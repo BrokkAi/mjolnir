@@ -215,6 +215,10 @@ fn spawn_dashboard_pty() -> DashboardPty {
 }
 
 fn spawn_dashboard_pty_with_idle_exit(exit_when_idle: bool) -> DashboardPty {
+    spawn_dashboard_pty_fixture(exit_when_idle, false)
+}
+
+fn spawn_dashboard_pty_fixture(exit_when_idle: bool, pending_session: bool) -> DashboardPty {
     let storage = DashboardStorage {
         directory: Some(tempfile::tempdir().expect("create Hel test storage")),
         stop_daemon: !exit_when_idle,
@@ -248,6 +252,22 @@ image = "ubuntu:24.04"
 "#,
     )
     .expect("write Hel test config");
+    let seeded_workspace = pending_session.then(|| {
+        let database = storage.path().join("data/hel/mj.sqlite3");
+        let workspace = hel::hel_database::create_workspace_at(&database, "Pending session test").unwrap();
+        // A durable session that the manager cannot yet adopt. No provider or
+        // container process is needed to exercise the dashboard wait path.
+        let session: hel::hel_state::SessionRecord = serde_json::from_value(serde_json::json!({
+            "id": "pending-session", "workspace_id": workspace.id,
+            "title": "Pending session", "harness_kind": "codex",
+            "last_profile": "codex", "bundle_id": "hel", "target_template_id": "podman",
+            "state": "running", "created_at": "2026-09-07T00:00:00Z", "updated_at": "2026-09-07T00:00:00Z"
+        })).unwrap();
+        let mut state = hel::hel_state::HelState::default();
+        state.sessions.insert(session.id.clone(), session);
+        hel::hel_database::save_state_to(&database, &state).unwrap();
+        workspace.name
+    });
     let mut master_fd = -1;
     let mut slave_fd = -1;
     let window_size = libc::winsize {
@@ -281,6 +301,9 @@ image = "ubuntu:24.04"
     );
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    if let Some(workspace) = &seeded_workspace {
+        command.args(["--workspace", workspace]);
+    }
     command
         .stdin(Stdio::from(duplicate(slave.as_raw_fd())))
         .stdout(Stdio::from(duplicate(slave.as_raw_fd())))
@@ -313,16 +336,18 @@ image = "ubuntu:24.04"
         });
     }
     let child = command.spawn().expect("spawn hel PTY helper");
-    let mut startup = Vec::new();
-    wait_for_output(
-        &mut master,
-        &mut startup,
-        b"Workspaces",
-        Instant::now() + TIMEOUT,
-    );
-    master
-        .write_all(b"\r\r")
-        .expect("accept suggested workspace name");
+    if !pending_session {
+        let mut startup = Vec::new();
+        wait_for_output(
+            &mut master,
+            &mut startup,
+            b"Workspaces",
+            Instant::now() + TIMEOUT,
+        );
+        master
+            .write_all(b"\r\r")
+            .expect("accept suggested workspace name");
+    }
     DashboardPty {
         _storage: storage,
         master,
@@ -532,4 +557,62 @@ fn live_workspace_preview_terminates_without_reopening_the_fallback_dashboard() 
         .rfind("\x1b[?1049l")
         .expect("restore alternate screen");
     assert!(disable_mouse_capture < leave_screen);
+}
+
+#[test]
+fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal() {
+    let DashboardPty {
+        _storage,
+        mut master,
+        slave,
+        original_termios: before,
+        mut child,
+    } = spawn_dashboard_pty_fixture(false, true);
+    let mut output = Vec::new();
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"Alt-Q quits.",
+        Instant::now() + TIMEOUT,
+    );
+    master.write_all(b"\x1b").expect("cancel opening");
+    output.clear();
+    wait_for_output(
+        &mut master,
+        &mut output,
+        // Ratatui writes only changed cells; the preceding words share cells
+        // with the opening notice, but this new suffix is written together.
+        b"retry.",
+        Instant::now() + TIMEOUT,
+    );
+    // A background tick must not restart the cancelled request.
+    thread::sleep(Duration::from_millis(1100));
+    drain(&mut master, &mut output);
+    assert!(!String::from_utf8_lossy(&output).contains("Alt-Q quits."));
+    output.clear();
+    master.write_all(b"\r").expect("retry opening");
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"Alt-Q quits.",
+        Instant::now() + TIMEOUT,
+    );
+    let quit_started = Instant::now();
+    master.write_all(QUIT_KEY).expect("quit while opening");
+    let status = wait_for_exit(
+        child.child_mut(),
+        &mut master,
+        &mut output,
+        "quit during session opening",
+    );
+    drop(child.take());
+    assert!(status.success());
+    assert!(
+        quit_started.elapsed() < Duration::from_secs(1),
+        "opening delayed quit"
+    );
+    assert_eq!(
+        stable_local_flags(termios(slave.as_raw_fd()).c_lflag),
+        stable_local_flags(before.c_lflag)
+    );
 }

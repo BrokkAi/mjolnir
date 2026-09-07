@@ -914,6 +914,9 @@ impl DashboardContext {
         session_id: &str,
         kind: SessionOperationKind,
     ) -> LifecycleOperationRequest {
+        if self.opening_chat_session.as_deref() == Some(session_id) {
+            self.cancel_chat_open();
+        }
         self.dashboard
             .begin_session_operation(session_id.to_owned(), kind, None);
         let cancelled = Arc::new(AtomicBool::new(false));

@@ -11,6 +11,7 @@
 //! functions over the same state.
 
 pub(crate) mod actions;
+mod attachment;
 pub(crate) mod io;
 mod pane_sizes;
 
@@ -82,15 +83,6 @@ const DASHBOARD_CLOCK_TICK: Duration = Duration::from_secs(1);
 /// activity; a stalled read must not leave the screen without a conversation.
 const STARTUP_SESSION_WAIT: Duration = Duration::from_secs(2);
 
-/// How long the startup pick keeps trying to open the conversation it chose.
-///
-/// Attaching needs the session manager to be managing that session, and the
-/// manager adopts sessions asynchronously after the surface starts, so the
-/// first attempt usually lands before it is ready and fails with "not
-/// managed". Retrying on the clock tick rides that out; the window bounds it
-/// so a session that never becomes managed cannot retry for ever.
-const STARTUP_SESSION_ATTACH_WINDOW: Duration = Duration::from_secs(30);
-
 /// Whether the surface still gets to choose which conversation it opens on.
 ///
 /// It waits for the stored summaries, because those carry the activity times
@@ -103,11 +95,6 @@ struct StartupSession {
     /// False once the choice has been made, or taken away.
     open_pending: bool,
     deadline: std::time::Instant,
-    /// The conversation the pick chose and is waiting on, so an attach that
-    /// lands before the session manager is ready can be tried again.
-    attempting: Option<String>,
-    /// When to stop retrying that attach.
-    give_up_at: std::time::Instant,
 }
 
 impl StartupSession {
@@ -119,8 +106,6 @@ impl StartupSession {
             pending_summaries: BTreeSet::new(),
             open_pending: false,
             deadline: now,
-            attempting: None,
-            give_up_at: now,
         }
     }
 
@@ -130,8 +115,6 @@ impl StartupSession {
             open_pending: !pending_summaries.is_empty(),
             pending_summaries,
             deadline: now + STARTUP_SESSION_WAIT,
-            attempting: None,
-            give_up_at: now + STARTUP_SESSION_ATTACH_WINDOW,
         }
     }
 
@@ -143,29 +126,6 @@ impl StartupSession {
     /// The user acted, so the choice is theirs now.
     fn cancel(&mut self) {
         self.open_pending = false;
-        self.attempting = None;
-    }
-
-    /// Records which conversation the pick is opening, so a failed attach can
-    /// be recognised as this one's.
-    fn attempting(&mut self, session_id: &str) {
-        self.attempting = Some(session_id.to_owned());
-    }
-
-    /// One attach failed. Returns whether the pick will try again, which is
-    /// also whether the failure is worth reporting: a manager that has not
-    /// adopted the session yet resolves itself, and saying so every second
-    /// would bury the notice bar in noise.
-    fn attach_failed(&mut self, session_id: &str, now: std::time::Instant) -> bool {
-        if self.attempting.as_deref() != Some(session_id) {
-            return false;
-        }
-        if now >= self.give_up_at {
-            self.attempting = None;
-            return false;
-        }
-        self.open_pending = true;
-        true
     }
 
     /// Whether the pick should run now. Answering `true` once retires the
@@ -377,13 +337,12 @@ pub(crate) struct DashboardContext {
     /// primary and one deferred reviewer form), so an id reused by a changed
     /// form cannot inherit old answers.
     question_drafts: BTreeMap<String, Vec<CachedQuestionDraft>>,
+    /// Retain save failures so quitting cannot erase their notice before it is read.
+    draft_save_failures: BTreeMap<String, String>,
     /// Session-manager attachment is asynchronous: an actor may need to
     /// answer from a worker or relay before a chat can be built.
     pub(crate) opening_chat_session: Option<String>,
-    /// The conversation the selection has moved on to while an attach is still
-    /// in flight. Only the newest is kept: walking the session list must not
-    /// queue an attach per row it passes through.
-    pending_chat_session: Option<String>,
+    attachment: attachment::SessionAttachment,
     /// Which conversation the surface opens on, and whether it is still the
     /// surface's choice to make.
     startup: StartupSession,
@@ -608,6 +567,13 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // that asks for work ends the batch so that dispatch still
                 // follows input order.
                 loop {
+                    if opening_cancel_event(&event, context.opening_chat_session.is_some(), context.dashboard.modal_open()) {
+                        context.cancel_chat_open();
+                        context.dashboard.focus_sessions();
+                        context.dashboard.set_notice("Session opening cancelled. Press Enter in Sessions to retry.");
+                        context.dirty = true;
+                        break;
+                    }
                     let batched = if let Some(command) =
                         global_chord_event(&context.dashboard, &event).filter(|command| {
                             !context.visible_chat().is_some_and(|chat| chat.component_modal_open())
@@ -795,6 +761,9 @@ pub(crate) async fn run_dashboard_for_workspace(
     // the background feeds are torn down after, as the rest of the context
     // drops.
     drop(context.terminal);
+    for error in context.draft_save_failures.values() {
+        eprintln!("{error}");
+    }
     if let Err(error) = context.pane_size_persistence.finish().await {
         tracing::warn!(%error, "workspace pane-size final flush failed");
         eprintln!("{error:#}");
@@ -1050,8 +1019,9 @@ impl DashboardContext {
             events: Some(event::EventStream::new()),
             active_chat: None,
             question_drafts: BTreeMap::new(),
+            draft_save_failures: BTreeMap::new(),
             opening_chat_session: None,
-            pending_chat_session: None,
+            attachment: attachment::SessionAttachment::default(),
             startup: StartupSession::idle(),
             dirty: true,
             drawn_notice_generation: 0,
@@ -1235,39 +1205,21 @@ impl DashboardContext {
         self.maybe_open_startup_session();
     }
 
-    /// Opens whatever the selection moved on to while an attach was running.
-    pub(super) fn open_pending_chat_session(&mut self) {
-        if let Some(session_id) = self.pending_chat_session.take() {
-            self.open_chat_session(&session_id);
-        }
-    }
-
-    /// Brings the conversation on screen into line with the Sessions pane's
-    /// selection.
-    ///
-    /// Moving the selection moves the transcript, so the pane reads as a list
-    /// of conversations rather than a list of things to go and open. Attaching
-    /// is asynchronous and coalesced, so walking the list costs one attach for
-    /// the row the user stops on rather than one per row passed through.
+    /// Follow a changed selection once. A failed open needs an explicit retry,
+    /// rather than another attempt on every render or background completion.
     pub(crate) fn follow_selected_session(&mut self) {
         let Some(selected) = self.dashboard.selected_session_id().map(str::to_owned) else {
             return;
         };
-        if self.opening_chat_session.as_deref() == Some(selected.as_str()) {
-            return;
+        if self.attachment.select(&selected) {
+            self.open_chat_session(&selected);
         }
-        if self.opening_chat_session.is_some() {
-            self.pending_chat_session = Some(selected);
-            return;
-        }
-        if self
-            .active_chat
-            .as_ref()
-            .is_some_and(|chat| chat.session_id() == selected)
-        {
-            return;
-        }
-        self.open_chat_session(&selected);
+    }
+
+    fn cancel_chat_open(&mut self) {
+        self.attachment.cancel();
+        self.opening_chat_session = None;
+        self.dashboard.set_opening_session(None);
     }
 
     /// The warm chat when it belongs on screen.
@@ -1275,31 +1227,26 @@ impl DashboardContext {
     /// While an attach for a different session is in flight, the chat still
     /// loaded is the one the selection has moved off. Drawing it under the new
     /// row's highlight, or handing it the keyboard, would report the wrong
-    /// conversation, so it is hidden until its own attach settles. Its feeds
-    /// keep running either way: a failed attach brings it back current.
+    /// conversation, so it stays hidden until selected again. Its feeds keep
+    /// running while an attach is pending, failed, or cancelled.
     pub(crate) fn visible_chat(&mut self) -> Option<&mut mj_chat::hel_chat::ActiveChat> {
         let Self {
             active_chat,
             opening_chat_session,
+            dashboard,
             ..
         } = self;
         let opening = opening_chat_session.as_deref();
-        active_chat
-            .as_mut()
-            .filter(|chat| chat_is_visible(opening, chat.session_id()))
+        active_chat.as_mut().filter(|chat| {
+            chat_is_visible(opening, chat.session_id())
+                && dashboard.selected_session_id() == Some(chat.session_id())
+        })
     }
 
     /// The user took the choice into their own hands, so the surface stops
     /// trying to pick a conversation for them.
     fn cancel_startup_session(&mut self) {
         self.startup.cancel();
-    }
-
-    /// Whether a failed attach belongs to the startup pick and will be tried
-    /// again on the next tick.
-    pub(super) fn retry_startup_attach(&mut self, session_id: &str) -> bool {
-        self.startup
-            .attach_failed(session_id, std::time::Instant::now())
     }
 
     /// Opens the conversation the surface should start on, once the summaries
@@ -1319,7 +1266,6 @@ impl DashboardContext {
             self.dashboard.focus_sessions();
             return;
         };
-        self.startup.attempting(&session_id);
         self.dashboard.focus_prompt();
         self.open_chat_session(&session_id);
     }
@@ -1399,6 +1345,7 @@ impl DashboardContext {
             ..
         } = self;
         let opening = opening_chat_session.as_deref();
+        let selected_session = dashboard.selected_session_id().map(str::to_owned);
         let transcript_selected = selection.active_surface() == Some(SurfaceId::Transcript);
         // The highlight and the extraction both run inside the draw closure,
         // once the surface has drawn: the hitboxes are registered by that
@@ -1407,9 +1354,10 @@ impl DashboardContext {
             render_combined(
                 frame,
                 dashboard,
-                active_chat
-                    .as_mut()
-                    .filter(|chat| chat_is_visible(opening, chat.session_id())),
+                active_chat.as_mut().filter(|chat| {
+                    chat_is_visible(opening, chat.session_id())
+                        && selected_session.as_deref() == Some(chat.session_id())
+                }),
                 transcript_selected,
             );
             *selection_text = draw_selection(frame, selection, dashboard.frame_surfaces());
@@ -1612,6 +1560,9 @@ impl DashboardContext {
     /// often on a different profile. Keeping the old view would redraw a
     /// Closing/Closed snapshot and refuse prompts.
     pub(crate) fn drop_warm_chat_for(&mut self, session_id: &str) {
+        if self.opening_chat_session.as_deref() == Some(session_id) {
+            self.cancel_chat_open();
+        }
         if self
             .active_chat
             .as_ref()
@@ -1701,29 +1652,23 @@ impl DashboardContext {
 
     pub(crate) fn open_chat_session(&mut self, session_id: &str) {
         self.dashboard.select_active_session(session_id);
+        self.attachment.select(session_id);
         self.save_active_question_draft();
         if self
             .active_chat
             .as_ref()
             .is_some_and(|chat| chat.session_id() == session_id && chat.session_feed_open())
         {
+            self.cancel_chat_open();
             self.dashboard.set_current_session(Some(session_id));
             self.acknowledge_visible_chat();
             self.dirty = true;
             return;
         }
         if self.opening_chat_session.as_deref() == Some(session_id) {
-            self.pending_chat_session = None;
             return;
         }
-        if self.opening_chat_session.is_some() {
-            // Hold the newest request rather than refusing it. The selection
-            // drives this, so a refusal would leave the conversation showing a
-            // row the user has already moved off.
-            self.pending_chat_session = Some(session_id.to_owned());
-            return;
-        }
-        self.pending_chat_session = None;
+        self.cancel_chat_open();
         let Some(session_record) = self.controller.state.sessions.get(session_id).cloned() else {
             self.dashboard.set_notice(format!(
                 "Could not open session: unknown session {session_id}"
@@ -1813,15 +1758,22 @@ impl DashboardContext {
         });
         self.opening_chat_session = Some(session_id.clone());
         self.dashboard.set_current_session(Some(&session_id));
+        self.dashboard.select_active_session(&session_id);
         self.dashboard.set_opening_session(Some(&session_id));
-        self.dashboard.set_notice("Opening session…");
-        tokio::spawn(async move {
-            let result = async {
+        self.dashboard.set_notice(
+            "Opening session… Esc cancels; select another session to switch; Alt-Q quits.",
+        );
+        let reported_session_id = session_id.clone();
+        let attachment_session_id = session_id.clone();
+        self.attachment.spawn(
+            &attachment_session_id,
+            attachment::ATTACH_TIMEOUT,
+            async move {
                 let managed = sessions
-                    .session(session_id.clone())
+                    .wait_for_session(&session_id, attachment::ATTACH_TIMEOUT)
                     .await
                     .map_err(|error| format!("{error:#}"))?;
-                tokio::task::spawn_blocking(move || {
+                tokio_util::task::AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
                     mj_chat::hel_chat::ActiveChat::prepare_with_persistence(
                         managed,
                         &bundle_id,
@@ -1832,18 +1784,20 @@ impl DashboardContext {
                         notices,
                         Some(persistence_tx),
                     )
-                })
+                }))
                 .await
                 .map_err(|error| format!("chat preparation task failed: {error}"))
-            }
-            .await;
-            if let Err(error) = updates.send(DashboardIoUpdate::ChatOpened {
-                session_id,
-                result: Box::new(result),
-            }) {
-                tracing::debug!(%error, "chat-open result dropped after dashboard shutdown");
-            }
-        });
+            },
+            move |generation, result| {
+                if let Err(error) = updates.send(DashboardIoUpdate::ChatOpened {
+                    generation,
+                    session_id: reported_session_id.clone(),
+                    result: Box::new(result),
+                }) {
+                    tracing::debug!(%error, "chat-open result dropped after dashboard shutdown");
+                }
+            },
+        );
         self.dirty = true;
     }
 
@@ -1866,7 +1820,8 @@ impl DashboardContext {
 
     /// Tells every operation still in flight to stop. Cancellation is
     /// cooperative, so this only requests it.
-    fn cancel_background_work(&self) {
+    fn cancel_background_work(&mut self) {
+        self.cancel_chat_open();
         self.critical_operations.cancel_all();
         if let Some(cancelled) = &self.review_discovery_cancel {
             cancelled.store(true, Ordering::Release);
@@ -2668,6 +2623,12 @@ fn record_chat_detach_state(
     ))
 }
 
+fn opening_cancel_event(event: &Event, opening: bool, modal: bool) -> bool {
+    opening
+        && !modal
+        && matches!(event, Event::Key(key) if key.code == KeyCode::Esc && key.kind != KeyEventKind::Release)
+}
+
 /// Whether the warm chat belongs on screen, given the session an attach is
 /// running for.
 ///
@@ -2940,6 +2901,23 @@ mod tests {
             KeyCode::Esc,
             KeyModifiers::NONE,
         ))
+    }
+
+    #[test]
+    fn escape_cancels_opening_without_stealing_modal_or_quit_keys() {
+        assert!(opening_cancel_event(&escape(), true, false));
+        assert!(!opening_cancel_event(&escape(), true, true));
+        assert!(!opening_cancel_event(&escape(), false, false));
+        let quit = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::ALT,
+        ));
+        assert!(!opening_cancel_event(&quit, true, false));
+        let dashboard = populated_dashboard();
+        assert_eq!(
+            global_chord_event(&dashboard, &quit),
+            Some(CommandId::QuitDetach)
+        );
     }
 
     fn open_test_chat(session_id: &str) -> ActiveChat {
@@ -3863,45 +3841,6 @@ mod tests {
         let mut stalled = StartupSession::begin(["session-a".to_owned()], start);
         assert!(!stalled.ready(start));
         assert!(stalled.ready(start + STARTUP_SESSION_WAIT));
-    }
-
-    /// The session manager adopts sessions asynchronously after the surface
-    /// starts, so the startup pick's first attach usually lands too early.
-    /// It has to ride that out rather than give up on the first refusal.
-    #[test]
-    fn the_startup_pick_retries_an_attach_the_manager_was_not_ready_for() {
-        let start = std::time::Instant::now();
-        let mut startup = StartupSession::begin(["session-a".to_owned()], start);
-        startup.summary_arrived("session-a");
-        assert!(startup.ready(start));
-        startup.attempting("session-a");
-
-        // The refusal is not worth reporting, and the pick re-arms.
-        assert!(startup.attach_failed("session-a", start));
-        assert!(startup.ready(start));
-
-        // A failure for some other session is not this pick's business.
-        startup.attempting("session-a");
-        assert!(!startup.attach_failed("session-b", start));
-
-        // Past the window it stops retrying and the failure is reported.
-        assert!(!startup.attach_failed("session-a", start + STARTUP_SESSION_ATTACH_WINDOW));
-        assert!(!startup.ready(start + STARTUP_SESSION_ATTACH_WINDOW));
-    }
-
-    /// A user who acts during the retries takes the choice back, and the
-    /// retries stop rather than yanking a conversation open underneath them.
-    #[test]
-    fn cancelling_stops_the_startup_attach_retries() {
-        let start = std::time::Instant::now();
-        let mut startup = StartupSession::begin(["session-a".to_owned()], start);
-        startup.summary_arrived("session-a");
-        assert!(startup.ready(start));
-        startup.attempting("session-a");
-
-        startup.cancel();
-        assert!(!startup.attach_failed("session-a", start));
-        assert!(!startup.ready(start));
     }
 
     /// The user acting is the strongest signal there is about which

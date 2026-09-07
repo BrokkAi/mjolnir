@@ -961,17 +961,24 @@ impl SessionManagerControl {
         session_id: &str,
         timeout: Duration,
     ) -> Result<ManagedSessionHandle> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            match self.session(session_id.to_owned()).await {
-                Ok(handle) => return Ok(handle),
-                Err(error) if tokio::time::Instant::now() < deadline => {
-                    tracing::trace!(session_id, "waiting for session actor: {error:#}");
-                    tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::timeout(timeout, async {
+            loop {
+                match self.session(session_id.to_owned()).await {
+                    Ok(handle) => return Ok(handle),
+                    Err(error) => {
+                        tracing::trace!(session_id, "waiting for session actor: {error:#}");
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
                 }
-                Err(error) => return Err(error),
             }
-        }
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "session {session_id} did not become available within {} seconds",
+                timeout.as_secs()
+            )
+        })?
     }
 }
 
@@ -3102,6 +3109,26 @@ pub fn replacement_session_test_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
+        let (commands, mut requests) = mpsc::channel(1);
+        let control = SessionManagerControl { commands };
+        let request = tokio::spawn(async move {
+            control
+                .wait_for_session("muse", Duration::from_millis(20))
+                .await
+        });
+        let ManagerCommand::Session { mut reply, .. } = requests.recv().await.unwrap();
+        // Retain the reply without answering, like an unresponsive manager.
+        let error = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .expect("the adoption deadline must bound an individual request")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("did not become available"));
+        reply.closed().await;
+    }
     #[cfg(unix)]
     use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
     use sha2::Digest;
