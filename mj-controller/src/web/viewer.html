@@ -86,9 +86,20 @@
       </section>
 
       <section id="resume-page" class="page hidden">
-        <h2>Resume a session</h2>
-        <div id="resumable"></div>
-        <p id="resume-error" role="alert"></p>
+        <div id="resume-list-view">
+          <h2>Resume a session</h2>
+          <label class="field resume-search-field">
+            <span>Find a session</span>
+            <input id="resume-search" type="search" autocomplete="off" placeholder="Title, project, profile" />
+          </label>
+          <div id="resumable"></div>
+        </div>
+        <div id="resume-detail-view" class="hidden">
+          <div class="row resume-detail-actions">
+            <button type="button" id="resume-detail-back" class="secondary">Back to sessions</button>
+          </div>
+          <div id="resume-detail"></div>
+        </div>
       </section>
 
       <section id="move-page" class="page hidden">

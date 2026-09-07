@@ -151,7 +151,7 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     // Scoped to the dashboard: the resume page renders session cards too, and
     // a hidden page's nodes are still in the document.
     const session = page.locator('#sessions .session').filter({ hasText: title });
-    await expect(session.locator('.state-live')).toHaveText(/live$/);
+    await expect(session).toHaveAttribute('aria-label', /^Open session /);
     stage('session-running');
     await expect(session).toHaveAttribute('role', 'link');
     await session.locator('h3').click();
@@ -206,11 +206,13 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await expect(session).toHaveCount(0);
     await page.getByRole('button', { name: 'Resume a session' }).click();
     await expect(page).toHaveURL(/\/resume$/);
-    const resumable = page.locator('#resumable .session').filter({ hasText: title });
-    await expect(resumable).toBeVisible();
-    await resumable.getByRole('button', { name: 'Resume' }).click();
-    await page.getByRole('button', { name: 'Back' }).click();
-    await expect(session.locator('.state-live')).toHaveText(/live$/);
+    const matchingResumeRow = page.locator('#resumable [data-session-id]').filter({ hasText: title });
+    await expect(matchingResumeRow).toBeVisible();
+    await matchingResumeRow.click();
+    await expect(page).toHaveURL(/\/resume\/[^/]+$/);
+    await page.locator('#resume-detail').getByRole('button', { name: 'Resume', exact: true }).click();
+    await expect(page).toHaveURL(/#workspace\/[^/]+$/);
+    await expect(session).toHaveAttribute('aria-label', /^Open session /);
     // A stop needs the daemon's session manager to have adopted the session,
     // and adoption is asynchronous, so a stop issued moments after a resume can
     // fail with "is not managed". The terminal surface offers Retry stop for
@@ -220,7 +222,8 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     // longer than a snapshot round trip.
     for (let attempt = 0; attempt < 4; attempt += 1) {
       if ((await session.count()) === 0) break;
-      const stop = session.getByRole('button', { name: 'Stop' });
+      await session.locator('[data-session-menu]').click();
+      const stop = session.getByRole('menuitem', { name: 'Stop session', exact: true });
       if ((await stop.count()) === 0) {
         await page.waitForTimeout(1000);
         continue;
@@ -254,10 +257,9 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await page.getByRole('menuitem', { name: 'Sign out' }).click();
     await expect(page.locator('#login')).toBeVisible();
   } catch (error) {
-    await page
-      .locator('#code')
-      .fill('')
-      .catch(() => {});
+    if (await page.locator('#code').isVisible()) {
+      await page.locator('#code').fill('').catch(() => {});
+    }
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
     await context.tracing.stop({ path: tracePath }).catch(() => {});
     throw error;

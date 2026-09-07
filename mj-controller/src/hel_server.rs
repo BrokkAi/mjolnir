@@ -3989,32 +3989,34 @@ mod tests {
     }
 
     #[test]
-    fn embedded_viewer_lists_histories_from_every_workspace() {
-        let source = viewer_source("const resumableCards =", "function resumableCard");
+    fn embedded_viewer_lists_current_workspace_histories_and_retained_move_recovery() {
+        let source = viewer_source("function isResumeSession(", "const resumeDrafts =");
         let setup = r#"
 const snapshot = {
-  profiles: [],
   sessions: [
     { id: "history-a", workspace_id: "workspace-a", capabilities: { resume: true } },
     { id: "history-b", workspace_id: "workspace-b", capabilities: { resume: true } },
-    { id: "running-b", workspace_id: "workspace-b", capabilities: { resume: false } },
+    { id: "running-a", workspace_id: "workspace-a", lifecycle: "live", has_error: true, capabilities: { resume: false, open: false } },
+    { id: "move-a", workspace_id: "workspace-a", capabilities: { resume: false }, move_recovery: { checkpoint_retained: true, phase: "failed" } },
+    { id: "moving-a", workspace_id: "workspace-a", capabilities: { resume: false }, move_recovery: { checkpoint_retained: true, phase: "starting_queue" } },
   ],
 };
-const resumable = {
-  children: [],
-  replaceChildren(...children) { this.children = children; },
-};
-function resumableCard(session) { return { id: session.id, querySelector() { return null; } }; }
-function el(_tag, _className, text) { return text; }
+function selectedWorkspaceId() { return "workspace-a"; }
+function sessionActivityMs() { return 0; }
+function epochMs() { return null; }
 "#;
         let checks = r#"
-renderResumable();
-if (JSON.stringify(resumable.children.map(card => card.id)) !== JSON.stringify(["history-a", "history-b"])) {
-  throw new Error(`global histories were filtered: ${JSON.stringify(resumable.children)}`);
+const ids = workspace => resumeSessions(workspace).map(session => session.id).sort();
+if (JSON.stringify(ids("workspace-a")) !== JSON.stringify(["history-a", "move-a"])) {
+  throw new Error(`workspace A histories or recoveries were wrong: ${JSON.stringify(ids("workspace-a"))}`);
 }
+if (JSON.stringify(ids("workspace-b")) !== JSON.stringify(["history-b"])) {
+  throw new Error(`workspace B histories were wrong: ${JSON.stringify(ids("workspace-b"))}`);
+}
+if (ids("missing-workspace").length !== 0) throw new Error("unknown workspace exposed sessions");
 "#;
         run_viewer_script(
-            "global-resume-history",
+            "workspace-resume-history",
             &format!("{setup}\n{source}\n{checks}"),
         );
     }
