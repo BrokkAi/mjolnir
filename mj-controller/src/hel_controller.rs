@@ -94,6 +94,20 @@ impl ControllerStoreGuard {
     }
 
     fn acquire_at(directory: &Path) -> Result<Self> {
+        Self::try_acquire_at(directory)?.with_context(|| {
+            format!(
+                "another Mjolnir controller is already using {}; stop it before starting this command",
+                directory.display()
+            )
+        })
+    }
+
+    /// Probe exclusivity without treating an owner that is still exiting as an error.
+    pub fn try_acquire() -> Result<Option<Self>> {
+        Self::try_acquire_at(&data_dir())
+    }
+
+    fn try_acquire_at(directory: &Path) -> Result<Option<Self>> {
         std::fs::create_dir_all(directory)
             .with_context(|| format!("create controller data directory {}", directory.display()))?;
         let path = directory.join("controller.lock");
@@ -109,16 +123,13 @@ impl ControllerStoreGuard {
             .with_context(|| format!("open controller lock {}", path.display()))?;
         match file.try_lock() {
             Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => bail!(
-                "another Mjolnir controller is already using {}; stop it before starting this command",
-                directory.display()
-            ),
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
             Err(std::fs::TryLockError::Error(error)) => {
                 return Err(error)
                     .with_context(|| format!("lock controller store {}", directory.display()));
             }
         }
-        Ok(Self { file })
+        Ok(Some(Self { file }))
     }
 
     /// Start the sole production SQLite writer after controller exclusivity

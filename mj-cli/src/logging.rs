@@ -237,10 +237,20 @@ fn prune_logs(directory: &Path, retain: usize) -> Result<()> {
     logs.sort_unstable();
     let remove = logs.len().saturating_sub(retain);
     for path in logs.into_iter().take(remove) {
-        fs::remove_file(&path)
-            .with_context(|| format!("remove expired Mjolnir log {}", path.display()))?;
+        remove_expired_log(&path)?;
     }
     Ok(())
+}
+
+fn remove_expired_log(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        // Another Mjolnir process may have pruned this file after the scan.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("remove expired Mjolnir log {}", path.display()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -323,5 +333,29 @@ mod tests {
             "legacy Hel logs are ignored rather than treated as Mjolnir state"
         );
         assert!(directory.path().join("notes.log").exists());
+    }
+
+    #[test]
+    fn remove_expired_log_ignores_a_candidate_removed_by_another_process() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj-20260824T000000.000Z-1.log");
+        fs::write(&path, "expired").unwrap();
+
+        // This is the state observed when another process wins the race
+        // between prune_logs' directory scan and its remove_file call.
+        fs::remove_file(&path).unwrap();
+
+        remove_expired_log(&path).unwrap();
+    }
+
+    #[test]
+    fn remove_expired_log_reports_non_missing_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj-20260824T000000.000Z-1.log");
+        fs::create_dir(&path).unwrap();
+
+        let error = remove_expired_log(&path).unwrap_err();
+
+        assert!(error.to_string().contains("remove expired Mjolnir log"));
     }
 }

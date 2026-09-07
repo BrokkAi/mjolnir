@@ -3116,7 +3116,58 @@ pub(crate) async fn connect_management() -> Result<ManagementClient> {
     })
 }
 
+#[derive(Debug)]
+struct DaemonStartGuard(fs::File);
+
+impl Drop for DaemonStartGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(%error, "could not release daemon startup lock");
+        }
+    }
+}
+
+async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
+    let deadline = Instant::now() + STOP_TIMEOUT + START_TIMEOUT;
+    loop {
+        let path = path.clone();
+        let guard = tokio::task::spawn_blocking(move || -> Result<Option<DaemonStartGuard>> {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut options = OpenOptions::new();
+            options.create(true).read(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = options.open(&path).context("open daemon startup lock")?;
+            match file.try_lock() {
+                Ok(()) => Ok(Some(DaemonStartGuard(file))),
+                Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+                Err(std::fs::TryLockError::Error(error)) => {
+                    Err(error).context("lock daemon startup")
+                }
+            }
+        })
+        .await
+        .context("daemon startup lock task failed")??;
+        if let Some(guard) = guard {
+            return Ok(guard);
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "timed out waiting for another client to finish starting the Mjolnir daemon"
+        );
+        tokio::time::sleep(RETRY_DELAY).await;
+    }
+}
+
 pub(crate) async fn connect_or_start() -> Result<DaemonClient> {
+    // Serialize replacement and publication across clients, then re-read the
+    // endpoint. A client waiting here must reuse the winner's daemon.
+    let _startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
     maybe_replace_stale_development_daemon().await?;
     if let Ok(metadata) = read_metadata_any()
         && metadata.protocol_version != PROTOCOL_VERSION
@@ -3132,14 +3183,46 @@ pub(crate) async fn connect_or_start() -> Result<DaemonClient> {
         return Ok(client);
     }
 
-    let executable = std::env::current_exe().context("find current mj executable")?;
-    let mut command = std::process::Command::new(executable);
-    command
-        .arg("daemon-run")
-        // This switch makes the invoking development client authoritative. It
-        // has no meaning inside the persistent daemon or its child processes.
-        .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
-    let _pid = hel::hel_subprocess::spawn_detached(&mut command, &data_dir().join("daemon.log"))?;
+    // Metadata disappears before shutdown releases the sole-writer lock.
+    // Do not launch a child that can only fail to acquire that lock.
+    let handoff_deadline = Instant::now() + STOP_TIMEOUT;
+    loop {
+        if let Some(guard) = tokio::task::spawn_blocking(ControllerStoreGuard::try_acquire)
+            .await
+            .context("probe controller ownership task failed")??
+        {
+            drop(guard);
+            break;
+        }
+        // A daemon started outside this client's startup lock may be becoming ready.
+        if let Ok(mut client) = connect_existing().await
+            && matches!(
+                client.request(DaemonAction::Ping).await,
+                Ok(DaemonReply::Pong)
+            )
+        {
+            return Ok(client);
+        }
+        ensure!(
+            Instant::now() < handoff_deadline,
+            "controller store is still owned by another process after {}s; daemon startup was not attempted",
+            STOP_TIMEOUT.as_secs()
+        );
+        tokio::time::sleep(RETRY_DELAY).await;
+    }
+
+    tokio::task::spawn_blocking(|| -> Result<u32> {
+        let executable = std::env::current_exe().context("find current mj executable")?;
+        let mut command = std::process::Command::new(executable);
+        command
+            .arg("daemon-run")
+            // This switch makes the invoking development client authoritative. It
+            // has no meaning inside the persistent daemon or its child processes.
+            .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
+        hel::hel_subprocess::spawn_detached(&mut command, &data_dir().join("daemon.log"))
+    })
+    .await
+    .context("spawn daemon task failed")??;
 
     let deadline = Instant::now() + START_TIMEOUT;
     let mut last_error = None;
@@ -4644,6 +4727,27 @@ mod tests {
     use super::*;
 
     #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn cancelled_startup_wait_does_not_retain_the_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon-start.lock");
+        let owner = acquire_start_guard(path.clone()).await.unwrap();
+        let mut waiter = tokio::spawn(acquire_start_guard(path.clone()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiter)
+                .await
+                .is_err()
+        );
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        drop(owner);
+        let replacement = tokio::time::timeout(Duration::from_secs(2), acquire_start_guard(path))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(replacement);
+    }
+
     #[test]
     fn executable_identity_detects_an_nfs_style_replaced_binary() {
         let directory = tempfile::tempdir().unwrap();
