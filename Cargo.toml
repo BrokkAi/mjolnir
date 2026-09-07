@@ -44,7 +44,7 @@ default-members = [".", "mj-worker", "mj-controller", "mj-chat", "mj-tui", "mj-c
 # inherits it with `version.workspace = true`, so the eight package versions
 # cannot drift apart (RELEASING.md requires them to match).
 [workspace.package]
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/BrokkAi/mjolnir"
@@ -66,11 +66,11 @@ rust-version = "1.96"
 [workspace.dependencies]
 # Subscription transcription is newer than the published 0.27.1 crate.
 anvil-llm = { package = "brokk-anvil-llm", git = "https://github.com/BrokkAi/anvil", rev = "73ca21b23632a5082884ab0adbc774eb5c64e4da", version = "0.27.1" }
-hel = { path = ".", package = "brokk-mj-core", version = "2.0.0", default-features = false }
-mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.0.0" }
-mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.0.0" }
-mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.0.0" }
-hel-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.0.0" }
+hel = { path = ".", package = "brokk-mj-core", version = "2.1.0", default-features = false }
+mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.1.0" }
+mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.1.0" }
+mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.1.0" }
+hel-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.1.0" }
 
 [workspace.lints.clippy]
 disallowed_methods = "warn"

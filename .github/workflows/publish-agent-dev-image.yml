@@ -5,6 +5,9 @@ on:
     branches: [ 'master' ]
     paths:
       - 'containers/**'
+      - '.dockerignore'
+      - 'mj-worker/assets/muse/**'
+      - 'scripts/install-muse.py'
       - '.github/workflows/publish-agent-dev-image.yml'
   workflow_dispatch: {}
   # Rebuild weekly so the image picks up new base layers and apt security
@@ -60,7 +63,7 @@ jobs:
         id: build
         uses: docker/build-push-action@v7
         with:
-          context: containers
+          context: .
           file: containers/Containerfile.agent-dev
           platforms: ${{ matrix.platform }}
           pull: true
