@@ -14,14 +14,17 @@ Publish the session-opening deadlock fix, web viewer port recovery, and concurre
 - [x] Confirm latest release 2.1.0, clean local master, and upstream origin/master.
 - [x] Fetch and merge concurrent upstream work after the initial push was rejected. No conflicts occurred.
 - [x] Verify all eight current crates.io trusted publishers match BrokkAi/mjolnir, publish.yml, crates-io.
-- [ ] Verify npm trusted-publisher settings; API read currently returns 401, and the user has been asked for settings confirmation or login.
+- [x] User explicitly instructed proceeding through the normal release pipeline with the existing publisher configuration after the npm read-access limitation was explained. No publisher settings were changed.
 - [x] Synchronize 2.1.1 versions and license report; repair readiness detection using structured daemon state; document cancellable session attachment and unconfirmed draft saves. License policy, supplemental report comparison, formatting, npm packaging tests, docs build/1691 links, and isolated reliability plus HTTPS recovery scenarios pass.
 - [x] Commit and push release preparation as fcb08c72; docs CI passed.
 - [x] Correct the upstream Linux-only test guard and push release candidate e7868de8701aa3b89eea00aae49f92fcf7186146.
 - [x] Complete local full-workspace tests, strict clippy, release builds, all eight source archives, portable musl build/clippy, license checks, documentation and focused end-to-end scenarios.
 - [x] (2026-09-07 14:40 UTC) Pass exact-candidate CI run 34131797482: all seven jobs concluded successfully across Linux, macOS, Windows, desktop, voice, licenses and reliability.
-- [ ] Resolve npm access verification before tagging.
-- [ ] Check version against clean commit, create and push annotated v2.1.1, and monitor artifacts plus both registry workflows.
+- [x] Recheck clean candidate versions and successful CI; create and push annotated v2.1.1 at e7868de8701aa3b89eea00aae49f92fcf7186146.
+- [x] (2026-09-07 15:51 UTC) Release workflow 34137744246 succeeded and published all three archives and checksum sidecars.
+- [x] npm workflow 34140423735 succeeded; all four packages report 2.1.1 as latest.
+- [x] (2026-09-07 16:05 UTC) crates.io workflow 34140415827 succeeded; all eight crates are present at 2.1.1 and not yanked.
+- [x] Download the published Linux x64 archive, verify its SHA-256 sidecar, and run its binary: `mj 2.1.1`.
 
 ## Surprises & Discoveries
 
@@ -33,7 +36,7 @@ CI 34130309251 additionally showed an upstream test calling Linux-only `executab
 ## Decision Log
 
 
-Use the next patch version, 2.1.1, because this release repairs the existing 2.1.0 behavior. Stay on master and merge upstream normally. The release request authorizes source/tag pushes and normal automatic publication, but does not waive the repository's per-package publisher verification. All eight crates.io configurations were read back with the existing credential. The npm settings endpoint requires authentication unavailable in this tool session; obtain the missing verification while preparing everything else.
+Use the next patch version, 2.1.1, because this release repairs the existing 2.1.0 behavior. Stay on master and merge upstream normally. The initial release request authorized source/tag pushes and normal automatic publication. After the local npm read-access limitation and checklist stop were explicitly explained, the user directed proceeding through the normal release pipeline; this overrides the prior verification pause for this release. All eight crates.io configurations were read back with the existing credential. The npm settings endpoint requires authentication unavailable in this tool session. Continue with the existing trusted publishers as instructed and verify actual publication results; a local settings-read 401 is not evidence that Actions publishing will fail.
 
 ## Context and Orientation
 
@@ -47,7 +50,7 @@ First repair readiness detection, update the workspace to 2.1.1, synchronize con
 
 Then run the required clean-commit validations: formatting, full tests, clippy, release build, portable worker build, license policy/report checks, packaging and relevant workspace checks. Push the exact candidate to master and wait for every required CI job. Resolve failures before tagging; if the candidate changes, validate affected code and wait for CI on that new commit.
 
-Finally verify publisher access for every package and confirm CI run 34131797482 concluded successfully. The intended tag target is e7868de8701aa3b89eea00aae49f92fcf7186146, which passed validation on clean master. Subsequent release-record-only commits do not change that candidate. Recheck the version and explicitly create the annotated tag at that validated commit, then push it. If runtime or packaging changes occur before release, choose and validate a new candidate instead. Monitor the GitHub Release and registry workflows to completion; verify all three platform archives/checksums, eight crates, and four npm packages. Record outcome in this plan in a subsequent documentation commit without changing the release tag.
+For the final milestone, follow the user's instruction to use the existing publishers and confirm CI run 34131797482 concluded successfully. The published tag target is e7868de8701aa3b89eea00aae49f92fcf7186146, which passed validation on clean master. Subsequent release-record-only commits do not change that candidate. Recheck the version and explicitly create the annotated tag at that validated commit, then push it. If runtime or packaging changes occur before release, choose and validate a new candidate instead. Monitor the GitHub Release and registry workflows to completion; verify all three platform archives/checksums, eight crates, and four npm packages. Record outcome in this plan in a subsequent documentation commit without changing the release tag.
 
 ## Concrete Steps
 
@@ -67,18 +70,20 @@ Never force-push master or move a published tag. Keep upstream work and user's s
 ## Outcomes & Retrospective
 
 
-Release 2.1.1 is prepared and pushed, with local validation complete and every CI build/test check passing on e7868de8701aa3b89eea00aae49f92fcf7186146. CI run 34131797482 concluded successfully with all seven jobs green. No tag or release has been created. Publication is blocked by the required npm publisher configuration verification: the authenticated settings endpoint returns 401, and no authenticated browser or npm credential is available in this session. The user has been asked to confirm the exact settings or sign in to npm. Do not treat elapsed time, the successful 2.1.0 release, or package existence as that confirmation.
+Release candidate e7868de8701aa3b89eea00aae49f92fcf7186146 passed local validation and all seven jobs in CI run 34131797482. Following the user's explicit instruction to proceed through the normal pipeline, annotated tag v2.1.1 was pushed at that candidate. Release workflow 34137744246 succeeded and published https://github.com/BrokkAi/mjolnir/releases/tag/v2.1.1 at 15:51:23 UTC on 2026-09-07 with all three platform archives and their SHA-256 sidecars. npm workflow 34140423735 and crates.io workflow 34140415827 both succeeded. Public registry reads confirmed all four npm packages at latest 2.1.1 and all eight Rust crates at 2.1.1 without yanks. The downloaded Linux x64 archive passed its checksum and its executable reported `mj 2.1.1`. No work remains for this release.
 
-Once access is verified, target the validated candidate explicitly with `git tag -a v2.1.1 e7868de8701aa3b89eea00aae49f92fcf7186146 -m "Mjolnir 2.1.1"` and push the tag after the clean-commit version and completed-CI checks. The documentation-only checkpoint recording this outcome is intentionally outside the release candidate. It uses `[skip ci]` because it changes only this internal record; the tag remains fixed to the fully validated code commit rather than the record commit.
+No package or publisher configuration was added or changed. The existing pipeline published successfully without intervention. The earlier local npm settings-read failure concerned inspection access, not the Actions publisher; it should not have been presented as evidence that the user needed to reconfigure working packages. The user's explicit instruction resolved that checklist pause, and actual publication verified the normal pipeline.
 
 ## Artifacts and Notes
 
 
 Verified crate configuration IDs are voice 14285, core 17008, worker 19051, controller 19050, chat 19052, TUI 16990, desktop 17009, and CLI 8869. Every configuration names BrokkAi/mjolnir, publish.yml, environment crates-io. No credentials belong in this plan.
 
-The four npm packages requiring confirmation are `@brokkai/mjolnir`, `@brokkai/mjolnir-darwin-universal`, `@brokkai/mjolnir-linux-x64-gnu`, and `@brokkai/mjolnir-linux-arm64-gnu`. Each must trust repository `BrokkAi/mjolnir`, workflow `publish-npm.yml`, environment `npm-publish`. Read with `npm trust list PACKAGE --json --registry=https://registry.npmjs.org` after authentication; this still returned E401 at 14:27 UTC on 2026-09-07.
+The four existing npm packages published by this release are `@brokkai/mjolnir`, `@brokkai/mjolnir-darwin-universal`, `@brokkai/mjolnir-linux-x64-gnu`, and `@brokkai/mjolnir-linux-arm64-gnu`. They were published successfully from repository `BrokkAi/mjolnir`, workflow `publish-npm.yml`, environment `npm-publish`. The earlier local `npm trust list` request returned E401, but no configuration changes were needed for the normal pipeline to publish.
 
 CI evidence: https://github.com/BrokkAi/mjolnir/actions/runs/34131797482. Local `cargo test --workspace --locked` and `cargo clippy --workspace --all-targets --locked -- -D warnings` passed. The final affected CLI test rerun passed all 194 tests. `cargo build --release --locked --workspace` and `cargo package --locked --workspace --no-verify` passed. The musl worker has no ELF interpreter or dynamic dependencies. The isolated three-client scenario reported zero leaks; HTTPS recovery covered identifying the occupied port owner, confirmed daemon shutdown and retry, and choosing another port without stopping the existing owner.
+
+Release workflow evidence: https://github.com/BrokkAi/mjolnir/actions/runs/34137744246. npm workflow: https://github.com/BrokkAi/mjolnir/actions/runs/34140423735. crates.io workflow: https://github.com/BrokkAi/mjolnir/actions/runs/34140415827. Published Linux verification files remain under `target/release-verification/v2.1.1/` and are not tracked.
 
 ## Interfaces and Dependencies
 
@@ -88,3 +93,7 @@ No new runtime dependencies are planned. Use the existing structured daemon prot
 Revision: initial release plan records the upstream merge, known CI failure, and publisher verification status.
 
 Revision 2026-09-07: record completed release preparation and validation, fix the tag target to the validated candidate, and preserve the exact npm prerequisite so a later continuation can finish publication without repeating completed work.
+
+Revision: the user explicitly directed proceeding with the normal release pipeline after discussing the npm settings limitation. Record the override, pushed tag and workflow; verify publication instead of repeating the local settings check.
+
+Revision 2026-09-07 16:05 UTC: complete the release record with successful GitHub, npm and crates.io workflows, direct registry verification, and the shipped Linux checksum/version check.
