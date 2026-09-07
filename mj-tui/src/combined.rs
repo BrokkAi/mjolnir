@@ -16,10 +16,10 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 
 use crate::render::{
     MINIMUM_TERMINAL_WIDTH, TerminalSizeRequirement, minimized_pane_size_controls,
-    minimized_quota_line, minimized_targets_line, pane_size_control_areas,
-    pane_title_content_width, render_capacity, render_footer, render_modal,
-    render_onboarding_surface, render_quotas, render_sessions, render_terminal_too_small,
-    sessions_content_height,
+    minimized_quota_line, minimized_sessions_content_height, minimized_targets_line,
+    pane_size_control_areas, pane_title_content_width, render_capacity, render_footer,
+    render_modal, render_onboarding_surface, render_quotas, render_sessions,
+    render_terminal_too_small, sessions_content_height,
 };
 use crate::resume::resume_sessions_pane;
 use crate::widgets::bordered_content;
@@ -38,22 +38,14 @@ const PANE_MINIMUM: u16 = 3;
 /// The one-row form Targets and Quota collapse to.
 const SUMMARY_ROW: u16 = 1;
 
-/// The terminal height at or above which the minimized Sessions grid gets its
-/// taller five-row cap; below it the grid is capped at two rows.
+/// The terminal height at or above which the minimized Sessions list gets its
+/// taller five-row cap; below it the list is capped at two rows.
 const TALL_TERMINAL_HEIGHT: u16 = 40;
 
-/// The number of columns in the minimized Sessions grid.
-pub(crate) const MINIMIZED_GRID_COLUMNS: usize = 3;
-
-/// How many content rows the minimized Sessions grid needs for its cells.
-/// Sparse grids use only the rows they need; short and tall terminals cap
-/// that count at the existing two- and five-row limits respectively.
-pub(crate) fn minimized_grid_rows(frame_height: u16, cell_count: usize) -> u16 {
-    let required = cell_count
-        .div_ceil(MINIMIZED_GRID_COLUMNS)
-        .max(1)
-        .try_into()
-        .unwrap_or(u16::MAX);
+/// How many one-line entries the minimized Sessions list can show. Short and
+/// tall terminals retain the existing two- and five-row caps respectively.
+pub(crate) fn minimized_session_rows(frame_height: u16, content_height: usize) -> u16 {
+    let required = content_height.max(1).try_into().unwrap_or(u16::MAX);
     let cap = if frame_height >= TALL_TERMINAL_HEIGHT {
         5
     } else {
@@ -355,8 +347,11 @@ pub fn render_combined(
         (
             SupportPane::Sessions,
             PaneDimensions {
-                minimized: minimized_grid_rows(area.height, dashboard.sessions_rows().len())
-                    .saturating_add(2),
+                minimized: minimized_session_rows(
+                    area.height,
+                    minimized_sessions_content_height(dashboard, area.width).into(),
+                )
+                .saturating_add(2),
                 full: sessions_content_height(dashboard, area.width).saturating_add(2),
                 standard_cap: area.height / 3,
             },
@@ -771,19 +766,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn minimized_grid_uses_fewest_rows_for_sparse_cell_counts() {
-        assert_eq!(minimized_grid_rows(40, 0), 1);
-        assert_eq!(minimized_grid_rows(40, 1), 1);
-        assert_eq!(minimized_grid_rows(40, 3), 1);
-        assert_eq!(minimized_grid_rows(40, 4), 2);
+    fn minimized_sessions_use_one_row_per_visible_item() {
+        assert_eq!(minimized_session_rows(40, 0), 1);
+        assert_eq!(minimized_session_rows(40, 1), 1);
+        assert_eq!(minimized_session_rows(40, 3), 3);
+        assert_eq!(minimized_session_rows(40, 4), 4);
     }
 
     #[test]
-    fn minimized_grid_caps_rows_at_two_short_and_five_tall() {
-        assert_eq!(minimized_grid_rows(39, 6), 2);
-        assert_eq!(minimized_grid_rows(39, 100), 2);
-        assert_eq!(minimized_grid_rows(40, 15), 5);
-        assert_eq!(minimized_grid_rows(100, 100), 5);
+    fn minimized_sessions_cap_rows_at_two_short_and_five_tall() {
+        assert_eq!(minimized_session_rows(39, 6), 2);
+        assert_eq!(minimized_session_rows(39, 100), 2);
+        assert_eq!(minimized_session_rows(40, 15), 5);
+        assert_eq!(minimized_session_rows(100, 100), 5);
     }
 
     #[test]

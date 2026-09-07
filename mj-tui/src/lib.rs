@@ -1088,8 +1088,7 @@ impl DashboardState {
     /// Selects the clicked row and, if it's the second click on the same row
     /// within `DOUBLE_CLICK_INTERVAL`, performs the same action Enter would.
     fn handle_row_click(&mut self, focus: Focus, index: usize) -> DashboardAction {
-        // Clicking a row selects it wherever the dial has left the pane; the
-        // grid draws focus and its selection, so there is nothing to open.
+        // Clicking a row selects it wherever the dial has left the pane.
         self.scroll_lookahead.set(None);
         self.focus = focus;
         if focus == Focus::Sessions {
@@ -1288,9 +1287,8 @@ impl DashboardState {
     /// The rows the Sessions pane draws at every explicit size: a heading per
     /// project and one row per live session.
     ///
-    /// Standard and Maximized use four-line session rows; Minimized packs the
-    /// same row set into a compact three-column grid. Focus never changes the
-    /// representation.
+    /// Standard and Maximized use four-line session rows; Minimized keeps only
+    /// each session's top summary line. Focus never changes the representation.
     pub(crate) fn sessions_rows(&self) -> Vec<SessionsRow> {
         let sessions = self.ordered_sessions();
         self.expanded_sessions_rows(&sessions)

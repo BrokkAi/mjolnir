@@ -402,7 +402,11 @@ fn first_launch_creates_a_workspace_and_local_session_without_terminal_input() {
     };
     assert_eq!(session.last_profile, "codex");
     assert_eq!(session.target_template_id, "localhost");
-    assert_eq!(session.project_directory.as_deref(), Some(storage.path()));
+    let workspace_root = storage.path().canonicalize().unwrap();
+    assert_eq!(
+        session.project_directory.as_deref(),
+        Some(workspace_root.as_path())
+    );
     let workspaces = hel::hel_database::list_workspaces_from(&database).unwrap();
     assert_eq!(workspaces.len(), 1);
     assert_eq!(workspaces[0].id, session.workspace_id);

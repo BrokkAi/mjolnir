@@ -208,10 +208,11 @@ transcript is not a Tab stop: read it with the mouse wheel or
 
 Sessions, Targets, and Quota each have `▁`, `▪`, and `□` controls in their
 title bars for minimized, standard, and maximized size. Minimized Targets and
-Quota become one summary row each; minimized Sessions becomes a compact
-three-column grid. A maximized pane gets the space its contents need after the
-Prompt has grown, while every other band keeps its minimum. Only one pane can
-be maximized at a time.
+Quota become one summary row each; minimized Sessions keeps the normal list but
+shows only each session's top summary line, without the `You:` and `Agent:`
+previews. A maximized pane gets the space its contents need after the Prompt has
+grown, while every other band keeps its minimum. Only one pane can be maximized
+at a time.
 
 `Alt+Z` cycles the focused support pane through its three sizes without moving
 focus. `Alt+G` is the layout shortcut: from all-standard it minimizes Sessions,

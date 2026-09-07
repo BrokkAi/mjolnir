@@ -20,7 +20,6 @@ use mj_chat::hel_chat::render_agent_message_tail;
 use mj_controller::hel_quota::{ProfileQuota, QuotaWindow};
 use mj_controller::hel_review_host::RuntimeReviewView;
 
-use crate::combined::MINIMIZED_GRID_COLUMNS;
 use crate::dialogs::{
     render_config_id_editor, render_confirmation, render_container_editor,
     render_import_bundle_confirmation, render_import_progress, render_rename_editor,
@@ -361,6 +360,7 @@ struct DrawnSessionRow {
 #[derive(Debug, Clone, Copy)]
 struct SessionRowsRenderOptions {
     force_expanded: bool,
+    summary_only: bool,
     show_project_numbers: bool,
     show_selection: bool,
 }
@@ -368,12 +368,21 @@ struct SessionRowsRenderOptions {
 impl SessionRowsRenderOptions {
     const DASHBOARD: Self = Self {
         force_expanded: false,
+        summary_only: false,
+        show_project_numbers: true,
+        show_selection: true,
+    };
+
+    const MINIMIZED: Self = Self {
+        force_expanded: false,
+        summary_only: true,
         show_project_numbers: true,
         show_selection: true,
     };
 
     const PREVIEW: Self = Self {
         force_expanded: true,
+        summary_only: false,
         show_project_numbers: false,
         show_selection: false,
     };
@@ -499,11 +508,19 @@ fn drawn_session_rows_with_options(
                     });
                     continue;
                 }
-                // The minimized layout draws its own grid (see
-                // `render_sessions_grid`) and never routes through here, so
-                // this laydown only handles expanded and collapsed project
-                // positions: four lines per session, or one.
-                if expanded {
+                if options.summary_only {
+                    lines.push(session_top_line(
+                        prefix,
+                        session,
+                        detail,
+                        review,
+                        unreachable,
+                        operation,
+                        now_epoch_seconds,
+                        &target,
+                        permission,
+                    ));
+                } else if expanded {
                     expanded_session_lines(
                         &mut lines,
                         session,
@@ -527,7 +544,7 @@ fn drawn_session_rows_with_options(
                         permission,
                     ));
                 }
-                let spacing = u16::from(expanded);
+                let spacing = u16::from(expanded && !options.summary_only);
                 rows.push(DrawnSessionRow {
                     session: Some(index),
                     heading: heading_key,
@@ -669,8 +686,8 @@ impl SessionRowFacts<'_> {
 /// The target label shown for each session, in `ordered_sessions()` order.
 ///
 /// A target repeated inside one project is ambiguous on its own, so repeats
-/// are numbered `[1]`, `[2]`, … in the order they appear. Both the row
-/// laydown and the minimized grid read from this so they agree on labels.
+/// are numbered `[1]`, `[2]`, … in the order they appear. Every Sessions
+/// representation reads from this so labels remain consistent.
 fn session_display_targets(dashboard: &DashboardState, sessions: &[&SessionRecord]) -> Vec<String> {
     let mut counts = BTreeMap::<(String, String), usize>::new();
     for session in sessions {
@@ -708,6 +725,13 @@ fn session_display_targets(dashboard: &DashboardState, sessions: &[&SessionRecor
 /// Content rows the Sessions pane wants, excluding its border.
 pub(crate) fn sessions_content_height(dashboard: &DashboardState, width: u16) -> u16 {
     drawn_session_rows(dashboard, width)
+        .iter()
+        .map(|row| row.content_height().saturating_add(row.spacing))
+        .fold(0, u16::saturating_add)
+}
+
+pub(crate) fn minimized_sessions_content_height(dashboard: &DashboardState, width: u16) -> u16 {
+    drawn_session_rows_with_options(dashboard, width, SessionRowsRenderOptions::MINIMIZED)
         .iter()
         .map(|row| row.content_height().saturating_add(row.spacing))
         .fold(0, u16::saturating_add)
@@ -802,16 +826,11 @@ pub(crate) fn render_sessions(
     area: Rect,
     dashboard: &DashboardState,
 ) -> SessionRowsRendered {
-    if dashboard.sessions_minimized() {
-        let _ = take_scroll_lookahead(dashboard, Focus::Sessions);
-        return render_sessions_grid(
-            frame,
-            area,
-            dashboard,
-            dashboard.pane_maximize_enabled(SupportPane::Sessions),
-        );
-    }
-    let drawn = drawn_session_rows(dashboard, area.width);
+    let drawn = if dashboard.sessions_minimized() {
+        drawn_session_rows_with_options(dashboard, area.width, SessionRowsRenderOptions::MINIMIZED)
+    } else {
+        drawn_session_rows(dashboard, area.width)
+    };
     let focused = dashboard.focus() == Focus::Sessions;
     let block = sessions_block(
         focused,
@@ -1007,258 +1026,6 @@ pub fn render_sessions_preview(
     );
     if viewport > 0 && area.height >= 2 {
         render_session_scrollbar(frame, area, content_length, offset, viewport);
-    }
-}
-
-/// One cell of the minimized Sessions grid: a project heading or a session.
-enum GridCell {
-    Heading(String),
-    Session { index: usize },
-}
-
-/// The minimized Sessions pane: a compact grid that shows every session.
-///
-/// Three equal columns, filled column by column (top to bottom, then
-/// rightward), with each project's heading appearing inline above its
-/// sessions. The grid is a viewport over the whole session flow; when the
-/// selection sits past the visible columns the window scrolls to keep it on
-/// screen. Each session cell shows its target — coloured by the same
-/// state-based rule the expanded rows use — and its turn clock, or `[idle]`,
-/// with the target ellipsized so the clock always fits.
-fn render_sessions_grid(
-    frame: &mut Frame,
-    area: Rect,
-    dashboard: &DashboardState,
-    maximize_enabled: bool,
-) -> SessionRowsRendered {
-    const GAP: u16 = 2;
-
-    let now_epoch_seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let sessions = dashboard.ordered_sessions();
-    let targets = session_display_targets(dashboard, &sessions);
-    let selected_index = dashboard
-        .selected_session_id()
-        .and_then(|id| sessions.iter().position(|session| session.id == id));
-
-    // The flow of cells the columns are packed from, headings inline.
-    let mut cells: Vec<GridCell> = Vec::new();
-    let mut selected_flow_pos = None;
-    for row in dashboard.sessions_rows() {
-        match row {
-            SessionsRow::ProjectHeading { label, .. } => cells.push(GridCell::Heading(label)),
-            SessionsRow::Session { index, .. } => {
-                if Some(index) == selected_index {
-                    selected_flow_pos = Some(cells.len());
-                }
-                cells.push(GridCell::Session { index });
-            }
-        }
-    }
-
-    let focused = dashboard.focus() == Focus::Sessions;
-    let block = sessions_block(
-        focused,
-        &dashboard.workspace_name,
-        area.width,
-        PaneSize::Minimized,
-        dashboard.pending_input_count(),
-        maximize_enabled,
-    );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut session_row_areas = Vec::new();
-    let grid_rows = inner.height as usize;
-    if grid_rows == 0 || inner.width == 0 {
-        return SessionRowsRendered {
-            session_row_areas,
-            project_heading_areas: Vec::new(),
-        };
-    }
-
-    // Column widths: equal share of what is left after the gaps, remainder
-    // handed to the leftmost columns so the row still spans the full width.
-    let gaps = GAP * (MINIMIZED_GRID_COLUMNS as u16 - 1);
-    let available = inner.width.saturating_sub(gaps);
-    let base = available / MINIMIZED_GRID_COLUMNS as u16;
-    let extra = available % MINIMIZED_GRID_COLUMNS as u16;
-    let column_widths: Vec<u16> = (0..MINIMIZED_GRID_COLUMNS)
-        .map(|column| base + u16::from((column as u16) < extra))
-        .collect();
-
-    // Viewport: scroll so the selected session's column stays visible. The
-    // offset is derived from the selection alone, so it needs no stored state.
-    let total_columns = cells.len().div_ceil(grid_rows).max(1);
-    let max_offset = total_columns.saturating_sub(MINIMIZED_GRID_COLUMNS);
-    let column_offset = selected_flow_pos
-        .map(|position| (position / grid_rows).saturating_sub(MINIMIZED_GRID_COLUMNS - 1))
-        .unwrap_or(0)
-        .min(max_offset);
-
-    // When the viewport does not show every session, the last visible cell
-    // becomes a dim "+N more" so it is clear the grid scrolls to reach the
-    // rest. It steps aside if the last cell holds the selection, so the marker
-    // never buries the session the user is on.
-    let total_sessions = cells
-        .iter()
-        .filter(|cell| matches!(cell, GridCell::Session { .. }))
-        .count();
-    let viewport_start = column_offset * grid_rows;
-    let viewport_end = ((column_offset + MINIMIZED_GRID_COLUMNS) * grid_rows).min(cells.len());
-    let sessions_shown = cells
-        .get(viewport_start..viewport_end)
-        .map(|slots| {
-            slots
-                .iter()
-                .filter(|cell| matches!(cell, GridCell::Session { .. }))
-                .count()
-        })
-        .unwrap_or(0);
-    // `then` rather than `then_some`: with no sessions at all the viewport is
-    // empty and `viewport_end - 1` would underflow before the guard is read.
-    let more_marker = (sessions_shown < total_sessions && viewport_end > viewport_start)
-        .then(|| viewport_end - 1)
-        .filter(|&last| {
-            !matches!(
-                cells.get(last),
-                Some(GridCell::Session { index }) if Some(*index) == selected_index
-            )
-        });
-
-    let mut column_x = inner.x;
-    for (visible_column, &column_width) in column_widths.iter().enumerate() {
-        if column_width == 0 {
-            continue;
-        }
-        let source_column = column_offset + visible_column;
-        for grid_row in 0..grid_rows {
-            let flow_position = source_column * grid_rows + grid_row;
-            let Some(cell) = cells.get(flow_position) else {
-                continue;
-            };
-            let y = inner.y + grid_row as u16;
-            let rect = Rect::new(column_x, y, column_width, 1);
-            if more_marker == Some(flow_position) {
-                let hidden = total_sessions - sessions_shown
-                    + usize::from(matches!(cell, GridCell::Session { .. }));
-                frame.render_widget(
-                    Paragraph::new(Line::styled(
-                        crate::widgets::truncate_text(
-                            &format!("+{hidden} more"),
-                            column_width as usize,
-                        ),
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                    rect,
-                );
-                continue;
-            }
-            let line = match cell {
-                GridCell::Heading(label) => Line::styled(
-                    crate::widgets::truncate_text(label, column_width as usize),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                GridCell::Session { index } => {
-                    let Some(session) = sessions.get(*index) else {
-                        continue;
-                    };
-                    let detail = dashboard.session_details.get(&session.id);
-                    let review = dashboard.session_review(&session.id);
-                    let facts = SessionRowFacts {
-                        detail,
-                        unreachable: dashboard.unreachable_sessions.contains(&session.id),
-                        state: session.state,
-                        now_epoch_seconds,
-                    };
-                    if let Some(transition) = dashboard.transition_kind(&session.id) {
-                        let prefix = if Some(*index) == selected_index {
-                            "› "
-                        } else {
-                            "  "
-                        };
-                        session_row_areas.push((*index, rect));
-                        session_transition_line(
-                            prefix,
-                            session,
-                            transition,
-                            dashboard.session_operations.get(&session.id),
-                            now_epoch_seconds,
-                            targets.get(*index).map_or("", String::as_str),
-                            column_width,
-                            &dashboard.config,
-                            None,
-                        )
-                    } else if let Some(transition) = dashboard.transition_failure_kind(&session.id)
-                    {
-                        let prefix = if Some(*index) == selected_index {
-                            "› "
-                        } else {
-                            "  "
-                        };
-                        session_row_areas.push((*index, rect));
-                        session_transition_line(
-                            prefix,
-                            session,
-                            transition,
-                            None,
-                            now_epoch_seconds,
-                            targets.get(*index).map_or("", String::as_str),
-                            column_width,
-                            &dashboard.config,
-                            session.last_error.as_deref(),
-                        )
-                    } else {
-                        let clock = if facts.needs_input() {
-                            "Needs input".to_owned()
-                        } else {
-                            facts.clock()
-                        };
-                        // A review owns the compact activity slot while it is
-                        // open. The primary is idle during a review, so showing
-                        // both labels would suggest contradictory work states.
-                        let activity = review_status_label(review)
-                            .map_or_else(|| clock.clone(), |label| label.to_owned());
-                        let prefix = if Some(*index) == selected_index {
-                            "› "
-                        } else {
-                            "  "
-                        };
-                        // Reserve the prefix, a separating space, and the clock;
-                        // the target takes whatever room is left and ellipsizes.
-                        let reserved = prefix.chars().count() + 1 + activity.chars().count();
-                        let target_room = (column_width as usize).saturating_sub(reserved);
-                        let target = targets.get(*index).cloned().unwrap_or_default();
-                        let target = crate::widgets::truncate_text(&target, target_room);
-                        session_row_areas.push((*index, rect));
-                        // Right-justify the clock at the column's edge: pad between
-                        // the target and the clock so the clocks line up in a
-                        // column instead of trailing each target.
-                        let used = prefix.chars().count()
-                            + target.chars().count()
-                            + activity.chars().count();
-                        let gap = (column_width as usize).saturating_sub(used).max(1);
-                        Line::styled(
-                            format!("{prefix}{target}{:gap$}{activity}", ""),
-                            facts.style(),
-                        )
-                    }
-                }
-            };
-            frame.render_widget(Paragraph::new(line), rect);
-        }
-        column_x = column_x.saturating_add(column_width).saturating_add(GAP);
-    }
-
-    SessionRowsRendered {
-        session_row_areas,
-        // The grid has no per-project collapse, so its headings are not
-        // clickable and report no hitboxes.
-        project_heading_areas: Vec::new(),
     }
 }
 
@@ -3156,32 +2923,29 @@ mod tests {
 
     #[test]
     fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
-        for (height, expected_sessions_height) in [(32, 4), (44, 5)] {
-            let mut dashboard = minimized_grid_dashboard(3, 2);
+        for (height, expected_sessions_height) in [(32, 4), (44, 7)] {
+            let mut dashboard = minimized_sessions_dashboard(3, 2);
             dashboard
                 .restore_pane_sizes(crate::PaneSizes::default())
                 .unwrap();
             dashboard.focus_sessions();
-            drawn(&mut dashboard, 120, height);
+            let standard = drawn(&mut dashboard, 120, height).join("\n");
             let standard_panes = dashboard.pane_areas.unwrap();
             let standard_transcript = dashboard.chat_transcript_area.unwrap();
+            assert!(standard.contains("You:"), "{standard}");
+            assert!(standard.contains("Agent:"), "{standard}");
 
             dashboard.handle_key(alt_key('g'));
-            drawn(&mut dashboard, 120, height);
+            let compact = drawn(&mut dashboard, 120, height).join("\n");
             let compact_panes = dashboard.pane_areas.unwrap();
             assert_eq!(compact_panes[0].height, expected_sessions_height);
             assert_eq!(compact_panes[1].height, 1);
             assert_eq!(compact_panes[2].height, 1);
             assert!(compact_panes[0].height < standard_panes[0].height);
             assert!(dashboard.chat_transcript_area.unwrap().height > standard_transcript.height);
-            assert!(
-                dashboard
-                    .session_row_areas
-                    .iter()
-                    .all(|(_, area)| area.height == 1),
-                "minimized sessions must occupy single-line grid cells"
-            );
-            assert!(dashboard.session_row_areas.len() >= 3);
+            assert!(!compact.contains("You:"), "{compact}");
+            assert!(!compact.contains("Agent:"), "{compact}");
+            assert!(!dashboard.session_row_areas.is_empty());
 
             dashboard.handle_key(alt_key('g'));
             drawn(&mut dashboard, 120, height);
@@ -3192,7 +2956,7 @@ mod tests {
 
     #[test]
     fn tab_focus_never_changes_band_geometry() {
-        let mut dashboard = minimized_grid_dashboard(3, 2);
+        let mut dashboard = minimized_sessions_dashboard(3, 2);
         for pane in [
             SupportPane::Sessions,
             SupportPane::Targets,
@@ -4305,14 +4069,12 @@ mod tests {
             "the expanded row: {expanded:?}"
         );
 
-        let mut grid = dashboard_with_session(running_session());
-        grid.set_session_activity("session-1", activity);
-        minimize_all_panes(&mut grid);
-        let cells = drawn(&mut grid, 120, 44);
-        assert!(
-            cells.iter().any(|line| line.contains("[BG 43m3")),
-            "the grid cell: {cells:?}"
-        );
+        let mut minimized = dashboard_with_session(running_session());
+        minimized.set_session_activity("session-1", activity);
+        minimize_all_panes(&mut minimized);
+        let summary = drawn(&mut minimized, 120, 44).join("\n");
+        assert!(!summary.contains("You:"), "{summary}");
+        assert!(!summary.contains("Agent:"), "{summary}");
     }
 
     /// Every expanded session is the same height, so the layout can be
@@ -4555,7 +4317,7 @@ mod tests {
             "{restored}"
         );
 
-        // The minimized grid uses the same compact activity slot and also
+        // The minimized list uses the same compact activity slot and also
         // must not pair a live review with the primary's idle marker.
         dashboard.set_session_reviews([RuntimeReviewView {
             session_id: "session-second".into(),
@@ -4566,19 +4328,20 @@ mod tests {
             verdict: None,
         }]);
         minimize_all_panes(&mut dashboard);
-        let grid = drawn(&mut dashboard, 140, 44).join("\n");
-        let grid_line = grid
+        let minimized = drawn(&mut dashboard, 140, 44).join("\n");
+        let minimized_line = minimized
             .lines()
             .find(|line| line.contains("Reviewing"))
-            .expect("review activity in the minimized grid");
-        let review_cell = &grid_line[grid_line.find("Reviewing").expect("review label")..];
-        assert!(!review_cell.contains("[idle]"), "{grid_line}");
+            .expect("review activity in the minimized list");
+        let review_cell =
+            &minimized_line[minimized_line.find("Reviewing").expect("review label")..];
+        assert!(!review_cell.contains("[idle]"), "{minimized_line}");
     }
 
     /// `projects` projects, `per_project` live sessions in each, laid out so
-    /// the minimized grid has real columns and headings to pack. Project
+    /// the minimized list has headings and enough sessions to scroll. Project
     /// directories are zero-padded so they sort in the obvious order.
-    fn minimized_grid_dashboard(projects: usize, per_project: usize) -> DashboardState {
+    fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> DashboardState {
         let mut sessions = BTreeMap::new();
         let mut index = 0;
         for project in 0..projects {
@@ -4601,143 +4364,104 @@ mod tests {
             },
             BTreeMap::new(),
         );
-        // One turn of the dial reaches the minimized grid.
+        // One turn of the dial reaches the minimized list.
         minimize_all_panes(&mut dashboard);
         dashboard
     }
 
     /// The content rows of the Sessions pane (inside its border) for a
-    /// minimized grid of the given terminal size.
-    fn grid_content_rows(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
-        let rows =
-            crate::combined::minimized_grid_rows(height, dashboard.sessions_rows().len()) as usize;
+    /// minimized list at the given terminal size.
+    fn minimized_content_rows(
+        dashboard: &mut DashboardState,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
+        let rows = crate::combined::minimized_session_rows(height, dashboard.sessions_rows().len())
+            as usize;
         let lines = drawn(dashboard, width, height);
         lines[1..=rows].to_vec()
     }
 
-    /// The grid packs every project's sessions under a white heading, filling
-    /// column by column, with the turn clock (here `[idle]`) beside each
-    /// target. Two sessions sharing a buffer row proves there is more than one
-    /// column.
+    /// Minimized Sessions keeps the familiar vertical list but drops every
+    /// transcript preview beneath the session's summary line.
     #[test]
-    fn the_minimized_grid_columns_carry_white_headers_targets_and_clocks() {
-        let mut dashboard = minimized_grid_dashboard(3, 2);
-        let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .expect("draw the grid");
-        let buffer = terminal.backend().buffer();
-        let lines = buffer_lines(buffer);
-
-        // Every project heading shows, in white and bold.
-        for project in ["proj00", "proj01", "proj02"] {
-            let row = lines
-                .iter()
-                .position(|line| line.contains(project))
-                .unwrap_or_else(|| panic!("heading {project} missing: {lines:?}"));
-            let column = cell_column(&lines[row], project);
-            let cell = &buffer[(column, row as u16)];
-            assert_eq!(cell.fg, Color::White, "{project} colour");
-            assert!(
-                cell.modifier.contains(Modifier::BOLD),
-                "{project} should be bold"
-            );
-        }
-
-        // Each session shows its target and its idle clock.
-        assert!(
-            lines.iter().any(|line| line.contains("podman")),
-            "a target: {lines:?}"
-        );
-        assert!(
-            lines.iter().any(|line| line.contains("[idle]")),
-            "an idle clock: {lines:?}"
-        );
-
-        // Column-major fill means some buffer row carries two sessions side by
-        // side.
-        assert!(
-            lines.iter().any(|line| line.matches("podman").count() >= 2),
-            "two columns on one row: {lines:?}"
-        );
+    fn minimized_sessions_keep_summary_rows_without_message_previews() {
+        let mut dashboard = minimized_sessions_dashboard(3, 2);
+        let rendered = drawn(&mut dashboard, 120, 44).join("\n");
+        assert!(rendered.contains("podman"), "{rendered}");
+        assert!(rendered.contains("ACP pretty name"), "{rendered}");
+        assert!(!rendered.contains("You:"), "{rendered}");
+        assert!(!rendered.contains("Agent:"), "{rendered}");
     }
 
-    /// When more sessions exist than the viewport shows, the last cell reads
-    /// "+N more" so it is clear the grid scrolls to reach the rest.
+    /// A busy minimized list keeps a bounded height and one-line hitboxes.
     #[test]
-    fn the_minimized_grid_marks_how_many_sessions_it_is_not_showing() {
-        // 3 projects x 3 sessions = 12 cells; a tiny 2-row grid shows only 6,
-        // hiding 5 sessions plus the one its marker cell covers.
-        let mut dashboard = minimized_grid_dashboard(3, 3);
+    fn minimized_sessions_bound_the_viewport_to_preserve_the_conversation() {
+        let mut dashboard = minimized_sessions_dashboard(3, 3);
         let lines = drawn(&mut dashboard, 120, 20);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 4);
         assert!(
-            lines.iter().any(|line| line.contains("+6 more")),
-            "expected a +6 more marker: {lines:?}"
+            dashboard
+                .session_row_areas
+                .iter()
+                .all(|(_, area)| area.height == 1)
         );
+        assert!(!lines.iter().any(|line| line.contains("You:")), "{lines:?}");
     }
 
-    /// A sparse grid uses one content row when its heading and sessions fit
-    /// across the three columns, and has nothing to mark.
+    /// A sparse minimized list uses one row for its heading and each session.
     #[test]
-    fn the_minimized_grid_uses_one_row_when_three_cells_fit() {
-        let mut dashboard = minimized_grid_dashboard(1, 2);
+    fn a_sparse_minimized_list_shows_its_heading_and_sessions() {
+        let mut dashboard = minimized_sessions_dashboard(1, 2);
         let lines = drawn(&mut dashboard, 120, 44);
         assert!(
             !lines.iter().any(|line| line.contains("more")),
             "no marker expected when all sessions fit: {lines:?}"
         );
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 3);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 5);
     }
 
-    /// The clock is right-justified at each column's edge, so the clocks line
-    /// up in a column rather than trailing immediately after each target.
+    /// The minimized row is the same top line as the expanded session.
     #[test]
-    fn the_minimized_grid_right_justifies_the_clock() {
-        let mut dashboard = minimized_grid_dashboard(1, 1);
-        let rows = grid_content_rows(&mut dashboard, 120, 44);
-        let session = rows
-            .iter()
-            .find(|line| line.contains("[idle]"))
-            .expect("the session row");
-
-        // Each column spans the inner width less two 2-space gaps, split
-        // three ways; the clock ends flush against its column's right edge.
-        let inner = 120u16 - 2;
-        let column0 = (inner - 4) / 3 + u16::from(!(inner - 4).is_multiple_of(3));
-        let session_column_start = 1 + column0 + 2;
-        let expected = session_column_start + column0 - "[idle]".len() as u16;
-        assert_eq!(cell_column(session, "[idle]"), expected, "{session:?}");
+    fn minimized_sessions_render_the_existing_top_line() {
+        let mut dashboard = minimized_sessions_dashboard(1, 1);
+        let rendered = drawn(&mut dashboard, 120, 44).join("\n");
+        assert!(
+            rendered.contains("podman  codex-1  ACP pretty name"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("[idle]"), "{rendered}");
     }
 
-    /// A session cell is coloured by the same state rule the expanded rows
+    /// A session row is coloured by the same state rule the expanded rows
     /// use: idle is blue, active work yellow, and a failed session red.
     #[test]
-    fn the_minimized_grid_colours_a_session_cell_by_state() {
+    fn the_minimized_list_colours_a_session_row_by_state() {
         let colour_of = |mut dashboard: DashboardState| {
             let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
             terminal
                 .draw(|frame| render(frame, &mut dashboard))
-                .expect("draw the grid");
+                .expect("draw the minimized list");
             let buffer = terminal.backend().buffer();
             let lines = buffer_lines(buffer);
             let row = lines
                 .iter()
                 .position(|line| line.contains("podman"))
-                .expect("a session cell");
+                .expect("a session row");
             buffer[(cell_column(&lines[row], "podman"), row as u16)].fg
         };
 
-        let healthy = minimized_grid_dashboard(1, 1);
+        let healthy = minimized_sessions_dashboard(1, 1);
         assert_eq!(colour_of(healthy), Color::LightBlue);
 
-        let mut busy = minimized_grid_dashboard(1, 1);
+        let mut busy = minimized_sessions_dashboard(1, 1);
         busy.session_details
             .get_mut("session-00")
             .expect("the session detail")
             .current_turn_started_at = Some(1);
         assert_eq!(colour_of(busy), Color::Yellow);
 
-        let mut failed = minimized_grid_dashboard(1, 1);
+        let mut failed = minimized_sessions_dashboard(1, 1);
         {
             let session = failed
                 .state
@@ -4749,11 +4473,11 @@ mod tests {
         assert_eq!(colour_of(failed), Color::Red);
     }
 
-    /// The target ellipsizes so the clock always survives, even in a narrow
-    /// column.
+    /// A narrow minimized pane truncates the summary without bringing back
+    /// the message previews.
     #[test]
-    fn the_minimized_grid_ellipsizes_the_target_to_keep_the_clock() {
-        let mut dashboard = minimized_grid_dashboard(1, 1);
+    fn minimized_sessions_truncate_only_the_top_line() {
+        let mut dashboard = minimized_sessions_dashboard(1, 1);
         dashboard
             .state
             .sessions
@@ -4761,26 +4485,25 @@ mod tests {
             .expect("the session")
             .target_template_id = "extremely-long-target-identifier".into();
 
-        let rows = grid_content_rows(&mut dashboard, 44, 22);
+        let rows = minimized_content_rows(&mut dashboard, 44, 22);
         assert!(
-            rows.iter().any(|line| line.contains('…')),
-            "the target should ellipsize: {rows:?}"
+            rows.iter()
+                .any(|line| line.contains("extremely-long-target-identifier")),
+            "the summary should begin with the target: {rows:?}"
         );
-        assert!(
-            rows.iter().any(|line| line.contains("[idle]")),
-            "the clock should survive: {rows:?}"
-        );
+        assert!(!rows.iter().any(|line| line.contains("You:")), "{rows:?}");
+        assert!(!rows.iter().any(|line| line.contains("Agent:")), "{rows:?}");
     }
 
-    /// The grid is a viewport: selecting a session past the visible columns
-    /// scrolls the window so it shows, and earlier columns leave view.
+    /// The minimized list is a viewport: selecting a session past the visible
+    /// rows scrolls the window so it shows, and earlier rows leave view.
     #[test]
-    fn the_minimized_grid_scrolls_to_keep_the_selection_visible() {
-        let mut dashboard = minimized_grid_dashboard(12, 1);
+    fn the_minimized_list_scrolls_to_keep_the_selection_visible() {
+        let mut dashboard = minimized_sessions_dashboard(12, 1);
 
         // Selecting the first session keeps the window at the start.
         dashboard.selected_session_id = Some("session-00".into());
-        let rows = grid_content_rows(&mut dashboard, 120, 44);
+        let rows = minimized_content_rows(&mut dashboard, 120, 44);
         assert!(
             rows.iter().any(|line| line.contains("proj00")),
             "first project visible: {rows:?}"
@@ -4792,7 +4515,7 @@ mod tests {
 
         // Selecting the last session scrolls it into view and the first out.
         dashboard.selected_session_id = Some("session-11".into());
-        let rows = grid_content_rows(&mut dashboard, 120, 44);
+        let rows = minimized_content_rows(&mut dashboard, 120, 44);
         assert!(
             rows.iter().any(|line| line.contains("proj11")),
             "last project scrolled into view: {rows:?}"
@@ -4803,19 +4526,19 @@ mod tests {
         );
     }
 
-    /// Clicking a grid cell selects that session and leaves the dial where
-    /// the user set it; the grid draws the selection itself.
+    /// Clicking a minimized row selects that session and leaves the dial where
+    /// the user set it; the list draws the selection itself.
     #[test]
-    fn clicking_a_minimized_grid_cell_selects_it_and_keeps_the_grid() {
+    fn clicking_a_minimized_row_selects_it_and_keeps_the_list() {
         use crossterm::event::{MouseButton, MouseEventKind};
 
-        let mut dashboard = minimized_grid_dashboard(2, 2);
+        let mut dashboard = minimized_sessions_dashboard(2, 2);
         drawn(&mut dashboard, 120, 44);
 
         let (index, rect) = *dashboard
             .session_row_areas
             .first()
-            .expect("a grid cell hitbox");
+            .expect("a minimized row hitbox");
         let expected = dashboard.ordered_sessions()[index].id.clone();
 
         dashboard.handle_mouse(mouse_at_row(
@@ -4827,14 +4550,14 @@ mod tests {
         assert_eq!(dashboard.selected_session_id(), Some(expected.as_str()));
         assert!(
             dashboard.sessions_minimized(),
-            "the click should leave the grid alone"
+            "the click should leave the minimized list alone"
         );
         assert_eq!(dashboard.focus(), Focus::Sessions);
     }
 
     #[test]
     fn a_short_terminal_keeps_every_minimized_title_and_control() {
-        let mut dashboard = minimized_grid_dashboard(2, 2);
+        let mut dashboard = minimized_sessions_dashboard(2, 2);
         dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
         dashboard.apply_quota(weekly_quota("claude-1", 63));
 
@@ -4842,7 +4565,7 @@ mod tests {
 
         assert!(
             (lines[0].contains('┌') || lines[0].contains('╔')) && lines[0].contains("Sessions"),
-            "the grid keeps its title and border: {lines:?}"
+            "the minimized list keeps its title and border: {lines:?}"
         );
         for visible in ["Targets", "Quota"] {
             assert!(
@@ -4854,18 +4577,18 @@ mod tests {
         let selection = dashboard
             .frame_surfaces()
             .surface(SurfaceId::DashboardPane(0))
-            .expect("tiny grid selection surface");
+            .expect("tiny minimized selection surface");
         assert_eq!(selection.rect, pane.inner(Margin::new(1, 1)));
         assert_eq!(selection.rect.height, 2);
     }
 
     #[test]
-    fn the_minimized_grid_reevaluates_the_height_threshold_each_frame() {
-        let mut dashboard = minimized_grid_dashboard(3, 2);
+    fn the_minimized_list_reevaluates_the_height_threshold_each_frame() {
+        let mut dashboard = minimized_sessions_dashboard(3, 2);
 
         let tall = drawn(&mut dashboard, 120, 44);
         assert!((tall[0].contains('┌') || tall[0].contains('╔')) && tall[0].contains("Sessions"));
-        assert_eq!(dashboard.pane_areas.expect("tall panes")[0].height, 5);
+        assert_eq!(dashboard.pane_areas.expect("tall panes")[0].height, 7);
 
         let short = drawn(&mut dashboard, 120, 20);
         assert!(
@@ -4874,13 +4597,12 @@ mod tests {
         assert_eq!(dashboard.pane_areas.expect("short panes")[0].height, 4);
 
         drawn(&mut dashboard, 120, 44);
-        assert_eq!(dashboard.pane_areas.expect("tall panes again")[0].height, 5);
+        assert_eq!(dashboard.pane_areas.expect("tall panes again")[0].height, 7);
     }
 
-    /// Minimized Sessions draws a sparse grid on a landscape terminal: one
-    /// heading and one session fit in a single bordered content row.
+    /// Minimized Sessions draws a sparse list on a landscape terminal.
     #[test]
-    fn minimized_on_a_landscape_terminal_draws_the_grid() {
+    fn minimized_on_a_landscape_terminal_draws_the_list() {
         let mut dashboard = dashboard_with_session(running_session());
         minimize_all_panes(&mut dashboard);
 
@@ -4891,13 +4613,13 @@ mod tests {
             .iter()
             .position(|line| line.contains("Conversation"))
             .expect("the conversation band");
-        assert_eq!(sessions_height, 3, "{lines:#?}");
+        assert_eq!(sessions_height, 4, "{lines:#?}");
     }
 
     /// A brand-new workspace has no sessions at all, and minimizing Sessions
-    /// there must still draw rather than fall over on an empty grid.
+    /// there must still draw rather than fall over on an empty list.
     #[test]
-    fn the_minimized_grid_draws_with_no_sessions() {
+    fn the_minimized_list_draws_with_no_sessions() {
         let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
         minimize_all_panes(&mut dashboard);
 
@@ -4909,7 +4631,7 @@ mod tests {
     }
 
     #[test]
-    fn minimized_on_a_portrait_terminal_still_draws_the_grid() {
+    fn minimized_on_a_portrait_terminal_still_draws_the_list() {
         let mut dashboard = dashboard_with_session(running_session());
         minimize_all_panes(&mut dashboard);
 
@@ -4921,11 +4643,11 @@ mod tests {
             .iter()
             .position(|line| line.contains("Conversation"))
             .expect("the conversation band");
-        assert_eq!(sessions_height, 3, "{lines:#?}");
+        assert_eq!(sessions_height, 4, "{lines:#?}");
     }
 
     #[test]
-    fn a_short_portrait_terminal_keeps_the_grid_and_support_summaries() {
+    fn a_short_portrait_terminal_keeps_the_list_and_support_summaries() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
         dashboard.apply_quota(weekly_quota("claude-1", 63));
@@ -4935,9 +4657,9 @@ mod tests {
 
         assert!(
             (lines[0].contains('┌') || lines[0].contains('╔')) && lines[0].contains("Sessions"),
-            "the portrait grid keeps its bordered Sessions title: {lines:?}"
+            "the portrait list keeps its bordered Sessions title: {lines:?}"
         );
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 3);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 4);
         for visible in ["Targets", "Quota"] {
             assert!(
                 lines.iter().any(|line| line.contains(visible)),
