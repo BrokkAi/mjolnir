@@ -1692,7 +1692,11 @@ pub(crate) fn render_resume_wizard(
     }
     let (title, choices, selected, help) = match wizard.step {
         WizardStep::Profile => (
-            " Resume · 1/3 profile (cross-harness supported) ",
+            if wizard.moving {
+                " Move · 1/3 profile (cross-harness supported) "
+            } else {
+                " Resume · 1/3 profile (cross-harness supported) "
+            },
             dashboard
                 .compatible_profiles(&wizard.session_id)
                 .into_iter()
@@ -1716,7 +1720,11 @@ pub(crate) fn render_resume_wizard(
             ][..],
         ),
         WizardStep::Target => (
-            " Resume · 2/3 new target ",
+            if wizard.moving {
+                " Move · 2/3 new target "
+            } else {
+                " Resume · 2/3 new target "
+            },
             dashboard
                 .config
                 .targets
