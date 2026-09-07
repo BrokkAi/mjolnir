@@ -3225,6 +3225,6 @@ pub(crate) fn select_contains(kind: &SessionConfigKind, desired: &str) -> bool {
 }
 
 #[cfg(all(test, unix))]
-mod muse_tests;
+pub(crate) mod muse_tests;
 #[cfg(test)]
 mod tests;

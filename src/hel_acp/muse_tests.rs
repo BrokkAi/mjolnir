@@ -1,5 +1,114 @@
 use super::*;
 use agent_client_protocol::schema::v1::{ImageContent, TextContent};
+use std::path::Path;
+
+/// Exercise the actual client and native host without printing credentials or
+/// provider transcripts in diagnostics.
+pub(crate) async fn native_muse_turn(
+    adapter: &Path,
+    muse: &Path,
+    home: &Path,
+    cwd: &Path,
+    resume: Option<String>,
+    prompt: &str,
+) -> (String, String) {
+    let mut environment = BTreeMap::from([
+        ("MUSE_CLI".into(), muse.to_string_lossy().into_owned()),
+        (
+            "MUSE_SERVE_ARGS".into(),
+            "--disable-shell --disable-write".into(),
+        ),
+    ]);
+    HarnessKind::Muse.configure_home_environment(home, &mut environment);
+    let resuming = resume.is_some();
+    let spec = LaunchSpec {
+        command: adapter.to_path_buf(),
+        args: Vec::new(),
+        environment,
+        cwd: cwd.to_path_buf(),
+        additional_directories: Vec::new(),
+        project_memory: None,
+        extra_mcp_servers: Vec::new(),
+        resume_session: resume,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Muse,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: StepClock::default(),
+    };
+    let (commands, receiver) = mpsc::channel(16);
+    let (sender, mut events) = mpsc::channel(128);
+    let task = tokio::spawn(run(spec, receiver, sender));
+    let mut session_id = String::new();
+    let mut reply = String::new();
+    let stop_reason = loop {
+        let event = tokio::time::timeout(Duration::from_secs(120), events.recv())
+            .await
+            .expect("native Muse timed out")
+            .expect("native Muse stopped unexpectedly");
+        match event {
+            RuntimeEvent::SessionStarted {
+                native_session_id,
+                resumed,
+                ..
+            } => {
+                assert_eq!(resumed, resuming);
+                eprintln!("Native Muse session ready (resumed={resumed})");
+                session_id = native_session_id;
+                commands
+                    .send(CommandRequest::Prompt {
+                        request_id: "native-smoke".into(),
+                        prompt: vec![ContentBlock::Text(TextContent::new(prompt))],
+                    })
+                    .await
+                    .unwrap();
+            }
+            RuntimeEvent::SessionUpdate { update } => {
+                if update["sessionUpdate"] == "agent_message_chunk"
+                    && let Some(text) = update["content"]["text"].as_str()
+                {
+                    reply.push_str(text);
+                }
+            }
+            RuntimeEvent::PromptFinished { stop_reason, .. } => {
+                break stop_reason;
+            }
+            RuntimeEvent::ElicitationRequested { request } => {
+                let (resolved, received) = oneshot::channel();
+                commands
+                    .send(CommandRequest::ResolveElicitation {
+                        elicitation_id: request.id,
+                        response: ElicitationResponse::Cancel,
+                        resolved,
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(received.await.unwrap(), Ok(()));
+            }
+            RuntimeEvent::Warning { message } if message.contains("ACP runtime failed") => {
+                panic!(
+                    "native Muse ACP runtime failed; check authentication and runtime configuration"
+                );
+            }
+            _ => {}
+        }
+    };
+    commands
+        .send(CommandRequest::Close {
+            request_id: "native-close".into(),
+        })
+        .await
+        .unwrap();
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(15), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!session_id.is_empty());
+    assert_eq!(stop_reason, "EndTurn", "native Muse turn failed");
+    (session_id, reply)
+}
 
 async fn next(events: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
     tokio::time::timeout(Duration::from_secs(15), events.recv())

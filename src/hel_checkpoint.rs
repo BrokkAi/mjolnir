@@ -3697,6 +3697,96 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires pinned MJ_MUSE_ACP_TEST_BINARY, MJ_MUSE_TEST_BINARY and authenticated MJ_MUSE_TEST_HOME; uses two provider turns"]
+    async fn live_muse_checkpoint_restore_preserves_native_context_and_queued_work() {
+        let required_path = |name| PathBuf::from(std::env::var_os(name).expect(name));
+        let adapter = required_path("MJ_MUSE_ACP_TEST_BINARY");
+        let muse = required_path("MJ_MUSE_TEST_BINARY");
+        let account = required_path("MJ_MUSE_TEST_HOME");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut spec, _) = fixture(temp.path());
+        spec.session.harness_kind = HarnessKind::Muse;
+        spec.session.profile_id = "muse-smoke".into();
+        spec.harness_home = temp.path().join("original/muse");
+        fs::create_dir_all(&spec.harness_home).unwrap();
+        fs::copy(
+            account.join("auth.json"),
+            spec.harness_home.join("auth.json"),
+        )
+        .unwrap();
+        let cwd = spec.workspace_root.join("app");
+        let token = format!(
+            "MUSE_{}",
+            temp.path().file_name().unwrap().to_string_lossy()
+        );
+        let prompt = format!(
+            "Remember this exact token for the next turn: {token}. Reply with only that token. Do not use tools."
+        );
+        let (session_id, reply) = crate::hel_acp::muse_tests::native_muse_turn(
+            &adapter,
+            &muse,
+            &spec.harness_home,
+            &cwd,
+            None,
+            &prompt,
+        )
+        .await;
+        assert!(
+            reply.contains(&token),
+            "provider did not acknowledge the smoke token"
+        );
+        spec.session.native_session_id = session_id.clone();
+        spec.canonical_session.transcript[0].body = CanonicalTranscriptBody::User {
+            content: vec![json!({"type":"text", "text":prompt})],
+        };
+        export_checkpoint(&spec).unwrap();
+        let archive = read_archive_verified(&spec.output_path).unwrap();
+        assert!(
+            archive
+                .manifest
+                .payloads
+                .iter()
+                .all(|payload| !payload.path.ends_with("auth.json"))
+        );
+        let restored_home = temp.path().join("restored/muse");
+        let restored_relay = temp.path().join("restored-relay");
+        restore_checkpoint(
+            &CheckpointRestoreSpec {
+                archive_path: spec.output_path.clone(),
+                workspace_root: spec.workspace_root.clone(),
+                relay_root: restored_relay.clone(),
+                harness_home: restored_home.clone(),
+                restore_repositories: false,
+                restore_native: true,
+                discard_queued_prompts: false,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap();
+        assert!(
+            !restored_home.join("auth.json").exists(),
+            "credentials entered the archive"
+        );
+        assert_eq!(
+            restored_seed(&restored_relay).queued_prompts,
+            spec.canonical_session.queued_prompts
+        );
+        fs::copy(
+            spec.harness_home.join("auth.json"),
+            restored_home.join("auth.json"),
+        )
+        .unwrap();
+        let (resumed_id, reply) = crate::hel_acp::muse_tests::native_muse_turn(
+            &adapter, &muse, &restored_home, &cwd, Some(session_id.clone()),
+            "What exact token did I ask you to remember in the previous turn? Reply only with the token. Do not use tools.",
+        ).await;
+        assert_eq!(resumed_id, session_id);
+        assert!(reply.contains(&token), "native context was not restored");
+    }
+
     #[test]
     fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
         let temp = tempfile::tempdir().unwrap();
