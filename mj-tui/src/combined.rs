@@ -5,6 +5,7 @@
 //! summaries under it, with a shared one-row footer. There is no second screen
 //! to switch to, so nothing is ever hidden behind a navigation step.
 
+use hel::hel_state::SessionTransitionKind;
 use mj_chat::hel_chat::{ActiveChat, ChatRegions};
 use mj_chat::hel_selection::{SurfaceFrame, SurfaceId};
 use ratatui::Frame;
@@ -318,11 +319,27 @@ pub fn render_combined(
         return;
     }
 
-    // With no conversation the prompt band holds the two-line guidance that
-    // stands in for a composer, so it asks for the rows to show both.
-    let desired_prompt = chat.as_ref().map_or(EMPTY_PROMPT_HEIGHT, |chat| {
-        chat.desired_prompt_height(area.width)
+    let selected_transition = dashboard.selected_session().and_then(|session| {
+        dashboard
+            .transition_kind(&session.id)
+            .map(|kind| (session.id.clone(), kind, false))
+            .or_else(|| {
+                dashboard
+                    .transition_failure_kind(&session.id)
+                    .map(|kind| (session.id.clone(), kind, true))
+            })
     });
+    // With no conversation the prompt band holds the two-line guidance that
+    // stands in for a composer, so it asks for the rows to show both. A
+    // transition uses only the compact status panel and its one-line cancel
+    // affordance.
+    let desired_prompt = if selected_transition.is_some() {
+        PROMPT_MINIMUM
+    } else {
+        chat.as_ref().map_or(EMPTY_PROMPT_HEIGHT, |chat| {
+            chat.desired_prompt_height(area.width)
+        })
+    };
     let sizes = [
         (
             SupportPane::Sessions,
@@ -431,39 +448,58 @@ pub fn render_combined(
     dashboard.chat_transcript_area = Some(transcript_area);
     dashboard.chat_prompt_area = Some(prompt_area);
     let prompt_focused = dashboard.prompt_has_focus();
-    let chat_drew_footer = match chat {
-        Some(chat) => {
-            chat.draw_in(
-                frame,
-                ChatRegions {
-                    transcript: transcript_area,
-                    prompt: prompt_area,
-                    footer: prompt_focused.then_some(footer_area),
-                    overlay: area,
-                },
-                prompt_focused,
-                transcript_selected,
-            );
-            // A chat-local modal may own the frame's interaction. Questions
-            // deliberately leave this flag clear so the navigator and other
-            // dashboard panes remain selectable beside the question area.
-            if chat.frame_surfaces_exclusive() {
-                dashboard.frame_surfaces.replace_with(chat.frame_surfaces());
-            } else {
-                dashboard.frame_surfaces.append(chat.frame_surfaces());
+    let chat_drew_footer = if let Some((session_id, transition, failed)) = selected_transition {
+        render_transition_surface(
+            frame,
+            transcript_area,
+            prompt_area,
+            dashboard,
+            &session_id,
+            transition,
+            failed,
+        );
+        false
+    } else {
+        match chat {
+            Some(chat) => {
+                chat.draw_in(
+                    frame,
+                    ChatRegions {
+                        transcript: transcript_area,
+                        prompt: prompt_area,
+                        footer: prompt_focused.then_some(footer_area),
+                        overlay: area,
+                    },
+                    prompt_focused,
+                    transcript_selected,
+                );
+                // A chat-local modal may own the frame's interaction. Questions
+                // deliberately leave this flag clear so the navigator and other
+                // dashboard panes remain selectable beside the question area.
+                if chat.frame_surfaces_exclusive() {
+                    dashboard.frame_surfaces.replace_with(chat.frame_surfaces());
+                } else {
+                    dashboard.frame_surfaces.append(chat.frame_surfaces());
+                }
+                prompt_focused
             }
-            prompt_focused
-        }
-        None => {
-            let reason = if dashboard.opening_session().is_some() {
-                EmptyConversation::Opening
-            } else if dashboard.ordered_sessions().is_empty() {
-                EmptyConversation::NoLiveSession
-            } else {
-                EmptyConversation::NoConversationOpen
-            };
-            render_empty_conversation(frame, transcript_area, prompt_area, prompt_focused, reason);
-            false
+            None => {
+                let reason = if dashboard.opening_session().is_some() {
+                    EmptyConversation::Opening
+                } else if dashboard.ordered_sessions().is_empty() {
+                    EmptyConversation::NoLiveSession
+                } else {
+                    EmptyConversation::NoConversationOpen
+                };
+                render_empty_conversation(
+                    frame,
+                    transcript_area,
+                    prompt_area,
+                    prompt_focused,
+                    reason,
+                );
+                false
+            }
         }
     };
 
@@ -550,6 +586,114 @@ enum EmptyConversation {
     NoConversationOpen,
     /// An attach is in flight, so a conversation is on its way.
     Opening,
+}
+
+/// Draws the conversation replacement shown while a lifecycle owns the
+/// selected session. The warm chat remains alive off-screen so its draft,
+/// read cursor, and history survive the operation, but neither transcript nor
+/// composer input can be mistaken for a session that is being retired.
+fn render_transition_surface(
+    frame: &mut Frame,
+    transcript_area: Rect,
+    prompt_area: Rect,
+    dashboard: &DashboardState,
+    session_id: &str,
+    transition: SessionTransitionKind,
+    failed: bool,
+) {
+    let Some(session) = dashboard.state.sessions.get(session_id) else {
+        return;
+    };
+    let operation = dashboard.session_operations.get(session_id);
+    let stages = operation
+        .map(|operation| {
+            operation
+                .active_stages
+                .keys()
+                .map(|stage| stage.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|stages| !stages.is_empty())
+        .unwrap_or_else(|| "waiting".to_owned());
+    let started_at = operation
+        .map(|operation| {
+            operation
+                .active_stages
+                .values()
+                .copied()
+                .min()
+                .unwrap_or(operation.started_at_epoch_seconds)
+        })
+        .unwrap_or_else(|| {
+            chrono::DateTime::parse_from_rfc3339(&session.updated_at)
+                .ok()
+                .and_then(|time| u64::try_from(time.timestamp()).ok())
+                .unwrap_or_default()
+        });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let target_id = operation
+        .and_then(|operation| operation.resume_destination.as_ref())
+        .map(|(_, target)| target.as_str())
+        .unwrap_or(&session.target_template_id);
+    let target = session.project_target(&dashboard.config, target_id);
+    let profile = operation
+        .and_then(|operation| operation.resume_destination.as_ref())
+        .map(|(profile, _)| profile.as_str())
+        .unwrap_or(&session.last_profile);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                format!("{} · {}", target, session.display_title()),
+                Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            Line::raw(format!("Operation: {}", transition.label())),
+            Line::raw(format!("Current stage: {stages}")),
+            Line::raw(format!(
+                "Elapsed: {} · Profile: {profile}",
+                mj_chat::usage_format::format_clock(now.saturating_sub(started_at))
+            )),
+        ])
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Transition · {} ", transition.label())),
+        ),
+        transcript_area,
+    );
+    let cancel_line = if !failed && operation.is_some_and(|operation| operation.cancellable) {
+        format!("Alt-X to cancel {}", transition.label().to_lowercase())
+    } else if failed {
+        format!(
+            "Operation failed: {}",
+            session.last_error.as_deref().unwrap_or("recovery required")
+        )
+    } else if operation.is_some() {
+        "This operation is at its commit boundary.".to_owned()
+    } else {
+        "This transition is owned by the daemon; select another session.".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                cancel_line,
+                Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            Line::raw(if failed {
+                "Press Enter for recovery, or select another session."
+            } else {
+                "Select another session to keep working."
+            }),
+        ])
+        .style(Style::default().fg(Color::DarkGray))
+        .wrap(Wrap { trim: true })
+        .block(Block::default().borders(Borders::ALL).title(" Status ")),
+        prompt_area,
+    );
 }
 
 /// The bordered chrome that stands in for a conversation when none is on

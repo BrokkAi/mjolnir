@@ -28,7 +28,10 @@ use hel::hel_projection::canonical_session_from_materialized;
 use hel::hel_state::{
     CheckpointMetadata, HelState, ManagedSessionSnapshot, SessionRecord, SessionState,
 };
-use hel::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
+use hel::hel_targets::{
+    self, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor, ProvisionStage,
+    ProvisionStageGuard,
+};
 use hel::hel_worker::{RelayCommand, RelayCursor, RelayExecutionState};
 
 use super::backend::backend_locator;
@@ -526,16 +529,21 @@ impl Controller {
             .checkpoint
             .clone();
         let latched = self
-            .checkpoint_session_latched(
+            .checkpoint_session_latched_with_recovery_stage(
                 session_id,
                 executor,
                 manager,
                 LatchExclusivity::ReleaseAfterLatch,
                 CheckpointExportPolicy::Always,
+                true,
             )
             .await?;
         let artifact = latched.artifact.clone();
-        if let Err(error) = verify_checkpoint_artifact(session_id, &artifact) {
+        let verification = {
+            let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
+            verify_checkpoint_artifact(session_id, &artifact)
+        };
+        if let Err(error) = verification {
             latched.abandon(session_id).await;
             return Err(remove_uninstalled_checkpoint(
                 &artifact.metadata.archive_path,
@@ -588,6 +596,26 @@ impl Controller {
         manager: Option<&SessionManagerControl>,
         exclusivity: LatchExclusivity,
         export_policy: CheckpointExportPolicy,
+    ) -> Result<LatchedCheckpoint> {
+        self.checkpoint_session_latched_with_recovery_stage(
+            session_id,
+            executor,
+            manager,
+            exclusivity,
+            export_policy,
+            exclusivity == LatchExclusivity::HoldThroughClose,
+        )
+        .await
+    }
+
+    async fn checkpoint_session_latched_with_recovery_stage(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: Option<&SessionManagerControl>,
+        exclusivity: LatchExclusivity,
+        export_policy: CheckpointExportPolicy,
+        recovery_copy: bool,
     ) -> Result<LatchedCheckpoint> {
         if let Some(operation) = hel::hel_database::load_move_operation(session_id)?
             && operation.queue_admission_started
@@ -743,14 +771,19 @@ impl Controller {
                 refresh_existing: false,
             };
             let prestage_started = Instant::now();
-            match run_checkpoint_staging_command(
-                executor,
-                &backend,
-                session_id,
-                &prestage,
-                capture_stdin_command,
-                "prestage target checkpoint",
-            ) {
+            let prestaged = {
+                let _recovery_copy = recovery_copy
+                    .then(|| ProvisionStageGuard::new(executor, ProvisionStage::RecoveryCopy));
+                run_checkpoint_staging_command(
+                    executor,
+                    &backend,
+                    session_id,
+                    &prestage,
+                    capture_stdin_command,
+                    "prestage target checkpoint",
+                )
+            };
+            match prestaged {
                 Ok(output) => match serde_json::from_slice::<CapturedCheckpoint>(&output.stdout) {
                     Ok(captured) => tracing::info!(
                         session_id,
@@ -962,14 +995,19 @@ impl Controller {
                     refresh_existing: true,
                 };
                 let capture_started = Instant::now();
-                let captured = run_checkpoint_staging_command(
-                    executor,
-                    &backend,
-                    session_id,
-                    &capture_spec,
-                    capture_stdin_command,
-                    "capture target checkpoint",
-                )?;
+                let captured = {
+                    let _recovery_copy = recovery_copy.then(|| {
+                        ProvisionStageGuard::new(executor, ProvisionStage::RecoveryCopy)
+                    });
+                    run_checkpoint_staging_command(
+                        executor,
+                        &backend,
+                        session_id,
+                        &capture_spec,
+                        capture_stdin_command,
+                        "capture target checkpoint",
+                    )?
+                };
                 let captured: CapturedCheckpoint = serde_json::from_slice(&captured.stdout)
                     .context("decode captured checkpoint result")?;
                 tracing::info!(
@@ -996,14 +1034,19 @@ impl Controller {
                     output_path: spec.output_path.clone(),
                 };
                 let pack_started = Instant::now();
-                let output = run_checkpoint_staging_command(
-                    executor,
-                    &backend,
-                    session_id,
-                    &pack_spec,
-                    pack_stdin_command,
-                    "pack target checkpoint",
-                )?;
+                let output = {
+                    let _recovery_copy = recovery_copy.then(|| {
+                        ProvisionStageGuard::new(executor, ProvisionStage::RecoveryCopy)
+                    });
+                    run_checkpoint_staging_command(
+                        executor,
+                        &backend,
+                        session_id,
+                        &pack_spec,
+                        pack_stdin_command,
+                        "pack target checkpoint",
+                    )?
+                };
                 tracing::info!(
                     session_id,
                     pack_ms = pack_started.elapsed().as_millis() as u64,
@@ -1012,8 +1055,18 @@ impl Controller {
                 output
             } else {
                 let export_started = Instant::now();
-                let output =
-                    export_target_checkpoint(executor, &backend, session_id, &spec, &remote_spec)?;
+                let output = {
+                    let _recovery_copy = recovery_copy.then(|| {
+                        ProvisionStageGuard::new(executor, ProvisionStage::RecoveryCopy)
+                    });
+                    export_target_checkpoint(
+                        executor,
+                        &backend,
+                        session_id,
+                        &spec,
+                        &remote_spec,
+                    )?
+                };
                 export_ms = Some(export_started.elapsed().as_millis() as u64);
                 output
             };
@@ -1063,56 +1116,65 @@ impl Controller {
                 expected_event_frontier: target_checkpoint.event_frontier,
                 expected_event_frontier_digest: &target_checkpoint.event_frontier_digest,
             };
-            let transfer_started = Instant::now();
-            let verified = transfer.execute(executor)?;
-            tracing::info!(
-                session_id,
-                transfer_and_checksum_ms = transfer_started.elapsed().as_millis() as u64,
-                "checkpoint archive transferred and checksum-verified"
-            );
-            let installed_archive = verified.archive_path().to_path_buf();
-            let validate_transferred = || -> Result<()> {
-                ensure!(
-                    verified.sha256() == target_checkpoint.sha256,
-                    "target and controller checkpoint checksums differ"
+            let metadata = {
+                let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
+                let transfer_started = Instant::now();
+                let verified = transfer.execute(executor)?;
+                tracing::info!(
+                    session_id,
+                    transfer_and_checksum_ms = transfer_started.elapsed().as_millis() as u64,
+                    "checkpoint archive transferred and checksum-verified"
                 );
-                ensure!(
-                    verified.event_frontier_digest() == expected_digest,
-                    "verified checkpoint event frontier digest changed"
-                );
-                Ok(())
-            };
-            if let Err(error) = validate_transferred() {
-                return Err(remove_uninstalled_checkpoint(&installed_archive, error));
-            }
-            // A checkpoint that still holds its barrier proves workspace
-            // consistency here instead. One that already released proved it
-            // before releasing; the sha256 chain covers the transfer itself.
-            if completion == CheckpointCompletion::HeldBarrier {
-                let revalidated = relay.sync_snapshot().await.and_then(|snapshot| {
-                    validate_checkpoint_barrier_snapshot(&snapshot, &barrier_command_id, &cursor)
-                });
-                if let Err(error) = revalidated {
+                let installed_archive = verified.archive_path().to_path_buf();
+                let validate_transferred = || -> Result<()> {
+                    ensure!(
+                        verified.sha256() == target_checkpoint.sha256,
+                        "target and controller checkpoint checksums differ"
+                    );
+                    ensure!(
+                        verified.event_frontier_digest() == expected_digest,
+                        "verified checkpoint event frontier digest changed"
+                    );
+                    Ok(())
+                };
+                if let Err(error) = validate_transferred() {
+                    return Err(remove_uninstalled_checkpoint(&installed_archive, error));
+                }
+                // A checkpoint that still holds its barrier proves workspace
+                // consistency here instead. One that already released proved it
+                // before releasing; the sha256 chain covers the transfer itself.
+                if completion == CheckpointCompletion::HeldBarrier {
+                    let revalidated = relay.sync_snapshot().await.and_then(|snapshot| {
+                        validate_checkpoint_barrier_snapshot(
+                            &snapshot,
+                            &barrier_command_id,
+                            &cursor,
+                        )
+                    });
+                    if let Err(error) = revalidated {
+                        return Err(remove_uninstalled_checkpoint(
+                            &installed_archive,
+                            error.context(
+                                "checkpoint barrier changed while transferring its archive",
+                            ),
+                        ));
+                    }
+                }
+                if let Err(error) = transfer
+                    .cleanup_plan(&verified)
+                    .and_then(|plan| plan.execute(executor).map(|_| ()))
+                {
                     return Err(remove_uninstalled_checkpoint(
                         &installed_archive,
-                        error.context("checkpoint barrier changed while transferring its archive"),
+                        error.context("clean target checkpoint staging"),
                     ));
                 }
-            }
-            if let Err(error) = transfer
-                .cleanup_plan(&verified)
-                .and_then(|plan| plan.execute(executor).map(|_| ()))
-            {
-                return Err(remove_uninstalled_checkpoint(
-                    &installed_archive,
-                    error.context("clean target checkpoint staging"),
-                ));
-            }
-            let metadata = CheckpointMetadata {
-                archive_path: verified.archive_path().to_path_buf(),
-                sha256: verified.sha256().to_string(),
-                created_at: checkpointed_at.clone(),
-                event_frontier: verified.event_frontier(),
+                CheckpointMetadata {
+                    archive_path: verified.archive_path().to_path_buf(),
+                    sha256: verified.sha256().to_string(),
+                    created_at: checkpointed_at.clone(),
+                    event_frontier: verified.event_frontier(),
+                }
             };
             Ok(CheckpointArtifact {
                 metadata,
@@ -2151,7 +2213,7 @@ mod tests {
     use hel::hel_state::{
         CheckpointMetadata, HelState, ManagedSessionSnapshot, MaterializedSession, SessionState,
     };
-    use hel::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec};
+    use hel::hel_targets::{self, CommandExecutor, CommandOutput, CommandSpec, ProvisionStage};
     #[cfg(unix)]
     use hel::hel_worker::RelayCommandOutcome;
     use hel::hel_worker::{RelayCommand, RelayCursor, RelayExecutionState};
@@ -3703,11 +3765,18 @@ mod tests {
         #[derive(Default)]
         struct RecordingExecutor {
             purposes: std::sync::Mutex<Vec<String>>,
+            active_stages: std::sync::Mutex<Vec<ProvisionStage>>,
+            stage_events: std::sync::Mutex<Vec<(ProvisionStage, bool)>>,
+            observed_stages: std::sync::Mutex<Vec<(String, Vec<ProvisionStage>)>>,
         }
 
         impl RecordingExecutor {
             fn refused(&self, command: &CommandSpec) -> Result<CommandOutput> {
                 self.purposes.lock().unwrap().push(command.purpose.clone());
+                self.observed_stages.lock().unwrap().push((
+                    command.purpose.clone(),
+                    self.active_stages.lock().unwrap().clone(),
+                ));
                 Ok(CommandOutput {
                     status: 1,
                     stdout: Vec::new(),
@@ -3717,6 +3786,14 @@ mod tests {
 
             fn purposes(&self) -> Vec<String> {
                 self.purposes.lock().unwrap().clone()
+            }
+
+            fn observed_stages(&self) -> Vec<(String, Vec<ProvisionStage>)> {
+                self.observed_stages.lock().unwrap().clone()
+            }
+
+            fn stage_events(&self) -> Vec<(ProvisionStage, bool)> {
+                self.stage_events.lock().unwrap().clone()
             }
         }
 
@@ -3731,6 +3808,21 @@ mod tests {
                 _input: &mut (dyn std::io::Read + Send),
             ) -> Result<CommandOutput> {
                 self.refused(command)
+            }
+
+            fn stage_started(&self, stage: ProvisionStage) {
+                self.active_stages.lock().unwrap().push(stage);
+                self.stage_events.lock().unwrap().push((stage, true));
+            }
+
+            fn stage_finished(&self, stage: ProvisionStage) {
+                let mut active = self.active_stages.lock().unwrap();
+                let position = active
+                    .iter()
+                    .position(|active_stage| *active_stage == stage)
+                    .expect("stage finished without a matching start");
+                active.remove(position);
+                self.stage_events.lock().unwrap().push((stage, false));
             }
         }
 
@@ -3940,6 +4032,26 @@ mod tests {
             format!("{error:#}").contains("no target is provisioned for this test"),
             "{error:#}"
         );
+        assert!(
+            executor.observed_stages().iter().any(|(purpose, stages)| {
+                purpose == "export target checkpoint"
+                    && stages.contains(&ProvisionStage::RecoveryCopy)
+            }),
+            "close checkpoint export did not run inside RecoveryCopy: {:?}",
+            executor.observed_stages()
+        );
+        assert_eq!(
+            executor
+                .stage_events()
+                .into_iter()
+                .filter(|(stage, _)| *stage == ProvisionStage::RecoveryCopy)
+                .collect::<Vec<_>>(),
+            vec![
+                (ProvisionStage::RecoveryCopy, true),
+                (ProvisionStage::RecoveryCopy, false)
+            ]
+        );
+        assert!(executor.active_stages.lock().unwrap().is_empty());
         assert!(checkpoint.archive_path.exists());
     }
     #[cfg(unix)]

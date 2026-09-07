@@ -38,7 +38,8 @@ use super::worker_binary::{bridge_readiness_stage, start_worker, worker_probe_di
 use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
     apply_workspace_to_raw, cleanup_managed_worktree, create_managed_worktree,
-    managed_worktree_checkout_exists, plan_raw_to_workspace, raw_checkout_divergence_notice,
+    managed_worktree_checkout_exists, plan_raw_to_workspace,
+    preserve_retained_managed_worktree_branch, raw_checkout_divergence_notice,
     raw_checkout_position, restore_managed_worktree, resume_compatibility, retire_managed_worktree,
 };
 use super::{
@@ -1012,12 +1013,21 @@ impl Controller {
                 .as_ref()
                 .and_then(ResumeConversion::workspace_to_raw)
             {
-                create_managed_worktree(
-                    executor,
-                    &conversion.worktree,
-                    None,
-                    PrimaryCheckoutRequirement::Any,
-                )?;
+                if conversion.reuse_existing_branch {
+                    let recovery_ref =
+                        preserve_retained_managed_worktree_branch(executor, &conversion.worktree)?;
+                    restore_managed_worktree(executor, &conversion.worktree)?;
+                    resume_notices.push(format!(
+                        "Before restoring this session's retained branch, Mjolnir preserved its tip at {recovery_ref}."
+                    ));
+                } else {
+                    create_managed_worktree(
+                        executor,
+                        &conversion.worktree,
+                        None,
+                        PrimaryCheckoutRequirement::Any,
+                    )?;
+                }
                 hel::hel_checkpoint::restore_single_repository_onto_branch(
                     &archive_path,
                     &conversion.worktree.worktree_root,

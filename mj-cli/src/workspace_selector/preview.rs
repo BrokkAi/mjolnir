@@ -754,6 +754,8 @@ mod tests {
         stopped.state = SessionState::Stopped;
         let mut resuming = snapshot(vec![stopped.clone()]);
         resuming.lifecycles.push(daemon::RuntimeLifecycleView {
+            operation_id: "operation-1".into(),
+            cancellable: true,
             session_id: stopped.id.clone(),
             kind: daemon::RuntimeLifecycleKind::Resume,
             started_at_epoch_seconds: 1,

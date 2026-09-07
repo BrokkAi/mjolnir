@@ -20,7 +20,7 @@ use ratatui::layout::Rect;
 use hel::hel_config::{HarnessKind, HelConfig, TargetTemplate as HelTargetTemplate};
 use hel::hel_state::{
     HelState, MoveOperation, ProjectSourceIdentity, ResumeQueueDisposition, SessionRecord,
-    SessionResourceAllocation, SessionState,
+    SessionResourceAllocation, SessionState, SessionTransitionKind,
 };
 use hel::hel_targets::AdditionalMount;
 use mj_chat::hel_chat::Notices;
@@ -349,6 +349,20 @@ impl SessionOperationKind {
             Self::Destroying => "Destroying",
             Self::Connecting => "Connecting",
             Self::Importing => "Importing",
+        }
+    }
+
+    /// The transition an operation temporarily owns in the user interface.
+    /// Connecting and importing an already-stopped record are background
+    /// activities, not conversation-replacing lifecycle transitions.
+    pub const fn transition_kind(self) -> Option<SessionTransitionKind> {
+        match self {
+            Self::Launching => Some(SessionTransitionKind::Starting),
+            Self::Resuming => Some(SessionTransitionKind::Resuming),
+            Self::Moving => Some(SessionTransitionKind::Moving),
+            Self::Stopping => Some(SessionTransitionKind::Stopping),
+            Self::Destroying => Some(SessionTransitionKind::Destroying),
+            Self::Connecting | Self::Importing => None,
         }
     }
 }
@@ -836,6 +850,47 @@ impl DashboardState {
         self.selected_session_id.as_deref()
     }
 
+    /// The operation that owns a session's conversation, if any. A local or
+    /// daemon operation wins over the durable record; the state fallback keeps
+    /// a recovering provisioning/closing/destroying record hidden until its
+    /// authoritative lifecycle completion arrives.
+    pub fn transition_kind(&self, session_id: &str) -> Option<SessionTransitionKind> {
+        if let Some(operation) = self.session_operations.get(session_id) {
+            // An explicit non-transition operation (Connecting/Importing) is
+            // still authoritative: it must not fall through to a stale
+            // Provisioning record and hide the conversation.
+            return operation.kind.transition_kind();
+        }
+        let session = self.state.sessions.get(session_id)?;
+        // A failed close/destroy remains durable for recovery, but it is no
+        // longer an in-flight transition. Keep its error and recovery controls
+        // visible instead of showing a spinner.
+        if session.last_error.is_some() {
+            return None;
+        }
+        session.state.transition_kind()
+    }
+
+    /// A durable transition record that failed before it could return to an
+    /// ordinary state. This is intentionally narrower than `Error`: only
+    /// Closing/Destroying records with an explicit error qualify.
+    pub fn transition_failure_kind(&self, session_id: &str) -> Option<SessionTransitionKind> {
+        if self.session_operations.contains_key(session_id) {
+            return None;
+        }
+        let session = self.state.sessions.get(session_id)?;
+        if session.last_error.is_some()
+            && matches!(
+                session.state,
+                SessionState::Closing | SessionState::Destroying
+            )
+        {
+            session.state.transition_kind()
+        } else {
+            None
+        }
+    }
+
     /// Whether the pointer is over the conversation the surface is drawing.
     /// A click there belongs to the chat, whatever has focus.
     pub fn chat_region_contains(&self, column: u16, row: u16) -> bool {
@@ -1155,6 +1210,22 @@ impl DashboardState {
             ));
             return DashboardAction::None;
         }
+        if let Some(transition) = self.transition_kind(&session.id) {
+            self.notices.set(format!(
+                "{} is in progress; select another session while it completes.",
+                transition.label()
+            ));
+            return DashboardAction::None;
+        }
+        if self.transition_failure_kind(&session.id).is_some() {
+            let confirmation = Confirmation::RecoverFailed {
+                session_id: session.id.clone(),
+                error: session.last_error.clone(),
+                recoverable: session.checkpoint.is_some(),
+            };
+            self.mode = Mode::Confirm(ConfirmDialog::new(confirmation));
+            return DashboardAction::None;
+        }
         if let Some(operation) = self
             .move_operations
             .get(&session.id)
@@ -1272,10 +1343,16 @@ impl DashboardState {
             .position(|index| sessions.get(index).is_some_and(|s| s.id == selected))
     }
 
-    /// The sessions the dashboard lists, in creation order. Only live
-    /// sessions appear here; everything else belongs to the resume dialog.
+    /// The sessions the dashboard lists, in creation order: live records and
+    /// terminal records still owned by a transition. Others belong in Resume.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
-        let active = partition_sessions(self.state.sessions.values()).0;
+        let (mut active, terminal) = partition_sessions(self.state.sessions.values());
+        active.extend(
+            terminal
+                .into_iter()
+                .filter(|session| self.transition_kind(&session.id).is_some()),
+        );
+        active.sort_by(|left, right| left.compare_by_creation(right));
         let mut groups = BTreeMap::<String, Vec<&SessionRecord>>::new();
         for session in active {
             groups

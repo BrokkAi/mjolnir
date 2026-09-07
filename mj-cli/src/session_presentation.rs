@@ -60,11 +60,19 @@ pub(crate) fn apply_lifecycle_display(
 ) {
     let kind = lifecycle_kind(lifecycle.kind);
     if dashboard.session_operation_kind(&lifecycle.session_id) != Some(kind) {
-        dashboard.begin_session_operation_at(
+        dashboard.begin_session_operation_at_with_id(
             lifecycle.session_id.clone(),
             kind,
             None,
             lifecycle.started_at_epoch_seconds,
+            Some(lifecycle.operation_id.clone()),
+            lifecycle.cancellable,
+        );
+    } else {
+        dashboard.set_session_operation_identity(
+            &lifecycle.session_id,
+            Some(lifecycle.operation_id.clone()),
+            lifecycle.cancellable,
         );
     }
     dashboard.replace_session_operation_stages(
@@ -242,6 +250,8 @@ mod tests {
 
     fn lifecycle(kind: RuntimeLifecycleKind) -> RuntimeLifecycleView {
         RuntimeLifecycleView {
+            operation_id: "operation-1".into(),
+            cancellable: true,
             session_id: "session-1".into(),
             kind,
             started_at_epoch_seconds: 123,

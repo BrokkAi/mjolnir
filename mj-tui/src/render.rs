@@ -12,7 +12,7 @@ use ratatui::widgets::{
 };
 
 use hel::hel_config::{HarnessKind, HelConfig, PermissionMode};
-use hel::hel_state::{SessionRecord, SessionState};
+use hel::hel_state::{SessionRecord, SessionState, SessionTransitionKind};
 use hel::hel_targets::DeploymentCapacityKind;
 use mj_chat::hel_chat::render_agent_message_head;
 #[cfg(test)]
@@ -459,6 +459,46 @@ fn drawn_session_rows_with_options(
                 };
                 let mut lines = Vec::new();
                 lines.extend(heading_line);
+                if let Some(transition) = dashboard.transition_kind(&session.id) {
+                    lines.push(session_transition_line(
+                        prefix,
+                        session,
+                        transition,
+                        operation,
+                        now_epoch_seconds,
+                        &target,
+                        width,
+                        &dashboard.config,
+                        None,
+                    ));
+                    rows.push(DrawnSessionRow {
+                        session: Some(index),
+                        heading: heading_key,
+                        lines,
+                        spacing: 0,
+                    });
+                    continue;
+                }
+                if let Some(transition) = dashboard.transition_failure_kind(&session.id) {
+                    lines.push(session_transition_line(
+                        prefix,
+                        session,
+                        transition,
+                        None,
+                        now_epoch_seconds,
+                        &target,
+                        width,
+                        &dashboard.config,
+                        session.last_error.as_deref(),
+                    ));
+                    rows.push(DrawnSessionRow {
+                        session: Some(index),
+                        heading: heading_key,
+                        lines,
+                        spacing: 0,
+                    });
+                    continue;
+                }
                 // The minimized layout draws its own grid (see
                 // `render_sessions_grid`) and never routes through here, so
                 // this laydown only handles expanded and collapsed project
@@ -1135,38 +1175,78 @@ fn render_sessions_grid(
                         state: session.state,
                         now_epoch_seconds,
                     };
-                    let clock = if facts.needs_input() {
-                        "Needs input".to_owned()
+                    if let Some(transition) = dashboard.transition_kind(&session.id) {
+                        let prefix = if Some(*index) == selected_index {
+                            "› "
+                        } else {
+                            "  "
+                        };
+                        session_row_areas.push((*index, rect));
+                        session_transition_line(
+                            prefix,
+                            session,
+                            transition,
+                            dashboard.session_operations.get(&session.id),
+                            now_epoch_seconds,
+                            targets.get(*index).map_or("", String::as_str),
+                            column_width,
+                            &dashboard.config,
+                            None,
+                        )
+                    } else if let Some(transition) = dashboard.transition_failure_kind(&session.id)
+                    {
+                        let prefix = if Some(*index) == selected_index {
+                            "› "
+                        } else {
+                            "  "
+                        };
+                        session_row_areas.push((*index, rect));
+                        session_transition_line(
+                            prefix,
+                            session,
+                            transition,
+                            None,
+                            now_epoch_seconds,
+                            targets.get(*index).map_or("", String::as_str),
+                            column_width,
+                            &dashboard.config,
+                            session.last_error.as_deref(),
+                        )
                     } else {
-                        facts.clock()
-                    };
-                    // A review owns the compact activity slot while it is
-                    // open. The primary is idle during a review, so showing
-                    // both labels would suggest contradictory work states.
-                    let activity = review_status_label(review)
-                        .map_or_else(|| clock.clone(), |label| label.to_owned());
-                    let prefix = if Some(*index) == selected_index {
-                        "› "
-                    } else {
-                        "  "
-                    };
-                    // Reserve the prefix, a separating space, and the clock;
-                    // the target takes whatever room is left and ellipsizes.
-                    let reserved = prefix.chars().count() + 1 + activity.chars().count();
-                    let target_room = (column_width as usize).saturating_sub(reserved);
-                    let target = targets.get(*index).cloned().unwrap_or_default();
-                    let target = crate::widgets::truncate_text(&target, target_room);
-                    session_row_areas.push((*index, rect));
-                    // Right-justify the clock at the column's edge: pad between
-                    // the target and the clock so the clocks line up in a
-                    // column instead of trailing each target.
-                    let used =
-                        prefix.chars().count() + target.chars().count() + activity.chars().count();
-                    let gap = (column_width as usize).saturating_sub(used).max(1);
-                    Line::styled(
-                        format!("{prefix}{target}{:gap$}{activity}", ""),
-                        facts.style(),
-                    )
+                        let clock = if facts.needs_input() {
+                            "Needs input".to_owned()
+                        } else {
+                            facts.clock()
+                        };
+                        // A review owns the compact activity slot while it is
+                        // open. The primary is idle during a review, so showing
+                        // both labels would suggest contradictory work states.
+                        let activity = review_status_label(review)
+                            .map_or_else(|| clock.clone(), |label| label.to_owned());
+                        let prefix = if Some(*index) == selected_index {
+                            "› "
+                        } else {
+                            "  "
+                        };
+                        // Reserve the prefix, a separating space, and the clock;
+                        // the target takes whatever room is left and ellipsizes.
+                        let reserved = prefix.chars().count() + 1 + activity.chars().count();
+                        let target_room = (column_width as usize).saturating_sub(reserved);
+                        let target = targets.get(*index).cloned().unwrap_or_default();
+                        let target = crate::widgets::truncate_text(&target, target_room);
+                        session_row_areas.push((*index, rect));
+                        // Right-justify the clock at the column's edge: pad between
+                        // the target and the clock so the clocks line up in a
+                        // column instead of trailing each target.
+                        let used = prefix.chars().count()
+                            + target.chars().count()
+                            + activity.chars().count();
+                        let gap = (column_width as usize).saturating_sub(used).max(1);
+                        Line::styled(
+                            format!("{prefix}{target}{:gap$}{activity}", ""),
+                            facts.style(),
+                        )
+                    }
                 }
             };
             frame.render_widget(Paragraph::new(line), rect);
@@ -1221,6 +1301,75 @@ fn collapsed_session_line(
         style,
     ));
     Line::from(spans).style(style)
+}
+
+/// The single row used while a lifecycle owns a session. It deliberately
+/// contains no transcript excerpt: the identity, operation, active stages,
+/// and elapsed time remain stable across expanded, collapsed, and minimized
+/// layouts while another session can still be selected and used.
+#[allow(clippy::too_many_arguments)]
+fn session_transition_line(
+    prefix: &str,
+    session: &SessionRecord,
+    transition: SessionTransitionKind,
+    operation: Option<&SessionOperationDisplay>,
+    now_epoch_seconds: u64,
+    target: &str,
+    width: u16,
+    config: &HelConfig,
+    failure: Option<&str>,
+) -> Line<'static> {
+    let started_at = operation
+        .map(|operation| {
+            operation
+                .active_stages
+                .values()
+                .copied()
+                .min()
+                .unwrap_or(operation.started_at_epoch_seconds)
+        })
+        .or_else(|| session_updated_at_epoch_seconds(session))
+        .unwrap_or(now_epoch_seconds);
+    let stages = operation
+        .map(|operation| {
+            operation
+                .active_stages
+                .keys()
+                .map(|stage| stage.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|stages| !stages.is_empty())
+        .unwrap_or_else(|| "waiting".to_owned());
+    let elapsed = mj_chat::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at));
+    let (profile, _) = operation
+        .and_then(|operation| operation.resume_destination.clone())
+        .unwrap_or_else(|| {
+            (
+                session.last_profile.clone(),
+                session.target_template_id.clone(),
+            )
+        });
+    let identity = format!(
+        "{} · {}",
+        session.project_name(config),
+        session_name(session)
+    );
+    let line = format!(
+        "{prefix}{target}  {} · {stages} · {elapsed}  {profile} · {identity}{}",
+        transition.label(),
+        failure.map_or_else(String::new, |error| format!(" · failed: {error}")),
+    );
+    Line::styled(
+        crate::widgets::truncate_text(&line, usize::from(width.saturating_sub(2))),
+        Style::default()
+            .fg(if failure.is_some() {
+                Color::Red
+            } else {
+                Color::LightYellow
+            })
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5616,6 +5765,33 @@ mod tests {
 
         let (clock, _, _, _, _) = session_values(&session, None, None, 1_012, &config());
         assert_eq!(clock, "Launch 12s");
+    }
+
+    #[test]
+    fn transition_row_is_compact_and_contains_stage_identity_and_elapsed() {
+        let session = stopped_session();
+        let operation = operation(SessionOperationKind::Moving, Some(ProvisionStage::Cloning));
+        let line = session_transition_line(
+            "› ",
+            &session,
+            hel::hel_state::SessionTransitionKind::Moving,
+            Some(&operation),
+            1_012,
+            "podman",
+            120,
+            &config(),
+            None,
+        );
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("Moving"), "{text}");
+        assert!(text.contains("Clone"), "{text}");
+        assert!(text.contains("12s"), "{text}");
+        assert!(text.contains("ACP pretty name"), "{text}");
+        assert!(!text.contains("No messages"), "{text}");
     }
 
     #[test]

@@ -95,7 +95,7 @@ use crate::hel_session_manager::{SessionManagerControl, StandaloneSession, new_c
 use hel::hel_archive::{CanonicalQueuedCommandKind, verify_archive_streaming};
 use hel::hel_state::{MoveOperation, MovePhase, ResumeQueueDisposition, SessionState};
 pub use hel::hel_state::{MoveOutcome, MovePreparation, MoveSelection, MoveSessionRequest};
-use hel::hel_targets::CommandExecutor;
+use hel::hel_targets::{CommandExecutor, ProvisionStage, ProvisionStageGuard};
 use hel::hel_worker::RelayCommand;
 
 fn digest(value: &impl serde::Serialize) -> Result<String> {
@@ -405,30 +405,35 @@ impl Controller {
         let id = prepared.selection.session_id.clone();
         let started = std::time::Instant::now();
         executor.notify_notice("Checking destination");
-        let mut checked = self
-            .prepare_move_session_controlled(prepared.selection.clone(), executor)
-            .await?;
-        // Destination checks can outlast a turn. Refresh confirmation from the
-        // relay immediately before interruption, while new submissions are held.
-        if matches!(
-            self.state.sessions[&id].state,
-            SessionState::Running | SessionState::Disconnected
-        ) {
-            let handle = manager
-                .wait_for_session(&id, std::time::Duration::from_secs(5))
+        let checked = {
+            let _checking_destination =
+                ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
+            let mut checked = self
+                .prepare_move_session_controlled(prepared.selection.clone(), executor)
                 .await?;
-            handle.sync_now().await?;
-            let (active, queue, fingerprint) = self.move_confirmation(&checked.selection)?;
-            checked.active = active
-                || handle.view().snapshot.as_ref().is_some_and(|snapshot| {
-                    let mut operational = snapshot.operational.clone();
-                    operational.queued_prompts.clear();
-                    operational.checkpoint_barrier = None;
-                    !operational.is_quiet()
-                });
-            checked.queued_commands = queue;
-            checked.fingerprint = fingerprint;
-        }
+            // Destination checks can outlast a turn. Refresh confirmation from the
+            // relay immediately before interruption, while new submissions are held.
+            if matches!(
+                self.state.sessions[&id].state,
+                SessionState::Running | SessionState::Disconnected
+            ) {
+                let handle = manager
+                    .wait_for_session(&id, std::time::Duration::from_secs(5))
+                    .await?;
+                handle.sync_now().await?;
+                let (active, queue, fingerprint) = self.move_confirmation(&checked.selection)?;
+                checked.active = active
+                    || handle.view().snapshot.as_ref().is_some_and(|snapshot| {
+                        let mut operational = snapshot.operational.clone();
+                        operational.queued_prompts.clear();
+                        operational.checkpoint_barrier = None;
+                        !operational.is_quiet()
+                    });
+                checked.queued_commands = queue;
+                checked.fingerprint = fingerprint;
+            }
+            checked
+        };
         ensure!(
             checked.fingerprint == prepared.fingerprint,
             "session, pending work, or destination configuration changed; prepare and confirm Move again"
@@ -782,32 +787,38 @@ impl Controller {
         let timing_id = operation.selection.session_id.clone();
         let _timing = MovePhaseTimer::new(&timing_id, "queue admission");
         let id = &operation.selection.session_id;
-        let destination = &self.state.sessions[id];
-        ensure!(
-            destination.state == SessionState::Running
-                && destination.target == operation.destination_target
-                && destination.native_session_id == operation.destination_native_session_id,
-            "cannot prove the same ready destination; refusing to replay potentially executed work"
-        );
-        let spec = self.reconnect_command(id)?;
-        let mut relay = StandaloneSession::connect_command(&spec, id).await?;
-        let store_id = relay.snapshot().operational.store_id.context("destination worker does not expose its durable store identity; upgrade the worker before admitting queued work")?;
-        if let Some(expected) = &operation.destination_store_id {
+        let mut relay = {
+            let _checking_destination =
+                ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
+            let destination = &self.state.sessions[id];
             ensure!(
-                *expected == store_id,
-                "destination relay storage was replaced; refusing to replay potentially executed work"
+                destination.state == SessionState::Running
+                    && destination.target == operation.destination_target
+                    && destination.native_session_id == operation.destination_native_session_id,
+                "cannot prove the same ready destination; refusing to replay potentially executed work"
             );
-        } else {
-            // No command can be admitted until this identity is durable.
-            operation.destination_store_id = Some(store_id);
-            hel::hel_database::save_move_operation(operation)?;
-        }
-        ensure!(
-            relay.snapshot().operational.native_session_id
-                == operation.destination_native_session_id,
-            "destination relay native identity changed; refusing queue replay"
-        );
+            let spec = self.reconnect_command(id)?;
+            let relay = StandaloneSession::connect_command(&spec, id).await?;
+            let store_id = relay.snapshot().operational.store_id.context("destination worker does not expose its durable store identity; upgrade the worker before admitting queued work")?;
+            if let Some(expected) = &operation.destination_store_id {
+                ensure!(
+                    *expected == store_id,
+                    "destination relay storage was replaced; refusing to replay potentially executed work"
+                );
+            } else {
+                // No command can be admitted until this identity is durable.
+                operation.destination_store_id = Some(store_id);
+                hel::hel_database::save_move_operation(operation)?;
+            }
+            ensure!(
+                relay.snapshot().operational.native_session_id
+                    == operation.destination_native_session_id,
+                "destination relay native identity changed; refusing queue replay"
+            );
+            relay
+        };
         if operation.queue == ResumeQueueDisposition::Start && !operation.queue_admission_finished {
+            let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
             executor.notify_notice("Starting queued work");
             let checkpoint = operation
                 .checkpoint
@@ -856,6 +867,7 @@ impl Controller {
         preparation: Option<&MovePreparation>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
+        let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
         let current = Controller {
             config: hel::hel_config::HelConfig::load()?,
             state: self.state.clone(),

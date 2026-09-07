@@ -6,7 +6,9 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::hel_session_manager::{SessionManagerControl, new_command_id};
 use hel::hel_state::{CheckpointMetadata, SessionRecord, SessionState};
-use hel::hel_targets::{self, CommandExecutor, ProcessExecutor};
+use hel::hel_targets::{
+    self, CommandExecutor, ProcessExecutor, ProvisionStage, ProvisionStageGuard,
+};
 use hel::hel_worker::{RelayCommand, RelayExecutionState};
 
 use super::backend::backend_locator;
@@ -156,34 +158,44 @@ impl Controller {
 
         let close_command_id = new_command_id("close")?;
         let barrier_command_id = latched.barrier_command_id.clone();
-        if let Err(error) = latched
-            .relay
-            .connection_mut()
-            .submit(
-                close_command_id,
-                RelayCommand::Close {
-                    barrier_command_id: barrier_command_id.clone(),
-                    expected: latched.cursor.clone(),
-                },
-            )
-            .await
-        {
+        let close_result = {
+            let _closing = ProvisionStageGuard::new(executor, ProvisionStage::Closing);
+            latched
+                .relay
+                .connection_mut()
+                .submit(
+                    close_command_id,
+                    RelayCommand::Close {
+                        barrier_command_id: barrier_command_id.clone(),
+                        expected: latched.cursor.clone(),
+                    },
+                )
+                .await
+        };
+        if let Err(error) = close_result {
             self.record_interrupted_close(session_id, &error)?;
             return Err(error.context("seal verified checkpoint for close"));
         }
-        if let Err(error) = latched
-            .relay
-            .connection_mut()
-            .submit(
-                new_command_id("checkpoint-complete")?,
-                RelayCommand::CompleteCheckpoint { barrier_command_id },
-            )
-            .await
-        {
+        let close_result = {
+            let _closing = ProvisionStageGuard::new(executor, ProvisionStage::Closing);
+            latched
+                .relay
+                .connection_mut()
+                .submit(
+                    new_command_id("checkpoint-complete")?,
+                    RelayCommand::CompleteCheckpoint { barrier_command_id },
+                )
+                .await
+        };
+        if let Err(error) = close_result {
             self.record_interrupted_close(session_id, &error)?;
             return Err(error.context("release verified close checkpoint"));
         }
-        if let Err(error) = wait_for_relay_closed(latched.relay.connection_mut()).await {
+        let close_result = {
+            let _closing = ProvisionStageGuard::new(executor, ProvisionStage::Closing);
+            wait_for_relay_closed(latched.relay.connection_mut()).await
+        };
+        if let Err(error) = close_result {
             self.record_interrupted_close(session_id, &error)?;
             return Err(error);
         }
@@ -240,6 +252,7 @@ impl Controller {
         match execution {
             RelayExecutionState::Closed => {}
             RelayExecutionState::Closing => {
+                let _closing = ProvisionStageGuard::new(executor, ProvisionStage::Closing);
                 wait_for_relay_closed(lease.connection_mut()).await?;
             }
             RelayExecutionState::Idle | RelayExecutionState::Running => {
@@ -325,7 +338,10 @@ impl Controller {
             .get(session_id)
             .expect("destroying session disappeared")
             .clone();
-        verify_installed_checkpoint_gate(session_id, verified)?;
+        {
+            let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
+            verify_installed_checkpoint_gate(session_id, verified)?;
+        }
         // The reviewer's native session lives on the target that is about to
         // go. Recording that now, before the target is torn down, is what
         // stops a resumed session from trying to reload a conversation that no
@@ -413,7 +429,24 @@ impl Controller {
             hel_targets::quiesce_plan(&backend, session_id)?.is_some(),
             "session {session_id} retained a non-Podman target after stopping"
         );
-        execute_target_cleanup(&backend, session_id, executor)?;
+        if let Err(error) = execute_target_cleanup(&backend, session_id, executor) {
+            let record = self.state.sessions.get_mut(session_id).unwrap();
+            record.updated_at = now();
+            record.last_error = Some(format!("deferred target cleanup failed: {error:#}"));
+            let persisted = persist_session_record_transition_or_restore(
+                &mut self.state,
+                session_id,
+                &previous,
+                "persist deferred target cleanup failure",
+                &persist,
+            );
+            return match persisted {
+                Ok(()) => Err(error),
+                Err(persist_error) => Err(error.context(format!(
+                    "also failed to persist deferred target cleanup failure: {persist_error:#}"
+                ))),
+            };
+        }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.target = None;
         record.updated_at = now();
@@ -463,8 +496,11 @@ impl Controller {
             .context("force stop requires an existing recovery archive")?;
         // Force stop skips a new checkpoint, never the checksum gate on the
         // archive that makes the logical session resumable afterwards.
-        verify_installed_checkpoint_gate(session_id, checkpoint)
-            .context("verify the recovery archive before force stopping")?;
+        {
+            let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
+            verify_installed_checkpoint_gate(session_id, checkpoint)
+                .context("verify the recovery archive before force stopping")?;
+        }
         retire_git_broker(session_id).context("stop the session's local Git broker")?;
         let mut deferred = false;
         if let Some(locator) = &session.target {
@@ -688,6 +724,137 @@ mod tests {
         assert_eq!(session.updated_at, "2026-08-14T12:00:00Z");
         assert!(session.last_checkpoint_error.is_none());
     }
+
+    struct DeferredCleanupExecutor {
+        statuses: RefCell<Vec<i32>>,
+    }
+
+    impl CommandExecutor for DeferredCleanupExecutor {
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            let status = self
+                .statuses
+                .borrow_mut()
+                .pop()
+                .expect("test cleanup command status");
+            Ok(CommandOutput {
+                status,
+                stdout: Vec::new(),
+                stderr: if status != 0 {
+                    b"cleanup failed".to_vec()
+                } else {
+                    Vec::new()
+                },
+            })
+        }
+    }
+
+    fn stopped_podman_cleanup_controller(session_id: &str) -> Controller {
+        let container_id = hel_targets::resource_name(session_id).unwrap();
+        let volume = format!("{container_id}-workspace");
+        let mut session = checkpoint_test_session(session_id);
+        session.target_template_id = "podman".into();
+        session.state = SessionState::Stopped;
+        session.target = Some(TargetLocator::LocalPodman {
+            container_id,
+            workspace_storage: hel::hel_state::PodmanWorkspaceLocator::Volume { name: volume },
+        });
+        let mut config = HelConfig::default();
+        config.targets.insert(
+            "podman".into(),
+            TargetTemplate::LocalPodman {
+                container: ConfigContainer {
+                    image: "test:latest".into(),
+                    pull_policy: Default::default(),
+                    platform: None,
+                    cpus: None,
+                    memory: None,
+                    environment: BTreeMap::new(),
+                    workspace_storage: hel::hel_config::PodmanWorkspaceStorage::PodmanVolume,
+                },
+            },
+        );
+        Controller {
+            config,
+            state: HelState {
+                sessions: BTreeMap::from([(session_id.into(), session)]),
+                ..HelState::default()
+            },
+        }
+    }
+
+    #[test]
+    fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let mut controller = stopped_podman_cleanup_controller(session_id);
+        let persisted = RefCell::new(Vec::new());
+        let failure = controller
+            .cleanup_stopped_target_with(
+                session_id,
+                &DeferredCleanupExecutor {
+                    // The cleanup command fails, then the exact-absence probe
+                    // confirms that the owned target is still present.
+                    statuses: RefCell::new(vec![1, 1]),
+                },
+                |record| {
+                    persisted
+                        .borrow_mut()
+                        .push((record.target.is_some(), record.last_error.clone()));
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{failure:#}").contains("cleanup failed"));
+        assert_eq!(persisted.borrow().len(), 1);
+        assert!(persisted.borrow()[0].0);
+        assert!(
+            persisted.borrow()[0]
+                .1
+                .as_deref()
+                .is_some_and(|error| error.contains("deferred target cleanup failed"))
+        );
+        assert!(controller.state.sessions[session_id].target.is_some());
+        assert!(controller.state.sessions[session_id].last_error.is_some());
+
+        let retry_persisted = RefCell::new(Vec::new());
+        controller
+            .cleanup_stopped_target_with(
+                session_id,
+                &DeferredCleanupExecutor {
+                    statuses: RefCell::new(vec![0, 0, 0]),
+                },
+                |record| {
+                    retry_persisted
+                        .borrow_mut()
+                        .push((record.target.is_some(), record.last_error.clone()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(retry_persisted.borrow().as_slice(), &[(false, None)]);
+        assert!(controller.state.sessions[session_id].target.is_none());
+        assert!(controller.state.sessions[session_id].last_error.is_none());
+    }
+
+    #[test]
+    fn deferred_cleanup_persistence_failure_restores_the_stopped_record() {
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let mut controller = stopped_podman_cleanup_controller(session_id);
+        let previous = controller.state.sessions[session_id].clone();
+        let failure = controller
+            .cleanup_stopped_target_with(
+                session_id,
+                &DeferredCleanupExecutor {
+                    statuses: RefCell::new(vec![1, 1]),
+                },
+                |_| Err(anyhow::anyhow!("database unavailable")),
+            )
+            .unwrap_err();
+        let detail = format!("{failure:#}");
+        assert!(detail.contains("cleanup failed"), "{detail}");
+        assert!(detail.contains("database unavailable"), "{detail}");
+        assert_eq!(controller.state.sessions[session_id], previous);
+    }
+
     #[test]
     fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
         struct RecordingExecutor {

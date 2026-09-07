@@ -121,6 +121,13 @@
           <span id="conversation-state" class="pill"></span>
           <button id="cancel-turn" class="secondary hidden">Stop turn</button>
         </div>
+        <section id="conversation-transition" class="conversation-transition card" hidden aria-live="polite">
+          <h2 id="conversation-transition-title"></h2>
+          <p id="conversation-transition-stage" class="session-activity"></p>
+          <p id="conversation-transition-notice" class="dim"></p>
+          <p id="conversation-transition-error" class="error" role="alert"></p>
+          <button id="conversation-transition-cancel" class="danger hidden" type="button">Cancel operation</button>
+        </section>
         <div id="conversation-scroll" class="conversation-scroll">
           <div id="conversation-feed"></div>
         </div>

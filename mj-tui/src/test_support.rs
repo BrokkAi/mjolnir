@@ -358,6 +358,8 @@ pub(crate) fn operation(
         .unwrap_or_default();
     SessionOperationDisplay {
         kind,
+        operation_id: None,
+        cancellable: true,
         started_at_epoch_seconds: 1_000,
         placeholder: None,
         active_stages,

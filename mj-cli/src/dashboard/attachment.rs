@@ -32,6 +32,14 @@ impl SessionAttachment {
         }
     }
 
+    /// A lifecycle owns the selected conversation temporarily. Unlike a
+    /// failed/cancelled open, its completion should allow one fresh attempt.
+    pub(super) fn defer(&mut self) {
+        if self.selection.take().is_some() || self.task.is_some() {
+            self.cancel();
+        }
+    }
+
     pub(super) fn accepts(&self, generation: u64, selection: Option<&str>) -> bool {
         // Input may have changed the row before the event loop starts its new
         // attachment. A queued completion must already respect that choice.
@@ -77,6 +85,26 @@ impl Drop for SessionAttachment {
 mod tests {
     use super::*;
     use tokio::sync::{mpsc, oneshot};
+
+    #[tokio::test]
+    async fn a_transition_retires_an_attach_and_rearms_the_same_selection_once() {
+        let mut attachment = SessionAttachment::default();
+        let (tx, rx) = oneshot::channel();
+        attachment.spawn(
+            "moving",
+            ATTACH_TIMEOUT,
+            async { Ok(()) },
+            move |generation, _| {
+                tx.send(generation).unwrap();
+            },
+        );
+        let generation = rx.await.unwrap();
+        attachment.defer();
+        attachment.defer();
+        assert!(!attachment.accepts(generation, Some("moving")));
+        assert!(attachment.select("moving"));
+        assert!(!attachment.select("moving"));
+    }
 
     #[tokio::test]
     async fn failed_open_does_not_retry_on_background_wakeups_but_can_be_retried_explicitly() {

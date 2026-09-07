@@ -661,12 +661,12 @@ kind = "local-bare"
                 last = str(error)
                 time.sleep(0.1)
                 continue
-            last = str(access)
+            last = str(access) if not isinstance(access, dict) or "Ready" not in access else "Ready"
             if isinstance(access, dict) and "Ready" in access:
                 ready = access["Ready"]
                 url = urllib.parse.urlsplit(ready["viewer_url"])
                 if url.hostname != "127.0.0.1" or url.port != port:
-                    raise ScenarioFailure(f"viewer bound an unexpected address: {ready['viewer_url']}")
+                    raise ScenarioFailure(f"viewer bound an unexpected address: {url.hostname}:{url.port}")
                 metadata = json.loads((self.data / "daemon.json").read_text())
                 self.daemon_pid = int(metadata["pid"])
                 self.record_process("observed", "daemon", self.daemon_pid)

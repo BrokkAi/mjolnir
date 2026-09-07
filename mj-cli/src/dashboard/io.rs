@@ -1319,9 +1319,23 @@ impl DashboardContext {
                 }
                 self.opening_chat_session = None;
                 self.dashboard.set_opening_session(None);
+                // The attach may have crossed a lifecycle boundary while it
+                // was preparing. Keep the warm chat/draft untouched and drop
+                // the late result instead of reviving a retiring conversation.
+                if self.dashboard.transition_kind(&session_id).is_some()
+                    || self
+                        .dashboard
+                        .transition_failure_kind(&session_id)
+                        .is_some()
+                {
+                    self.dashboard.set_current_session(None);
+                    self.defer_chat_open();
+                    self.dirty = true;
+                    return;
+                }
                 match *result {
                     Ok(chat) => {
-                        let mut chat = chat.open();
+                        let mut chat = chat.open_replacing(self.active_chat.as_ref());
                         // The old warm chat continued receiving feed updates
                         // while this attach was in flight. Capture its latest
                         // local form state just before replacing it.

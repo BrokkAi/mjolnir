@@ -1162,6 +1162,25 @@ article > h3 {
   border-bottom: 1px solid var(--border);
 }
 
+.conversation-transition {
+  margin: auto 0;
+  padding: 24px;
+  text-align: center;
+}
+
+.conversation-transition h2 {
+  margin: 0 0 8px;
+}
+
+.conversation-transition .session-activity {
+  margin: 0 0 8px;
+  color: var(--accent);
+}
+
+.conversation-transition button {
+  margin-top: 12px;
+}
+
 .conversation-name {
   flex: 1;
   overflow: hidden;

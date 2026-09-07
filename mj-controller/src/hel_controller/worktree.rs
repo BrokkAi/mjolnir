@@ -166,8 +166,15 @@ impl Controller {
                     .with_context(|| format!("unknown target template {target_id:?}"))?,
             )?,
         };
-        ensure_managed_worktree_available(executor, &worktree)?;
-        Ok(WorkspaceToRawConversion { worktree })
+        let reuse_existing_branch =
+            retained_managed_worktree_branch_available(executor, &worktree)?;
+        if !reuse_existing_branch {
+            ensure_managed_worktree_available(executor, &worktree)?;
+        }
+        Ok(WorkspaceToRawConversion {
+            worktree,
+            reuse_existing_branch,
+        })
     }
 
     pub(super) fn prepare_managed_raw_worktree(
@@ -460,6 +467,10 @@ impl ResumeConversion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WorkspaceToRawConversion {
     pub(super) worktree: ManagedWorktree,
+    /// The first move retires this session's checkout but deliberately keeps
+    /// its `mj/<session>` branch for source recovery. Reattach that branch on
+    /// the return move instead of trying to create it a second time.
+    pub(super) reuse_existing_branch: bool,
 }
 
 /// Reshape a bundle session's record for the checkout it is moving into. The
@@ -1054,6 +1065,115 @@ fn ensure_managed_worktree_available(
         1 => Ok(()),
         status => bail!(
             "check managed worktree branch availability failed with status {status}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
+}
+
+/// Check whether the deterministic branch left by this session's earlier
+/// raw-to-workspace move can be reattached. A branch with this session's id is
+/// session-owned, but an active checkout elsewhere is still a collision: the
+/// restore must not make one branch belong to two worktrees.
+fn retained_managed_worktree_branch_available(
+    executor: &impl CommandExecutor,
+    worktree: &ManagedWorktree,
+) -> Result<bool> {
+    if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
+        bail!(
+            "managed worktree path already exists: {}",
+            worktree.worktree_root.display()
+        );
+    }
+    let branch_ref = format!("refs/heads/{}", worktree.branch);
+    let check = managed_git_command(
+        &worktree.target,
+        &worktree.source_repository,
+        ["show-ref", "--verify", "--quiet", &branch_ref],
+        "check retained managed worktree branch",
+    );
+    let output = executor.execute(&check)?;
+    match output.status {
+        1 => Ok(false),
+        0 => {
+            let worktrees = managed_git_stdout(
+                executor,
+                &worktree.target,
+                &worktree.source_repository,
+                ["worktree", "list", "--porcelain", "-z"],
+                "check retained managed worktree checkout",
+            )?;
+            let branch_field = format!("branch {branch_ref}");
+            if worktrees.split('\0').any(|field| field == branch_field) {
+                bail!(
+                    "managed worktree branch is still checked out: {}",
+                    worktree.branch
+                );
+            }
+            Ok(true)
+        }
+        status => bail!(
+            "check retained managed worktree branch failed with status {status}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
+}
+
+/// Preserve the ref that a return-to-local restore is about to reset. The
+/// retained `mj/<session>` branch is the source-recovery point; keeping a
+/// second ref makes a later commit on that branch recoverable as well.
+pub(super) fn preserve_retained_managed_worktree_branch(
+    executor: &impl CommandExecutor,
+    worktree: &ManagedWorktree,
+) -> Result<String> {
+    let session_id = worktree
+        .branch
+        .strip_prefix("mj/")
+        .context("managed worktree branch is not session-owned")?;
+    let branch_ref = format!("refs/heads/{}", worktree.branch);
+    let tip = managed_git_stdout(
+        executor,
+        &worktree.target,
+        &worktree.source_repository,
+        ["rev-parse", "--verify", &branch_ref],
+        "read retained managed worktree branch tip",
+    )?;
+    let recovery_ref = format!("refs/mj/recovery/{session_id}/{tip}");
+    let existing = managed_git_command(
+        &worktree.target,
+        &worktree.source_repository,
+        ["show-ref", "--verify", "--quiet", &recovery_ref],
+        "check retained managed worktree recovery ref",
+    );
+    let output = executor.execute(&existing)?;
+    match output.status {
+        0 => {
+            let existing_tip = managed_git_stdout(
+                executor,
+                &worktree.target,
+                &worktree.source_repository,
+                ["rev-parse", "--verify", &recovery_ref],
+                "verify retained managed worktree recovery ref",
+            )?;
+            ensure!(
+                existing_tip == tip,
+                "retained managed worktree recovery ref {recovery_ref} points to {existing_tip}, expected {tip}"
+            );
+            Ok(recovery_ref)
+        }
+        1 => {
+            execute_checked(
+                executor,
+                managed_git_command(
+                    &worktree.target,
+                    &worktree.source_repository,
+                    ["update-ref", &recovery_ref, &tip],
+                    "preserve retained managed worktree branch",
+                ),
+            )?;
+            Ok(recovery_ref)
+        }
+        status => bail!(
+            "check retained managed worktree recovery ref failed with status {status}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ),
     }
@@ -2312,6 +2432,116 @@ mod tests {
         assert!(format!("{error:#}").contains("already exists"), "{error:#}");
     }
     #[test]
+    fn a_return_to_local_reuses_its_retained_branch_and_preserves_its_tip() {
+        let repository = committed_repository();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let branch = format!("mj/{session_id}");
+        let original_tip = test_git(repository.path(), &["rev-parse", "HEAD"]);
+        test_git(repository.path(), &["branch", &branch]);
+        let mut config = resume_compatibility_config();
+        config
+            .bundles
+            .insert("project".into(), local_bundle(repository.path()));
+        let session = checkpoint_test_session(session_id);
+        let controller = Controller {
+            config,
+            state: HelState {
+                sessions: BTreeMap::from([(session_id.into(), session.clone())]),
+                ..HelState::default()
+            },
+        };
+
+        let conversion = controller
+            .plan_workspace_to_raw(&session, "local-bare", &ProcessExecutor)
+            .unwrap();
+
+        assert!(conversion.reuse_existing_branch);
+        assert!(!conversion.worktree.worktree_root.exists());
+        let recovery_ref =
+            preserve_retained_managed_worktree_branch(&ProcessExecutor, &conversion.worktree)
+                .unwrap();
+        assert_eq!(
+            recovery_ref,
+            format!("refs/mj/recovery/{session_id}/{original_tip}")
+        );
+        assert_eq!(
+            test_git(
+                repository.path(),
+                &["show-ref", "--hash", recovery_ref.as_str()],
+            ),
+            original_tip
+        );
+        assert_eq!(
+            preserve_retained_managed_worktree_branch(&ProcessExecutor, &conversion.worktree)
+                .unwrap(),
+            recovery_ref
+        );
+
+        test_git(repository.path(), &["checkout", &branch]);
+        test_git(
+            repository.path(),
+            &["commit", "--allow-empty", "-m", "later retained tip"],
+        );
+        let later_tip = test_git(repository.path(), &["rev-parse", "HEAD"]);
+        test_git(repository.path(), &["checkout", "master"]);
+        let later_recovery_ref =
+            preserve_retained_managed_worktree_branch(&ProcessExecutor, &conversion.worktree)
+                .unwrap();
+        assert_eq!(
+            later_recovery_ref,
+            format!("refs/mj/recovery/{session_id}/{later_tip}")
+        );
+        assert_ne!(later_recovery_ref, recovery_ref);
+        assert_eq!(
+            test_git(
+                repository.path(),
+                &["show-ref", "--hash", recovery_ref.as_str()],
+            ),
+            original_tip
+        );
+    }
+    #[test]
+    fn a_return_to_local_rejects_a_retained_branch_checked_out_elsewhere() {
+        let repository = committed_repository();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let branch = format!("mj/{session_id}");
+        test_git(repository.path(), &["branch", &branch]);
+        let elsewhere = repository.path().join("other-worktree");
+        test_git(
+            repository.path(),
+            &["worktree", "add", &elsewhere.to_string_lossy(), &branch],
+        );
+        let mut config = resume_compatibility_config();
+        config
+            .bundles
+            .insert("project".into(), local_bundle(repository.path()));
+        let session = checkpoint_test_session(session_id);
+        let controller = Controller {
+            config,
+            state: HelState {
+                sessions: BTreeMap::from([(session_id.into(), session.clone())]),
+                ..HelState::default()
+            },
+        };
+
+        let error = controller
+            .plan_workspace_to_raw(&session, "local-bare", &ProcessExecutor)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("still checked out"), "{error:#}");
+        assert!(
+            !repository
+                .path()
+                .join(".mj/worktrees")
+                .join(session_id)
+                .exists()
+        );
+        assert_eq!(
+            test_git(repository.path(), &["rev-parse", &branch]),
+            test_git(repository.path(), &["rev-parse", "HEAD"])
+        );
+    }
+    #[test]
     fn a_session_that_left_its_target_is_a_valid_raw_session() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let repository = PathBuf::from("/home/dev/project");
@@ -2339,6 +2569,7 @@ mod tests {
                 branch: format!("mj/{session_id}"),
                 target: ManagedWorktreeTarget::Local,
             },
+            reuse_existing_branch: false,
         };
 
         apply_workspace_to_raw(&mut record, &conversion);
@@ -2376,6 +2607,7 @@ mod tests {
                     branch: format!("mj/{session_id}"),
                     target: ManagedWorktreeTarget::Local,
                 },
+                reuse_existing_branch: false,
             },
         );
 

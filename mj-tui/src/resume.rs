@@ -456,6 +456,13 @@ impl DashboardState {
             &self.checkpoint_archive_sizes,
             &chrono::Local::now(),
         );
+        self.resume_rows.retain(|row| {
+            row.session_id().is_none_or(|id| {
+                self.session_operations
+                    .get(id)
+                    .is_none_or(|operation| operation.kind.transition_kind().is_none())
+            })
+        });
         for row in &mut self.resume_rows {
             row.move_recovery = row
                 .session_id()

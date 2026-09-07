@@ -1464,16 +1464,22 @@ pub(crate) struct RemoteDashboardWorkerPoller {
     pub(crate) updates: SessionManagerUpdates,
     pub(crate) control: SessionManagerControl,
     pub(crate) shutdown: SessionManagerShutdown,
-    pub(crate) lifecycles: tokio::sync::watch::Receiver<Vec<daemon::RuntimeLifecycleView>>,
-    /// Durable Move intents, including retained failed/cancelled recovery.
-    pub(crate) moves: tokio::sync::watch::Receiver<Vec<hel::hel_state::MoveOperation>>,
+    pub(crate) state: tokio::sync::watch::Receiver<RuntimeStateUpdate>,
     /// Reviews the daemon is running for this workspace's sessions.
     pub(crate) reviews:
         tokio::sync::watch::Receiver<Vec<mj_controller::hel_review_host::RuntimeReviewView>>,
     /// Background events the daemon wants reported once, oldest first.
     pub(crate) notices: tokio::sync::watch::Receiver<Vec<daemon::RuntimeNotice>>,
     pub(crate) config: tokio::sync::watch::Receiver<hel::hel_config::HelConfig>,
-    pub(crate) records: tokio::sync::watch::Receiver<Vec<SessionRecord>>,
+}
+
+/// Records and lifecycle ownership must reach the surface in the same frame.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RuntimeStateUpdate {
+    pub revision: u64,
+    pub records: Vec<SessionRecord>,
+    pub lifecycles: Vec<daemon::RuntimeLifecycleView>,
+    pub moves: Vec<hel::hel_state::MoveOperation>,
 }
 
 /// What a session looked like the last time a view was published for it.
@@ -1798,12 +1804,10 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
         publisher,
         mut requests,
     } = channels;
-    let (lifecycle_tx, lifecycle_rx) = tokio::sync::watch::channel(Vec::new());
-    let (moves_tx, moves_rx) = tokio::sync::watch::channel(Vec::new());
+    let (state_tx, state_rx) = tokio::sync::watch::channel(RuntimeStateUpdate::default());
     let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(Vec::new());
     let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::new());
     let (config_tx, config_rx) = tokio::sync::watch::channel(hel::hel_config::HelConfig::default());
-    let (records_tx, records_rx) = tokio::sync::watch::channel(Vec::new());
     tokio::spawn(async move {
         let mut feed = spawn_runtime_feed(workspace_id);
         let mut request_order = mj_controller::hel_session_manager::SessionRequestOrder::new();
@@ -1820,12 +1824,12 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
                                 if *config == snapshot.config { false }
                                 else { *config = snapshot.config.clone(); true }
                             });
-                            records_tx.send_if_modified(|records| {
-                                if *records == snapshot.records { false }
-                                else { records.clone_from(&snapshot.records); true }
+                            state_tx.send_replace(RuntimeStateUpdate {
+                                revision: snapshot.revision,
+                                records: snapshot.records,
+                                lifecycles: snapshot.lifecycles,
+                                moves: snapshot.moves,
                             });
-                            lifecycle_tx.send_replace(snapshot.lifecycles);
-                            moves_tx.send_replace(snapshot.moves);
                             reviews_tx.send_replace(snapshot.reviews);
                             notices_tx.send_replace(snapshot.notices);
                         }
@@ -1846,12 +1850,10 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
         updates,
         control,
         shutdown,
-        lifecycles: lifecycle_rx,
-        moves: moves_rx,
+        state: state_rx,
         reviews: reviews_rx,
         notices: notices_rx,
         config: config_rx,
-        records: records_rx,
     })
 }
 
