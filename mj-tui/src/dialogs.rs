@@ -9,13 +9,14 @@ use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use mj_chat::theme;
 use qrcode::QrCode;
 use qrcode::types::{Color as QrColor, EcLevel};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use std::path::PathBuf;
 
@@ -497,12 +498,12 @@ pub(crate) fn render_import_progress(
                 "No progress for {}s; the filesystem may be stalled.",
                 stalled_for.as_secs()
             ),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         )
     } else {
         Line::styled(
             "The dashboard remains responsive while the import runs.",
-            Style::default().fg(Color::Gray),
+            Style::default().fg(theme::MUTED),
         )
     };
     let paragraph = Paragraph::new(vec![
@@ -524,7 +525,7 @@ pub(crate) fn render_import_progress(
         area,
     );
     frame.render_widget(
-        Block::default().borders(Borders::ALL).title(format!(
+        theme::modal().title(format!(
             " Importing session · progress {}/{total} ",
             progress.step
         )),
@@ -575,7 +576,7 @@ pub(crate) fn render_import_bundle_confirmation(
             confirmation
                 .dirty_git_roots
                 .iter()
-                .map(|root| Line::styled(root.clone(), Style::default().fg(Color::Yellow))),
+                .map(|root| Line::styled(root.clone(), Style::default().fg(theme::WARNING))),
         );
     }
     if !confirmation.omitted_non_git_dirs.is_empty() {
@@ -587,7 +588,7 @@ pub(crate) fn render_import_bundle_confirmation(
         ));
         lines.extend(
             confirmation.omitted_non_git_dirs.iter().map(|directory| {
-                Line::styled(directory.clone(), Style::default().fg(Color::Yellow))
+                Line::styled(directory.clone(), Style::default().fg(theme::WARNING))
             }),
         );
     }
@@ -602,7 +603,7 @@ pub(crate) fn render_import_bundle_confirmation(
             confirmation
                 .scratch_git_roots
                 .iter()
-                .map(|root| Line::styled(root.clone(), Style::default().fg(Color::Yellow))),
+                .map(|root| Line::styled(root.clone(), Style::default().fg(theme::WARNING))),
         );
     }
     lines.push(Line::raw(""));
@@ -620,12 +621,7 @@ pub(crate) fn render_import_bundle_confirmation(
         area,
     );
     let popup = centered_modal(frame, surfaces, 76, height, area);
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Import safety warning "),
-        popup,
-    );
+    frame.render_widget(theme::modal().title(" Import safety warning "), popup);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -677,12 +673,7 @@ pub(crate) fn render_rename_editor(
     surfaces: &mut FrameSurfaces,
 ) {
     let popup = centered_modal(frame, surfaces, 60, 8, area);
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Rename session "),
-        popup,
-    );
+    frame.render_widget(theme::modal().title(" Rename session "), popup);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -720,9 +711,7 @@ pub(crate) fn render_config_id_editor(
 ) {
     let popup = centered_modal(frame, surfaces, 60, 8, area);
     frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Rename {} ID ", editor.kind.label())),
+        theme::modal().title(format!(" Rename {} ID ", editor.kind.label())),
         popup,
     );
     let inner = popup.inner(ratatui::layout::Margin {
@@ -775,13 +764,16 @@ pub(crate) fn render_target_actions(
                 .get(id)
                 .map(target_kind_label)
                 .unwrap_or("missing");
-            Line::styled(format!("{id:<24} {kind}"), Style::default())
+            Line::from(vec![
+                Span::styled(format!("{id:<24} "), theme::title(false)),
+                Span::styled(kind, theme::muted()),
+            ])
         })
         .collect::<Vec<_>>();
     let list_rows = if rows.is_empty() {
         vec![Line::styled(
             "No targets configured.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         )]
     } else {
         rows
@@ -791,12 +783,7 @@ pub(crate) fn render_target_actions(
         .saturating_add(8)
         .max(12);
     let popup = centered_modal(frame, surfaces, 72, height, area);
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Target actions "),
-        popup,
-    );
+    frame.render_widget(theme::modal().title(" Target actions "), popup);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -812,8 +799,17 @@ pub(crate) fn render_target_actions(
     let status_y = list_area.bottom().saturating_add(1);
     if let Some(target_id) = &dialog.testing {
         frame.render_widget(
-            Paragraph::new(format!("Testing {target_id}… Alt-X cancels test"))
-                .style(Style::default().fg(Color::Yellow)),
+            Paragraph::new(Line::from(vec![
+                mj_chat::spinner::compact_span(
+                    dashboard.config.spinner,
+                    mj_chat::spinner::elapsed_ms(),
+                ),
+                Span::styled(
+                    format!(" Testing {target_id}…"),
+                    Style::default().fg(theme::ACCENT),
+                ),
+                Span::styled(" Alt-X cancels test", theme::muted()),
+            ])),
             Rect::new(inner.x, status_y, inner.width, 1),
         );
     } else if let Some((target_id, result)) = &dialog.result {
@@ -823,9 +819,9 @@ pub(crate) fn render_target_actions(
                 Err(error) => format!("{target_id}: {error}"),
             })
             .style(Style::default().fg(if result.is_ok() {
-                Color::Green
+                theme::SUCCESS
             } else {
-                Color::Yellow
+                theme::WARNING
             })),
             Rect::new(inner.x, status_y, inner.width, 1),
         );
@@ -833,7 +829,7 @@ pub(crate) fn render_target_actions(
     let hint = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1);
     frame.render_widget(
         Paragraph::new("Up/Down selects target · Tab selects action · Esc closes")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(theme::MUTED)),
         hint,
     );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
@@ -905,7 +901,7 @@ pub(crate) fn render_web_dialog(
         inner_width = 60;
         lines.push(Line::styled(
             "Stop this Mjolnir server?",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         ));
         lines.push(Line::raw(format!("{} · PID {}", process.name, process.pid)));
         lines.push(Line::raw(process.executable.display().to_string()));
@@ -914,14 +910,14 @@ pub(crate) fn render_web_dialog(
     } else if dialog.loading {
         lines.push(Line::styled(
             "Starting web viewer…",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         ));
     } else if let Some(message) = &dialog.message {
         inner_width = 60;
         lines.extend(
             message
                 .lines()
-                .map(|line| Line::styled(line.to_owned(), Style::default().fg(Color::Yellow))),
+                .map(|line| Line::styled(line.to_owned(), Style::default().fg(theme::WARNING))),
         );
         if let Some(address) = dialog.failed_address {
             lines.push(Line::raw(format!("Address: {address}")));
@@ -936,7 +932,7 @@ pub(crate) fn render_web_dialog(
         if dialog.inspecting {
             lines.push(Line::styled(
                 "Inspecting listener…",
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme::ACCENT),
             ));
         }
         if let Some(message) = &dialog.inspection_message {
@@ -970,7 +966,7 @@ pub(crate) fn render_web_dialog(
             lines.push(
                 Line::styled(
                     "Terminal is too small for a scannable QR code.",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::WARNING),
                 )
                 .centered(),
             );
@@ -980,20 +976,20 @@ pub(crate) fn render_web_dialog(
             // The QR encodes this URL; the text is the fallback for hand entry,
             // so it wraps within the box instead of widening it.
             lines.push(Line::from(vec![
-                Span::styled("Web: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(url.clone(), Style::default().fg(Color::Cyan)),
+                Span::styled("Web: ", Style::default().fg(theme::MUTED)),
+                Span::styled(url.clone(), Style::default().fg(theme::ACCENT)),
             ]));
         }
         if let Some(code) = &dialog.viewer_code {
             lines.push(Line::from(vec![
-                Span::styled("Viewer code: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(code.clone(), Style::default().fg(Color::Cyan)),
+                Span::styled("Viewer code: ", Style::default().fg(theme::MUTED)),
+                Span::styled(code.clone(), Style::default().fg(theme::ACCENT)),
             ]));
         }
         if let Some(reason) = &dialog.fallback_reason {
             lines.push(Line::styled(
                 format!("Local fallback: {reason}"),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::WARNING),
             ));
         }
     }
@@ -1010,10 +1006,7 @@ pub(crate) fn render_web_dialog(
         .saturating_add(2 + footer_height)
         .min(inner_area.height);
     let popup = centered_modal_fixed(frame, surfaces, box_width, box_height, area);
-    frame.render_widget(
-        Block::default().borders(Borders::ALL).title(" Web viewer "),
-        popup,
-    );
+    frame.render_widget(theme::modal().title(" Web viewer "), popup);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -1097,16 +1090,14 @@ pub(crate) fn render_repository_origin(
     if let Some(error) = &dialog.error {
         lines.push(Line::styled(
             error.clone(),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         ));
     }
     let body_paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
     let popup_height = popup_height(&body_paragraph, 76, 14, area);
     let popup = centered_modal(frame, surfaces, 76, popup_height, area);
     frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Repository history is missing "),
+        theme::modal().title(" Repository history is missing "),
         popup,
     );
     let inner = popup.inner(ratatui::layout::Margin {
@@ -1135,7 +1126,7 @@ pub(crate) fn render_repository_origin(
     let hint_y = inner.bottom().saturating_sub(3);
     frame.render_widget(
         Paragraph::new("Type or paste into Source · Tab moves · Enter checks")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(theme::MUTED)),
         Rect::new(inner.x, hint_y, inner.width, 1),
     );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
@@ -1172,7 +1163,7 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 Line::raw(""),
             ];
             lines.extend(repositories.iter().map(|repository| {
-                Line::styled(repository.clone(), Style::default().fg(Color::Yellow))
+                Line::styled(repository.clone(), Style::default().fg(theme::WARNING))
             }));
             lines.extend([
                 Line::raw(""),
@@ -1190,7 +1181,7 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 lines.extend([
                     Line::styled(
                         "Mjolnir will interrupt the current turn.",
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(theme::WARNING),
                     ),
                     Line::raw("It will then save a recovery copy and destroy the target."),
                 ]);
@@ -1206,7 +1197,7 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
                     "The second opinion in progress cannot be continued after resume.",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::WARNING),
                 ));
                 lines.push(Line::raw(
                     "Its review is kept for reference; a later one starts a new conversation.",
@@ -1238,7 +1229,7 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 Line::raw(""),
                 Line::styled(
                     format!("Stop failed: {error}"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::WARNING),
                 ),
             ],
         ),
@@ -1251,7 +1242,7 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
             match error {
                 Some(error) => lines.push(Line::styled(
                     format!("Failed: {error}"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::WARNING),
                 )),
                 None => lines.push(Line::raw("This session failed without a recorded error.")),
             }
@@ -1294,13 +1285,13 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                             .as_deref()
                             .unwrap_or("current target")
                     ),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::WARNING),
                 ),
             ];
             if let Some(error) = &operation.error {
                 lines.push(Line::styled(
                     format!("Error: {error}"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::WARNING),
                 ));
             }
             lines.push(Line::raw(""));
@@ -1385,9 +1376,13 @@ pub(crate) fn render_confirmation(
     let height = popup_height(&paragraph, 72, nominal.saturating_add(extra), area);
     let popup = centered_modal(frame, surfaces, 72, height, area);
     frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red))
+        theme::modal()
+            .border_style(Style::default().fg(theme::ERROR))
+            .title_style(
+                Style::default()
+                    .fg(theme::ERROR)
+                    .add_modifier(Modifier::BOLD),
+            )
             .title(title),
         popup,
     );
@@ -2183,7 +2178,6 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
-    use ratatui::style::Color;
 
     use hel::hel_state::SessionState;
 
@@ -2226,7 +2220,7 @@ mod tests {
         assert!(rendered.contains("Web viewer"));
         assert!(rendered.contains("http://127.0.0.1:37650"));
         assert!(rendered.contains("Viewer code: 022160"));
-        assert!(rendered.contains("[ Close ]"));
+        assert!(rendered.contains("  Close  "));
     }
 
     #[test]
@@ -2300,10 +2294,10 @@ mod tests {
             let text = rendered.join("\n");
             assert!(text.contains("Port 37650 is already in use."));
             assert!(text.contains("Address: 127.0.0.1:37650"));
-            assert!(text.contains("[ Use another port ]"));
-            assert!(text.contains("[ Inspect port ]"));
-            assert!(text.contains("[ Retry ]"));
-            assert!(text.contains("[ Close ]"));
+            assert!(text.contains("  Use another port  "));
+            assert!(text.contains("  Inspect port  "));
+            assert!(text.contains("  Retry  "));
+            assert!(text.contains("  Close  "));
             assert!(
                 rendered
                     .iter()
@@ -2325,8 +2319,8 @@ mod tests {
         assert!(dialog.loading);
         let rendered = draw_web_dialog(dialog, 80, 24).join("\n");
         assert!(rendered.contains("Starting web viewer"));
-        assert!(rendered.contains("[ Close ]"));
-        assert!(!rendered.contains("[ Use another port ]"));
+        assert!(rendered.contains("  Close  "));
+        assert!(!rendered.contains("  Use another port  "));
         assert_eq!(
             activate_web(&mut dashboard, DialogControl::WebClose),
             DashboardAction::CancelWebAccess
@@ -2361,7 +2355,7 @@ mod tests {
         assert!(!dialog.inspecting);
         let rendered = draw_web_dialog(dialog, 80, 24).join("\n");
         assert!(rendered.contains("Permission denied"));
-        assert!(rendered.contains("[ Use another port ]"));
+        assert!(rendered.contains("  Use another port  "));
     }
 
     #[test]
@@ -2389,7 +2383,7 @@ mod tests {
         let rendered = draw_web_dialog(dialog, 80, 24).join("\n");
         assert!(rendered.contains("PID 4242"));
         assert!(rendered.contains("/opt/mj/bin/mj"));
-        assert!(rendered.contains("[ Stop and retry ]"));
+        assert!(rendered.contains("  Stop and retry  "));
         assert_eq!(
             activate_web(&mut dashboard, DialogControl::WebCancelStop),
             DashboardAction::None
@@ -2422,9 +2416,9 @@ mod tests {
         let (row, line) = rendered
             .iter()
             .enumerate()
-            .find(|(_, line)| line.contains("[ Stop server… ]"))
+            .find(|(_, line)| line.contains("  Stop server…  "))
             .unwrap();
-        let column = line.find("[ Stop server… ]").unwrap();
+        let column = line.find("  Stop server…  ").unwrap();
         for kind in [
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
             crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
@@ -2515,6 +2509,7 @@ mod tests {
             hel::hel_config::HelConfig {
                 version: hel::hel_config::CONFIG_VERSION,
                 newer_config_version: None,
+                spinner: Default::default(),
                 phone: Default::default(),
                 review: Default::default(),
                 startup: Default::default(),
@@ -2912,15 +2907,24 @@ mod tests {
         };
 
         // The shared button row keeps both buttons in their normal style while
-        // the field has focus. Tab then moves the cyan focus style between the
+        // the field has focus. Tab then moves the accent focus style between the
         // footer buttons.
-        assert_eq!(button_styles(&mut dashboard), (Color::Reset, Color::Reset));
+        assert_eq!(
+            button_styles(&mut dashboard),
+            (theme::SURFACE_RAISED, theme::SURFACE_RAISED)
+        );
 
         dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(button_styles(&mut dashboard), (Color::Cyan, Color::Reset));
+        assert_eq!(
+            button_styles(&mut dashboard),
+            (theme::ACCENT, theme::SURFACE_RAISED)
+        );
 
         dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(button_styles(&mut dashboard), (Color::Reset, Color::Cyan));
+        assert_eq!(
+            button_styles(&mut dashboard),
+            (theme::SURFACE_RAISED, theme::ACCENT)
+        );
     }
 
     #[test]
@@ -2939,8 +2943,8 @@ mod tests {
             .expect("button row");
         let y = buffer.area.y + row as u16;
         let cancel_x = buffer.area.x + cell_column(&lines[row], "Cancel");
-        assert_eq!(buffer[(cancel_x, y)].bg, Color::Cyan);
-        assert_eq!(buffer[(cancel_x - 1, y)].bg, Color::Cyan);
+        assert_eq!(buffer[(cancel_x, y)].bg, theme::ACCENT);
+        assert_eq!(buffer[(cancel_x - 1, y)].bg, theme::ACCENT);
         assert!(!lines.iter().any(|line| line.contains("Esc cancels this")));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
@@ -2968,7 +2972,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("[x] Ignore untracked files"));
+        assert!(rendered.contains("[✓] Ignore untracked files"));
         assert!(rendered.contains(" Cancel "));
         assert!(rendered.contains(" Continue "));
         assert!(rendered.contains("Space toggles the checkbox."));
@@ -3508,11 +3512,11 @@ mod tests {
         let button_y = buffer.area.y + row as u16;
         let cancel_x = buffer.area.x + cell_column(&lines[row], "Cancel");
         let stop_x = buffer.area.x + cell_column(&lines[row], "Stop");
-        assert_eq!(buffer[(stop_x, button_y)].bg, Color::Cyan);
-        assert_eq!(buffer[(cancel_x, button_y)].bg, Color::Reset);
+        assert_eq!(buffer[(stop_x, button_y)].bg, theme::ACCENT);
+        assert_eq!(buffer[(cancel_x, button_y)].bg, theme::SURFACE_RAISED);
         // Each label keeps its one-cell padding inside the button background.
-        assert_eq!(buffer[(cancel_x - 1, button_y)].bg, Color::Reset);
-        assert_eq!(buffer[(stop_x - 1, button_y)].bg, Color::Cyan);
+        assert_eq!(buffer[(cancel_x - 1, button_y)].bg, theme::SURFACE_RAISED);
+        assert_eq!(buffer[(stop_x - 1, button_y)].bg, theme::ACCENT);
         assert!(!lines.iter().any(|line| line.contains("Press y/Enter")));
     }
 
@@ -3739,7 +3743,11 @@ mod tests {
         let source_y = buffer.area.y + source_row as u16;
         let source_x = buffer.area.x + cell_column(&lines[source_row], "Source:");
         let field_x = source_x + 8;
-        assert_eq!(buffer[(field_x, source_y)].bg, Color::Cyan);
+        assert!(
+            buffer[(field_x, source_y)]
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        );
         assert_eq!(
             cursor_position,
             Position {
@@ -3760,8 +3768,8 @@ mod tests {
         let button_y = buffer.area.y + button_row as u16;
         let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
         let check_x = buffer.area.x + cell_column(&lines[button_row], "Check origin");
-        assert_eq!(buffer[(cancel_x, button_y)].bg, Color::Reset);
-        assert_eq!(buffer[(check_x, button_y)].bg, Color::Reset);
+        assert_eq!(buffer[(cancel_x, button_y)].bg, theme::SURFACE_RAISED);
+        assert_eq!(buffer[(check_x, button_y)].bg, theme::SURFACE_RAISED);
 
         dashboard.handle_key(key(KeyCode::Tab));
         terminal
@@ -3775,8 +3783,12 @@ mod tests {
             .expect("button row");
         let button_y = buffer.area.y + button_row as u16;
         let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
-        assert_eq!(buffer[(cancel_x, button_y)].bg, Color::Cyan);
-        assert_eq!(buffer[(field_x, source_y)].bg, Color::Reset);
+        assert_eq!(buffer[(cancel_x, button_y)].bg, theme::ACCENT);
+        assert!(
+            !buffer[(field_x, source_y)]
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        );
     }
 
     #[test]

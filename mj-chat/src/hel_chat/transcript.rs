@@ -6,13 +6,14 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use crate::theme;
 use agent_client_protocol::schema::v1::{Plan, ToolCall, ToolCallContent, ToolCallStatus};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Padding, Paragraph, Widget};
 use serde::Deserialize;
 
 use crate::hel_selection::{ContentPos, SelectionRange, SurfaceFrame, SurfaceId};
@@ -32,7 +33,7 @@ pub(super) use hel::hel_transcript::{
 use super::ChatState;
 use super::rendering::{
     LogicalLine, TranscriptRenderMode, append_trimmed_ellipsis, markdown_lines, raw_lines,
-    sanitize_terminal_text, wrap_styled_line,
+    sanitize_terminal_text, truncate_line_to_width, wrap_styled_line,
 };
 
 #[derive(Debug, Clone)]
@@ -2101,7 +2102,9 @@ pub(super) fn render_transcript(
 ) {
     let viewport_height = usize::from(area.height.saturating_sub(2));
     chat.last_viewport_height = viewport_height;
-    let content_width = area.width.saturating_sub(1);
+    let block = theme::panel(false).padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    let content_width = inner.width;
     let window = chat.viewport(content_width, viewport_height);
     // The window resolves and clamps the anchor: an anchor inside the last
     // screenful snaps back to following the tail.
@@ -2109,15 +2112,28 @@ pub(super) fn render_transcript(
     let at_tail = window.anchor == TranscriptAnchor::Bottom;
     let top = window.top;
     let title = transcript_title(chat, hel::clock::epoch_seconds());
-    let block = Block::default()
-        .borders(Borders::TOP | Borders::BOTTOM)
-        // The border style reaches the title too, and the title is the name of
-        // the conversation you are in, not chrome. Draw it bright white so it
-        // stands out from the dim rule and the transcript's default text.
-        .title(Line::styled(title, Style::default().fg(Color::White)))
-        .border_style(Style::default().fg(Color::DarkGray));
-    let mut inner = block.inner(area);
-    inner.width = content_width;
+    let activity = (chat.needs_animation() && area.width >= 12).then(|| {
+        let mut activity = if area.width >= 48 {
+            chat.activity_spinner()
+        } else {
+            Line::from(crate::spinner::compact_span(
+                chat.spinner_style,
+                crate::spinner::elapsed_ms(),
+            ))
+        };
+        activity.spans.insert(0, Span::raw(" "));
+        activity.spans.push(Span::raw(" "));
+        activity
+    });
+    let title_width = usize::from(area.width.saturating_sub(2))
+        .saturating_sub(activity.as_ref().map_or(0, |line| line.width() + 1));
+    let mut block = block.title(truncate_line_to_width(
+        Line::styled(title, theme::title(false)),
+        title_width,
+    ));
+    if let Some(activity) = activity {
+        block = block.title(activity.right_aligned());
+    }
     frame.render_widget(block, area);
     let visible = window
         .rows
@@ -2125,12 +2141,15 @@ pub(super) fn render_transcript(
         .take(usize::from(inner.height))
         .collect::<Vec<_>>();
     let visible_rows = visible.len();
-    frame.render_widget(Paragraph::new(visible), inner);
+    frame.render_widget(
+        Paragraph::new(visible).style(Style::default().fg(theme::TEXT)),
+        inner,
+    );
     chat.register_transcript_surface(inner, top, visible_rows, at_tail, gesture_active);
     let track = Rect::new(
         inner.right(),
         inner.y,
-        u16::from(area.width > 0),
+        u16::from(inner.width > 0),
         inner.height,
     );
     if let Some(geometry) =
@@ -2139,11 +2158,11 @@ pub(super) fn render_transcript(
         for row in track.y..track.bottom() {
             let is_thumb = row >= geometry.thumb.y && row < geometry.thumb.bottom();
             frame.buffer_mut()[(track.x, row)]
-                .set_symbol(if is_thumb { "█" } else { "│" })
+                .set_symbol(if is_thumb { "▐" } else { "│" })
                 .set_style(Style::default().fg(if is_thumb {
-                    Color::Gray
+                    theme::ACCENT
                 } else {
-                    Color::DarkGray
+                    theme::BORDER
                 }));
         }
     }
@@ -2287,7 +2306,7 @@ fn empty_transcript_row(loading: bool) -> Line<'static> {
             "No messages yet — send a prompt to begin."
         },
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(theme::MUTED)
             .add_modifier(Modifier::ITALIC),
     ))
 }
@@ -2321,23 +2340,30 @@ fn render_transcript_entry(
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let visual = entry_visual(entry);
-    let label = match entry.role {
+    let time = match entry.role {
         ChatRole::User | ChatRole::Agent | ChatRole::System => {
-            format_event_time(entry.recorded_at_ms).map_or_else(
-                || visual.label.clone(),
-                |time| format!("{} · {time}", visual.label),
-            )
+            format_event_time(entry.recorded_at_ms)
         }
-        _ => visual.label.clone(),
+        _ => None,
     };
-    let header = Line::from(vec![
+    let mut header = vec![
         Span::styled(
             format!("{} ", visual.glyph),
             visual.header_style.add_modifier(Modifier::BOLD),
         ),
-        Span::styled(label, visual.header_style.add_modifier(Modifier::BOLD)),
-    ]);
-    out.extend(wrap_styled_line(header, width, ROLE_GUTTER_WIDTH));
+        Span::styled(
+            visual.label.clone(),
+            visual.header_style.add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(time) = time {
+        header.push(Span::styled(format!(" · {time}"), theme::muted()));
+    }
+    out.extend(wrap_styled_line(
+        Line::from(header),
+        width,
+        ROLE_GUTTER_WIDTH,
+    ));
     out.extend(entry_body_rows(entry, width, mode));
     out.push(Line::from(""));
     out
@@ -2382,9 +2408,9 @@ fn entry_logical_lines(
             .iter()
             .map(|item| {
                 let (glyph, style) = match item.status {
-                    PlanStatus::Pending => ("○", Style::default().fg(Color::DarkGray)),
-                    PlanStatus::Running => ("●", Style::default().fg(Color::Yellow)),
-                    PlanStatus::Completed => ("✓", Style::default().fg(Color::Green)),
+                    PlanStatus::Pending => ("○", Style::default().fg(theme::MUTED)),
+                    PlanStatus::Running => ("●", Style::default().fg(theme::WARNING)),
+                    PlanStatus::Completed => ("✓", Style::default().fg(theme::SUCCESS)),
                 };
                 LogicalLine {
                     line: Line::from(vec![
@@ -2435,7 +2461,7 @@ struct EntryVisual {
 fn entry_visual(entry: &ChatEntry) -> EntryVisual {
     match entry.role {
         ChatRole::User => {
-            let style = Style::default().fg(Color::Cyan);
+            let style = Style::default().fg(theme::ACCENT);
             EntryVisual {
                 glyph: "❯",
                 label: "You".into(),
@@ -2445,25 +2471,25 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
             }
         }
         ChatRole::Agent => {
-            let style = Style::default().fg(Color::Yellow);
+            let style = Style::default().fg(theme::SECONDARY);
             EntryVisual {
                 glyph: "●",
                 label: "Agent".into(),
                 header_style: style,
                 body_style: Style::default(),
-                rail_style: style,
+                rail_style: Style::default().fg(theme::BORDER),
             }
         }
         ChatRole::Thought => {
             let style = Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme::MUTED)
                 .add_modifier(Modifier::ITALIC);
             EntryVisual {
                 glyph: "○",
                 label: "Thinking".into(),
                 header_style: style,
                 body_style: style,
-                rail_style: style,
+                rail_style: Style::default().fg(theme::BORDER),
             }
         }
         ChatRole::Tool => {
@@ -2474,11 +2500,11 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
                 label: format!("Tool · {label}"),
                 header_style: style,
                 body_style: Style::default(),
-                rail_style: style,
+                rail_style: Style::default().fg(theme::BORDER),
             }
         }
         ChatRole::Plan => {
-            let style = Style::default().fg(Color::Magenta);
+            let style = Style::default().fg(theme::SECONDARY);
             EntryVisual {
                 glyph: "◇",
                 label: "Plan".into(),
@@ -2488,7 +2514,7 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
             }
         }
         ChatRole::PlanProposal => {
-            let style = Style::default().fg(Color::LightMagenta);
+            let style = Style::default().fg(theme::SECONDARY);
             EntryVisual {
                 glyph: "◈",
                 label: "Proposed plan".into(),
@@ -2498,7 +2524,7 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
             }
         }
         ChatRole::System => {
-            let style = Style::default().fg(Color::DarkGray);
+            let style = Style::default().fg(theme::MUTED);
             EntryVisual {
                 glyph: "─",
                 label: "Mjolnir".into(),
@@ -2512,10 +2538,10 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
 
 fn tool_presentation(status: ToolStatus) -> (&'static str, &'static str, Style) {
     match status {
-        ToolStatus::Pending => ("•", "waiting", Style::default().fg(Color::DarkGray)),
-        ToolStatus::Running => ("●", "running", Style::default().fg(Color::Yellow)),
-        ToolStatus::Completed => ("✓", "done", Style::default().fg(Color::Green)),
-        ToolStatus::Failed => ("×", "failed", Style::default().fg(Color::Red)),
+        ToolStatus::Pending => ("•", "waiting", Style::default().fg(theme::MUTED)),
+        ToolStatus::Running => ("●", "running", Style::default().fg(theme::WARNING)),
+        ToolStatus::Completed => ("✓", "done", Style::default().fg(theme::SUCCESS)),
+        ToolStatus::Failed => ("×", "failed", Style::default().fg(theme::ERROR)),
     }
 }
 

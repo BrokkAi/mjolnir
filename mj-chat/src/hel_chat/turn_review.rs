@@ -20,13 +20,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::theme;
 use crossterm::event::{Event, MouseEvent};
 use rat_event::ConsumedEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::components::{ButtonRow, ControlKind, Form, Interaction, TabStrip};
 use hel::hel_review::driver::{Resolution, RoleState, TurnReviewPhase};
@@ -822,10 +823,9 @@ fn render_review_overview(
     title: &str,
     strip: Option<Line<'static>>,
 ) -> (Rect, usize, usize) {
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = theme::panel(false)
         .title(title.to_owned())
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(theme::WARNING));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -838,7 +838,7 @@ fn render_review_overview(
         lines.push(Line::from(""));
     }
     lines.push(Line::from(vec![
-        Span::styled("Stage: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Stage: ", Style::default().fg(theme::MUTED)),
         Span::raw(review.view.status.clone()),
     ]));
     lines.push(Line::from(""));
@@ -849,7 +849,7 @@ fn render_review_overview(
     if review.view.roles.is_empty() {
         lines.push(Line::from(Span::styled(
             "  waiting for reviewer roles to start",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         )));
     } else {
         for role in &review.view.roles {
@@ -864,7 +864,7 @@ fn render_review_overview(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Prompt paused during review. Esc cancels; Tab opens transcripts.",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme::MUTED),
     )));
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -878,11 +878,11 @@ fn render_review_overview(
 
 fn role_state_color(state: RoleState) -> Color {
     match state {
-        RoleState::Pending => Color::DarkGray,
-        RoleState::Running => Color::Yellow,
-        RoleState::Clean => Color::Green,
-        RoleState::Findings => Color::LightMagenta,
-        RoleState::Failed => Color::Red,
+        RoleState::Pending => theme::MUTED,
+        RoleState::Running => theme::WARNING,
+        RoleState::Clean => theme::SUCCESS,
+        RoleState::Findings => theme::SECONDARY,
+        RoleState::Failed => theme::ERROR,
     }
 }
 
@@ -894,10 +894,9 @@ fn render_verdict_panel(
     title: &str,
     strip: Option<Line<'static>>,
 ) -> (Rect, usize, usize) {
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = theme::panel(false)
         .title(title.to_owned())
-        .border_style(Style::default().fg(Color::LightMagenta));
+        .border_style(Style::default().fg(theme::SECONDARY));
     let mut inner = block.inner(area);
     frame.render_widget(block, area);
     if let Some(strip) = strip
@@ -977,7 +976,7 @@ pub(super) fn render_turn_review_actions(
     );
     if status_column < area.right() {
         frame.render_widget(
-            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(status).style(Style::default().fg(theme::MUTED)),
             Rect::new(
                 status_column,
                 area.y,
@@ -1003,10 +1002,10 @@ pub(super) fn role_strip(review: &TurnReview) -> Option<Line<'static>> {
             "Overview",
             if review.overview_selected() {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme::ACCENT)
                     .add_modifier(Modifier::REVERSED)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(theme::ACCENT)
             },
         ));
     }
@@ -1031,9 +1030,9 @@ pub(super) fn role_strip(review: &TurnReview) -> Option<Line<'static>> {
             spans.push(Span::raw("  "));
         }
         let color = match review.verdict_kind() {
-            Some(VerdictKind::Failed) => Color::Red,
-            Some(VerdictKind::Findings) => Color::LightMagenta,
-            _ => Color::Green,
+            Some(VerdictKind::Failed) => theme::ERROR,
+            Some(VerdictKind::Findings) => theme::SECONDARY,
+            _ => theme::SUCCESS,
         };
         let mut style = Style::default().fg(color);
         if review.verdict_selected() {

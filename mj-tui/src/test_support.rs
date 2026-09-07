@@ -92,6 +92,7 @@ pub(crate) fn config() -> HelConfig {
     HelConfig {
         version: CONFIG_VERSION,
         newer_config_version: None,
+        spinner: Default::default(),
         phone: Default::default(),
         review: Default::default(),
         startup: Default::default(),

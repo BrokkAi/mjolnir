@@ -3,14 +3,15 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use rat_event::ConsumedEvent;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Clear, Paragraph, Widget, Wrap};
 
 use crate::components::{
     ButtonRow, ChoiceList, ControlKind, FieldEdit, Form, Interaction, TextField,
@@ -879,16 +880,7 @@ fn render_elicitation_at(
     // navigator and every neighboring pane remain untouched.
     frame.render_widget(Clear, area);
     let title = dialog.request.title.as_deref().unwrap_or("Agent question");
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" {title} "))
-        .border_style(if focused {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        });
+    let block = theme::panel(focused).title(format!(" {title} "));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let focus = focus_content(dialog);
@@ -1160,9 +1152,9 @@ fn render_elicitation_at(
             "Click to answer · F6 to change pane"
         })
         .style(Style::default().fg(if dialog.error.is_some() && focused {
-            Color::Red
+            theme::ERROR
         } else {
-            Color::DarkGray
+            theme::MUTED
         })),
         chunks[3],
     );
@@ -1220,7 +1212,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
     let mut lines = vec![Line::from(vec![
         Span::styled(
             format!("{}/{}  ", focus + 1, dialog.display_fields.len()),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ),
         Span::styled(
             format!("{}{}", field.title, required),
@@ -1230,7 +1222,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
     if let Some(description) = &field.description {
         lines.push(Line::styled(
             description.as_str(),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(theme::TEXT),
         ));
     }
     let mut option_rows = vec![];
@@ -1247,7 +1239,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             let input_line = lines.len() as u16;
             lines.push(Line::styled(
                 format!("> {shown}"),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme::ACCENT),
             ));
             focused_row = Some(2 + usize::from(field.description.is_some()));
             text_cursor = Some((
@@ -1270,7 +1262,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                     };
                 let style = if cursor {
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme::ACCENT)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -1285,13 +1277,13 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                     if let Some(description) = &option.description {
                         lines.push(Line::styled(
                             format!("    {description}"),
-                            Style::default().fg(Color::Gray),
+                            Style::default().fg(theme::TEXT),
                         ));
                     }
                     if let Some(preview) = &option.preview {
                         lines.push(Line::styled(
                             format!("    {preview}"),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(theme::MUTED),
                         ));
                     }
                     if display.custom_option == Some(index)
@@ -1330,7 +1322,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 };
                 let style = if dialog.option_cursors[display.field] == index {
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme::ACCENT)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -1357,7 +1349,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             focused_row = Some(lines.len());
             lines.push(Line::styled(
                 if *selected { "☑ Yes" } else { "☐ No" },
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme::ACCENT),
             ));
         }
         _ => {}
@@ -1445,7 +1437,7 @@ fn render_custom_answer(
     };
     let style = if focused {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme::ACCENT)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -1470,7 +1462,7 @@ fn render_custom_text(
     if let Some(description) = &custom.description {
         lines.push(Line::styled(
             format!("    {description}"),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(theme::TEXT),
         ));
     }
     let shown = if custom.secret {
@@ -1481,7 +1473,7 @@ fn render_custom_text(
     let input_line = lines.len() as u16;
     lines.push(Line::styled(
         format!("> {shown}"),
-        Style::default().fg(Color::Cyan),
+        Style::default().fg(theme::ACCENT),
     ));
     *text_cursor = Some((
         input_line,
@@ -1864,10 +1856,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(buffer[(question_bounds.x, question_bounds.y)].symbol(), "┌");
+        assert_eq!(buffer[(question_bounds.x, question_bounds.y)].symbol(), "╭");
         assert_eq!(
             buffer[(question_bounds.right() - 1, question_bounds.y)].symbol(),
-            "┐"
+            "╮"
         );
     }
 

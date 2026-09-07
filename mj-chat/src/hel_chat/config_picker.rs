@@ -1,13 +1,14 @@
 //! The `/model` and `/effort` selector: a modal over the chat listing every
 //! value the harness advertises, filtered as the user types.
 
+use crate::theme;
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use rat_event::ConsumedEvent;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use hel::hel_acp::SessionConfigChoice;
 use hel::hel_worker::WorkerPhase;
@@ -244,10 +245,7 @@ pub(super) fn render_config_picker(
     let picker = chat.config_picker.as_mut()?;
     let visible = picker.filtered.len().clamp(1, 8);
     let rect = crate::hel_modal::centered_modal_rect_fixed(frame, 72, visible as u16 + 7, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" Choose a {} ", picker.key))
-        .border_style(Style::default().fg(Color::LightMagenta));
+    let block = theme::modal().title(format!(" Choose a {} ", picker.key));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -263,7 +261,7 @@ pub(super) fn render_config_picker(
         .split(inner);
     let label = Paragraph::new(Line::from(Span::styled(
         "filter:",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme::MUTED),
     )));
     frame.render_widget(label, chunks[0]);
     let filter_area = chunks[1];
@@ -308,7 +306,7 @@ pub(super) fn render_config_picker(
     );
     frame.render_widget(
         Paragraph::new("↑/↓ choose · type to filter · Tab controls · Enter apply · Esc cancel")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(theme::MUTED)),
         chunks[4],
     );
     picker.form.end_frame(ConfigControl::Filter);
@@ -516,8 +514,8 @@ mod tests {
                 .position(|character| character == corner)
                 .unwrap_or_else(|| panic!("no {corner} in {title:?}"))
         };
-        let left = column_of('┌');
-        let right = column_of('┐');
+        let left = column_of('╭');
+        let right = column_of('╮');
         assert!(
             left >= usize::from(MODAL_SCREEN_MARGIN),
             "selector starts at column {left} in {title:?}"

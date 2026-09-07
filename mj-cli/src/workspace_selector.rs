@@ -10,10 +10,11 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind};
 use hel_tui::{SessionsPreviewState, render_sessions_preview};
 use mj_chat::hel_chat::Notices;
 use mj_chat::hel_text_input::TextInput;
+use mj_chat::theme;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use tokio_stream::StreamExt;
 
 use crate::TerminalGuard;
@@ -104,6 +105,10 @@ pub(crate) async fn select_workspace(
     let mut events = event::EventStream::new();
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut animation_ticks = tokio::time::interval(Duration::from_millis(
+        mj_chat::spinner::SPINNER_REDRAW_INTERVAL_MS as u64,
+    ));
+    animation_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut preview: Option<WorkspacePreview> = None;
     let mut preview_workspace_id = None;
     let mut preview_scroll = SessionsPreviewState::default();
@@ -125,6 +130,7 @@ pub(crate) async fn select_workspace(
             });
         }
         terminal.terminal.draw(|frame| {
+            frame.render_widget(Block::default().style(theme::base()), frame.area());
             let [body, footer] = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(4), Constraint::Length(1)])
@@ -150,16 +156,22 @@ pub(crate) async fn select_workspace(
                                 .join(", ")
                         )
                     };
-                    ListItem::new(format!("{}{}", candidate.workspace.name, attached))
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            candidate.workspace.name.clone(),
+                            Style::default().fg(theme::TEXT),
+                        ),
+                        Span::styled(attached, theme::muted()),
+                    ]))
                 })
                 .collect::<Vec<_>>();
-            items.push(ListItem::new("＋ Create new"));
+            items.push(ListItem::new("＋ Create new").style(Style::default().fg(theme::ACCENT)));
             list_state.select(Some(selected));
             frame.render_stateful_widget(
                 List::new(items)
-                    .block(Block::default().title(" Workspaces ").borders(Borders::ALL))
+                    .block(theme::panel(true).title(" ✦ Workspaces "))
                     .highlight_symbol("› ")
-                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+                    .highlight_style(theme::selection(true)),
                 left,
                 &mut list_state,
             );
@@ -189,13 +201,14 @@ pub(crate) async fn select_workspace(
                 } else {
                     frame.render_widget(
                         Paragraph::new("Loading sessions…")
-                            .block(Block::default().title(" Sessions ").borders(Borders::ALL)),
+                            .style(theme::muted())
+                            .block(theme::panel(false).title(" Sessions ")),
                         sessions,
                     );
                 }
                 if let Some(status) = status {
                     frame.render_widget(
-                        Paragraph::new(status).style(Style::default().fg(Color::Yellow)),
+                        Paragraph::new(status).style(Style::default().fg(theme::WARNING)),
                         status_area,
                     );
                 }
@@ -206,7 +219,7 @@ pub(crate) async fn select_workspace(
                         Line::from(""),
                         Line::from(format!("Suggested name: {suggested_name}")),
                     ])
-                    .block(Block::default().title(" Preview ").borders(Borders::ALL))
+                    .block(theme::panel(false).title(" Preview "))
                     .wrap(Wrap { trim: false }),
                     right,
                 );
@@ -214,7 +227,11 @@ pub(crate) async fn select_workspace(
 
             let (footer_text, footer_style) =
                 selector_footer(editing.as_ref(), confirming.as_ref(), &input, notices);
-            frame.render_widget(Paragraph::new(footer_text).style(footer_style), footer);
+            frame.render_widget(
+                Paragraph::new(footer_text)
+                    .style(theme::muted().bg(theme::SURFACE).patch(footer_style)),
+                footer,
+            );
         })?;
 
         let event = tokio::select! {
@@ -227,6 +244,7 @@ pub(crate) async fn select_workspace(
                 if let Some(preview) = preview.as_mut() { preview.tick(); }
                 continue;
             }
+            _ = animation_ticks.tick(), if preview.as_ref().is_some_and(|preview| preview.dashboard.needs_fast_tick()) => continue,
             _ = async { preview.as_mut().expect("guarded preview").update().await }, if preview.is_some() => continue,
         };
         if editing.is_none()
@@ -410,7 +428,7 @@ fn selector_footer(
         None => match confirming {
             Some(confirm) => (delete_prompt(confirm, input), Style::default()),
             None => match notices.current() {
-                Some(notice) => (notice, Style::default().fg(Color::Yellow)),
+                Some(notice) => (notice, Style::default().fg(theme::WARNING)),
                 None => (SELECTOR_HINTS.into(), Style::default()),
             },
         },
@@ -485,7 +503,7 @@ mod tests {
         let (text, style) = selector_footer(None, None, &TextInput::new(), &notices);
 
         assert!(text.starts_with("Could not delete workspace:"));
-        assert_eq!(style.fg, Some(Color::Yellow));
+        assert_eq!(style.fg, Some(theme::WARNING));
         assert!(!notices.dismiss(std::time::Instant::now()));
     }
 

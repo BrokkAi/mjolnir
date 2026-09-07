@@ -166,8 +166,9 @@ fn startup_session_choice<'a>(
         })
         .map(|session| session.id.clone())
 }
-/// Redraw cadence while a dialog animates on its own.
-const IMPORT_PROGRESS_TICK: Duration = Duration::from_millis(125);
+/// Fastest activity animation; individual styles advance from monotonic time.
+const ANIMATION_TICK: Duration =
+    Duration::from_millis(mj_chat::spinner::SPINNER_REDRAW_INTERVAL_MS as u64);
 /// Scroll cadence while a drag is held past a scrollable surface's edge.
 const SELECTION_AUTOSCROLL_TICK: Duration = Duration::from_millis(80);
 pub(crate) const QUOTA_REFRESH_NOTICE: &str = "Refreshing targets and quotas…";
@@ -527,11 +528,9 @@ pub(crate) async fn run_dashboard_for_workspace(
         DASHBOARD_CLOCK_TICK,
     );
     clock_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut import_tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + IMPORT_PROGRESS_TICK,
-        IMPORT_PROGRESS_TICK,
-    );
-    import_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut animation_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + ANIMATION_TICK, ANIMATION_TICK);
+    animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Only armed while a held pointer sits at a scrollable surface's edge, so
     // an idle dashboard never ticks on it.
     let mut autoscroll_tick = tokio::time::interval(SELECTION_AUTOSCROLL_TICK);
@@ -719,10 +718,9 @@ pub(crate) async fn run_dashboard_for_workspace(
                 context.dirty = true;
                 context.maybe_open_startup_session();
             }
-            // The import progress dialog reports how long a step has stalled
-            // and the resume dialog spins while it scans; both need a faster
-            // tick, and only while they are on screen.
-            _ = import_tick.tick(), if context.dashboard.needs_fast_tick() => {
+            // Input redraws never advance animations. Only visible activity
+            // arms this timer; settled conversations keep the slow clock.
+            _ = animation_tick.tick(), if context.needs_animation() => {
                 context.dirty = true;
             }
             // A drag held past a scrollable surface's edge keeps scrolling it
@@ -1258,6 +1256,13 @@ impl DashboardContext {
                     .transition_failure_kind(chat.session_id())
                     .is_none()
         })
+    }
+
+    fn needs_animation(&mut self) -> bool {
+        self.dashboard.needs_fast_tick()
+            || self
+                .visible_chat()
+                .is_some_and(|chat| chat.needs_animation())
     }
 
     /// The user took the choice into their own hands, so the surface stops
@@ -3284,10 +3289,10 @@ mod tests {
             .expect("draw chat");
         let surfaces = chat.frame_surfaces();
         let transcript = surfaces.surface(SurfaceId::Transcript).expect("transcript");
-        assert_eq!(transcript.rect.right(), 59);
+        let scrollbar_x = transcript.rect.right();
         let mut selection = SelectionState::new();
         for event in [
-            mouse(MouseEventKind::Down(MouseButton::Left), 59, 5),
+            mouse(MouseEventKind::Down(MouseButton::Left), scrollbar_x, 5),
             mouse(MouseEventKind::Drag(MouseButton::Left), 30, 10),
             mouse(MouseEventKind::Up(MouseButton::Left), 30, 18),
         ] {

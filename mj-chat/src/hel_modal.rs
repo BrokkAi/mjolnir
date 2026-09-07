@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
-use ratatui::widgets::Clear;
+use ratatui::widgets::{Block, Clear};
 
 use crate::hel_selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
 
@@ -46,7 +46,9 @@ pub fn bordered_content(area: Rect) -> Rect {
 /// it keeps a pane-local modal from erasing a neighboring pane and keeps tiny
 /// terminal coordinates valid.
 fn clear_modal(frame: &mut Frame, popup: Rect, bounds: Rect) {
-    frame.render_widget(Clear, modal_clear_area(popup, bounds));
+    let area = modal_clear_area(popup, bounds);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(crate::theme::base()), area);
 }
 
 fn modal_clear_area(popup: Rect, bounds: Rect) -> Rect {
@@ -258,8 +260,16 @@ mod tests {
                 let cell = &buffer[(x, y)];
                 if expected_clear.contains(Position::new(x, y)) {
                     assert_eq!(cell.symbol(), " ", "cell ({x}, {y}) was not blank");
-                    assert_eq!(cell.fg, Color::Reset, "cell ({x}, {y}) kept its foreground");
-                    assert_eq!(cell.bg, Color::Reset, "cell ({x}, {y}) kept its background");
+                    assert_eq!(
+                        cell.fg,
+                        crate::theme::TEXT,
+                        "cell ({x}, {y}) kept its foreground"
+                    );
+                    assert_eq!(
+                        cell.bg,
+                        crate::theme::BACKGROUND,
+                        "cell ({x}, {y}) kept its background"
+                    );
                 } else {
                     assert_eq!(
                         cell.symbol(),

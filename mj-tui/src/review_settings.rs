@@ -9,17 +9,18 @@ use std::time::Instant;
 
 use crossterm::event::Event;
 use hel::hel_acp::SessionConfigChoice;
-use hel::hel_config::{HelConfig, ReviewConfig};
+use hel::hel_config::{HelConfig, ReviewConfig, SpinnerStyle};
 use hel::hel_review::lanes::ReviewTier;
 use mj_chat::components::{
     ButtonRow, Checkbox, ControlKind, Form, FormViewport, Interaction, TabStrip,
 };
 use mj_chat::hel_selection::FrameSurfaces;
+use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::widgets::{centered_modal, centered_rect};
 use crate::{DashboardAction, DashboardState, Mode};
@@ -86,6 +87,7 @@ pub(crate) struct ReviewSettingsDialog {
     choices_loading: bool,
     request_key: Option<ReviewSettingsCacheKey>,
     discovery_started: Instant,
+    spinner_style: SpinnerStyle,
     pub(crate) cleanup_warning: Option<String>,
     pub(crate) discovery_error: Option<String>,
     pub(crate) saving: bool,
@@ -117,6 +119,7 @@ impl ReviewSettingsDialog {
             choices_loading: false,
             request_key: None,
             discovery_started: Instant::now(),
+            spinner_style: config.spinner,
             cleanup_warning: None,
             discovery_error: None,
             saving: false,
@@ -673,8 +676,10 @@ pub(crate) fn render_review_settings(
     surfaces: &mut FrameSurfaces,
 ) {
     use ReviewSettingsFocus::*;
-    let spinner =
-        ['|', '/', '-', '\\'][(dialog.discovery_started.elapsed().as_millis() / 125 % 4) as usize];
+    let spinner = mj_chat::spinner::compact_frame(
+        dialog.spinner_style,
+        dialog.discovery_started.elapsed().as_millis(),
+    );
     let status = if dialog.probing && dialog.choices_loading {
         format!("{spinner} Loading choices…")
     } else if dialog.probing || dialog.model_choices_discovered {
@@ -687,31 +692,41 @@ pub(crate) fn render_review_settings(
         "Choices not loaded".to_owned()
     };
     let mut notes = vec![
-        Line::raw("Global settings; changes apply to subsequent reviews."),
-        Line::raw(status),
+        Line::styled(
+            "Global settings; changes apply to subsequent reviews.",
+            theme::muted(),
+        ),
+        Line::styled(
+            status,
+            Style::default().fg(if dialog.choices_loading {
+                theme::ACCENT
+            } else {
+                theme::MUTED
+            }),
+        ),
     ];
     if let Some(warning) = &dialog.cleanup_warning {
         notes.push(Line::styled(
             format!("Cleanup warning: {warning}"),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         ));
     }
     if let Some(error) = &dialog.discovery_error {
         notes.push(Line::styled(
             format!("Discovery: {error}"),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         ));
     }
     if let Some(reason) = &dialog.read_only_reason {
         notes.push(Line::styled(
             reason.clone(),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         ));
     }
     if let Some(error) = &dialog.save_error {
         notes.push(Line::styled(
             format!("Save failed: {error}"),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         ));
     }
     if dialog.review.profile.is_none() && dialog.review.enabled {
@@ -748,7 +763,7 @@ pub(crate) fn render_review_settings(
         ReviewTier::Quick => "One general reviewer; a validator checks any findings.",
         ReviewTier::Extended => "A supervisor selects specialist reviewers for deeper coverage.",
     })
-    .style(Style::default().fg(Color::DarkGray))
+    .style(Style::default().fg(theme::MUTED))
     .wrap(Wrap { trim: true });
     let description_width = centered_rect(86, 1, area).width.saturating_sub(12);
     let description_height =
@@ -763,9 +778,7 @@ pub(crate) fn render_review_settings(
             .max(20),
         area,
     );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Review settings ");
+    let block = theme::modal().title(" Review settings ");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let body = Rect::new(
@@ -855,7 +868,7 @@ pub(crate) fn render_review_settings(
         frame.render_widget(
             Line::styled(
                 "Tab moves · arrows select · Space toggles · Esc closes",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             ),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
         );

@@ -1113,7 +1113,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::style::{Modifier, Style};
 
     use hel::hel_state::{
         HelState, MaterializedExecutionState, MaterializedSession, SessionState, TranscriptBody,
@@ -1286,7 +1286,7 @@ mod tests {
         assert_eq!(
             badge.spans[0].style,
             Style::default()
-                .fg(Color::LightYellow)
+                .fg(mj_chat::theme::WARNING)
                 .add_modifier(Modifier::BOLD)
         );
 
