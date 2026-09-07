@@ -300,7 +300,7 @@ pub async fn run_server(options: ServerOptions) -> AnyResult<()> {
             .handle(handle)
             .serve(app.into_make_service())
             .await
-            .context("run Mjolnir HTTPS phone server")
+            .with_context(|| format!("run Mjolnir HTTPS web viewer on {bind}"))
     } else {
         let listener = tokio::net::TcpListener::bind(bind)
             .await
