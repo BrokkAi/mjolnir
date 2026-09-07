@@ -26,6 +26,7 @@ import threading
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -654,17 +655,24 @@ kind = "local-bare"
         deadline = time.monotonic() + TIMEOUT
         last = ""
         while time.monotonic() < deadline:
-            result = self.command("daemon", "status", timeout=3, check=False)
-            last = re.sub(r"viewer code [0-9]{6}", "viewer code [redacted]", result.stdout + result.stderr)
-            match = re.search(
-                rf"web viewer (?:http|https)://127\.0\.0\.1:{port}/?; viewer code ([0-9]{{6}})",
-                result.stdout,
-            )
-            if result.returncode == 0 and match:
+            try:
+                access = self.daemon_request({"action": "web_viewer_access"})["value"]
+            except (OSError, ValueError, ScenarioFailure) as error:
+                last = str(error)
+                time.sleep(0.1)
+                continue
+            last = str(access) if not isinstance(access, dict) or "Ready" not in access else "Ready"
+            if isinstance(access, dict) and "Ready" in access:
+                ready = access["Ready"]
+                url = urllib.parse.urlsplit(ready["viewer_url"])
+                if url.hostname != "127.0.0.1" or url.port != port:
+                    raise ScenarioFailure(f"viewer bound an unexpected address: {url.hostname}:{url.port}")
                 metadata = json.loads((self.data / "daemon.json").read_text())
                 self.daemon_pid = int(metadata["pid"])
                 self.record_process("observed", "daemon", self.daemon_pid)
-                return match.group(1), self.daemon_pid
+                return ready["viewer_code"], self.daemon_pid
+            if isinstance(access, dict) and ("Failed" in access or "Unavailable" in access):
+                raise ScenarioFailure(f"web viewer startup failed: {access}")
             time.sleep(0.1)
         raise ScenarioFailure(f"daemon/web viewer did not become ready: {last[-4000:]}")
 

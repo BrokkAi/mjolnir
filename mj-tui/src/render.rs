@@ -4068,7 +4068,7 @@ mod tests {
         assert!(lines.contains("Prompt (opening session)"), "{lines}");
         assert!(lines.contains("Opening session"), "{lines}");
         assert!(
-            lines.contains("The conversation appears when it attaches."),
+            lines.contains("Esc cancels · select another session to switch · Alt-Q quits"),
             "{lines}"
         );
         assert!(!lines.contains("No conversation open"), "{lines}");

@@ -741,7 +741,7 @@ fn render_empty_conversation(
             " Prompt (opening session) ",
             [
                 "Opening session…",
-                "The conversation appears when it attaches.",
+                "Esc cancels · select another session to switch · Alt-Q quits",
             ],
         ),
     };

@@ -60,6 +60,7 @@ pub(crate) enum DashboardIoUpdate {
         result: std::result::Result<ProjectSourceIdentity, String>,
     },
     ChatOpened {
+        generation: u64,
         session_id: String,
         result: Box<std::result::Result<mj_chat::hel_chat::PreparedChat, String>>,
     },
@@ -324,6 +325,41 @@ where
         drop(guard);
     })
 }
+
+/// Network waits must not hold a blocking-pool thread: connecting to the
+/// daemon itself needs a blocking metadata read. Bound acknowledgement waits
+/// so a silent daemon cannot indefinitely prevent dashboard exit.
+fn spawn_critical_async<T: Send + 'static>(
+    tracker: CriticalOperationTracker,
+    label: impl Into<String>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    timeout: Duration,
+    work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+) -> JoinHandle<()> {
+    let label = label.into();
+    let guard = tracker.begin(label.clone());
+    tokio::spawn(async move {
+        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(work));
+        let result = match tokio::time::timeout(timeout, task).await {
+            Ok(Ok(result)) => result.map_err(|error| format!("{error:#}")),
+            Ok(Err(error)) => Err(format!("{label} task failed: {error}")),
+            Err(_) => Err(format!(
+                "{label}: the daemon did not acknowledge the save within {} seconds; it may still complete. Reconnect to verify the saved state",
+                timeout.as_secs()
+            )),
+        };
+        if let Err(error) = &result {
+            tracing::error!(operation = %label, %error, "dashboard save was not confirmed");
+        }
+        if let Err(error) = updates.send(report(result)) {
+            tracing::debug!(operation = %label, %error, "dashboard save result dropped after shutdown");
+        }
+        drop(guard);
+    })
+}
+
+const SAVE_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Like [`spawn_critical_io`], with a cooperative cancellation flag for work
 /// that can own a subprocess while the dashboard is shutting down.
@@ -677,18 +713,16 @@ pub(crate) fn spawn_dashboard_rename(
 ) {
     let renamed_session_id = session_id.clone();
     let requested_title = title.clone();
-    let runtime = tokio::runtime::Handle::current();
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         format!("renaming session {}", short_id(&session_id)),
         updates,
-        move || {
-            runtime.block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .set_session_title(renamed_session_id, requested_title)
-                    .await
-            })
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .set_session_title(renamed_session_id, requested_title)
+                .await
         },
         move |result| DashboardIoUpdate::RenameSession {
             session_id,
@@ -814,25 +848,23 @@ pub(crate) fn spawn_detached_session_state_persist(
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
     let persisted_session_id = session_id.clone();
-    let runtime = tokio::runtime::Handle::current();
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         format!("saving draft for {}", short_id(&session_id)),
         updates,
-        move || {
-            runtime.block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .persist_detached_session_state(
-                        client_id,
-                        workspace_id,
-                        persisted_session_id,
-                        event_ordinal,
-                        std::process::id(),
-                        draft,
-                    )
-                    .await
-            })
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .persist_detached_session_state(
+                    client_id,
+                    workspace_id,
+                    persisted_session_id,
+                    event_ordinal,
+                    std::process::id(),
+                    draft,
+                )
+                .await
         },
         move |result| DashboardIoUpdate::DetachedSessionState { session_id, result },
     )
@@ -847,18 +879,16 @@ pub(crate) fn spawn_read_receipt_persist(
     tracker: CriticalOperationTracker,
 ) {
     let persisted_session_id = session_id.clone();
-    let runtime = tokio::runtime::Handle::current();
-    spawn_critical_io(
+    spawn_critical_async(
         tracker,
         format!("saving read status for {}", short_id(&session_id)),
         updates,
-        move || {
-            runtime.block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .persist_read_receipt(client_id, workspace_id, persisted_session_id, through)
-                    .await
-            })
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .persist_read_receipt(client_id, workspace_id, persisted_session_id, through)
+                .await
         },
         move |result| DashboardIoUpdate::ReadReceipt { session_id, result },
     );
@@ -1273,10 +1303,18 @@ impl DashboardContext {
                     ),
                 }
             }
-            DashboardIoUpdate::ChatOpened { session_id, result } => {
+            DashboardIoUpdate::ChatOpened {
+                generation,
+                session_id,
+                result,
+            } => {
                 // Ignore a late result after a newer request has taken its
                 // place (or the dashboard has shut down).
-                if self.opening_chat_session.as_deref() != Some(session_id.as_str()) {
+                if !self
+                    .attachment
+                    .accepts(generation, self.dashboard.selected_session_id())
+                    || self.opening_chat_session.as_deref() != Some(session_id.as_str())
+                {
                     return;
                 }
                 self.opening_chat_session = None;
@@ -1291,7 +1329,7 @@ impl DashboardContext {
                         .is_some()
                 {
                     self.dashboard.set_current_session(None);
-                    self.open_pending_chat_session();
+                    self.defer_chat_open();
                     self.dirty = true;
                     return;
                 }
@@ -1314,31 +1352,10 @@ impl DashboardContext {
                         self.acknowledge_visible_chat();
                     }
                     Err(error) => {
-                        // Nothing opened, so the compact session list must not
-                        // go on claiming a conversation is on screen.
-                        self.dashboard.set_current_session(
-                            self.active_chat
-                                .as_ref()
-                                .map(mj_chat::hel_chat::ActiveChat::session_id),
-                        );
-                        // The startup pick often attaches before the session
-                        // manager has adopted the session. That resolves
-                        // itself, so it retries quietly rather than reporting
-                        // a failure the user can do nothing about.
-                        if self.retry_startup_attach(&session_id) {
-                            tracing::debug!(
-                                %session_id,
-                                "startup attach was early, retrying: {error}"
-                            );
-                        } else {
-                            self.dashboard
-                                .set_notice(format!("Could not open session: {error}"));
-                        }
+                        tracing::warn!(%session_id, %error, "could not open session");
+                        self.dashboard.set_notice(format!("Could not open session: {error}. Press Enter in Sessions to retry, or select another session. Alt-Q quits."));
                     }
                 }
-                // The selection may have moved on while this attach was in
-                // flight; the newest row wins.
-                self.open_pending_chat_session();
                 self.dirty = true;
             }
             DashboardIoUpdate::CreateSession(update) => self.apply_create_session_update(*update),
@@ -1499,14 +1516,19 @@ impl DashboardContext {
                     Err(error) => self.dashboard.set_notice(format!("Paste failed: {error}")),
                 }
             }
-            DashboardIoUpdate::DetachedSessionState { session_id, result } => {
-                if let Err(error) = result {
-                    self.dashboard.set_notice(format!(
-                        "Could not save draft and read status for {}: {error}",
-                        short_id(&session_id)
-                    ));
+            DashboardIoUpdate::DetachedSessionState { session_id, result } => match result {
+                Ok(()) => {
+                    self.draft_save_failures.remove(&session_id);
                 }
-            }
+                Err(error) => {
+                    let message = format!(
+                        "Could not confirm saved draft and read status for {}: {error}",
+                        short_id(&session_id)
+                    );
+                    self.draft_save_failures.insert(session_id, message.clone());
+                    self.dashboard.set_notice(message);
+                }
+            },
             DashboardIoUpdate::ReadReceipt { session_id, result } => {
                 self.finish_read_receipt(session_id, result);
             }
@@ -1781,7 +1803,7 @@ impl DashboardContext {
                 // so reading the whole projection was work proportional to
                 // history for a result that was thrown away.
                 self.request_transcript_tail_seed(&session_id);
-                self.dashboard.select_active_session(&session_id);
+                self.open_chat_session(&session_id);
                 self.dashboard.set_notice(format!(
                     "Resumed {} with {profile_id} on {target_id}",
                     short_id(&session_id)
@@ -1790,7 +1812,7 @@ impl DashboardContext {
             }
             Ok(LifecycleSuccess::Moved(outcome)) => {
                 self.request_transcript_tail_seed(&session_id);
-                self.dashboard.select_active_session(&session_id);
+                self.open_chat_session(&session_id);
                 let destination = format!("{}/{}", outcome.profile_id, outcome.target_template_id);
                 self.dashboard
                     .set_notice(if outcome.outcome == "unchanged" {
@@ -1884,6 +1906,105 @@ mod tests {
     use super::*;
     use hel::hel_config::ProjectRepository;
     use mj_controller::hel_controller::create_quick_bundle_in_config as create_quick_bundle;
+
+    #[test]
+    fn asynchronous_saves_leave_the_blocking_pool_available_for_connection_metadata() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (tracker, _) = CriticalOperationTracker::new();
+            let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+            let (ready, mut started) = tokio::sync::mpsc::unbounded_channel();
+            let release = Arc::new(tokio::sync::Notify::new());
+            let mut tasks = Vec::new();
+            for id in 0..64 {
+                let ready = ready.clone();
+                let release = release.clone();
+                tasks.push(spawn_critical_async(
+                    tracker.clone(),
+                    format!("saving draft {id}"),
+                    updates.clone(),
+                    Duration::from_secs(2),
+                    async move {
+                        // The real connection needs a blocking metadata read.
+                        tokio::task::spawn_blocking(|| ()).await?;
+                        let released = release.notified();
+                        tokio::pin!(released);
+                        released.as_mut().enable();
+                        ready.send(())?;
+                        released.await;
+                        Ok(())
+                    },
+                    move |result| DashboardIoUpdate::DetachedSessionState {
+                        session_id: id.to_string(),
+                        result,
+                    },
+                ));
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                for _ in 0..64 {
+                    started.recv().await.unwrap();
+                }
+                // Chat preparation and other UI work can still use the pool.
+                assert_eq!(
+                    tokio::task::spawn_blocking(|| "chat ready").await.unwrap(),
+                    "chat ready"
+                );
+            })
+            .await
+            .expect("network waits must not starve blocking work");
+            release.notify_waiters();
+            for task in tasks {
+                task.await.unwrap();
+            }
+            for _ in 0..64 {
+                assert!(matches!(
+                    results.recv().await,
+                    Some(DashboardIoUpdate::DetachedSessionState { result: Ok(()), .. })
+                ));
+            }
+            assert!(
+                tracker.blockers().is_empty(),
+                "saves must release quit blockers"
+            );
+        });
+        runtime.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn unresponsive_save_reports_uncertain_durability_and_releases_quit() {
+        let (tracker, _) = CriticalOperationTracker::new();
+        let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_critical_async(
+            tracker.clone(),
+            "saving draft",
+            updates,
+            Duration::from_millis(20),
+            std::future::pending::<Result<()>>(),
+            |result| DashboardIoUpdate::DetachedSessionState {
+                session_id: "muse".into(),
+                result,
+            },
+        );
+        assert_eq!(tracker.blockers().len(), 1);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let Some(DashboardIoUpdate::DetachedSessionState {
+            result: Err(error), ..
+        }) = results.recv().await
+        else {
+            panic!("missing save failure");
+        };
+        assert!(error.contains("did not acknowledge"));
+        assert!(error.contains("may still complete"));
+        assert!(tracker.blockers().is_empty());
+    }
 
     #[test]
     fn quick_github_bundle_uses_collision_suffix_and_reuses_matching_source() {

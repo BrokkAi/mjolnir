@@ -5011,6 +5011,7 @@ mod tests {
         drop(replacement);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn executable_identity_detects_an_nfs_style_replaced_binary() {
         let directory = tempfile::tempdir().unwrap();
