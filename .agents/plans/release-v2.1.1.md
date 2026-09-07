@@ -13,13 +13,16 @@ Publish the session-opening deadlock fix, web viewer port recovery, and concurre
 - [x] Verify all eight current crates.io trusted publishers match BrokkAi/mjolnir, publish.yml, crates-io.
 - [ ] Verify npm trusted-publisher settings; API read currently returns 401, and the user has been asked for settings confirmation or login.
 - [x] Synchronize 2.1.1 versions and license report; repair readiness detection using structured daemon state; document cancellable session attachment and unconfirmed draft saves. License policy, supplemental report comparison, formatting, npm packaging tests, docs build/1691 links, and isolated reliability plus HTTPS recovery scenarios pass.
-- [ ] Commit release preparation and run required clean-commit validation.
+- [x] Commit and push release preparation as fcb08c72; docs CI passed. All eight source archives and the portable musl worker build pass. Full workspace tests, clippy and release builds are running.
+- [ ] Finish clean-commit validation and correct the newly diagnosed upstream cross-platform test guard.
 - [ ] Validate the clean release commit locally, push master, and pass exact-commit CI.
 - [ ] Check version against clean commit, create and push annotated v2.1.1, and monitor artifacts plus both registry workflows.
 
 ## Surprises & Discoveries
 
 Upstream master advanced to c68f1356 with project grouping, move-dialog fixes, and daemon ownership handoff. The merged candidate retains these. Earlier CI 34127806733 failed because the reliability harness expected a viewer URL without a trailing slash, while the recovered viewer now reports its canonical URL with a slash. Replace presentation-text parsing with the existing authenticated daemon request helper and structured ready state.
+
+CI 34130309251 additionally showed an upstream test calling Linux-only `executable_file_identity` on macOS and Windows. Gate that test with the same `target_os = "linux"` condition as the helper. The actual release runtime behavior is unchanged by this test-only correction.
 
 ## Decision Log
 
