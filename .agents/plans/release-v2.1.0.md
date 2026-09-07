@@ -12,7 +12,10 @@ Publish the current master work, including Muse Code support and durable session
 - [x] Select v2.1.0 and synchronize workspace manifest and lockfile versions.
 - [x] Regenerate and validate license reports; pass formatting, full tests, Clippy, release CLI and portable musl worker builds, all-workspace checks, and archive creation for all eight packages.
 - [x] Commit and push release preparation and cross-platform fixes through 75be7e68; pass clean-commit release version check.
-- [ ] Resolve extracted voice-package verification failure: published brokk-anvil-llm 0.27.1 lacks the transcription API used from the pinned Git revision. Publishing an updated Anvil dependency needs authorization for that separate project.
+- [x] Publish brokk-anvil-client 0.28.1 under foundev ownership, configure its trusted publisher, and replace every old-package consumer with the registry dependency.
+- [x] Read back and verify the exact trusted publisher for all three Anvil and all eight Mjolnir release crates.
+- [x] Pass full workspace tests, workspace/all-target Clippy, formatting, version and license checks against the published replacement.
+- [ ] Finish release builds and extracted-package verification; push the final candidate and await CI.
 - [ ] Wait for master CI on the final release commit; workflow 34108548549 for 75be7e68 remains in progress, with voice and three-client checks successful.
 - [ ] Create/push annotated v2.1.0 tag after validations pass; monitor release and publication workflows.
 
@@ -29,6 +32,10 @@ Successful source builds and archive creation do not prove registry publication 
 Use a minor version because Muse support adds functionality. Keep all work on current master. The user's release request authorizes pushing Mjolnir and its release tag and the normal automatic registry/image publication workflows. Do not tag until the release commit passes required local checks and master CI.
 
 Hold the Mjolnir tag rather than trigger a known failing, potentially partial registry release. Ask for authorization to publish the updated BrokkAi/anvil dependency; prior upstream release authorization concerned muse-acp. Once authorized, follow that repository's release instructions, publish the required API, update Mjolnir's dependency and lockfile/license report, repeat affected validations including extracted voice-package verification, push the final candidate, and await its CI before tagging.
+
+The subsequently authorized Anvil v0.28.0 attempt published its minimizer, then failed with HTTP 403 for the old LLM crate because the release identity lacked access. The user now explicitly chooses to replace that package completely with brokk-anvil-client owned by foundev and shared like the other Anvil crates. This supersedes the interrupted proposal to disable voice: no voice-removal edits were made. Anvil's replacement plan is /home/ryan/code/anvil/.agents/plans/replace-llm-crate.md. Prepare a source-only exact Git pin for development until the replacement is published; do not tag Mjolnir until it uses the published registry version and extracted-package verification passes. Verify publishing access per package, not merely registry existence, before any further release mutation.
+
+The replacement is now published from Anvil commit 3e7ba29acf799658b7c91c528f850494b45fb093. Its direct owner is foundev, the Brokk engineering team is added, and jbellis and DavidBakerEffendi have pending owner invitations. Trusted publisher configuration 19317 matches BrokkAi/anvil, publish-crate.yml, environment release. Authenticated registry read-back confirmed the expected configuration for all eleven release crates across both repositories. Mjolnir now uses registry-only brokk-anvil-client 0.28.1; no temporary Git pin was needed. Controller utility inference, chat auth reading, and the voice worker all use the replacement.
 
 ## Context and Orientation
 
@@ -48,6 +55,10 @@ Regenerate files safely and preserve unrelated changes. Never move an already-pu
 
 ## Outcomes & Retrospective
 
-Mjolnir v2.1.0 preparation and implementation fixes are pushed. Local validations passed except extracted voice-package compilation against crates.io. No v2.1.0 tag or GitHub release has been created. Finishing requires a published Anvil version containing the already-used transcription API and successful final-commit CI.
+Mjolnir v2.1.0 preparation and implementation fixes are pushed. No v2.1.0 tag or GitHub release has been created. The replacement package is published with foundev ownership and verified trusted publishing. Mjolnir validation against that registry version is in progress; final candidate commit, CI, tagging, and release publication remain.
 
 Revision note: recorded the completed local validation and pushed checkpoints, and the experimentally confirmed dependency publication blocker so release work can resume without repeating discovery.
+
+Revision note: recorded the explicit package-replacement decision, retained voice support, and the ownership/publication gates learned from the failed Anvil publication.
+
+Revision note: recorded actual replacement publication, ownership/invitations, and verified publisher configurations; the registry access blocker is resolved.

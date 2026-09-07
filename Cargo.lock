@@ -567,9 +567,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
-name = "brokk-anvil-llm"
-version = "0.27.1"
-source = "git+https://github.com/BrokkAi/anvil?rev=73ca21b23632a5082884ab0adbc774eb5c64e4da#73ca21b23632a5082884ab0adbc774eb5c64e4da"
+name = "brokk-anvil-client"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b73af61305a3591406d8624d57db897f3c7a8da5837dba7ffdf3e42f381f956"
 dependencies = [
  "anyhow",
  "base64",
@@ -603,7 +604,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "base64",
- "brokk-anvil-llm",
+ "brokk-anvil-client",
  "brokk-mj-controller",
  "brokk-mj-core",
  "chrono",
@@ -634,7 +635,7 @@ dependencies = [
  "axum",
  "axum-server",
  "base64",
- "brokk-anvil-llm",
+ "brokk-anvil-client",
  "brokk-mj-core",
  "chrono",
  "dirs",
@@ -749,7 +750,7 @@ name = "brokk-mj-voice-worker"
 version = "2.1.0"
 dependencies = [
  "anyhow",
- "brokk-anvil-llm",
+ "brokk-anvil-client",
  "bytes",
  "cpal",
  "libloading",
