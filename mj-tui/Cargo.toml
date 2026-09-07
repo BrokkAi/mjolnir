@@ -12,6 +12,7 @@ publish = true
 workspace = true
 
 [dependencies]
+anyhow = "1"
 hel = { workspace = true, features = ["controller"] }
 mj-controller.workspace = true
 mj-chat.workspace = true

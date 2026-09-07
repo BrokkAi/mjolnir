@@ -12,6 +12,7 @@
 
 pub(crate) mod actions;
 pub(crate) mod io;
+mod pane_sizes;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -64,6 +65,9 @@ use crate::pollers::{
     refresh_dashboard_poll_targets, schedule_due_credential_syncs, session_target_is_pollable,
     spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller, spawn_quota_refresher,
     spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
+};
+use crate::session_presentation::{
+    apply_lifecycle_display, apply_session_activity, lifecycle_kind,
 };
 use crate::{TerminalGuard, short_id};
 
@@ -355,6 +359,7 @@ pub(crate) struct DashboardContext {
     pub(crate) workspace_id: String,
     pub(crate) client_id: String,
     pub(crate) dashboard: DashboardState,
+    pane_size_persistence: pane_sizes::PaneSizePersistence,
     /// One notifications bar for the whole process: the dashboard and every
     /// chat view opened from it report through this shared handle.
     notices: mj_chat::hel_chat::Notices,
@@ -400,9 +405,9 @@ pub(crate) struct DashboardContext {
     quota: Feed<Receiver<QuotaUpdate>>,
     pub(crate) manual_quota_refresh_generation: Option<u64>,
     pub(crate) target_test_cancel: Option<Arc<AtomicBool>>,
-    /// The one active global review capability probe. New profile/model
+    /// The active global review choice discovery. New profile/model
     /// selections cancel the old request before starting another one.
-    pub(crate) review_probe_cancel: Option<Arc<AtomicBool>>,
+    pub(crate) review_discovery_cancel: Option<Arc<AtomicBool>>,
 
     worker_targets_tx: watch::Sender<Vec<WorkerPollTarget>>,
     worker: Feed<SessionManagerUpdates>,
@@ -574,6 +579,9 @@ pub(crate) async fn run_dashboard_for_workspace(
         // The winning arm takes the message that woke the loop; the drains
         // below batch whatever is queued behind it, so one wakeup is one draw.
         tokio::select! {
+            () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {
+                context.dirty = true;
+            }
             _ = termination.cancelled(), if !context.shutdown_requested => {
                 context.begin_shutdown(false);
             }
@@ -596,8 +604,12 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // follows input order.
                 loop {
                     let batched = if let Some(command) =
-                        global_chord_event(&context.dashboard, &event)
+                        global_chord_event(&context.dashboard, &event).filter(|command| {
+                            !context.visible_chat().is_some_and(|chat| chat.component_modal_open())
+                                || matches!(command, CommandId::Help | CommandId::QuitDetach | CommandId::TogglePanePreset | CommandId::Refresh)
+                        })
                     {
+                        if let Some(chat) = context.visible_chat() { chat.cancel_component_pointer(); }
                         // Detaching from an open conversation has to save the
                         // draft and the read cursor, which is the chat's own
                         // bookkeeping rather than the dashboard's.
@@ -750,6 +762,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
         }
         context.drain_feeds();
+        context
+            .pane_size_persistence
+            .update(context.dashboard.pane_sizes());
         if !context.shutdown_requested {
             context.apply_chat_outcome(chat_outcome).await;
             actions::apply_dashboard_action(&mut context, action).await?;
@@ -771,6 +786,10 @@ pub(crate) async fn run_dashboard_for_workspace(
     // the background feeds are torn down after, as the rest of the context
     // drops.
     drop(context.terminal);
+    if let Err(error) = context.pane_size_persistence.finish().await {
+        tracing::warn!(%error, "workspace pane-size final flush failed");
+        eprintln!("{error:#}");
+    }
     if let Some(shutdown) = context.worker_shutdown.take() {
         shutdown
             .shutdown()
@@ -916,6 +935,9 @@ impl DashboardContext {
             controller.state.clone(),
             BTreeMap::new(),
         );
+        let pane_sizes = hel::hel_database::load_workspace_pane_sizes(workspace_id)
+            .context("load workspace pane sizes")?;
+        dashboard.restore_pane_sizes(pane_sizes)?;
         let notices = mj_chat::hel_chat::Notices::default();
         dashboard.share_notices(notices.clone());
         for (session_id, queued) in projected_queued_prompts(&controller)? {
@@ -998,6 +1020,11 @@ impl DashboardContext {
             tokio::sync::mpsc::channel::<DashboardImportUpdate>(8);
         let (dashboard_io_tx, dashboard_io_rx) =
             tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
+        let pane_size_persistence = pane_sizes::PaneSizePersistence::start(
+            workspace_id.to_owned(),
+            pane_sizes,
+            notices.clone(),
+        );
 
         let mut context = Self {
             terminal,
@@ -1005,6 +1032,7 @@ impl DashboardContext {
             workspace_id: workspace_id.to_owned(),
             client_id: client_id.to_owned(),
             dashboard,
+            pane_size_persistence,
             notices,
             events: Some(event::EventStream::new()),
             active_chat: None,
@@ -1024,7 +1052,7 @@ impl DashboardContext {
             quota: Feed::new(quota_updates_rx),
             manual_quota_refresh_generation: None,
             target_test_cancel: None,
-            review_probe_cancel: None,
+            review_discovery_cancel: None,
             worker_targets_tx,
             worker: Feed::new(worker_updates_rx),
             runtime_lifecycles: Feed::new(runtime_lifecycles_rx),
@@ -1425,11 +1453,24 @@ impl DashboardContext {
     /// Routes one terminal event through the selection engine, hit-testing
     /// against the surfaces the view on screen registered.
     fn route_selection(&mut self, event: Event) -> SelectionRouting {
+        let chat_owns_pointer = !self.dashboard.modal_open()
+            && match &event {
+                Event::Mouse(mouse) => self
+                    .visible_chat()
+                    .is_some_and(|chat| chat.component_handles_mouse(*mouse)),
+                _ => false,
+            };
         let Self {
             selection,
             dashboard,
             ..
         } = self;
+        if let Event::Mouse(mouse) = &event
+            && (dashboard.component_handles_mouse(*mouse) || chat_owns_pointer)
+        {
+            selection.clear();
+            return SelectionRouting::Forward(event);
+        }
         let focus_question = match &event {
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
                 question_click_focuses(dashboard.modal_open(), dashboard.frame_surfaces(), mouse)
@@ -1759,11 +1800,13 @@ impl DashboardContext {
         self.dashboard.set_opening_session(Some(&session_id));
         self.dashboard.set_notice("Opening session…");
         tokio::spawn(async move {
-            let result = sessions
-                .session(session_id.clone())
-                .await
-                .map(|managed| {
-                    mj_chat::hel_chat::ActiveChat::open_with_persistence(
+            let result = async {
+                let managed = sessions
+                    .session(session_id.clone())
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
+                tokio::task::spawn_blocking(move || {
+                    mj_chat::hel_chat::ActiveChat::prepare_with_persistence(
                         managed,
                         &bundle_id,
                         Some(context),
@@ -1774,7 +1817,10 @@ impl DashboardContext {
                         Some(persistence_tx),
                     )
                 })
-                .map_err(|error| format!("{error:#}"));
+                .await
+                .map_err(|error| format!("chat preparation task failed: {error}"))
+            }
+            .await;
             if let Err(error) = updates.send(DashboardIoUpdate::ChatOpened {
                 session_id,
                 result: Box::new(result),
@@ -1806,7 +1852,7 @@ impl DashboardContext {
     /// cooperative, so this only requests it.
     fn cancel_background_work(&self) {
         self.critical_operations.cancel_all();
-        if let Some(cancelled) = &self.review_probe_cancel {
+        if let Some(cancelled) = &self.review_discovery_cancel {
             cancelled.store(true, Ordering::Release);
         }
         for operation in self.lifecycle_operations.values() {
@@ -1939,6 +1985,7 @@ impl DashboardContext {
             self.controller_changed = true;
             let session_id = update.session_id.clone();
             let connected = update.view.connected;
+            apply_session_activity(&mut self.dashboard, &session_id, &update.view);
             // Only unreachable relays drive the worker diagnostics flow.
             let connection_error = match update.view.error.as_ref() {
                 Some(ViewError::Unreachable(detail)) => Some(detail.clone()),
@@ -1958,29 +2005,6 @@ impl DashboardContext {
                 .snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.materialized.clone());
-            let current_step_started_at_ms = update
-                .view
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.operational.current_step_started_at_ms);
-            self.dashboard
-                .set_current_step_start(&session_id, current_step_started_at_ms);
-            // What the session is doing beyond its turn clock: the turn the
-            // harness started on its own, and the commands the agent left
-            // running after the turn that started them ended.
-            self.dashboard.set_session_activity(
-                &session_id,
-                update.view.snapshot.as_ref().map_or_else(
-                    mj_chat::usage_format::SessionActivity::default,
-                    |snapshot| mj_chat::usage_format::SessionActivity::of(&snapshot.operational),
-                ),
-            );
-            // A view is published as disconnected only once the relay has
-            // failed past the unreachable threshold, so this reddens the band
-            // exactly when the target is genuinely unreachable and clears it on
-            // recovery.
-            self.dashboard
-                .set_session_connectivity(&session_id, connected);
             match apply_worker_poll_update(
                 &mut self.controller,
                 &mut self.dashboard,
@@ -2046,15 +2070,7 @@ impl DashboardContext {
             self.remote_lifecycle_sessions.remove(&session_id);
         }
         for lifecycle in lifecycles {
-            let kind = match lifecycle.kind {
-                crate::daemon::RuntimeLifecycleKind::Create => SessionOperationKind::Launching,
-                crate::daemon::RuntimeLifecycleKind::Close
-                | crate::daemon::RuntimeLifecycleKind::ForceStop => SessionOperationKind::Stopping,
-                crate::daemon::RuntimeLifecycleKind::Resume => SessionOperationKind::Resuming,
-                crate::daemon::RuntimeLifecycleKind::DestroyStopped
-                | crate::daemon::RuntimeLifecycleKind::ForceDestroy
-                | crate::daemon::RuntimeLifecycleKind::Cleanup => SessionOperationKind::Destroying,
-            };
+            let kind = lifecycle_kind(lifecycle.kind);
             mark_active_chat_retiring_for_remote_lifecycle(
                 self.active_chat.as_mut(),
                 &lifecycle.session_id,
@@ -2063,22 +2079,22 @@ impl DashboardContext {
             if !self
                 .lifecycle_operations
                 .contains_key(&lifecycle.session_id)
-                && self
-                    .remote_lifecycle_sessions
-                    .insert(lifecycle.session_id.clone())
             {
-                self.dashboard.begin_session_operation_at(
-                    lifecycle.session_id.clone(),
-                    kind,
-                    None,
-                    lifecycle.started_at_epoch_seconds,
+                self.remote_lifecycle_sessions
+                    .insert(lifecycle.session_id.clone());
+                apply_lifecycle_display(&mut self.dashboard, &lifecycle);
+            } else {
+                self.dashboard.replace_session_operation_stages(
+                    &lifecycle.session_id,
+                    lifecycle.active_stages,
                 );
-            }
-            self.dashboard
-                .replace_session_operation_stages(&lifecycle.session_id, lifecycle.active_stages);
-            if let Some((profile_id, target_id)) = lifecycle.resume_destination {
-                self.dashboard
-                    .set_resume_destination(&lifecycle.session_id, profile_id, target_id);
+                if let Some((profile_id, target_id)) = lifecycle.resume_destination {
+                    self.dashboard.set_resume_destination(
+                        &lifecycle.session_id,
+                        profile_id,
+                        target_id,
+                    );
+                }
             }
             if let Some(notice) = lifecycle.notice {
                 self.dashboard.set_notice(notice);
@@ -2640,27 +2656,52 @@ fn dispatch_event(
     action: &mut DashboardAction,
     chat_outcome: &mut mj_chat::hel_chat::ChatEventOutcome,
 ) -> bool {
-    let to_chat = match &event {
-        Event::Mouse(mouse) if !context.dashboard.modal_open() => {
-            let over_chat = context
-                .dashboard
-                .chat_region_contains(mouse.column, mouse.row);
-            if over_chat && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                context.dashboard.focus_prompt();
+    let dashboard_modal = context.dashboard.modal_open();
+    let geometry_event = matches!(&event, Event::Resize(..) | Event::Mouse(_));
+    let chat_modal = !context.dashboard.modal_open()
+        && context
+            .visible_chat()
+            .is_some_and(|chat| chat.component_modal_open());
+    let to_chat = chat_modal
+        || match &event {
+            Event::Mouse(mouse) if !context.dashboard.modal_open() => {
+                let over_chat = context
+                    .dashboard
+                    .chat_region_contains(mouse.column, mouse.row);
+                if over_chat && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    context.dashboard.focus_prompt();
+                }
+                over_chat
+                    || context
+                        .visible_chat()
+                        .is_some_and(|chat| chat.component_handles_mouse(*mouse))
+                    || (matches!(
+                        mouse.kind,
+                        MouseEventKind::Drag(MouseButton::Left)
+                            | MouseEventKind::Up(MouseButton::Left)
+                    ) && context
+                        .visible_chat()
+                        .is_some_and(|chat| chat.transcript_scrollbar_dragging()))
             }
-            over_chat
-        }
-        _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
-    };
+            _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
+        };
     match context.visible_chat().filter(|_| to_chat) {
         Some(chat) => {
             *chat_outcome = chat.handle_event(event);
             matches!(*chat_outcome, mj_chat::hel_chat::ChatEventOutcome::None)
+                && !geometry_event
+                && !chat_modal
+                && !chat.component_modal_open()
         }
         None => {
             *action = dashboard_event_action(&mut context.dashboard, event);
             context.controller_changed = true;
+            // A modal can change its control geometry without asking for domain
+            // work. Draw that state before taking the next queued pointer event.
             matches!(*action, DashboardAction::None)
+                && !dashboard_modal
+                && !context.dashboard.modal_open()
+                && !geometry_event
         }
     }
 }
@@ -3246,6 +3287,50 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn transcript_scrollbar_gestures_bypass_text_selection() {
+        let mut chat = open_test_chat("scrollbar-selection");
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                chat.draw_in(
+                    frame,
+                    mj_chat::hel_chat::ChatRegions {
+                        transcript: Rect::new(0, 0, 60, 15),
+                        prompt: Rect::new(0, 15, 60, 5),
+                        footer: None,
+                        overlay: frame.area(),
+                    },
+                    true,
+                    false,
+                );
+            })
+            .expect("draw chat");
+        let surfaces = chat.frame_surfaces();
+        let transcript = surfaces.surface(SurfaceId::Transcript).expect("transcript");
+        assert_eq!(transcript.rect.right(), 59);
+        let mut selection = SelectionState::new();
+        for event in [
+            mouse(MouseEventKind::Down(MouseButton::Left), 59, 5),
+            mouse(MouseEventKind::Drag(MouseButton::Left), 30, 10),
+            mouse(MouseEventKind::Up(MouseButton::Left), 30, 18),
+        ] {
+            assert_eq!(
+                route_selection_event(&mut selection, surfaces, event.clone()),
+                SelectionRouting::Forward(event)
+            );
+        }
+        assert!(selection.active_surface().is_none());
+        assert_eq!(
+            route_selection_event(
+                &mut selection,
+                surfaces,
+                mouse(MouseEventKind::Down(MouseButton::Left), 2, 5),
+            ),
+            SelectionRouting::Consumed
+        );
+    }
+
     #[test]
     fn only_a_visible_question_focuses_the_composer_from_modal_body_clicks() {
         let mut surfaces = FrameSurfaces::new();
@@ -3594,7 +3679,8 @@ mod tests {
             DashboardAction::None
         ));
         assert!(dashboard.modal_open(), "the target actions dialog is open");
-        // Rename, Test, Close: one Tab lands on Test.
+        // The target list is one Tab stop before Rename and Test.
+        dashboard.handle_key(plain_key(crossterm::event::KeyCode::Tab));
         dashboard.handle_key(plain_key(crossterm::event::KeyCode::Tab));
         assert!(matches!(
             dashboard.handle_key(plain_key(crossterm::event::KeyCode::Enter)),

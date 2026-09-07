@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use hel::hel_config::{HarnessProfile, HelConfig, PhoneConfig, is_bare_project_target};
-use hel::hel_state::{HelState, MaterializedSession, SessionRecord};
+use hel::hel_state::{HelState, MaterializedSession, ProjectSourceIdentity, SessionRecord};
 use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor, ProcessExecutor};
 use hel::hel_worker::RelayCommand;
 use hel::hel_workspace::WorkspaceRecord;
@@ -17,8 +17,8 @@ use mj_controller::hel_controller::{Controller, SessionLaunchOptions};
 use mj_controller::hel_quota::ProfileQuota;
 use mj_controller::hel_server::{
     ActionOutcome, BrowserTranscript, ControllerAction, ControllerRequest, PreflightFailure,
-    ReadReceiptRequest, ResumeQueueDisposition, ServerOptions, ViewerQueuedPrompt, ViewerQuota,
-    ViewerSnapshot, ViewerUserShell,
+    ReadReceiptRequest, ResumeQueueDisposition, ServerOptions, ViewerActivityDetails,
+    ViewerActivityKind, ViewerQueuedPrompt, ViewerQuota, ViewerSnapshot, ViewerUserShell,
 };
 use mj_controller::hel_session_manager::{
     SessionManagerChannels, SessionManagerControl, new_command_id,
@@ -444,6 +444,7 @@ fn spawn_tailscale_cert_renewer(
 }
 
 const MAX_CONCURRENT_PHONE_ACTIONS: usize = 4;
+const MAX_CONCURRENT_BUNDLE_CREATIONS: usize = 4;
 
 struct PhoneActionStarted {
     action_id: u64,
@@ -523,6 +524,16 @@ struct ReadReceiptPersisted {
 
 struct ControllerReloaded {
     result: std::result::Result<Controller, String>,
+}
+
+struct BundleCreated {
+    result: std::result::Result<
+        mj_controller::hel_controller::QuickBundleCreation,
+        mj_controller::hel_controller::QuickBundleFailure,
+    >,
+    reply: tokio::sync::oneshot::Sender<
+        std::result::Result<String, mj_controller::hel_server::BundleFailure>,
+    >,
 }
 
 /// Loads durable controller state without occupying the phone control loop.
@@ -720,6 +731,8 @@ pub(crate) async fn run_server(
     let mut pending_elicitations = std::collections::BTreeMap::new();
     let mut prompt_images = std::collections::BTreeSet::new();
     let mut operational = std::collections::BTreeMap::new();
+    let mut materialized_activity = load_materialized_activity(&controller).await?;
+    let mut project_sources = PhoneProjectSources::default();
     let mut operations = std::collections::BTreeMap::new();
     let mut launch_failures = Vec::new();
     // What the capacity poller last said, per probe target. The projection is
@@ -740,6 +753,8 @@ pub(crate) async fn run_server(
             pending_elicitations: &pending_elicitations,
             prompt_images: &prompt_images,
             operational: &operational,
+            materialized_activity: &materialized_activity,
+            project_sources: &project_sources,
             operations: &operations,
             capacity: &viewer_capacity(&capacity_state),
             launch_failures: &launch_failures,
@@ -749,6 +764,7 @@ pub(crate) async fn run_server(
     ));
     let (conversation_tx, conversation_rx) = tokio::sync::watch::channel(conversations.clone());
     let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(32);
+    let (bundle_tx, mut bundle_rx) = tokio::sync::mpsc::channel(16);
     let (receipt_tx, mut receipt_rx) = tokio::sync::mpsc::channel(32);
     let (preflight_tx, mut preflight_rx) = tokio::sync::mpsc::channel(32);
     let (client_state_tx, mut client_state_rx) = tokio::sync::mpsc::channel(64);
@@ -771,10 +787,13 @@ pub(crate) async fn run_server(
         bind,
         snapshot_rx,
         conversation_rx,
-        action_tx,
-        receipt_tx,
-        preflight_tx,
-        client_state_tx,
+        mj_controller::hel_server::ServerRequests {
+            action_tx,
+            bundle_tx,
+            receipt_tx,
+            preflight_tx,
+            client_state_tx,
+        },
     )?;
     options.shutdown = termination.clone();
     // Session cookies are stateless, so a per-process key would sign every
@@ -841,8 +860,12 @@ pub(crate) async fn run_server(
             tokio::sync::mpsc::unbounded_channel::<ReadReceiptPersisted>();
         let (controller_reload_tx, mut controller_reload_rx) =
             tokio::sync::mpsc::unbounded_channel::<ControllerReloaded>();
+        let (bundle_done_tx, mut bundle_done_rx) =
+            tokio::sync::mpsc::unbounded_channel::<BundleCreated>();
+        let mut bundle_jobs = tokio::task::JoinSet::new();
         let mut controller_reload_in_flight = false;
         let mut controller_reload_requested = false;
+        let mut controller_reload_invalidated = false;
         let mut pending_action_errors = std::collections::BTreeMap::<String, String>::new();
         let mut active_actions = std::collections::BTreeSet::new();
         let mut next_action_id = 0_u64;
@@ -874,6 +897,8 @@ pub(crate) async fn run_server(
                         pending_elicitations: &pending_elicitations,
                         prompt_images: &prompt_images,
                         operational: &operational,
+                        materialized_activity: &materialized_activity,
+                        project_sources: &project_sources,
                         operations: &operations,
                         capacity: &viewer_capacity(&capacity_state),
                         launch_failures: &launch_failures,
@@ -886,8 +911,21 @@ pub(crate) async fn run_server(
             };
         }
         loop {
+            project_sources.synchronize(&controller);
             tokio::select! {
                 _ = termination.cancelled() => break,
+                resolved = project_sources.jobs.join_next(), if !project_sources.jobs.is_empty() => {
+                    match resolved {
+                        Some(Ok(resolved)) => project_sources.complete(resolved),
+                        Some(Err(error)) => {
+                            failure = Some(anyhow::anyhow!("web project source task failed: {error}"));
+                            break;
+                        }
+                        None => unreachable!("project source jobs were not empty"),
+                    }
+                    revision = daemon_runtime.allocate_revision();
+                    publish_snapshot!(revision);
+                }
                 changed = daemon_revisions.changed() => {
                     if changed.is_err() {
                         failure = feed_stopped(
@@ -1029,6 +1067,10 @@ pub(crate) async fn run_server(
                     if let Some(snapshot) = update.view.snapshot {
                         let materialized = snapshot.materialized;
                         let operational_state = snapshot.operational;
+                        materialized_activity.insert(
+                            update.session_id.clone(),
+                            materialized.last_activity_at_ms,
+                        );
                         let queued = queued_prompt_projection(&materialized);
                         let pending = materialized.pending_elicitations.clone();
                         let active_shells = operational_state.active_user_shells.clone();
@@ -1216,6 +1258,90 @@ pub(crate) async fn run_server(
                         }
                     }
                 }
+                bundle = bundle_rx.recv(), if bundle_jobs.len() < MAX_CONCURRENT_BUNDLE_CREATIONS => {
+                    let Some(mj_controller::hel_server::BundleRequest { source, reply }) = bundle else {
+                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering bundle requests");
+                        break;
+                    };
+                    // Repository canonicalization and config persistence both
+                    // touch the filesystem. Keep them off this loop, and
+                    // report a panic as a failed request rather than dropping
+                    // the browser's reply.
+                    let done = bundle_done_tx.clone();
+                    let daemon_runtime = daemon_runtime.clone();
+                    bundle_jobs.spawn(async move {
+                        let result = daemon_runtime
+                            .create_quick_bundle(source)
+                            .await;
+                        if let Err(error) = done.send(BundleCreated { result, reply }) {
+                            tracing::debug!(%error, "bundle creation finished after the server stopped");
+                        }
+                    });
+                }
+                bundle_done = bundle_done_rx.recv() => {
+                    let Some(BundleCreated { result, reply }) = bundle_done else {
+                        failure = feed_stopped(termination.is_cancelled(), "the bundle creation pipeline stopped while the phone server was running");
+                        break;
+                    };
+                    match result {
+                        Ok(created) => {
+                            let bundle_id = created.bundle_id;
+                            // Other config sections may have changed while
+                            // this request was in flight. Publish only the
+                            // bundle this transaction created; a full fresh
+                            // config is requested below and must not make a
+                            // later completion hide another completed bundle.
+                            let Some(bundle) = created.config.bundles.get(&bundle_id) else {
+                                tracing::error!(%bundle_id, "bundle creation returned a config without its bundle");
+                                if reply.send(Err(mj_controller::hel_server::BundleFailure::Controller)).is_err() {
+                                    tracing::debug!("bundle creation failure reply dropped after client disconnect");
+                                }
+                                continue;
+                            };
+                            controller
+                                .config
+                                .bundles
+                                .insert(bundle_id.clone(), bundle.clone());
+                            // A reload started before this save may still be
+                            // queued. It must not hide a bundle after we have
+                            // acknowledged it as available to the browser.
+                            controller_reload_invalidated |= controller_reload_in_flight;
+                            revision = daemon_runtime.allocate_revision();
+                            publish_snapshot!(revision);
+                            request_daemon_controller_reload(
+                                daemon_runtime.clone(),
+                                "new bundle publication",
+                            );
+                            if reply.send(Ok(bundle_id)).is_err() {
+                                tracing::debug!("bundle creation reply dropped after client disconnect");
+                            }
+                        }
+                        Err(error) => {
+                            let failure = match error {
+                                mj_controller::hel_controller::QuickBundleFailure::InvalidSource(
+                                    detail,
+                                ) => {
+                                    tracing::debug!(error = %detail, "phone bundle source was invalid");
+                                    mj_controller::hel_server::BundleFailure::InvalidSource
+                                }
+                                mj_controller::hel_controller::QuickBundleFailure::Persistence(
+                                    detail,
+                                ) => {
+                                    tracing::warn!(error = %detail, "phone bundle creation failed");
+                                    mj_controller::hel_server::BundleFailure::Controller
+                                }
+                            };
+                            if reply.send(Err(failure)).is_err() {
+                                tracing::debug!("bundle creation failure reply dropped after client disconnect");
+                            }
+                        }
+                    }
+                }
+                bundle_job = bundle_jobs.join_next(), if !bundle_jobs.is_empty() => {
+                    if let Some(Err(error)) = bundle_job {
+                        tracing::warn!(%error, "bundle creation task panicked");
+                    }
+                }
                 preflight = preflight_rx.recv() => {
                     let Some(mj_controller::hel_server::PreflightRequest {
                         bundle_id,
@@ -1327,19 +1453,26 @@ pub(crate) async fn run_server(
                     match &request.action {
                         ControllerAction::RefreshCapacity { target_id } => {
                             let known = capacity_state.contains_key(target_id);
+                            // One queued nudge refreshes every target. Do not
+                            // block the consumer while readings wait for it.
+                            let accepted = known && match capacity_triggers_tx.try_send(()) {
+                                Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => true,
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                                    tracing::warn!("phone capacity refresh rejected: poller stopped");
+                                    false
+                                }
+                            };
                             if known {
                                 if let Some(entry) = capacity_state.get_mut(target_id) {
-                                    entry.refreshing = true;
+                                    entry.refreshing = accepted;
+                                    if !accepted {
+                                        entry.failed = true;
+                                    }
                                 }
-                                // The trigger is a nudge with no payload: it
-                                // asks the poller to sample every target now,
-                                // which is what a person pressing refresh on
-                                // the Targets page means.
-                                capacity_triggers_tx.send(()).await.ok();
                                 revision = daemon_runtime.allocate_revision();
                                 publish_snapshot!(revision);
                             }
-                            let outcome = if known {
+                            let outcome = if accepted {
                                 ActionOutcome::Accepted
                             } else {
                                 ActionOutcome::Failed
@@ -1489,6 +1622,8 @@ pub(crate) async fn run_server(
                                 pending_elicitations: &pending_elicitations,
                                 prompt_images: &prompt_images,
                                 operational: &operational,
+                                materialized_activity: &materialized_activity,
+                                project_sources: &project_sources,
                                 operations: &operations,
                                 capacity: &viewer_capacity(&capacity_state),
                                 launch_failures: &launch_failures,
@@ -1574,6 +1709,18 @@ pub(crate) async fn run_server(
                         break;
                     };
                     controller_reload_in_flight = false;
+                    if std::mem::take(&mut controller_reload_invalidated) {
+                        if let Err(error) = &result {
+                            tracing::warn!(%error, "superseded controller reload failed");
+                        }
+                        controller_reload_requested = false;
+                        request_controller_reload(
+                            &mut controller_reload_in_flight,
+                            &mut controller_reload_requested,
+                            &controller_reload_tx,
+                        );
+                        continue;
+                    }
                     match result {
                         Ok(mut reloaded) => {
                             for (session_id, error) in &pending_action_errors {
@@ -1607,6 +1754,9 @@ pub(crate) async fn run_server(
                                 controller.state.sessions.contains_key(session_id)
                             });
                             operational.retain(|session_id, _| {
+                                controller.state.sessions.contains_key(session_id)
+                            });
+                            materialized_activity.retain(|session_id, _| {
                                 controller.state.sessions.contains_key(session_id)
                             });
                             // A reload is the moment the controller's own view
@@ -1646,6 +1796,9 @@ pub(crate) async fn run_server(
                 }
             }
         }
+        // Bundle jobs are supervised so shutdown never leaves a detached
+        // request task behind holding the config mutation lock.
+        bundle_jobs.shutdown().await;
         // Every exit stops in-flight work, whether it was asked for or forced.
         for control in action_cancellations.values() {
             control.request_cancel();
@@ -2189,6 +2342,146 @@ async fn apply_phone_action(
     }
 }
 
+/// Inputs that can change a session's source without changing its ID.
+#[derive(Clone, PartialEq, Eq)]
+struct ProjectSourceKey {
+    directory: Option<PathBuf>,
+    worktree: Option<hel::hel_state::ManagedWorktree>,
+    target: Option<hel::hel_config::TargetTemplate>,
+    fallback: ProjectSourceIdentity,
+}
+
+impl ProjectSourceKey {
+    fn of(session: &SessionRecord, config: &HelConfig) -> Self {
+        Self {
+            directory: session.project_directory.clone(),
+            worktree: session.managed_worktree.clone(),
+            target: config.targets.get(&session.target_template_id).cloned(),
+            fallback: session.project_source(config),
+        }
+    }
+}
+
+struct ProjectSourceEntry {
+    key: ProjectSourceKey,
+    source: Option<ProjectSourceIdentity>,
+    retry_at: Option<Instant>,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct ProjectSourceResolved {
+    cancelled: Arc<AtomicBool>,
+    session_id: String,
+    key: ProjectSourceKey,
+    result: Result<ProjectSourceIdentity, String>,
+}
+
+/// Git/SSH probes run independently of snapshot publication and are bounded
+/// and cancelled when their inputs disappear or the server shuts down.
+#[derive(Default)]
+struct PhoneProjectSources {
+    entries: std::collections::BTreeMap<String, ProjectSourceEntry>,
+    jobs: tokio::task::JoinSet<ProjectSourceResolved>,
+}
+
+impl PhoneProjectSources {
+    fn synchronize(&mut self, controller: &Controller) {
+        self.entries.retain(|id, entry| {
+            let keep = controller.state.sessions.get(id).is_some_and(|session| {
+                session.project_directory.is_some()
+                    && entry.key == ProjectSourceKey::of(session, &controller.config)
+            });
+            if !keep {
+                entry.cancelled.store(true, Ordering::Release);
+            }
+            keep
+        });
+        for session in controller.state.sessions.values() {
+            if self.jobs.len() >= 8 {
+                break;
+            }
+            if session.project_directory.is_none()
+                || self.entries.get(&session.id).is_some_and(|entry| {
+                    entry
+                        .retry_at
+                        .is_none_or(|deadline| Instant::now() < deadline)
+                })
+            {
+                continue;
+            }
+            let key = ProjectSourceKey::of(session, &controller.config);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            self.entries.insert(
+                session.id.clone(),
+                ProjectSourceEntry {
+                    key: key.clone(),
+                    source: None,
+                    retry_at: None,
+                    cancelled: cancelled.clone(),
+                },
+            );
+            let source_controller = Controller {
+                config: controller.config.clone(),
+                state: HelState {
+                    sessions: [(session.id.clone(), session.clone())]
+                        .into_iter()
+                        .collect(),
+                    ..HelState::default()
+                },
+            };
+            let session_id = session.id.clone();
+            self.jobs.spawn_blocking(move || {
+                let executor = CancellableProcessExecutor::new(cancelled.clone())
+                    .with_deadline(Duration::from_secs(8));
+                let result = source_controller
+                    .resolve_session_project_source(&session_id, &executor)
+                    .map_err(|error| format!("{error:#}"));
+                ProjectSourceResolved {
+                    cancelled,
+                    session_id,
+                    key,
+                    result,
+                }
+            });
+        }
+    }
+
+    fn complete(&mut self, resolved: ProjectSourceResolved) {
+        let Some(entry) = self.entries.get_mut(&resolved.session_id) else {
+            return;
+        };
+        if entry.key != resolved.key || !Arc::ptr_eq(&entry.cancelled, &resolved.cancelled) {
+            return;
+        }
+        match resolved.result {
+            Ok(source) => entry.source = Some(source),
+            Err(error) => {
+                tracing::warn!(session_id = %resolved.session_id, %error, "could not resolve web project source");
+                entry.retry_at = Some(Instant::now() + Duration::from_secs(30));
+            }
+        }
+    }
+
+    fn source(
+        &self,
+        session: &SessionRecord,
+        config: &HelConfig,
+    ) -> Option<&ProjectSourceIdentity> {
+        self.entries
+            .get(&session.id)
+            .filter(|entry| entry.key == ProjectSourceKey::of(session, config))
+            .and_then(|entry| entry.source.as_ref())
+    }
+}
+
+impl Drop for PhoneProjectSources {
+    fn drop(&mut self) {
+        for entry in self.entries.values() {
+            entry.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// The live, per-session projections the phone snapshot layers on top of the
 /// controller's durable state. They arrive from relay snapshots rather than
 /// from disk, so they travel together instead of as separate arguments.
@@ -2206,6 +2499,11 @@ struct PhoneSessionViews<'a> {
     /// projection learns what the agent can do, rather than guessing from the
     /// durable record, which knows only what was configured.
     operational: &'a std::collections::BTreeMap<String, hel::hel_worker::RelayOperationalState>,
+    /// Durable activity watermarks delivered with the materialized worker
+    /// snapshots. Keeping this in the control-loop cache avoids a database
+    /// read while rendering each viewer snapshot.
+    materialized_activity: &'a std::collections::BTreeMap<String, Option<i64>>,
+    project_sources: &'a PhoneProjectSources,
     /// Lifecycle operations running now, keyed by session.
     operations: &'a std::collections::BTreeMap<String, mj_controller::hel_server::ViewerOperation>,
     /// The most recent capacity reading per probe target.
@@ -2257,7 +2555,9 @@ fn publish_capacity_targets(
                 failed: false,
             });
     }
-    targets_tx.send_replace(targets);
+    if targets_tx.borrow().as_slice() != targets.as_slice() {
+        targets_tx.send_replace(targets);
+    }
 }
 
 /// Project the capacity readings for the phone.
@@ -2558,6 +2858,8 @@ fn viewer_snapshot(
         pending_elicitations,
         prompt_images,
         operational,
+        materialized_activity,
+        project_sources,
         operations,
         capacity,
         launch_failures,
@@ -2610,6 +2912,12 @@ fn viewer_snapshot(
         });
     }
     for session in &mut snapshot.sessions {
+        if let Some(record) = controller.state.sessions.get(&session.id)
+            && let Some(source) = project_sources.source(record, &controller.config)
+        {
+            session.set_project_source(source);
+        }
+        session.last_activity_at_ms = materialized_activity.get(&session.id).copied().flatten();
         session.queued_prompts = queued_prompts
             .get(&session.id)
             .into_iter()
@@ -2670,13 +2978,18 @@ fn viewer_snapshot(
             session.config_options = viewer_config_options(state);
             // The same three states the terminal's expanded row shows, from
             // the same helper, so the phone never disagrees with it.
-            let turn_started_at = state
+            let turn_started_at_ms = state
                 .active_prompt
                 .as_ref()
                 .map(|prompt| prompt.started_at_ms)
-                .or_else(|| state.harness_turn.map(|turn| turn.started_at_ms))
-                .and_then(|started_at_ms| u64::try_from(started_at_ms / 1_000).ok());
+                .or_else(|| state.harness_turn.map(|turn| turn.started_at_ms));
+            let turn_started_at = turn_started_at_ms
+                .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
+                .map(|started_at_ms| started_at_ms / 1_000);
             let activity = mj_chat::usage_format::SessionActivity::of(state);
+            let activity_details =
+                activity.details(turn_started_at_ms, state.current_step_started_at_ms);
+            session.activity_details = Some(viewer_activity_details(&activity_details));
             session.is_idle = controller
                 .state
                 .sessions
@@ -2736,6 +3049,56 @@ fn viewer_snapshot(
     }
     snapshot.capacity = capacity.to_vec();
     snapshot
+}
+
+fn viewer_activity_details(
+    details: &mj_chat::usage_format::SessionActivityDetails,
+) -> ViewerActivityDetails {
+    ViewerActivityDetails {
+        kind: match details.kind {
+            mj_chat::usage_format::SessionActivityKind::Turn => ViewerActivityKind::Turn,
+            mj_chat::usage_format::SessionActivityKind::Step => ViewerActivityKind::Step,
+            mj_chat::usage_format::SessionActivityKind::Background => {
+                ViewerActivityKind::Background
+            }
+            mj_chat::usage_format::SessionActivityKind::Idle => ViewerActivityKind::Idle,
+            mj_chat::usage_format::SessionActivityKind::Lifecycle => ViewerActivityKind::Lifecycle,
+        },
+        turn_started_at_ms: details.turn_started_at_ms,
+        step_started_at_ms: details.step_started_at_ms,
+        background_started_at_ms: details.background_started_at_ms,
+        idle_since_ms: details.idle_since_ms,
+        label: details.label.clone(),
+    }
+}
+
+/// Seed the viewer's in-memory activity cache from the durable projection
+/// before publishing its first snapshot. Later worker snapshots update this
+/// cache without adding a database read to the render path.
+async fn load_materialized_activity(
+    controller: &Controller,
+) -> Result<std::collections::BTreeMap<String, Option<i64>>> {
+    let session_ids = controller
+        .state
+        .sessions
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    tokio::task::spawn_blocking(move || {
+        session_ids
+            .into_iter()
+            .map(|session_id| {
+                hel::hel_database::load_materialized_session_summary(&session_id).map(|summary| {
+                    (
+                        session_id,
+                        summary.and_then(|summary| summary.last_activity_at_ms),
+                    )
+                })
+            })
+            .collect()
+    })
+    .await
+    .context("materialized activity startup task failed")?
 }
 
 #[cfg(test)]
@@ -2913,6 +3276,7 @@ mod tests {
 
         let operational = |agent_capabilities| RelayOperationalState {
             session_id: "session-1".into(),
+            idle_since_ms: None,
             execution: RelayExecutionState::Idle,
             latest_ordinal: 0,
             latest_digest: String::new(),
@@ -2971,6 +3335,7 @@ mod tests {
         controller.state.sessions.insert(record.id.clone(), record);
         let operational = RelayOperationalState {
             session_id: "session-1".into(),
+            idle_since_ms: None,
             execution: RelayExecutionState::Idle,
             latest_ordinal: 0,
             latest_digest: String::new(),
@@ -3011,6 +3376,8 @@ mod tests {
             background_commands: Vec::new(),
         };
         let mut operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
+        let materialized_activity =
+            std::collections::BTreeMap::from([("session-1".into(), Some(7_777_i64))]);
         let project = |operational: &std::collections::BTreeMap<String, RelayOperationalState>| {
             viewer_snapshot(
                 &controller,
@@ -3023,6 +3390,8 @@ mod tests {
                     pending_elicitations: &std::collections::BTreeMap::new(),
                     prompt_images: &std::collections::BTreeSet::new(),
                     operational,
+                    materialized_activity: &materialized_activity,
+                    project_sources: &PhoneProjectSources::default(),
                     operations: &std::collections::BTreeMap::new(),
                     capacity: &[],
                     launch_failures: &[],
@@ -3033,6 +3402,20 @@ mod tests {
         };
         let snapshot = project(&operational);
         let session = &snapshot.sessions[0];
+
+        assert_eq!(session.display_location, "podman");
+        assert_eq!(session.last_activity_at_ms, Some(7_777));
+        assert_eq!(
+            session.activity_details,
+            Some(mj_controller::hel_server::ViewerActivityDetails {
+                kind: ViewerActivityKind::Idle,
+                turn_started_at_ms: None,
+                step_started_at_ms: None,
+                background_started_at_ms: None,
+                idle_since_ms: None,
+                label: None,
+            })
+        );
 
         assert!(session.capabilities.prompt);
         assert!(session.capabilities.set_plan_mode);
@@ -3081,6 +3464,7 @@ mod tests {
         let unknown = project(&std::collections::BTreeMap::new());
         assert!(!unknown.sessions[0].is_idle);
         assert!(unknown.sessions[0].activity.is_empty());
+        assert!(unknown.sessions[0].activity_details.is_none());
     }
 
     #[test]
@@ -3117,6 +3501,194 @@ mod tests {
             },
             state: HelState::default(),
         }
+    }
+
+    fn snapshot_with_project_sources(
+        controller: &Controller,
+        sources: &PhoneProjectSources,
+    ) -> ViewerSnapshot {
+        viewer_snapshot(
+            controller,
+            &[],
+            &Default::default(),
+            &PhoneSessionViews {
+                conversations: &Default::default(),
+                queued_prompts: &Default::default(),
+                active_user_shells: &Default::default(),
+                pending_elicitations: &Default::default(),
+                prompt_images: &Default::default(),
+                operational: &Default::default(),
+                materialized_activity: &Default::default(),
+                project_sources: sources,
+                operations: &Default::default(),
+                capacity: &[],
+                launch_failures: &[],
+                reviews: &Default::default(),
+            },
+            1,
+        )
+    }
+
+    #[tokio::test]
+    async fn phone_projects_resolve_origins_and_discard_results_after_location_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut controller = controller_with_profiles(&["codex"]);
+        controller
+            .config
+            .targets
+            .insert("local".into(), TargetTemplate::LocalBare);
+        for (id, origin) in [
+            ("first-checkout", "git@github.com:BrokkAi/hel.git"),
+            ("second-checkout", "https://github.com/BrokkAi/hel.git"),
+        ] {
+            let directory = root.path().join(id);
+            std::fs::create_dir(&directory).unwrap();
+            for args in [vec!["init"], vec!["remote", "add", "origin", origin]] {
+                let command = hel::hel_targets::CommandSpec::new(
+                    "git",
+                    ["-C".to_owned(), directory.to_string_lossy().into_owned()]
+                        .into_iter()
+                        .chain(args.into_iter().map(str::to_owned)),
+                );
+                assert_eq!(ProcessExecutor.execute(&command).unwrap().status, 0);
+            }
+            let mut record = phone_session(id, 0);
+            record.project_directory = Some(directory);
+            record.target_template_id = "local".into();
+            controller.state.sessions.insert(id.into(), record);
+        }
+        let mut sources = PhoneProjectSources::default();
+        sources.synchronize(&controller);
+        assert_eq!(sources.jobs.len(), 2);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(result) = sources.jobs.join_next().await {
+                sources.complete(result.unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot = snapshot_with_project_sources(&controller, &sources);
+        assert_eq!(
+            snapshot.sessions[0].project_key,
+            snapshot.sessions[1].project_key
+        );
+        assert!(
+            snapshot
+                .sessions
+                .iter()
+                .all(|session| session.project_label == "hel")
+        );
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .unwrap()
+                .contains(&root.path().to_string_lossy().to_string())
+        );
+        sources.synchronize(&controller);
+        assert!(
+            sources.jobs.is_empty(),
+            "unchanged inputs reuse the resolved origin"
+        );
+
+        let previous = &sources.entries["first-checkout"];
+        let late = ProjectSourceResolved {
+            cancelled: previous.cancelled.clone(),
+            session_id: "first-checkout".into(),
+            key: previous.key.clone(),
+            result: Ok(ProjectSourceIdentity::git_remote("old/wrong").unwrap()),
+        };
+        controller
+            .state
+            .sessions
+            .get_mut("first-checkout")
+            .unwrap()
+            .project_directory = None;
+        let snapshot = snapshot_with_project_sources(&controller, &sources);
+        assert_ne!(
+            snapshot.sessions[0].project_key,
+            snapshot.sessions[1].project_key
+        );
+        sources.synchronize(&controller);
+        assert!(late.cancelled.load(Ordering::Acquire));
+        sources.complete(late);
+        assert!(!sources.entries.contains_key("first-checkout"));
+        assert_eq!(snapshot.sessions[0].project_label, "project");
+    }
+
+    #[test]
+    fn capacity_target_publication_skips_unchanged_targets_and_preserves_readings() {
+        let mut controller = controller_with_profiles(&[]);
+        controller
+            .config
+            .targets
+            .insert("raw".into(), TargetTemplate::LocalBare);
+        let (targets_tx, mut targets_rx) = tokio::sync::watch::channel(Vec::new());
+        let mut state = std::collections::BTreeMap::new();
+
+        publish_capacity_targets(&controller, &targets_tx, &mut state);
+        assert!(targets_rx.has_changed().expect("target sender is alive"));
+        assert_eq!(targets_rx.borrow_and_update().len(), 1);
+
+        let usage = hel::hel_targets::DeploymentCapacityUsage {
+            cpu_percent: Some(37),
+            memory_used_bytes: 3,
+            memory_total_bytes: 4,
+            logical_cores: 8,
+            disk_total_bytes: Some(5),
+        };
+        let local = state.get_mut("local").expect("local capacity state");
+        local.usage = Some(usage.clone());
+        local.on_demand = true;
+        local.sampled_at_epoch_seconds = Some(42);
+        local.refreshing = false;
+
+        publish_capacity_targets(&controller, &targets_tx, &mut state);
+        assert!(!targets_rx.has_changed().expect("target sender is alive"));
+        let local_capacity = viewer_capacity(&state)
+            .into_iter()
+            .find(|capacity| capacity.id == "local")
+            .expect("local viewer capacity");
+        assert_eq!(local_capacity.cpu_percent, usage.cpu_percent);
+        assert_eq!(
+            local_capacity.memory_used_bytes,
+            Some(usage.memory_used_bytes)
+        );
+        assert_eq!(local_capacity.logical_cores, Some(usage.logical_cores));
+        assert_eq!(local_capacity.sampled_at_epoch_seconds, Some(42));
+
+        controller
+            .config
+            .targets
+            .insert("second-local".into(), TargetTemplate::LocalBare);
+        publish_capacity_targets(&controller, &targets_tx, &mut state);
+        assert!(targets_rx.has_changed().expect("target sender is alive"));
+        assert_eq!(targets_rx.borrow_and_update().len(), 1);
+        assert_eq!(state["local"].usage, Some(usage.clone()));
+
+        controller.config.targets.insert(
+            "fleet".into(),
+            TargetTemplate::AwsEc2 {
+                aws_profile: None,
+                region: "us-east-1".into(),
+                launch_template: "hel-runson".into(),
+                launch_template_version: None,
+                ssh_user: "ubuntu".into(),
+                address_source: Default::default(),
+                identity_file: None,
+                ssh_args: Vec::new(),
+            },
+        );
+        publish_capacity_targets(&controller, &targets_tx, &mut state);
+        assert!(targets_rx.has_changed().expect("target sender is alive"));
+        assert_eq!(targets_rx.borrow_and_update().len(), 2);
+        assert!(state.contains_key("aws:fleet"));
+        assert_eq!(state["local"].usage, Some(usage.clone()));
+
+        controller.config.targets.remove("fleet");
+        publish_capacity_targets(&controller, &targets_tx, &mut state);
+        assert!(targets_rx.has_changed().expect("target sender is alive"));
+        assert_eq!(targets_rx.borrow_and_update().len(), 1);
+        assert!(!state.contains_key("aws:fleet"));
+        assert_eq!(state["local"].usage, Some(usage));
     }
 
     fn prompt_action() -> ControllerAction {
@@ -3398,6 +3970,8 @@ mod tests {
                     pending_elicitations: &std::collections::BTreeMap::new(),
                     prompt_images: &std::collections::BTreeSet::new(),
                     operational: &std::collections::BTreeMap::new(),
+                    materialized_activity: &std::collections::BTreeMap::new(),
+                    project_sources: &PhoneProjectSources::default(),
                     operations: &std::collections::BTreeMap::new(),
                     capacity: &[],
                     launch_failures: &[],
@@ -3473,6 +4047,8 @@ mod tests {
                 pending_elicitations: &std::collections::BTreeMap::new(),
                 prompt_images: &std::collections::BTreeSet::new(),
                 operational: &std::collections::BTreeMap::new(),
+                materialized_activity: &std::collections::BTreeMap::new(),
+                project_sources: &PhoneProjectSources::default(),
                 operations: &std::collections::BTreeMap::new(),
                 capacity: &[],
                 launch_failures: &failures,

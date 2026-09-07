@@ -3803,6 +3803,7 @@ mod tests {
                 window: hel::hel_state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational: RelayOperationalState {
+                    idle_since_ms: None,
                     session_id: "session-1".into(),
                     execution: hel::hel_worker::RelayExecutionState::Idle,
                     latest_ordinal: ordinal,

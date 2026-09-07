@@ -943,7 +943,8 @@ impl Controller {
                     hel_targets::TargetLocator::LocalPodman { .. }
                     | hel_targets::TargetLocator::LocalDocker { .. }
                     | hel_targets::TargetLocator::AppleContainer { .. }
-                    | hel_targets::TargetLocator::SshPodman { .. } => "/workspace".to_string(),
+                    | hel_targets::TargetLocator::SshPodman { .. }
+                    | hel_targets::TargetLocator::SshDocker { .. } => "/workspace".to_string(),
                     hel_targets::TargetLocator::AwsEc2 { workspace, .. }
                     | hel_targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
                     hel_targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),

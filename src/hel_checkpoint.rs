@@ -2182,35 +2182,7 @@ fn checkpoint_stdin_command(
 ) -> Result<CommandSpec> {
     let root = worker_root(locator, session_id)?;
     let args = vec![format!("{root}/hel"), "worker".into(), subcommand.into()];
-    let command = match locator {
-        TargetLocator::LocalBare { .. } => {
-            let mut args = args;
-            CommandSpec::new(args.remove(0), args)
-        }
-        TargetLocator::LocalPodman { container_id, .. } => {
-            container_exec("podman", container_id, args)
-        }
-        TargetLocator::LocalDocker { container_id } => container_exec("docker", container_id, args),
-        TargetLocator::AppleContainer { container_id } => {
-            container_exec("container", container_id, args)
-        }
-        TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            ssh_command(ssh, args)
-        }
-        TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => {
-            let mut remote = vec![
-                "podman".into(),
-                "exec".into(),
-                "-i".into(),
-                container_id.clone(),
-            ];
-            remote.extend(args);
-            ssh_command(ssh, remote)
-        }
-    };
-    Ok(command.purpose(purpose))
+    crate::hel_targets::command_on_locator(locator, session_id, args, purpose)
 }
 
 pub fn export_command(
@@ -2227,35 +2199,7 @@ pub fn export_command(
         "--spec".into(),
         spec_path.into(),
     ];
-    let command = match locator {
-        TargetLocator::LocalBare { .. } => {
-            let mut args = args;
-            CommandSpec::new(args.remove(0), args)
-        }
-        TargetLocator::LocalPodman { container_id, .. } => {
-            container_exec("podman", container_id, args)
-        }
-        TargetLocator::LocalDocker { container_id } => container_exec("docker", container_id, args),
-        TargetLocator::AppleContainer { container_id } => {
-            container_exec("container", container_id, args)
-        }
-        TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            ssh_command(ssh, args)
-        }
-        TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => {
-            let mut remote = vec![
-                "podman".into(),
-                "exec".into(),
-                "-i".into(),
-                container_id.clone(),
-            ];
-            remote.extend(args);
-            ssh_command(ssh, remote)
-        }
-    };
-    Ok(command.purpose("export target checkpoint"))
+    crate::hel_targets::command_on_locator(locator, session_id, args, "export target checkpoint")
 }
 
 pub fn restore_command(
@@ -2272,35 +2216,7 @@ pub fn restore_command(
         "--spec".into(),
         spec_path.into(),
     ];
-    let command = match locator {
-        TargetLocator::LocalBare { .. } => {
-            let mut args = args;
-            CommandSpec::new(args.remove(0), args)
-        }
-        TargetLocator::LocalPodman { container_id, .. } => {
-            container_exec("podman", container_id, args)
-        }
-        TargetLocator::LocalDocker { container_id } => container_exec("docker", container_id, args),
-        TargetLocator::AppleContainer { container_id } => {
-            container_exec("container", container_id, args)
-        }
-        TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            ssh_command(ssh, args)
-        }
-        TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => {
-            let mut remote = vec![
-                "podman".into(),
-                "exec".into(),
-                "-i".into(),
-                container_id.clone(),
-            ];
-            remote.extend(args);
-            ssh_command(ssh, remote)
-        }
-    };
-    Ok(command.purpose("restore target checkpoint"))
+    crate::hel_targets::command_on_locator(locator, session_id, args, "restore target checkpoint")
 }
 
 #[derive(Debug, Clone)]
@@ -2352,9 +2268,21 @@ impl CheckpointTransfer<'_> {
             .prefix(".hel-checkpoint-")
             .tempfile_in(parent)?;
         let path = temporary.path().to_path_buf();
-        transfer_plan(self.locator, self.session_id, self.remote_archive, &path)?
-            .execute(executor)
-            .context("download target checkpoint")?;
+        let transfer_result =
+            transfer_plan(self.locator, self.session_id, self.remote_archive, &path)?
+                .execute(executor)
+                .context("download target checkpoint");
+        let staging_cleanup_result =
+            cleanup_transfer_staging(self.locator, self.session_id, executor);
+        if let Err(error) = transfer_result {
+            return match staging_cleanup_result {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(error.context(format!(
+                    "clean target checkpoint host staging also failed: {cleanup:#}"
+                ))),
+            };
+        }
+        staging_cleanup_result.context("clean target checkpoint host staging")?;
         let sha256 = checkpoint_sha256(&path).context("hash downloaded checkpoint")?;
         ensure!(
             sha256 == self.expected_sha256,
@@ -2389,6 +2317,36 @@ impl CheckpointTransfer<'_> {
         );
         cleanup_plan(self.locator, self.session_id, self.remote_archive)
     }
+}
+
+/// SSH container transfers use a host-side copy because `scp` cannot address
+/// a path inside the container. The copy is disposable and must be removed as
+/// soon as it has been downloaded; the in-container archive remains gated by
+/// [`CheckpointTransfer::cleanup_plan`] until the local copy is verified.
+fn cleanup_transfer_staging(
+    locator: &TargetLocator,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    let command = match locator {
+        TargetLocator::SshPodman { ssh, .. } | TargetLocator::SshDocker { ssh, .. } => Some(
+            ssh_command(ssh, ["rm", "-f", "--", &remote_staging_path(session_id)?])
+                .purpose("remove remote checkpoint staging"),
+        ),
+        _ => None,
+    };
+    if let Some(command) = command {
+        let output = executor.execute(&command)?;
+        if output.status != 0 {
+            bail!(
+                "{} failed with status {}: {}",
+                command.purpose,
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn checkpoint_sha256(path: &Path) -> Result<String> {
@@ -2451,7 +2409,8 @@ pub fn transfer_plan(
         }
         TargetLocator::SshPodman {
             ssh, container_id, ..
-        } => {
+        }
+        | TargetLocator::SshDocker { ssh, container_id } => {
             let staging = remote_staging_path(session_id)?;
             vec![
                 ssh_command(ssh, ["mkdir", "-p", ".local/share/hel/transfers"])
@@ -2459,20 +2418,20 @@ pub fn transfer_plan(
                 ssh_command(
                     ssh,
                     [
-                        "podman",
+                        locator.container_engine().expect("remote container"),
                         "cp",
                         &format!("{container_id}:{remote_archive}"),
                         &staging,
                     ],
                 )
-                .purpose("stage remote Podman checkpoint"),
+                .purpose("stage remote container checkpoint"),
             ]
         }
     };
-    if let TargetLocator::SshPodman { ssh, .. } = locator {
+    if let TargetLocator::SshPodman { ssh, .. } | TargetLocator::SshDocker { ssh, .. } = locator {
         commands.push(
             scp_command(ssh, &remote_staging_path(session_id)?, &local)
-                .purpose("download remote Podman checkpoint over SSH"),
+                .purpose("download remote container checkpoint over SSH"),
         );
     }
     Ok(CommandPlan {
@@ -2509,10 +2468,19 @@ fn cleanup_plan(locator: &TargetLocator, session_id: &str, remote: &str) -> Resu
         }
         TargetLocator::SshPodman {
             ssh, container_id, ..
-        } => vec![
+        }
+        | TargetLocator::SshDocker { ssh, container_id } => vec![
             ssh_command(
                 ssh,
-                ["podman", "exec", container_id, "rm", "-f", "--", remote],
+                [
+                    locator.container_engine().expect("remote container"),
+                    "exec",
+                    container_id,
+                    "rm",
+                    "-f",
+                    "--",
+                    remote,
+                ],
             ),
             ssh_command(ssh, ["rm", "-f", "--", &remote_staging_path(session_id)?]),
         ],
@@ -4365,6 +4333,69 @@ mod tests {
         }
     }
 
+    struct SshDockerTransferExecutor {
+        archive: Vec<u8>,
+        commands: RefCell<Vec<CommandSpec>>,
+        fail_download: bool,
+        fail_staging_cleanup: bool,
+    }
+
+    impl SshDockerTransferExecutor {
+        fn new(archive: Vec<u8>) -> Self {
+            Self {
+                archive,
+                commands: RefCell::new(Vec::new()),
+                fail_download: false,
+                fail_staging_cleanup: false,
+            }
+        }
+    }
+
+    impl CommandExecutor for SshDockerTransferExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.borrow_mut().push(command.clone());
+            let remote = command.args.last().map(String::as_str).unwrap_or_default();
+            if command.program == "scp" {
+                if self.fail_download {
+                    return Ok(CommandOutput {
+                        status: 23,
+                        stdout: Vec::new(),
+                        stderr: b"scp unavailable".to_vec(),
+                    });
+                }
+                fs::write(
+                    command
+                        .args
+                        .last()
+                        .context("missing local checkpoint path")?,
+                    &self.archive,
+                )?;
+            }
+            if command.program == "ssh"
+                && remote.contains("'rm' '-f' '--' '.local/share/hel/transfers/")
+                && self.fail_staging_cleanup
+            {
+                return Ok(CommandOutput {
+                    status: 19,
+                    stdout: Vec::new(),
+                    stderr: b"staging cleanup unavailable".to_vec(),
+                });
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn ssh_docker_locator() -> TargetLocator {
+        TargetLocator::SshDocker {
+            ssh: ssh(),
+            container_id: crate::hel_targets::resource_name(SESSION).unwrap(),
+        }
+    }
+
     #[test]
     fn export_and_transfer_only_gate_after_local_verification() {
         let temp = tempfile::tempdir().unwrap();
@@ -4531,6 +4562,82 @@ mod tests {
 
         assert!(format!("{error:#}").contains("checkpoint checksums differ"));
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn ssh_docker_failed_hash_cleans_host_staging_but_preserves_container_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("controller/session.hel.zip");
+        let executor = SshDockerTransferExecutor::new(vec![b'x'; 128 * 1024]);
+        let error = CheckpointTransfer {
+            locator: &ssh_docker_locator(),
+            session_id: SESSION,
+            remote_archive: "/var/lib/hel/workers/source.hel.zip",
+            destination: &destination,
+            expected_sha256: &"0".repeat(64),
+            expected_event_frontier: 1,
+            expected_event_frontier_digest: &"a".repeat(64),
+        }
+        .execute(&executor)
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("checkpoint checksums differ"));
+        assert!(!destination.exists());
+        let commands = executor.commands.borrow();
+        assert!(commands.iter().any(|command| {
+            command.program == "ssh"
+                && command.args.last().is_some_and(|remote| {
+                    remote.contains("'rm' '-f' '--' '.local/share/hel/transfers/")
+                })
+        }));
+        assert!(!commands.iter().any(|command| {
+            command
+                .args
+                .last()
+                .is_some_and(|remote| remote.contains("'docker' 'exec'"))
+        }));
+    }
+
+    #[test]
+    fn ssh_docker_download_and_staging_cleanup_errors_keep_the_original_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("controller/session.hel.zip");
+        let mut executor = SshDockerTransferExecutor::new(vec![b'x'; 128 * 1024]);
+        executor.fail_download = true;
+        executor.fail_staging_cleanup = true;
+        let error = CheckpointTransfer {
+            locator: &ssh_docker_locator(),
+            session_id: SESSION,
+            remote_archive: "/var/lib/hel/workers/source.hel.zip",
+            destination: &destination,
+            expected_sha256: &"0".repeat(64),
+            expected_event_frontier: 1,
+            expected_event_frontier_digest: &"a".repeat(64),
+        }
+        .execute(&executor)
+        .unwrap_err();
+
+        let text = format!("{error:#}");
+        assert!(text.contains("download target checkpoint"), "{text}");
+        assert!(text.contains("scp unavailable"), "{text}");
+        assert!(
+            text.contains("clean target checkpoint host staging also failed")
+                && text.contains("staging cleanup unavailable"),
+            "{text}"
+        );
+        let commands = executor.commands.borrow();
+        assert!(commands.iter().any(|command| {
+            command.program == "ssh"
+                && command.args.last().is_some_and(|remote| {
+                    remote.contains("'rm' '-f' '--' '.local/share/hel/transfers/")
+                })
+        }));
+        assert!(!commands.iter().any(|command| {
+            command
+                .args
+                .last()
+                .is_some_and(|remote| remote.contains("'docker' 'exec'"))
+        }));
     }
 
     #[test]

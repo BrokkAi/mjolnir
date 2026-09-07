@@ -881,7 +881,8 @@ fn template_architecture(template: &hel::hel_config::TargetTemplate) -> Option<&
         Template::LocalPodman { container }
         | Template::LocalDocker { container }
         | Template::AppleContainer { container }
-        | Template::SshPodman { container, .. } => container.platform.as_deref()?,
+        | Template::SshPodman { container, .. }
+        | Template::SshDocker { container, .. } => container.platform.as_deref()?,
         Template::LocalBare | Template::SshBare { .. } | Template::AwsEc2 { .. } => return None,
     };
     // Platform strings appear as "linux/arm64", "arm64", or "linux/arm64/v8".
@@ -908,7 +909,10 @@ fn preflight_architectures(template: &hel::hel_config::TargetTemplate) -> Vec<&'
         | Template::LocalPodman { .. }
         | Template::LocalDocker { .. }
         | Template::AppleContainer { .. } => vec![std::env::consts::ARCH],
-        Template::SshBare { .. } | Template::SshPodman { .. } | Template::AwsEc2 { .. } => {
+        Template::SshBare { .. }
+        | Template::SshPodman { .. }
+        | Template::SshDocker { .. }
+        | Template::AwsEc2 { .. } => {
             vec!["x86_64", "aarch64"]
         }
     }
@@ -985,6 +989,9 @@ fn target_architecture(
         hel_targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         } => ssh_command_spec(ssh, ["podman", "exec", container_id, "uname", "-m"]),
+        hel_targets::TargetLocator::SshDocker { ssh, container_id } => {
+            ssh_command_spec(ssh, ["docker", "exec", container_id, "uname", "-m"])
+        }
     }
     .purpose("detect target architecture");
     let output = execute_checked(executor, command)?;
@@ -1054,7 +1061,8 @@ fn workspace_paths(
         hel_targets::TargetLocator::LocalPodman { .. }
         | hel_targets::TargetLocator::LocalDocker { .. }
         | hel_targets::TargetLocator::AppleContainer { .. }
-        | hel_targets::TargetLocator::SshPodman { .. } => "/workspace".to_string(),
+        | hel_targets::TargetLocator::SshPodman { .. }
+        | hel_targets::TargetLocator::SshDocker { .. } => "/workspace".to_string(),
         hel_targets::TargetLocator::AwsEc2 { workspace, .. }
         | hel_targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
     };
@@ -1236,7 +1244,8 @@ fn append_hel_target_environment(
         hel_targets::TargetLocator::LocalPodman { .. }
         | hel_targets::TargetLocator::LocalDocker { .. }
         | hel_targets::TargetLocator::AppleContainer { .. }
-        | hel_targets::TargetLocator::SshPodman { .. } => MJ_CONTAINER_ENVIRONMENT.to_owned(),
+        | hel_targets::TargetLocator::SshPodman { .. }
+        | hel_targets::TargetLocator::SshDocker { .. } => MJ_CONTAINER_ENVIRONMENT.to_owned(),
         hel_targets::TargetLocator::AwsEc2 { workspace, .. } => format!(
             "## Mjolnir disposable environment\n\nThis session runs on a disposable Mjolnir EC2 instance. When the session closes, Mjolnir checkpoints everything in project workspace directories under `$HOME/{workspace}`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then terminates the instance.\n\nEverything outside `$HOME/{workspace}`, including installed packages, the rest of `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n"
         ),
@@ -1466,7 +1475,13 @@ fn install_worker_files(
         }
         hel_targets::TargetLocator::SshPodman {
             ssh, container_id, ..
-        } => {
+        }
+        | hel_targets::TargetLocator::SshDocker { ssh, container_id } => {
+            let engine = match locator {
+                hel_targets::TargetLocator::SshPodman { .. } => "podman",
+                hel_targets::TargetLocator::SshDocker { .. } => "docker",
+                _ => unreachable!("matched remote container target"),
+            };
             // The worker binary is 10-30 MB and identical across sessions, so
             // keep it in a content-addressed cache on the remote host and copy
             // it over the wire only once per unique binary.
@@ -1495,7 +1510,7 @@ fn install_worker_files(
                 execute_checked(
                     executor,
                     scp_command_spec(ssh, worker_binary, &partial, false)
-                        .purpose("upload remote Podman worker binary"),
+                        .purpose("upload remote container worker binary"),
                 )?;
                 // Rename within the cache directory so the final path only
                 // ever names a complete upload.
@@ -1518,17 +1533,17 @@ fn install_worker_files(
                 execute_checked(
                     executor,
                     scp_command_spec(ssh, source, &format!("{upload}/{name}"), false)
-                        .purpose("upload remote Podman worker file"),
+                        .purpose("upload remote container worker file"),
                 )?;
             }
             execute_checked(
                 executor,
                 scp_command_spec(ssh, profile_stage, &format!("{upload}/profile"), true)
-                    .purpose("upload remote Podman profile allowlist"),
+                    .purpose("upload remote container profile allowlist"),
             )?;
             let remote = [
                 vec![
-                    "podman".into(),
+                    engine.into(),
                     "exec".into(),
                     container_id.clone(),
                     "mkdir".into(),
@@ -1537,31 +1552,31 @@ fn install_worker_files(
                     profile_home.into(),
                 ],
                 vec![
-                    "podman".into(),
+                    engine.into(),
                     "cp".into(),
                     cached_worker.clone(),
                     format!("{container_id}:{worker_root}/hel"),
                 ],
                 vec![
-                    "podman".into(),
+                    engine.into(),
                     "cp".into(),
                     format!("{upload}/launch.json"),
                     format!("{container_id}:{worker_root}/launch.json"),
                 ],
                 vec![
-                    "podman".into(),
+                    engine.into(),
                     "cp".into(),
                     format!("{upload}/ownership.json"),
                     format!("{container_id}:{worker_root}/ownership.json"),
                 ],
                 vec![
-                    "podman".into(),
+                    engine.into(),
                     "cp".into(),
                     format!("{upload}/profile/."),
                     format!("{container_id}:{profile_home}"),
                 ],
                 vec![
-                    "podman".into(),
+                    engine.into(),
                     "exec".into(),
                     container_id.clone(),
                     "chmod".into(),
@@ -1569,7 +1584,7 @@ fn install_worker_files(
                     format!("{worker_root}/hel"),
                 ],
                 vec![
-                    "podman".into(),
+                    engine.into(),
                     "exec".into(),
                     container_id.clone(),
                     "chmod".into(),
@@ -1582,7 +1597,7 @@ fn install_worker_files(
             for args in remote {
                 execute_checked(
                     executor,
-                    ssh_command_spec(ssh, args).purpose("install remote Podman worker"),
+                    ssh_command_spec(ssh, args).purpose("install remote container worker"),
                 )?;
             }
         }
@@ -1901,7 +1916,13 @@ fn installed_worker_binary_replacement_plan(
         ],
         hel_targets::TargetLocator::SshPodman {
             ssh, container_id, ..
-        } => {
+        }
+        | hel_targets::TargetLocator::SshDocker { ssh, container_id } => {
+            let engine = match locator {
+                hel_targets::TargetLocator::SshPodman { .. } => "podman",
+                hel_targets::TargetLocator::SshDocker { .. } => "docker",
+                _ => unreachable!("matched remote container target"),
+            };
             let upload = format!(".cache/mjolnir/uploads/{session_id}-hel.next");
             vec![
                 ssh_command_spec(ssh, ["mkdir", "-p", ".cache/mjolnir/uploads"])
@@ -1910,13 +1931,13 @@ fn installed_worker_binary_replacement_plan(
                     .purpose("stage replacement Mjolnir worker"),
                 ssh_command_spec(
                     ssh,
-                    ["podman", "cp", &upload, &format!("{container_id}:{staged}")],
+                    [engine, "cp", &upload, &format!("{container_id}:{staged}")],
                 )
                 .purpose("stage replacement Mjolnir worker"),
                 ssh_command_spec(
                     ssh,
                     [
-                        "podman",
+                        engine,
                         "exec",
                         container_id,
                         "mv",
@@ -1929,7 +1950,7 @@ fn installed_worker_binary_replacement_plan(
                 .purpose("replace installed Mjolnir worker"),
                 ssh_command_spec(
                     ssh,
-                    ["podman", "exec", container_id, "chmod", "700", &installed],
+                    [engine, "exec", container_id, "chmod", "700", &installed],
                 )
                 .purpose("make replaced Mjolnir worker executable"),
                 ssh_command_spec(ssh, ["rm", "-f", "--", &upload])
@@ -1966,6 +1987,9 @@ fn installed_file_digest_command(
         hel_targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sha256sum", path]),
+        hel_targets::TargetLocator::SshDocker { ssh, container_id } => {
+            ssh_command_spec(ssh, ["docker", "exec", container_id, "sha256sum", path])
+        }
     }
     .purpose(purpose)
 }
@@ -2005,6 +2029,10 @@ fn worker_launch_refresh_plan(
             ssh,
             ["podman", "exec", "-i", container_id, "sh", "-c", &script],
         ),
+        hel_targets::TargetLocator::SshDocker { ssh, container_id } => ssh_command_spec(
+            ssh,
+            ["docker", "exec", "-i", container_id, "sh", "-c", &script],
+        ),
     }
     .purpose("replace stale Mjolnir worker launch config")
     .with_sensitive_stdin(body);
@@ -2039,6 +2067,7 @@ fn worker_binary_refresh_plan(
         hel_targets::TargetLocator::AwsEc2 { .. }
             | hel_targets::TargetLocator::SshBare { .. }
             | hel_targets::TargetLocator::SshPodman { .. }
+            | hel_targets::TargetLocator::SshDocker { .. }
     ) {
         return Ok(Some(WorkerBinaryRefresh::Remote(
             RemoteWorkerBinaryRefresh {
@@ -2181,6 +2210,9 @@ fn stop_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str) 
         hel_targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
+        hel_targets::TargetLocator::SshDocker { ssh, container_id } => {
+            ssh_command_spec(ssh, ["docker", "exec", container_id, "sh", "-c", &script])
+        }
     }
     .purpose("stop Mjolnir worker daemon")
 }
@@ -2205,6 +2237,9 @@ fn worker_liveness_command(locator: &hel_targets::TargetLocator, worker_root: &s
         hel_targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
+        hel_targets::TargetLocator::SshDocker { ssh, container_id } => {
+            ssh_command_spec(ssh, ["docker", "exec", container_id, "sh", "-c", &script])
+        }
     }
     .purpose("probe Mjolnir worker daemon liveness")
 }
@@ -2292,6 +2327,18 @@ fn start_worker_command(locator: &hel_targets::TargetLocator, worker_root: &str)
                 &exec_script,
             ],
         ),
+        hel_targets::TargetLocator::SshDocker { ssh, container_id } => ssh_command_spec(
+            ssh,
+            [
+                "docker",
+                "exec",
+                "--detach",
+                container_id,
+                "sh",
+                "-c",
+                &exec_script,
+            ],
+        ),
     }
     .purpose("start detached Mjolnir worker")
     // Everything before this moves data into the target and reports as Sync.
@@ -2347,6 +2394,10 @@ fn worker_binary_probe_failure(
         } => ssh_command_spec(
             ssh,
             ["podman", "exec", container_id, binary.as_str(), "--version"],
+        ),
+        hel_targets::TargetLocator::SshDocker { ssh, container_id } => ssh_command_spec(
+            ssh,
+            ["docker", "exec", container_id, binary.as_str(), "--version"],
         ),
     }
     .purpose("probe installed worker binary");
@@ -2404,6 +2455,9 @@ pub(super) fn worker_last_words(
         hel_targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
+        hel_targets::TargetLocator::SshDocker { ssh, container_id } => {
+            ssh_command_spec(ssh, ["docker", "exec", container_id, "sh", "-c", &script])
+        }
     }
     .purpose("collect worker last words");
     let output = match executor.execute(&command) {
@@ -3250,6 +3304,49 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn ssh_docker_install_uses_docker_for_remote_container_operations() {
+        let mut fixture = podman_install_fixture();
+        fixture.locator = hel_targets::TargetLocator::SshDocker {
+            ssh: SshTarget {
+                destination: "user@example.test".into(),
+                ssh_args: Vec::new(),
+            },
+            container_id: "container-1".into(),
+        };
+        let executor = PodmanInstallExecutor {
+            commands: RefCell::new(Vec::new()),
+            worker_cached: true,
+        };
+        install_worker_files(
+            &executor,
+            &fixture.locator,
+            "0123456789abcdef0123456789abcdef",
+            "/workspace/.hel/worker",
+            "/workspace/.hel/profile",
+            &fixture.worker_binary,
+            &fixture.launch_config,
+            &fixture.ownership,
+            &fixture.profile_stage,
+        )
+        .unwrap();
+
+        let lines = rendered(&executor.commands.borrow());
+        assert!(
+            lines.iter().any(|line| line.contains("'docker' 'cp'")),
+            "expected Docker to copy the cached worker, got {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("'docker' 'exec'")),
+            "expected Docker to prepare the worker directories, got {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("'podman'")),
+            "Docker installation accidentally used Podman: {lines:#?}"
+        );
+    }
+
     #[test]
     fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         struct RecordingExecutor {

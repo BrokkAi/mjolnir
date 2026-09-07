@@ -925,12 +925,36 @@ pub struct DockerPreflight {
 /// Image and OverlayFS support are exercised by the setup/doctor smoke test;
 /// this fast probe runs before every launch and never pulls an image.
 pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<DockerPreflight> {
+    verify_docker(None, executor)
+}
+
+pub fn verify_ssh_docker(
+    ssh: &SshTarget,
+    executor: &impl CommandExecutor,
+) -> Result<DockerPreflight> {
+    validate_ssh(ssh)?;
+    verify_docker(Some(ssh), executor).with_context(|| {
+        format!(
+            "Docker preflight on {} failed; run docker info on that SSH host",
+            ssh.destination
+        )
+    })
+}
+
+fn verify_docker(
+    ssh: Option<&SshTarget>,
+    executor: &impl CommandExecutor,
+) -> Result<DockerPreflight> {
     let command = CommandSpec::new(
         "docker",
         ["version", "--format", "{{.Server.Version}} {{.Server.Os}}"],
     )
     .purpose("check Docker daemon")
     .stage(ProvisionStage::Provisioning);
+    let command = match ssh {
+        Some(ssh) => command_over_ssh(command, ssh),
+        None => command,
+    };
     let output = executor
         .execute(&command)
         .context("Docker preflight failed: run `docker info` as the user running Mjolnir")?;
@@ -1239,11 +1263,11 @@ impl CommandPlan {
                 ];
                 command.args.extend(args);
             }
-            TargetTemplate::SshPodman { .. } => {
+            TargetTemplate::SshPodman { .. } | TargetTemplate::SshDocker { .. } => {
                 let remote = command
                     .args
                     .last_mut()
-                    .context("remote Podman command has no SSH command argument")?;
+                    .context("remote container command has no SSH command argument")?;
                 *remote = format!("{read_and_export} exec {remote}");
             }
             TargetTemplate::LocalBare
@@ -1503,13 +1527,14 @@ pub enum ImageHost {
     LocalPodman,
     LocalDocker,
     SshPodman(SshTarget),
+    SshDocker(SshTarget),
 }
 
 impl ImageHost {
     const fn engine(&self) -> &'static str {
         match self {
             Self::LocalPodman | Self::SshPodman(_) => "podman",
-            Self::LocalDocker => "docker",
+            Self::LocalDocker | Self::SshDocker(_) => "docker",
         }
     }
 
@@ -1519,6 +1544,7 @@ impl ImageHost {
             Self::LocalPodman => "local podman".to_owned(),
             Self::LocalDocker => "local docker".to_owned(),
             Self::SshPodman(ssh) => format!("podman on {}", ssh.destination),
+            Self::SshDocker(ssh) => format!("docker on {}", ssh.destination),
         }
     }
 
@@ -1527,7 +1553,7 @@ impl ImageHost {
             Self::LocalPodman | Self::LocalDocker => {
                 CommandSpec::new(args[0].clone(), args[1..].iter().cloned())
             }
-            Self::SshPodman(ssh) => ssh_command_owned(ssh, args),
+            Self::SshPodman(ssh) | Self::SshDocker(ssh) => ssh_command_owned(ssh, args),
         }
         .purpose(purpose)
     }
@@ -1649,6 +1675,10 @@ pub enum TargetTemplate {
         ssh: SshTarget,
         container: ContainerTemplate,
     },
+    SshDocker {
+        ssh: SshTarget,
+        container: ContainerTemplate,
+    },
 }
 
 fn default_ssh_prefix() -> String {
@@ -1704,6 +1734,32 @@ pub enum TargetLocator {
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
     },
+    SshDocker {
+        ssh: SshTarget,
+        container_id: String,
+    },
+}
+
+impl TargetTemplate {
+    pub const fn container_engine(&self) -> Option<&'static str> {
+        match self {
+            Self::LocalPodman(_) | Self::SshPodman { .. } => Some("podman"),
+            Self::LocalDocker(_) | Self::SshDocker { .. } => Some("docker"),
+            Self::AppleContainer(_) => Some("container"),
+            _ => None,
+        }
+    }
+}
+
+impl TargetLocator {
+    pub const fn container_engine(&self) -> Option<&'static str> {
+        match self {
+            Self::LocalPodman { .. } | Self::SshPodman { .. } => Some("podman"),
+            Self::LocalDocker { .. } | Self::SshDocker { .. } => Some("docker"),
+            Self::AppleContainer { .. } => Some("container"),
+            _ => None,
+        }
+    }
 }
 
 /// Commands and identity needed to bring a stopped managed target back online.
@@ -1776,7 +1832,8 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
         TargetTemplate::LocalPodman(_)
         | TargetTemplate::LocalDocker(_)
         | TargetTemplate::AppleContainer(_)
-        | TargetTemplate::SshPodman { .. } => Ok(CONTAINER_WORKSPACE.to_owned()),
+        | TargetTemplate::SshPodman { .. }
+        | TargetTemplate::SshDocker { .. } => Ok(CONTAINER_WORKSPACE.to_owned()),
         TargetTemplate::AwsEc2(_) => Ok(format!(".local/share/hel/workspaces/{session_id}")),
         TargetTemplate::SshBare {
             workspace_prefix, ..
@@ -1810,9 +1867,25 @@ pub fn provision_plan(
                 | TargetTemplate::LocalDocker(_)
                 | TargetTemplate::AppleContainer(_)
                 | TargetTemplate::SshPodman { .. }
+                | TargetTemplate::SshDocker { .. }
         )
     {
         bail!("additional mounts require a container-backed target");
+    }
+    if let TargetTemplate::SshDocker { ssh, container } = template {
+        validate_ssh(ssh)?;
+        let mut plan = provision_plan(
+            &TargetTemplate::LocalDocker(container.clone()),
+            session_id,
+            bundle,
+            additional_mounts,
+        )?;
+        plan.commands = plan
+            .commands
+            .into_iter()
+            .map(|command| command_over_ssh(command, ssh))
+            .collect();
+        return Ok(plan);
     }
     let name = resource_name(session_id)?;
     let mut commands = Vec::new();
@@ -1939,6 +2012,7 @@ pub fn provision_plan(
                 ssh_command_owned(ssh, args)
             }));
         }
+        TargetTemplate::SshDocker { .. } => unreachable!("handled above"),
         TargetTemplate::SshPodman { ssh, container } => {
             validate_ssh(ssh)?;
             validate_container_template(container)?;
@@ -1950,7 +2024,8 @@ pub fn provision_plan(
                 Some(ssh),
             )?);
             commands.extend(
-                install_git_plan(ExecutionBoundary::SshPodman {
+                install_git_plan(ExecutionBoundary::SshContainer {
+                    engine: "podman",
                     ssh,
                     container_id: &name,
                 })
@@ -2010,7 +2085,11 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
             validate_ssh(ssh)?;
             ("podman", container, ExecutionBoundary::Ssh(ssh))
         }
-        _ => bail!("setup smoke tests require a local container or ssh-podman target"),
+        TargetTemplate::SshDocker { ssh, container } => {
+            validate_ssh(ssh)?;
+            ("docker", container, ExecutionBoundary::Ssh(ssh))
+        }
+        _ => bail!("setup smoke tests require a local or SSH container target"),
     };
     validate_container_template(container)?;
 
@@ -2057,6 +2136,9 @@ pub fn run_setup_smoke_test(
     if let TargetTemplate::LocalDocker(container) = template {
         return run_docker_overlay_smoke_test(container, smoke_id, executor);
     }
+    if let TargetTemplate::SshDocker { ssh, container } = template {
+        return run_ssh_docker_overlay_smoke_test(ssh, container, smoke_id, executor);
+    }
     let plan = setup_smoke_plan(template, smoke_id)?;
     execute_checked(executor, &plan.commands[0])?;
     let smoke_result = execute_checked(executor, &plan.commands[1]);
@@ -2064,6 +2146,84 @@ pub fn run_setup_smoke_test(
     smoke_result?;
     cleanup_result
 }
+
+fn run_ssh_docker_overlay_smoke_test(
+    ssh: &SshTarget,
+    container: &ContainerTemplate,
+    smoke_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    validate_ssh(ssh)?;
+    validate_container_template(container)?;
+    let name = resource_name(smoke_id)?;
+    let prepare = ssh_command(ssh, ["sh", "-c",
+        "set -eu; root=$(mktemp -d /tmp/mj-docker-overlay-smoke.XXXXXXXXXX); printf 'lower\\n' >\"$root/original.txt\"; printf '%s\\n' \"$root\""])
+        .purpose("create remote Docker OverlayFS smoke source");
+    let output = executor.execute(&prepare)?;
+    ensure!(
+        output.status == 0,
+        "{} failed on {}: {}",
+        prepare.purpose,
+        ssh.destination,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lower = String::from_utf8(output.stdout).context("decode remote smoke directory")?;
+    let lower = lower.trim();
+    ensure!(
+        lower.starts_with("/tmp/mj-docker-overlay-smoke.")
+            && !lower.contains(['\n', '\r'])
+            && !lower.contains("/../"),
+        "unexpected remote smoke directory {lower:?}"
+    );
+    let mount = AdditionalMount {
+        source: PathBuf::from(lower),
+        destination: PathBuf::from("/mnt/hel-overlay-smoke"),
+        read_only: false,
+    };
+    let result = (|| {
+        let create = command_over_ssh(
+            docker_container_run(container, &name, smoke_id, &[mount])?,
+            ssh,
+        );
+        execute_checked(executor, &create)?;
+        let probe = command_over_ssh(
+            container_exec("docker", &name, ["sh", "-c", DOCKER_OVERLAY_SMOKE_PROBE]),
+            ssh,
+        )
+        .purpose("verify remote Docker OverlayFS copy-on-write attachment");
+        execute_checked(executor, &probe)?;
+        execute_checked(executor, &ssh_command(ssh, ["sh", "-c",
+            "test \"$(cat \"$1/original.txt\")\" = lower && test ! -e \"$1/container-created.txt\"", "mj-check-smoke-source", lower])
+            .purpose("verify original remote attachment is unchanged"))
+    })();
+    let cleanup = (|| {
+        let plan = close_plan(
+            &TargetLocator::SshDocker {
+                ssh: ssh.clone(),
+                container_id: name,
+            },
+            smoke_id,
+        )?;
+        for command in &plan.commands {
+            execute_checked(executor, command)?;
+        }
+        // Never remove a lower directory until its container and volumes are gone.
+        execute_checked(
+            executor,
+            &ssh_command(ssh, ["rm", "-rf", "--", lower])
+                .purpose("remove remote Docker smoke source"),
+        )
+    })();
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("remote smoke cleanup also failed: {cleanup:#}")))
+        }
+    }
+}
+
+const DOCKER_OVERLAY_SMOKE_PROBE: &str = "test \"$(cat /mnt/hel-overlay-smoke/original.txt)\" = lower && printf 'changed\\n' >/mnt/hel-overlay-smoke/original.txt && printf 'created\\n' >/mnt/hel-overlay-smoke/container-created.txt";
 
 fn run_docker_overlay_smoke_test(
     container: &ContainerTemplate,
@@ -2086,16 +2246,8 @@ fn run_docker_overlay_smoke_test(
     };
     let create = docker_container_run(container, &name, smoke_id, &[mount])?
         .purpose("create disposable Docker OverlayFS smoke container");
-    let probe = container_exec(
-        "docker",
-        &name,
-        [
-            "sh",
-            "-c",
-            "test \"$(cat /mnt/hel-overlay-smoke/original.txt)\" = lower && printf 'changed\\n' >/mnt/hel-overlay-smoke/original.txt && printf 'created\\n' >/mnt/hel-overlay-smoke/container-created.txt",
-        ],
-    )
-    .purpose("verify Docker OverlayFS copy-on-write attachment");
+    let probe = container_exec("docker", &name, ["sh", "-c", DOCKER_OVERLAY_SMOKE_PROBE])
+        .purpose("verify Docker OverlayFS copy-on-write attachment");
     let cleanup = close_plan(&TargetLocator::LocalDocker { container_id: name }, smoke_id)?
         .commands
         .into_iter()
@@ -2186,10 +2338,11 @@ pub fn reconnect_plan(locator: &TargetLocator, session_id: &str) -> Result<Comma
         }
         TargetLocator::SshPodman {
             ssh, container_id, ..
-        } => ssh_command(
+        }
+        | TargetLocator::SshDocker { ssh, container_id } => ssh_command(
             ssh,
             [
-                "podman",
+                locator.container_engine().expect("remote container"),
                 "exec",
                 "-i",
                 container_id,
@@ -2218,6 +2371,21 @@ pub fn target_recovery_plan(
     session_id: &str,
 ) -> Result<Option<TargetRecoveryPlan>> {
     verify_locator(locator, session_id)?;
+    if let TargetLocator::SshDocker { ssh, container_id } = locator {
+        let local = target_recovery_plan(
+            &TargetLocator::LocalDocker {
+                container_id: container_id.clone(),
+            },
+            session_id,
+        )?;
+        return Ok(local.map(|plan| TargetRecoveryPlan {
+            exists: command_over_ssh(plan.exists, ssh),
+            inspect: command_over_ssh(plan.inspect, ssh),
+            start: command_over_ssh(plan.start, ssh),
+            session_id: plan.session_id,
+        }));
+    }
+
     let (exists, inspect, start) = match locator {
         TargetLocator::LocalPodman { container_id, .. } => (
             CommandSpec::new("podman", ["container", "exists", container_id])
@@ -2227,6 +2395,7 @@ pub fn target_recovery_plan(
             CommandSpec::new("podman", ["start", container_id])
                 .purpose("start stopped Mjolnir session container"),
         ),
+        TargetLocator::SshDocker { .. } => unreachable!("handled above"),
         TargetLocator::LocalDocker { container_id } => (
             CommandSpec::new(
                 "sh",
@@ -2399,9 +2568,13 @@ pub fn command_on_locator(
         }
         TargetLocator::SshPodman {
             ssh, container_id, ..
-        } => {
+        }
+        | TargetLocator::SshDocker { ssh, container_id } => {
             let mut remote = vec![
-                "podman".to_owned(),
+                locator
+                    .container_engine()
+                    .expect("remote container")
+                    .to_owned(),
                 "exec".to_owned(),
                 "-i".to_owned(),
                 container_id.to_owned(),
@@ -2540,11 +2713,12 @@ pub fn resource_probe(locator: &TargetLocator, session_id: &str) -> Result<Sessi
         ),
         TargetLocator::SshPodman {
             ssh, container_id, ..
-        } => (
+        }
+        | TargetLocator::SshDocker { ssh, container_id } => (
             ssh_command(
                 ssh,
                 [
-                    "podman",
+                    locator.container_engine().expect("remote container"),
                     "exec",
                     container_id,
                     "sh",
@@ -2552,12 +2726,12 @@ pub fn resource_probe(locator: &TargetLocator, session_id: &str) -> Result<Sessi
                     CGROUP_RESOURCE_USAGE_SCRIPT,
                 ],
             )
-            .purpose("sample remote Podman container resources"),
+            .purpose("sample remote container resources"),
             Some(
                 ssh_command(
                     ssh,
                     [
-                        "podman",
+                        locator.container_engine().expect("remote container"),
                         "container",
                         "inspect",
                         "--size",
@@ -2566,7 +2740,7 @@ pub fn resource_probe(locator: &TargetLocator, session_id: &str) -> Result<Sessi
                         container_id,
                     ],
                 )
-                .purpose("sample remote Podman container writable disk"),
+                .purpose("sample remote container writable disk"),
             ),
         ),
         TargetLocator::AwsEc2 { ssh, workspace, .. } => {
@@ -2767,7 +2941,8 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
         TargetLocator::LocalPodman { .. }
         | TargetLocator::LocalDocker { .. }
         | TargetLocator::AppleContainer { .. }
-        | TargetLocator::SshPodman { .. } => format!("/var/lib/hel/workers/{session_id}"),
+        | TargetLocator::SshPodman { .. }
+        | TargetLocator::SshDocker { .. } => format!("/var/lib/hel/workers/{session_id}"),
         TargetLocator::AwsEc2 { .. } | TargetLocator::SshBare { .. } => {
             format!(".local/share/hel/workers/{session_id}")
         }
@@ -2943,12 +3118,30 @@ pub fn clear_relay_state_plan(
         | TargetLocator::LocalDocker { .. }
         | TargetLocator::AppleContainer { .. }
         | TargetLocator::SshPodman { .. }
+        | TargetLocator::SshDocker { .. }
         | TargetLocator::AwsEc2 { .. } => None,
     })
 }
 
 pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
     verify_locator(locator, session_id)?;
+    if let TargetLocator::SshDocker { ssh, container_id } = locator {
+        let local = close_plan(
+            &TargetLocator::LocalDocker {
+                container_id: container_id.clone(),
+            },
+            session_id,
+        )?;
+        return Ok(CommandPlan {
+            description: local.description,
+            commands: local
+                .commands
+                .into_iter()
+                .map(|command| command_over_ssh(command, ssh))
+                .collect(),
+        });
+    }
+
     let session_worker_root = worker_root(locator, session_id)?;
     let session_profile_home = format!(".local/share/hel/profiles/{session_id}");
     if matches!(
@@ -2971,6 +3164,7 @@ pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPl
             )
         }
         TargetLocator::LocalPodman { .. } => unreachable!("handled above"),
+        TargetLocator::SshDocker { .. } => unreachable!("handled above"),
         TargetLocator::LocalDocker { container_id } => {
             let script = r#"status=0
 if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$1" 2>/dev/null); then
@@ -2990,11 +3184,13 @@ if [ "$status" -eq 0 ]; then
         for volume in $volumes; do docker volume rm --force "$volume" || status=$?; done
     fi
 fi
-rm -rf -- "$HOME/.cache/mjolnir/git/sessions/$2"
+if [ "$status" -eq 0 ]; then
+    rm -rf -- "$HOME/.cache/mjolnir/git/sessions/$2" || status=$?
+fi
 if [ "$status" -eq 0 ]; then
     root="$HOME/.cache/mjolnir/docker-overlays/$1"
     if [ "$(cat "$root/.hel-session" 2>/dev/null || true)" = "$2" ]; then
-        case $1 in hel-*) rm -rf -- "$root" ;; *) status=2 ;; esac
+        case $1 in mj-*|hel-*) rm -rf -- "$root" || status=$? ;; *) status=2 ;; esac
     fi
 fi
 exit "$status""#;
@@ -3243,7 +3439,7 @@ pub fn cleanup_target_is_confirmed_absent(
                 .purpose("confirm exact Apple session container is absent"),
             false,
         ),
-        TargetLocator::LocalDocker { container_id } => (
+        TargetLocator::LocalDocker { container_id } | TargetLocator::SshDocker { container_id, .. } => (
             CommandSpec::new(
                 "sh",
                 [
@@ -3273,6 +3469,10 @@ pub fn cleanup_target_is_confirmed_absent(
             true,
         ),
         _ => return Ok(false),
+    };
+    let command = match locator {
+        TargetLocator::SshDocker { ssh, .. } => command_over_ssh(command, ssh),
+        _ => command,
     };
     let output = executor.execute(&command)?;
     if status_is_answer {
@@ -3367,7 +3567,8 @@ pub enum ExecutionBoundary<'a> {
         container_id: &'a str,
     },
     Ssh(&'a SshTarget),
-    SshPodman {
+    SshContainer {
+        engine: &'a str,
         ssh: &'a SshTarget,
         container_id: &'a str,
     },
@@ -3419,7 +3620,7 @@ pub fn bootstrap_probe_plan(
 pub fn install_git_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
     let managed_container = matches!(
         boundary,
-        ExecutionBoundary::Container { .. } | ExecutionBoundary::SshPodman { .. }
+        ExecutionBoundary::Container { .. } | ExecutionBoundary::SshContainer { .. }
     );
     let script = if managed_container {
         "set -eu; if ! command -v git >/dev/null 2>&1 || ! command -v gh >/dev/null 2>&1; then SUDO=''; if [ \"$(id -u)\" != 0 ]; then command -v sudo >/dev/null 2>&1 && sudo -n true || { echo 'Git and GitHub CLI installation requires root or passwordless sudo' >&2; exit 1; }; SUDO='sudo -n'; fi; if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update; $SUDO apt-get install -y git gh ca-certificates curl; elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y git gh ca-certificates curl; elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y git gh ca-certificates curl; elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache git github-cli ca-certificates curl; else echo 'Unsupported package manager; install Git and GitHub CLI in the image' >&2; exit 1; fi; fi; git config --global credential.https://github.com.helper '!gh auth git-credential'; git config --global credential.https://gist.github.com.helper '!gh auth git-credential'"
@@ -3677,7 +3878,7 @@ cleanup() {
             done
         fi
         if [ "$released" = true ] && [ "$(cat "$marker" 2>/dev/null || true)" = "$session" ]; then
-            case $container in hel-*) rm -rf -- "$root" ;; esac
+            case $container in mj-*|hel-*) rm -rf -- "$root" ;; esac
         fi
     fi
     exit "$status"
@@ -3885,6 +4086,17 @@ fn container_exec(
     CommandSpec::new(engine, command_args)
 }
 
+/// Move a command to the remote host without losing its input or lifecycle metadata.
+fn command_over_ssh(mut command: CommandSpec, ssh: &SshTarget) -> CommandSpec {
+    let remote = std::iter::once(command.program)
+        .chain(command.args)
+        .collect();
+    let wrapped = ssh_command_owned(ssh, remote);
+    command.program = wrapped.program;
+    command.args = wrapped.args;
+    command
+}
+
 fn at_boundary(boundary: ExecutionBoundary<'_>, args: Vec<String>) -> CommandSpec {
     match boundary {
         ExecutionBoundary::Direct => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
@@ -3893,9 +4105,13 @@ fn at_boundary(boundary: ExecutionBoundary<'_>, args: Vec<String>) -> CommandSpe
             container_id,
         } => container_exec(engine, container_id, args),
         ExecutionBoundary::Ssh(ssh) => ssh_command_owned(ssh, args),
-        ExecutionBoundary::SshPodman { ssh, container_id } => {
+        ExecutionBoundary::SshContainer {
+            engine,
+            ssh,
+            container_id,
+        } => {
             let mut remote = vec![
-                "podman".to_owned(),
+                engine.to_owned(),
                 "exec".to_owned(),
                 "-i".to_owned(),
                 container_id.to_owned(),
@@ -3910,14 +4126,13 @@ mod ssh;
 
 pub use ssh::posix_quote;
 pub use ssh::{
-    join_remote_command, ssh_connectivity_probe, ssh_directory_completions, ssh_directory_exists,
-    validate_bare_project_directory,
+    join_remote_command, ssh_command, ssh_connectivity_probe, ssh_directory_completions,
+    ssh_directory_exists, validate_bare_project_directory,
 };
 use ssh::{
-    ssh_command, ssh_command_owned, ssh_validation_command, validate_aws,
-    validate_bare_project_path, validate_container_template, validate_executable,
-    validate_relative_path, validate_session_id, validate_ssh, validate_workspace_prefix,
-    verify_locator,
+    ssh_command_owned, ssh_validation_command, validate_aws, validate_bare_project_path,
+    validate_container_template, validate_executable, validate_relative_path, validate_session_id,
+    validate_ssh, validate_workspace_prefix, verify_locator,
 };
 
 #[cfg(test)]

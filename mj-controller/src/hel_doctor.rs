@@ -20,8 +20,9 @@ use hel::hel_credentials::login_command;
 use hel::hel_targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec,
     ContainerTemplate as RuntimeContainerTemplate, ProcessExecutor, SshTarget as RuntimeSshTarget,
-    TargetTemplate as RuntimeTargetTemplate, run_setup_smoke_test, ssh_connectivity_probe,
-    verify_local_docker, verify_local_podman, verify_ssh_podman,
+    TargetTemplate as RuntimeTargetTemplate, run_setup_smoke_test, ssh_command,
+    ssh_connectivity_probe, verify_local_docker, verify_local_podman, verify_ssh_docker,
+    verify_ssh_podman,
 };
 
 // Only the image for the Apple container smoke test when the config has no
@@ -193,6 +194,7 @@ pub fn run_with_config_path(
     checks.extend(docker_checks(config.as_ref(), executor, options.smoke));
     checks.extend(ssh_bare_checks(config.as_ref(), executor));
     checks.extend(ssh_podman_checks(config.as_ref(), executor, options.smoke));
+    checks.extend(ssh_docker_checks(config.as_ref(), executor, options.smoke));
     checks.extend(aws_checks(config.as_ref(), executor));
     checks.extend(worker_binary_checks(config.as_ref()));
     checks.push(apple_container_check(
@@ -971,6 +973,139 @@ fn ssh_podman_check(
     }
 }
 
+/// One check per `ssh-docker` target: Docker daemon, image, and optional
+/// remote OverlayFS smoke test, all executed on the SSH host.
+fn ssh_docker_checks(
+    config: Option<&HelConfig>,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> Vec<DoctorCheck> {
+    let Some(config) = config else {
+        return Vec::new();
+    };
+    config
+        .targets
+        .iter()
+        .filter_map(|(id, target)| match target {
+            TargetTemplate::SshDocker { ssh, container } => Some(ssh_docker_check(
+                id,
+                &backend_ssh(ssh),
+                &container.image,
+                executor,
+                smoke,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ssh_docker_check(
+    id: &str,
+    ssh: &RuntimeSshTarget,
+    image: &str,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> DoctorCheck {
+    let check_id = format!("runtime.ssh-docker.{id}");
+    let title = format!("Remote Docker for target {id}");
+    let destination = &ssh.destination;
+    if let SshConnectivity::Failed {
+        detail,
+        remediation,
+    } = ssh_connectivity(ssh, executor)
+    {
+        return DoctorCheck::fixable(check_id, title, detail, remediation);
+    }
+
+    let preflight = match verify_ssh_docker(ssh, executor) {
+        Ok(preflight) => preflight,
+        Err(error) => {
+            let detail = format!("{error:#}");
+            return DoctorCheck::fixable(
+                check_id,
+                title,
+                detail,
+                format!(
+                    "Verify `ssh {destination}` succeeds noninteractively from this host, then install and start Docker Engine there; make sure `docker info` succeeds for the configured SSH user."
+                ),
+            );
+        }
+    };
+
+    if smoke {
+        let target = RuntimeTargetTemplate::SshDocker {
+            ssh: ssh.clone(),
+            container: RuntimeContainerTemplate {
+                image: image.to_owned(),
+                pull_policy: Default::default(),
+                extra_run_args: vec![],
+                workspace_storage: Default::default(),
+            },
+        };
+        return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
+            Ok(()) => DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "Remote Docker {} is available via {destination}; disposable run/exec/remove and remote OverlayFS attachment smoke test passed for image {image}.",
+                    preflight.version
+                ),
+            ),
+            Err(error) => DoctorCheck::fixable(
+                check_id,
+                title,
+                format!(
+                    "Disposable run/exec/remove smoke test failed for image {image} on {destination}: {error:#}"
+                ),
+                format!(
+                    "Fix the configured image or Docker runtime on {destination}, then run `mj doctor --json --smoke` again."
+                ),
+            ),
+        };
+    }
+
+    let image_command = ssh_command(
+        ssh,
+        [
+            "docker".to_owned(),
+            "image".to_owned(),
+            "inspect".to_owned(),
+            image.to_owned(),
+        ]
+        .to_vec(),
+    )
+    .purpose("check remote Docker image presence");
+    match executor.execute(&image_command) {
+        Ok(output) if output.status == 0 => DoctorCheck::ready(
+            check_id,
+            title,
+            format!(
+                "Remote Docker {} is available via {destination}; image {image} is present. Run `mj doctor --json --smoke` to verify remote OverlayFS attachments.",
+                preflight.version
+            ),
+        ),
+        Ok(output) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!(
+                "Image {image} is not present in remote Docker storage on {destination}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            format!(
+                "Pull it on {destination} with `ssh {destination} docker pull {image}`, or run `mj doctor --json --smoke`."
+            ),
+        ),
+        Err(error) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!("Could not inspect remote Docker image {image} on {destination}: {error}"),
+            format!(
+                "Verify `ssh {destination} docker info` succeeds, then pull {image} on that host."
+            ),
+        ),
+    }
+}
+
 /// Shared disposable-container identity for every doctor smoke test.
 fn doctor_smoke_id() -> String {
     format!(
@@ -1176,8 +1311,13 @@ fn worker_binary_checks(config: Option<&HelConfig>) -> Vec<DoctorCheck> {
         .filter_map(|(id, target)| match target {
             TargetTemplate::LocalPodman { container }
             | TargetTemplate::LocalDocker { container }
-            | TargetTemplate::AppleContainer { container } => Some((id, container, false)),
-            TargetTemplate::SshPodman { container, .. } => Some((id, container, true)),
+            | TargetTemplate::AppleContainer { container } => Some((id, container, None)),
+            TargetTemplate::SshPodman { container, .. } => {
+                Some((id, container, Some("ssh-podman")))
+            }
+            TargetTemplate::SshDocker { container, .. } => {
+                Some((id, container, Some("ssh-docker")))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1190,14 +1330,18 @@ fn worker_binary_checks(config: Option<&HelConfig>) -> Vec<DoctorCheck> {
     }
     containers
         .into_iter()
-        .map(|(id, container, remote)| {
-            if remote && container.platform.is_none() {
+        .map(|(id, container, remote_kind)| {
+            if let Some(remote_kind) = remote_kind
+                && container.platform.is_none()
+            {
                 // The remote CPU architecture is only observable once the host
                 // is reachable, so an explicit `platform` is required here.
                 return DoctorCheck::unsupported(
                     format!("worker.{id}"),
                     format!("Container worker binary for target {id}"),
-                    "Set `platform` on this ssh-podman target to check its worker binary; the remote architecture is unknown until provisioning.",
+                    format!(
+                        "Set `platform` on this {remote_kind} target to check its worker binary; the remote architecture is unknown until provisioning."
+                    ),
                 );
             }
             worker_binary_check(id, container)
@@ -1922,6 +2066,77 @@ mod tests {
     }
 
     #[test]
+    fn ssh_docker_check_probes_connectivity_daemon_and_remote_image() {
+        let executor = FakeExecutor::new([
+            Ok(output(b"")),
+            Ok(output(b"29.0.1 linux\n")),
+            Ok(output(b"image metadata\n")),
+        ]);
+        let check = ssh_docker_check(
+            "remote",
+            &runtime_ssh(),
+            "ghcr.io/example/dev:1",
+            &executor,
+            false,
+        );
+
+        assert_eq!(check.id, "runtime.ssh-docker.remote");
+        assert_eq!(check.title, "Remote Docker for target remote");
+        assert_eq!(check.status, CheckStatus::Ready);
+        assert!(check.detail.contains("Remote Docker 29.0.1"));
+        assert!(
+            check
+                .detail
+                .contains("image ghcr.io/example/dev:1 is present")
+        );
+        let commands = executor.commands.borrow();
+        assert_eq!(commands.len(), 3);
+        assert!(commands.iter().all(|command| command.program == "ssh"));
+        assert!(commands[0].args.last().unwrap().contains("'true'"));
+        assert!(
+            commands[1]
+                .args
+                .last()
+                .unwrap()
+                .contains("'docker' 'version'")
+        );
+        assert!(
+            commands[2]
+                .args
+                .last()
+                .unwrap()
+                .contains("'docker' 'image' 'inspect'")
+        );
+    }
+
+    #[test]
+    fn ssh_docker_check_smoke_runs_overlay_on_the_remote_host() {
+        let executor = FakeExecutor::new([
+            Ok(output(b"")),
+            Ok(output(b"29.0.1 linux\n")),
+            Ok(output(b"/tmp/mj-docker-overlay-smoke.fixture\n")),
+            Ok(output(b"created\n")),
+            Ok(output(b"ok\n")),
+            Ok(output(b"verified\n")),
+            Ok(output(b"removed\n")),
+            Ok(output(b"removed\n")),
+        ]);
+        let check = ssh_docker_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, true);
+
+        assert_eq!(check.status, CheckStatus::Ready);
+        assert!(check.detail.contains("remote OverlayFS attachment"));
+        let commands = executor.commands.borrow();
+        assert_eq!(commands.len(), 8);
+        assert!(commands.iter().all(|command| command.program == "ssh"));
+        assert!(commands[2].args.last().unwrap().contains("mktemp"));
+        assert!(commands[3].args.last().unwrap().contains("'docker' 'run'"));
+        assert!(commands[4].args.last().unwrap().contains("'docker' 'exec'"));
+        assert!(commands[5].args.last().unwrap().contains("original.txt"));
+        assert!(commands[6].args.last().unwrap().contains("docker rm"));
+        assert!(commands[7].args.last().unwrap().contains("'rm' '-rf'"));
+    }
+
+    #[test]
     fn ssh_podman_checks_are_skipped_without_a_valid_config() {
         let executor = FakeExecutor::new([]);
 
@@ -2080,6 +2295,26 @@ mod tests {
         assert_eq!(checks[0].id, "worker.remote");
         assert_ne!(checks[0].status, CheckStatus::Unsupported);
         assert!(checks[0].detail.contains("x86_64-unknown-linux-musl"));
+    }
+
+    #[test]
+    fn worker_check_for_an_ssh_docker_target_hints_at_remote_architecture() {
+        let config = config_with([(
+            "remote",
+            TargetTemplate::SshDocker {
+                ssh: ssh_connection(),
+                container: container("ubuntu:24.04"),
+            },
+        )]);
+
+        let checks = worker_binary_checks(Some(&config));
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, CheckStatus::Unsupported);
+        assert_eq!(
+            checks[0].detail,
+            "Set `platform` on this ssh-docker target to check its worker binary; the remote architecture is unknown until provisioning."
+        );
     }
 
     #[test]

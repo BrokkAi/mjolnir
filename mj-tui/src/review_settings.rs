@@ -2,41 +2,52 @@
 //!
 //! This dialog owns only the in-memory draft of [`HelConfig::review`]. The
 //! controller performs discovery and persistence off the event loop; replies
-//! carry a generation so a slow probe can never replace a newer choice.
+//! carry a generation so a slow discovery can never replace a newer choice.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::cell::{Cell, RefCell};
+use std::time::Instant;
+
+use crossterm::event::Event;
 use hel::hel_acp::SessionConfigChoice;
 use hel::hel_config::{HelConfig, ReviewConfig};
 use hel::hel_review::lanes::ReviewTier;
+use mj_chat::components::{
+    ButtonRow, Checkbox, ControlKind, Form, FormViewport, Interaction, TabStrip,
+};
 use mj_chat::hel_selection::FrameSurfaces;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::style::{Color, Style};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::widgets::{centered_modal, focused_buttons, popup_height};
-use crate::{DashboardAction, DashboardState, Mode, cycle_control};
+use crate::widgets::{centered_modal, centered_rect};
+use crate::{DashboardAction, DashboardState, Mode};
 
-/// A readiness observation for one actual review execution target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewTargetReadiness {
-    pub target: String,
-    pub ready: bool,
-    pub message: String,
-}
-
-/// Capabilities returned by a background review probe.
+/// Selectors advertised by one successful reviewer discovery.
 ///
 /// The choices come from the harness adapter. The UI adds the explicit
 /// profile-default row while rendering, so it never invents a model or effort
-/// accepted by a worker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewSettingsProbeResult {
+/// accepted by a worker. The boolean distinguishes a successful empty effort
+/// list from an effort probe that has not completed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewSettingsChoices {
     pub model_choices: Vec<SessionConfigChoice>,
     pub effort_choices: Vec<SessionConfigChoice>,
-    pub targets: Vec<ReviewTargetReadiness>,
+    pub effort_capabilities_discovered: bool,
 }
+
+/// The final outcome of reviewer selector discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewSettingsDiscoveryResult {
+    Available {
+        choices: ReviewSettingsChoices,
+        cleanup_warning: Option<String>,
+    },
+    Unavailable,
+}
+
+pub(crate) type ReviewSettingsCacheKey = (String, Option<String>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewSettingsFocus {
@@ -46,54 +57,15 @@ pub(crate) enum ReviewSettingsFocus {
     Model,
     Effort,
     Cancel,
+    Refresh,
     Save,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReviewProbeRefresh {
+enum ReviewSettingsDiscoveryKind {
     Profile,
     Model,
-    Effort,
-}
-
-const REVIEW_SETTINGS_FOCUS: [ReviewSettingsFocus; 7] = [
-    ReviewSettingsFocus::Enabled,
-    ReviewSettingsFocus::Tier,
-    ReviewSettingsFocus::Profile,
-    ReviewSettingsFocus::Model,
-    ReviewSettingsFocus::Effort,
-    ReviewSettingsFocus::Cancel,
-    ReviewSettingsFocus::Save,
-];
-const REVIEW_SETTINGS_BUTTONS: &[&str] = &["Cancel", "Save"];
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReviewReadiness {
-    /// No probe has run for the current profile and selector draft.
-    Unknown(String),
-    Loading,
-    Verified(Vec<ReviewTargetReadiness>),
-    /// There is no connected target to verify. This is a valid save state, but
-    /// the dialog tells the user how to obtain a concrete result.
-    Unverified(String),
-    Invalid(String),
-    Failed(String),
-}
-
-impl ReviewReadiness {
-    fn label(&self) -> String {
-        match self {
-            Self::Unknown(message) => format!("unverified: {message}"),
-            Self::Loading => "checking actual targets…".to_owned(),
-            Self::Verified(targets) => {
-                let ready = targets.iter().filter(|target| target.ready).count();
-                format!("verified ({ready}/{} targets ready)", targets.len())
-            }
-            Self::Unverified(message) => format!("unverified: {message}"),
-            Self::Invalid(message) => format!("cannot use these settings: {message}"),
-            Self::Failed(message) => format!("check failed: {message}"),
-        }
-    }
+    Refresh,
 }
 
 /// The editable global review form.
@@ -101,18 +73,21 @@ impl ReviewReadiness {
 pub(crate) struct ReviewSettingsDialog {
     pub(crate) review: ReviewConfig,
     pub(crate) profiles: Vec<Option<String>>,
-    pub(crate) focus: ReviewSettingsFocus,
+    pub(crate) form: RefCell<Form<ReviewSettingsFocus>>,
+    scroll: Cell<u16>,
     pub(crate) model_choices: Vec<SessionConfigChoice>,
     pub(crate) effort_choices: Vec<SessionConfigChoice>,
-    /// Whether a successful adapter probe supplied the choices currently
-    /// shown. An empty list after a completed probe still differs from a
-    /// selector that has not been checked yet.
-    pub(crate) model_capabilities_discovered: bool,
+    /// Whether the model list came from a successful discovery. This remains
+    /// useful when an adapter advertises no configurable models.
+    pub(crate) model_choices_discovered: bool,
     pub(crate) effort_capabilities_discovered: bool,
-    pub(crate) target_readiness: Vec<ReviewTargetReadiness>,
-    pub(crate) readiness: ReviewReadiness,
     pub(crate) generation: u64,
     pub(crate) probing: bool,
+    choices_loading: bool,
+    request_key: Option<ReviewSettingsCacheKey>,
+    discovery_started: Instant,
+    pub(crate) cleanup_warning: Option<String>,
+    pub(crate) discovery_error: Option<String>,
     pub(crate) saving: bool,
     pub(crate) save_error: Option<String>,
     pub(crate) read_only_reason: Option<String>,
@@ -122,30 +97,28 @@ impl ReviewSettingsDialog {
     fn new(config: &HelConfig) -> Self {
         let mut profiles = vec![None];
         profiles.extend(config.profiles.keys().cloned().map(Some));
-        let profile = config.review.profile.as_deref();
-        let readiness = if profile.is_none() {
-            ReviewReadiness::Unverified(
-                "select a reviewer profile, then start a session to verify it".to_owned(),
-            )
-        } else {
-            ReviewReadiness::Unknown("checking the selected reviewer profile…".to_owned())
-        };
-        Self {
+        let dialog = Self {
             review: config.review.clone(),
             profiles,
-            focus: ReviewSettingsFocus::Enabled,
+            form: RefCell::new(Form::default()),
+            scroll: Cell::new(0),
             model_choices: Vec::new(),
             effort_choices: Vec::new(),
-            model_capabilities_discovered: false,
+            model_choices_discovered: false,
             effort_capabilities_discovered: false,
-            target_readiness: Vec::new(),
-            readiness,
             generation: 0,
             probing: false,
+            choices_loading: false,
+            request_key: None,
+            discovery_started: Instant::now(),
+            cleanup_warning: None,
+            discovery_error: None,
             saving: false,
             save_error: None,
             read_only_reason: config.newer_build_notice(),
-        }
+        };
+        dialog.prepare();
+        dialog
     }
 
     fn profile_index(&self) -> usize {
@@ -153,13 +126,6 @@ impl ReviewSettingsDialog {
             .iter()
             .position(|profile| profile.as_deref() == self.review.profile.as_deref())
             .unwrap_or(0)
-    }
-
-    fn profile_label(&self) -> String {
-        self.review
-            .profile
-            .clone()
-            .unwrap_or_else(|| "No reviewer profile".to_owned())
     }
 
     fn value_label(
@@ -199,151 +165,277 @@ impl ReviewSettingsDialog {
         values
     }
 
-    fn select_value(
-        current: Option<&str>,
-        choices: &[SessionConfigChoice],
-        delta: isize,
-    ) -> Option<String> {
-        let values = Self::choice_values(current, choices);
-        let index = values
-            .iter()
-            .position(|candidate| candidate.as_deref() == current)
-            .unwrap_or(0);
-        values
-            .get(cycle_index(index, values.len(), delta))
-            .cloned()
-            .flatten()
+    fn focused(&self) -> ReviewSettingsFocus {
+        self.form
+            .borrow()
+            .focused()
+            .unwrap_or(ReviewSettingsFocus::Enabled)
     }
 
-    fn button_index(focus: ReviewSettingsFocus) -> usize {
-        match focus {
-            ReviewSettingsFocus::Cancel => 0,
-            ReviewSettingsFocus::Save
-            | ReviewSettingsFocus::Enabled
-            | ReviewSettingsFocus::Tier
-            | ReviewSettingsFocus::Profile
-            | ReviewSettingsFocus::Model
-            | ReviewSettingsFocus::Effort => 1,
+    fn selectors(&self) -> Vec<(ReviewSettingsFocus, &'static str, Vec<String>, usize)> {
+        use ReviewSettingsFocus::*;
+        let choices = |value: Option<&str>, choices: &[SessionConfigChoice], discovered| {
+            let values = Self::choice_values(value, choices);
+            let selected = values
+                .iter()
+                .position(|entry| entry.as_deref() == value)
+                .unwrap_or(0);
+            let labels = values
+                .iter()
+                .map(|entry| Self::value_label(entry.as_deref(), choices, discovered))
+                .collect();
+            (labels, selected)
+        };
+        let (models, model) = choices(
+            self.review.model.as_deref(),
+            &self.model_choices,
+            self.model_choices_discovered,
+        );
+        let (efforts, effort) = choices(
+            self.review.effort.as_deref(),
+            &self.effort_choices,
+            self.effort_capabilities_discovered,
+        );
+        vec![
+            (
+                Tier,
+                "Tier",
+                vec!["Quick".into(), "Extended".into()],
+                usize::from(self.review.tier == ReviewTier::Extended),
+            ),
+            (
+                Profile,
+                "Profile",
+                self.profiles
+                    .iter()
+                    .map(|value| {
+                        value
+                            .clone()
+                            .unwrap_or_else(|| "No reviewer profile".into())
+                    })
+                    .collect(),
+                self.profile_index(),
+            ),
+            (Model, "Model", models, model),
+            (Effort, "Effort", efforts, effort),
+        ]
+    }
+
+    fn prepare(&self) {
+        use ReviewSettingsFocus::*;
+        let mut form = self.form.borrow_mut();
+        form.begin_update();
+        form.declare_with_enabled(Enabled, ControlKind::Checkbox, !self.saving);
+        for (id, _, labels, selected) in self.selectors() {
+            form.declare_with_enabled(
+                id,
+                ControlKind::Tabs {
+                    len: labels.len(),
+                    selected,
+                },
+                !self.saving,
+            );
         }
+        form.declare_with_enabled(Refresh, ControlKind::Button, !self.saving);
+        form.declare_with_enabled(Cancel, ControlKind::Button, true);
+        form.declare_with_enabled(Save, ControlKind::Button, self.can_save());
+        form.end_frame(Enabled);
     }
 
     fn can_save(&self) -> bool {
         if self.saving || self.read_only_reason.is_some() {
             return false;
         }
-        // A disabled review is an ordinary place to keep a reviewer profile,
-        // including a selector that an unavailable target cannot currently
-        // validate. It must remain possible to save those values for a later
-        // session.
+        // A disabled review remains a useful draft even while discovery is
+        // unavailable. Local config validation still runs when the controller
+        // saves it.
         if !self.review.enabled {
             return true;
         }
-        if self.review.profile.is_none() {
+        let Some(profile) = self.review.profile.as_deref() else {
+            return false;
+        };
+        if !self
+            .profiles
+            .iter()
+            .any(|candidate| candidate.as_deref() == Some(profile))
+        {
             return false;
         }
-        matches!(
-            self.readiness,
-            ReviewReadiness::Verified(_) | ReviewReadiness::Unverified(_)
-        )
+        if self.model_choices_discovered
+            && self.review.model.as_deref().is_some_and(|model| {
+                !self
+                    .model_choices
+                    .iter()
+                    .any(|choice| choice.value == model)
+            })
+        {
+            return false;
+        }
+        if self.effort_capabilities_discovered
+            && self.review.effort.as_deref().is_some_and(|effort| {
+                !self
+                    .effort_choices
+                    .iter()
+                    .any(|choice| choice.value == effort)
+            })
+        {
+            return false;
+        }
+        true
     }
 
-    fn probe_action(
+    fn apply_cached_choices(&mut self, choices: &ReviewSettingsChoices) {
+        self.model_choices = choices.model_choices.clone();
+        self.effort_choices = choices.effort_choices.clone();
+        self.model_choices_discovered = true;
+        self.effort_capabilities_discovered = choices.effort_capabilities_discovered;
+        self.cleanup_warning = None;
+        self.discovery_error = None;
+        self.probing = false;
+        self.choices_loading = false;
+    }
+
+    fn clear_profile_choices(&mut self) {
+        self.model_choices.clear();
+        self.effort_choices.clear();
+        self.model_choices_discovered = false;
+        self.effort_capabilities_discovered = false;
+    }
+
+    fn start_discovery(
         &mut self,
         dashboard: &mut DashboardState,
-        refresh: ReviewProbeRefresh,
+        kind: ReviewSettingsDiscoveryKind,
     ) -> DashboardAction {
-        self.generation = dashboard.next_review_settings_generation();
         self.save_error = None;
-        self.target_readiness.clear();
-        match refresh {
-            ReviewProbeRefresh::Profile => {
-                self.model_choices.clear();
-                self.effort_choices.clear();
-                self.model_capabilities_discovered = false;
-                self.effort_capabilities_discovered = false;
-            }
-            ReviewProbeRefresh::Model => {
+        match kind {
+            ReviewSettingsDiscoveryKind::Profile => self.clear_profile_choices(),
+            ReviewSettingsDiscoveryKind::Model => {
+                // Model choices describe the profile and remain useful while
+                // the model-specific effort discovery is in flight.
                 self.effort_choices.clear();
                 self.effort_capabilities_discovered = false;
             }
-            ReviewProbeRefresh::Effort => {}
+            // Refresh deliberately retains the current choices and knowledge
+            // flags while removing the persisted cache entry. This keeps a
+            // draft saveable when the fresh discovery cannot reach a worker.
+            ReviewSettingsDiscoveryKind::Refresh => {}
         }
         let Some(profile) = self.review.profile.clone() else {
+            self.generation = dashboard.next_review_settings_generation();
             self.probing = false;
-            self.model_choices.clear();
-            self.effort_choices.clear();
-            self.model_capabilities_discovered = false;
-            self.effort_capabilities_discovered = false;
-            self.readiness = ReviewReadiness::Unverified(
-                "select a reviewer profile, then start a session to verify it".to_owned(),
-            );
-            return DashboardAction::CancelReviewSettingsProbe;
+            self.choices_loading = false;
+            self.request_key = None;
+            self.cleanup_warning = None;
+            self.discovery_error = None;
+            return DashboardAction::CancelReviewSettingsDiscovery;
         };
+
+        let key = (profile.clone(), self.review.model.clone());
+        if !matches!(kind, ReviewSettingsDiscoveryKind::Refresh)
+            && let Some(choices) = dashboard.review_settings_choices.get(&key).cloned()
+        {
+            // A cache hit supersedes any request still owned by the controller.
+            // Bumping the generation makes a late reply harmless; the single
+            // cancel action lets the controller stop that request.
+            let had_pending = self.probing;
+            self.generation = dashboard.next_review_settings_generation();
+            self.apply_cached_choices(&choices);
+            self.request_key = None;
+            return if had_pending {
+                DashboardAction::CancelReviewSettingsDiscovery
+            } else {
+                DashboardAction::None
+            };
+        }
+
+        // Selecting another key supersedes the previous request. The
+        // controller cancels it before starting this generation.
+        if !matches!(kind, ReviewSettingsDiscoveryKind::Refresh)
+            && self.probing
+            && self.request_key.as_ref() == Some(&key)
+        {
+            return DashboardAction::None;
+        }
         self.probing = true;
-        self.readiness = ReviewReadiness::Loading;
-        DashboardAction::ProbeReviewSettings {
+        self.choices_loading = true;
+        self.discovery_started = Instant::now();
+        self.cleanup_warning = None;
+        self.discovery_error = None;
+        self.generation = dashboard.next_review_settings_generation();
+        self.request_key = Some(key);
+        DashboardAction::DiscoverReviewSettings {
             generation: self.generation,
             profile_id: profile,
             model: self.review.model.clone(),
-            effort: self.review.effort.clone(),
         }
     }
 
-    pub(crate) fn apply_probe(
+    fn apply_choices(
         &mut self,
         generation: u64,
         profile_id: &str,
         model: Option<&str>,
-        effort: Option<&str>,
-        result: Result<ReviewSettingsProbeResult, String>,
+        choices: ReviewSettingsChoices,
     ) -> bool {
-        if generation != self.generation
+        if !self.probing
+            || generation != self.generation
             || self.review.profile.as_deref() != Some(profile_id)
             || self.review.model.as_deref() != model
-            || self.review.effort.as_deref() != effort
         {
             return false;
         }
+        self.model_choices = choices.model_choices;
+        self.effort_choices = choices.effort_choices;
+        self.model_choices_discovered = true;
+        self.effort_capabilities_discovered = choices.effort_capabilities_discovered;
+        self.discovery_error = None;
+        self.choices_loading = false;
+        true
+    }
+
+    fn apply_discovery(
+        &mut self,
+        generation: u64,
+        profile_id: &str,
+        model: Option<&str>,
+        result: Result<ReviewSettingsDiscoveryResult, String>,
+    ) -> Option<ReviewSettingsChoices> {
+        if !self.probing
+            || generation != self.generation
+            || self.review.profile.as_deref() != Some(profile_id)
+            || self.review.model.as_deref() != model
+        {
+            return None;
+        }
         self.probing = false;
+        self.choices_loading = false;
         match result {
-            Ok(result) => {
-                // A failed target can still produce a report, but it did not
-                // prove that an empty selector list came from a successful
-                // adapter discovery. A non-empty list or a ready target is
-                // the conservative evidence that an explicit value may be
-                // called unavailable.
-                let target_ready = result.targets.iter().any(|target| target.ready);
-                self.model_capabilities_discovered =
-                    !result.model_choices.is_empty() || target_ready;
-                self.effort_capabilities_discovered =
-                    !result.effort_choices.is_empty() || target_ready;
-                self.target_readiness = result.targets.clone();
-                self.model_choices = result.model_choices;
-                self.effort_choices = result.effort_choices;
-                if result.targets.is_empty() {
-                    self.readiness = ReviewReadiness::Unverified(
-                        "no active target is available; start a session to verify review readiness"
-                            .to_owned(),
-                    );
-                } else if result.targets.iter().all(|target| target.ready) {
-                    self.readiness = ReviewReadiness::Verified(result.targets);
-                } else {
-                    let failures = result
-                        .targets
-                        .iter()
-                        .filter(|target| !target.ready)
-                        .map(|target| format!("{}: {}", target.target, target.message))
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    self.readiness = ReviewReadiness::Invalid(failures);
-                }
+            Ok(ReviewSettingsDiscoveryResult::Available {
+                choices,
+                cleanup_warning,
+            }) => {
+                self.model_choices = choices.model_choices.clone();
+                self.effort_choices = choices.effort_choices.clone();
+                self.model_choices_discovered = true;
+                self.effort_capabilities_discovered = choices.effort_capabilities_discovered;
+                self.cleanup_warning = cleanup_warning;
+                self.discovery_error = None;
+                Some(choices)
+            }
+            Ok(ReviewSettingsDiscoveryResult::Unavailable) => {
+                self.cleanup_warning = None;
+                self.discovery_error =
+                    Some("A connected session is needed to refresh choices.".to_owned());
+                None
             }
             Err(error) => {
-                self.target_readiness.clear();
-                self.readiness = ReviewReadiness::Failed(error);
+                self.cleanup_warning = None;
+                self.discovery_error = Some(error);
+                None
             }
         }
-        true
     }
 
     pub(crate) fn apply_save_result(&mut self, result: Result<(), String>) {
@@ -351,99 +443,82 @@ impl ReviewSettingsDialog {
         self.save_error = result.err();
     }
 
-    fn handle_key(&mut self, dashboard: &mut DashboardState, key: KeyEvent) -> DashboardAction {
-        if key.code == KeyCode::Esc {
-            dashboard.cancel_modal();
-            return DashboardAction::CancelReviewSettingsProbe;
-        }
-        if self.saving {
-            return DashboardAction::None;
-        }
-        let reverse = key.modifiers.contains(KeyModifiers::SHIFT);
-        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
-            let next = cycle_control(self.focus, &REVIEW_SETTINGS_FOCUS, reverse);
-            self.focus = next;
-            return DashboardAction::None;
-        }
-
-        let delta = match key.code {
-            KeyCode::Up | KeyCode::Left => Some(-1),
-            KeyCode::Down | KeyCode::Right => Some(1),
-            _ => None,
-        };
-        if let Some(delta) = delta {
-            match self.focus {
-                ReviewSettingsFocus::Enabled => self.review.enabled = !self.review.enabled,
-                ReviewSettingsFocus::Tier => {
-                    self.review.tier = cycle_control(
-                        self.review.tier,
-                        &[ReviewTier::Quick, ReviewTier::Extended],
-                        delta < 0,
-                    );
-                }
-                ReviewSettingsFocus::Profile => {
-                    let index = cycle_index(self.profile_index(), self.profiles.len(), delta);
-                    self.review.profile = self.profiles.get(index).cloned().flatten();
-                    return self.probe_action(dashboard, ReviewProbeRefresh::Profile);
-                }
-                ReviewSettingsFocus::Model => {
-                    self.review.model = Self::select_value(
-                        self.review.model.as_deref(),
-                        &self.model_choices,
-                        delta,
-                    );
-                    return self.probe_action(dashboard, ReviewProbeRefresh::Model);
-                }
-                ReviewSettingsFocus::Effort => {
-                    self.review.effort = Self::select_value(
-                        self.review.effort.as_deref(),
-                        &self.effort_choices,
-                        delta,
-                    );
-                    return self.probe_action(dashboard, ReviewProbeRefresh::Effort);
-                }
-                ReviewSettingsFocus::Cancel | ReviewSettingsFocus::Save => {}
+    fn handle_event(
+        &mut self,
+        dashboard: &mut DashboardState,
+        event: Event,
+    ) -> (DashboardAction, bool) {
+        use ReviewSettingsFocus::*;
+        let interaction = self.form.get_mut().handle(&event).action;
+        let changed = interaction.is_some();
+        let close = matches!(
+            interaction,
+            Some(Interaction::Cancel | Interaction::Activate(Cancel))
+        );
+        let action = match interaction {
+            Some(Interaction::Cancel | Interaction::Activate(Cancel)) => {
+                DashboardAction::CancelReviewSettingsDiscovery
             }
-            return DashboardAction::None;
-        }
-
-        if key.code == KeyCode::Char(' ') && self.focus == ReviewSettingsFocus::Enabled {
-            self.review.enabled = !self.review.enabled;
-            return DashboardAction::None;
-        }
-
-        if key.code != KeyCode::Enter {
-            return DashboardAction::None;
-        }
-        match self.focus {
-            ReviewSettingsFocus::Cancel => {
-                dashboard.cancel_modal();
-                DashboardAction::CancelReviewSettingsProbe
+            Some(Interaction::Toggle(Enabled)) => {
+                self.review.enabled = !self.review.enabled;
+                DashboardAction::None
             }
-            ReviewSettingsFocus::Save => {
-                if !self.can_save() {
-                    if self.read_only_reason.is_some() {
-                        dashboard.set_notice(
-                            self.read_only_reason
-                                .clone()
-                                .unwrap_or_else(|| "Configuration is read-only.".to_owned()),
-                        );
-                    } else if self.review.enabled && self.review.profile.is_none() {
-                        dashboard.set_notice(
-                            "Choose a reviewer profile before enabling automatic review.",
-                        );
-                    } else if let ReviewReadiness::Invalid(message) = &self.readiness {
-                        dashboard.set_notice(format!("Review settings are not ready: {message}"));
-                    } else if let ReviewReadiness::Failed(message) = &self.readiness {
-                        dashboard.set_notice(format!(
-                            "Could not verify review readiness: {message}. Retry or disable automatic review."
-                        ));
-                    } else if self.probing {
-                        dashboard.set_notice(
-                            "Wait for review readiness to finish before enabling automatic review.",
-                        );
-                    }
-                    return DashboardAction::None;
+            Some(Interaction::Select(Tier, index)) => {
+                self.review.tier = if index == 0 {
+                    ReviewTier::Quick
+                } else {
+                    ReviewTier::Extended
+                };
+                DashboardAction::None
+            }
+            Some(Interaction::Select(Profile, index)) => {
+                let profile = self.profiles.get(index).cloned().flatten();
+                if self.review.profile == profile {
+                    DashboardAction::None
+                } else {
+                    self.review.profile = profile;
+                    self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Profile)
+                }
+            }
+            Some(Interaction::Select(Model, index)) => {
+                let model = Self::choice_values(self.review.model.as_deref(), &self.model_choices)
+                    .get(index)
+                    .cloned()
+                    .flatten();
+                if self.review.model == model {
+                    DashboardAction::None
+                } else {
+                    self.review.model = model;
+                    self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Model)
+                }
+            }
+            Some(Interaction::Select(Effort, index)) => {
+                self.review.effort =
+                    Self::choice_values(self.review.effort.as_deref(), &self.effort_choices)
+                        .get(index)
+                        .cloned()
+                        .flatten();
+                DashboardAction::None
+            }
+            // Selector activation only opens the tab list. Discovery is tied
+            // to changing the profile/model or pressing Refresh choices;
+            // repeated activation must not restart a request.
+            Some(Interaction::Activate(Profile | Model | Effort)) => DashboardAction::None,
+            Some(Interaction::Activate(Refresh)) => {
+                if let Some(profile) = self.review.profile.as_deref() {
+                    dashboard.clear_review_settings_choices(profile);
+                }
+                self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Refresh)
+            }
+            Some(Interaction::Activate(Save)) if self.can_save() => {
+                if self.probing {
+                    // Saving supersedes the background request. Invalidate its
+                    // identity immediately so a queued progress/final reply
+                    // from the cancellation cannot repopulate the cache.
+                    self.generation = dashboard.next_review_settings_generation();
+                    self.probing = false;
+                    self.choices_loading = false;
+                    self.request_key = None;
                 }
                 self.saving = true;
                 self.save_error = None;
@@ -451,43 +526,65 @@ impl ReviewSettingsDialog {
                     review: self.review.clone(),
                 }
             }
-            ReviewSettingsFocus::Enabled => {
-                self.review.enabled = !self.review.enabled;
-                DashboardAction::None
-            }
-            ReviewSettingsFocus::Tier => {
-                self.review.tier = cycle_control(
-                    self.review.tier,
-                    &[ReviewTier::Quick, ReviewTier::Extended],
-                    false,
-                );
-                DashboardAction::None
-            }
-            ReviewSettingsFocus::Profile => {
-                self.probe_action(dashboard, ReviewProbeRefresh::Profile)
-            }
-            ReviewSettingsFocus::Model => self.probe_action(dashboard, ReviewProbeRefresh::Model),
-            ReviewSettingsFocus::Effort => {
-                self.review.effort =
-                    Self::select_value(self.review.effort.as_deref(), &self.effort_choices, 1);
-                self.probe_action(dashboard, ReviewProbeRefresh::Effort)
-            }
+            _ => DashboardAction::None,
+        };
+        if changed {
+            self.prepare();
         }
-    }
-}
-
-fn cycle_index(index: usize, len: usize, delta: isize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    if delta < 0 {
-        index.checked_sub(delta.unsigned_abs()).unwrap_or(len - 1)
-    } else {
-        index.saturating_add(delta as usize) % len
+        (action, close)
     }
 }
 
 impl DashboardState {
+    pub(crate) fn review_settings_discovery_active(&self) -> bool {
+        fn active(mode: &Mode) -> bool {
+            match mode {
+                Mode::ReviewSettings(dialog) => dialog.probing,
+                Mode::Help(overlay) => active(&overlay.return_to),
+                _ => false,
+            }
+        }
+        active(&self.mode)
+    }
+
+    /// Removes every cached choice for one profile. The open dialog keeps its
+    /// current values until the forced refresh settles.
+    pub(crate) fn clear_review_settings_choices(&mut self, profile_id: &str) {
+        self.review_settings_choices
+            .retain(|(profile, _), _| profile != profile_id);
+    }
+
+    /// Keep cached choices only for profile definitions that are unchanged in
+    /// the new configuration. Review edits alone therefore preserve the cache,
+    /// while editing, removing, or replacing a profile invalidates its keys.
+    pub(crate) fn invalidate_review_settings_choices_for_config(&mut self, config: &HelConfig) {
+        self.review_settings_choices.retain(|(profile, _), _| {
+            self.config.profiles.get(profile) == config.profiles.get(profile)
+        });
+    }
+
+    /// Publish adapter choices while cleanup continues. Successful progress is
+    /// cached immediately so reopening the dialog can use it without waiting
+    /// for the final cleanup result.
+    pub fn apply_review_settings_choices(
+        &mut self,
+        generation: u64,
+        profile_id: &str,
+        model: Option<&str>,
+        choices: ReviewSettingsChoices,
+    ) -> bool {
+        let Some(dialog) = review_settings_dialog_mut(&mut self.mode) else {
+            return false;
+        };
+        if !dialog.apply_choices(generation, profile_id, model, choices.clone()) {
+            return false;
+        }
+        self.review_settings_choices
+            .insert((profile_id.to_owned(), model.map(str::to_owned)), choices);
+        dialog.prepare();
+        true
+    }
+
     fn next_review_settings_generation(&mut self) -> u64 {
         self.review_settings_generation = self.review_settings_generation.wrapping_add(1);
         self.review_settings_generation
@@ -496,45 +593,70 @@ impl DashboardState {
     pub(crate) fn begin_review_settings(&mut self) -> DashboardAction {
         let mut dialog = ReviewSettingsDialog::new(&self.config);
         let action = if dialog.review.profile.is_some() {
-            dialog.probe_action(self, ReviewProbeRefresh::Profile)
+            dialog.start_discovery(self, ReviewSettingsDiscoveryKind::Profile)
         } else {
             DashboardAction::None
         };
+        dialog.prepare();
         self.mode = Mode::ReviewSettings(dialog);
         action
     }
 
-    pub(crate) fn handle_review_settings_key(
+    pub(crate) fn handle_review_settings_event(
         &mut self,
-        key: KeyEvent,
+        event: Event,
         mut dialog: ReviewSettingsDialog,
     ) -> DashboardAction {
-        let action = dialog.handle_key(self, key);
-        if !matches!(self.mode, Mode::Dashboard) {
+        let (action, close) = dialog.handle_event(self, event);
+        if close {
+            self.cancel_modal();
+        } else {
             self.mode = Mode::ReviewSettings(dialog);
         }
         action
     }
 
-    pub fn apply_review_settings_probe(
+    pub fn apply_review_settings_discovery(
         &mut self,
         generation: u64,
         profile_id: &str,
         model: Option<&str>,
-        effort: Option<&str>,
-        result: Result<ReviewSettingsProbeResult, String>,
+        result: Result<ReviewSettingsDiscoveryResult, String>,
     ) -> bool {
-        let Mode::ReviewSettings(dialog) = &mut self.mode else {
+        let Some(dialog) = review_settings_dialog_mut(&mut self.mode) else {
             return false;
         };
-        dialog.apply_probe(generation, profile_id, model, effort, result)
+        if !dialog.probing
+            || dialog.generation != generation
+            || dialog.review.profile.as_deref() != Some(profile_id)
+            || dialog.review.model.as_deref() != model
+        {
+            return false;
+        }
+        let key = (profile_id.to_owned(), model.map(str::to_owned));
+        let choices = dialog.apply_discovery(generation, profile_id, model, result);
+        dialog.request_key = None;
+        if let Some(choices) = choices {
+            self.review_settings_choices.insert(key, choices);
+        }
+        dialog.prepare();
+        true
     }
 
     pub fn review_settings_save_failed(&mut self, error: String) {
-        let Mode::ReviewSettings(dialog) = &mut self.mode else {
+        let Some(dialog) = review_settings_dialog_mut(&mut self.mode) else {
             return;
         };
         dialog.apply_save_result(Err(error));
+        dialog.prepare();
+    }
+}
+
+fn review_settings_dialog_mut(mode: &mut Mode) -> Option<&mut ReviewSettingsDialog> {
+    match mode {
+        Mode::ReviewSettings(dialog) => Some(dialog),
+        Mode::Help(overlay) => review_settings_dialog_mut(&mut overlay.return_to),
+        _ => None,
     }
 }
 
@@ -544,152 +666,209 @@ pub(crate) fn render_review_settings(
     dialog: &ReviewSettingsDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let field = |focused| {
-        if focused {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        }
+    use ReviewSettingsFocus::*;
+    let spinner =
+        ['|', '/', '-', '\\'][(dialog.discovery_started.elapsed().as_millis() / 125 % 4) as usize];
+    let status = if dialog.probing && dialog.choices_loading {
+        format!("{spinner} Loading choices…")
+    } else if dialog.probing || dialog.model_choices_discovered {
+        "Choices loaded".to_owned()
+    } else if let Some(error) = &dialog.discovery_error {
+        format!("Choices unavailable: {error}")
+    } else if dialog.review.profile.is_none() {
+        "Choose a reviewer profile".to_owned()
+    } else {
+        "Choices not loaded".to_owned()
     };
-    let row = |label: &str, value: String, focused: bool| {
-        Line::from(vec![
-            Span::styled(format!("{label:<18}"), Style::default().fg(Color::DarkGray)),
-            Span::styled(value, field(focused)),
-        ])
-    };
-    let mut lines = vec![
-        Line::styled(
-            "Global settings; changes apply to subsequent reviews.",
-            Style::default().fg(Color::DarkGray),
-        ),
-        Line::raw(""),
-        row(
-            "Automatic review",
-            if dialog.review.enabled { "On" } else { "Off" }.to_owned(),
-            dialog.focus == ReviewSettingsFocus::Enabled,
-        ),
-        row(
-            "Tier",
-            dialog.review.tier.label().to_owned(),
-            dialog.focus == ReviewSettingsFocus::Tier,
-        ),
-        row(
-            "Profile",
-            dialog.profile_label(),
-            dialog.focus == ReviewSettingsFocus::Profile,
-        ),
-        row(
-            "Model",
-            ReviewSettingsDialog::value_label(
-                dialog.review.model.as_deref(),
-                &dialog.model_choices,
-                dialog.model_capabilities_discovered,
-            ),
-            dialog.focus == ReviewSettingsFocus::Model,
-        ),
-        row(
-            "Effort",
-            ReviewSettingsDialog::value_label(
-                dialog.review.effort.as_deref(),
-                &dialog.effort_choices,
-                dialog.effort_capabilities_discovered,
-            ),
-            dialog.focus == ReviewSettingsFocus::Effort,
-        ),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("Readiness        ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                dialog.readiness.label(),
-                Style::default().fg(match dialog.readiness {
-                    ReviewReadiness::Verified(_) => Color::Green,
-                    ReviewReadiness::Invalid(_) | ReviewReadiness::Failed(_) => Color::Yellow,
-                    _ => Color::DarkGray,
-                }),
-            ),
-        ]),
+    let mut notes = vec![
+        Line::raw("Global settings; changes apply to subsequent reviews."),
+        Line::raw(status),
     ];
-    if !dialog.target_readiness.is_empty() {
-        let targets = &dialog.target_readiness;
-        for target in targets {
-            lines.push(Line::styled(
-                format!(
-                    "  {}: {}",
-                    target.target,
-                    if target.ready {
-                        "ready"
-                    } else {
-                        &target.message
-                    }
-                ),
-                Style::default().fg(if target.ready {
-                    Color::Green
-                } else {
-                    Color::Yellow
-                }),
-            ));
-        }
+    if let Some(warning) = &dialog.cleanup_warning {
+        notes.push(Line::styled(
+            format!("Cleanup warning: {warning}"),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if let Some(error) = &dialog.discovery_error {
+        notes.push(Line::styled(
+            format!("Discovery: {error}"),
+            Style::default().fg(Color::Yellow),
+        ));
     }
     if let Some(reason) = &dialog.read_only_reason {
-        lines.push(Line::styled(
+        notes.push(Line::styled(
             reason.clone(),
             Style::default().fg(Color::Yellow),
         ));
     }
     if let Some(error) = &dialog.save_error {
-        lines.push(Line::styled(
+        notes.push(Line::styled(
             format!("Save failed: {error}"),
             Style::default().fg(Color::Yellow),
         ));
     }
     if dialog.review.profile.is_none() && dialog.review.enabled {
-        lines.push(Line::styled(
+        notes.push(Line::raw(
             "Choose a profile before enabling automatic review.",
-            Style::default().fg(Color::Yellow),
         ));
-    }
-    lines.push(Line::raw(""));
-    let save_focused = dialog.focus == ReviewSettingsFocus::Save;
-    let buttons = if dialog.saving {
-        Line::styled(
-            "Saving review settings…",
-            Style::default().fg(Color::Yellow),
-        )
-    } else {
-        let mut line = focused_buttons(
-            REVIEW_SETTINGS_BUTTONS,
-            ReviewSettingsDialog::button_index(dialog.focus),
-        );
-        if !dialog.can_save() && save_focused {
-            line = Line::from(vec![Span::styled(
-                " Save unavailable ",
-                Style::default().fg(Color::DarkGray),
-            )]);
+    } else if dialog.review.enabled {
+        if dialog.model_choices_discovered
+            && dialog.review.model.as_deref().is_some_and(|model| {
+                !dialog
+                    .model_choices
+                    .iter()
+                    .any(|choice| choice.value == model)
+            })
+        {
+            notes.push(Line::raw(
+                "Selected model is unavailable in the discovered choices.",
+            ));
         }
-        line
-    };
-    lines.push(buttons);
-    lines.push(Line::styled(
-        "Tab moves · arrows change values · Profile default clears model/effort · Esc closes",
-        Style::default().fg(Color::DarkGray),
-    ));
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Review settings "),
-        )
-        .wrap(Wrap { trim: false });
+        if dialog.effort_capabilities_discovered
+            && dialog.review.effort.as_deref().is_some_and(|effort| {
+                !dialog
+                    .effort_choices
+                    .iter()
+                    .any(|choice| choice.value == effort)
+            })
+        {
+            notes.push(Line::raw(
+                "Selected effort is unavailable in the discovered choices.",
+            ));
+        }
+    }
+    let description = Paragraph::new(match dialog.review.tier {
+        ReviewTier::Quick => "One general reviewer; a validator checks any findings.",
+        ReviewTier::Extended => "A supervisor selects specialist reviewers for deeper coverage.",
+    })
+    .style(Style::default().fg(Color::DarkGray))
+    .wrap(Wrap { trim: true });
+    let description_width = centered_rect(86, 1, area).width.saturating_sub(12);
+    let description_height =
+        u16::try_from(description.line_count(description_width.max(1))).unwrap_or(u16::MAX);
     let popup = centered_modal(
         frame,
         surfaces,
         86,
-        popup_height(&paragraph, 86, 20, area),
+        (notes.len() as u16)
+            .saturating_add(10)
+            .saturating_add(description_height)
+            .max(20),
         area,
     );
-    frame.render_widget(paragraph, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Review settings ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    let focus_row = match dialog.focused() {
+        Enabled => 0,
+        Tier => 1,
+        Profile => 2 + description_height,
+        Model => 3 + description_height,
+        Effort => 4 + description_height,
+        _ => 0,
+    };
+    let viewport = FormViewport::new(
+        body,
+        (notes.len() as u16)
+            .saturating_add(6)
+            .saturating_add(description_height),
+        dialog.scroll.get(),
+        Some(focus_row),
+    );
+    dialog.scroll.set(viewport.offset());
+    let row = |index: u16| viewport.row(index, 1);
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    Checkbox::render(
+        frame,
+        row(0),
+        "Automatic review",
+        dialog.review.enabled,
+        !dialog.saving,
+        &mut form,
+        Enabled,
+    );
+    for (index, (id, label, values, selected)) in dialog.selectors().iter().enumerate() {
+        let area = row(index as u16 + 1 + if index > 0 { description_height } else { 0 });
+        let label_width = 10.min(area.width);
+        let loading = dialog.probing && dialog.choices_loading && (*id == Model || *id == Effort);
+        frame.render_widget(
+            Line::raw(if loading {
+                format!("{label} {spinner}")
+            } else {
+                (*label).to_owned()
+            }),
+            Rect::new(area.x, area.y, label_width, area.height),
+        );
+        let field = Rect::new(
+            area.x + label_width,
+            area.y,
+            area.width - label_width,
+            area.height,
+        );
+        TabStrip::render_enabled(
+            frame,
+            field,
+            &values.iter().map(String::as_str).collect::<Vec<_>>(),
+            *selected,
+            !dialog.saving,
+            &mut form,
+            *id,
+        );
+    }
+    let help_area = viewport.row(2, description_height);
+    let indent = 10.min(help_area.width);
+    frame.render_widget(
+        description.scroll((viewport.offset().saturating_sub(2), 0)),
+        Rect::new(
+            help_area.x + indent,
+            help_area.y,
+            help_area.width - indent,
+            help_area.height,
+        ),
+    );
+    for (index, line) in notes.into_iter().enumerate() {
+        frame.render_widget(line, row(index as u16 + 6 + description_height));
+    }
+    let footer = Rect::new(
+        inner.x,
+        inner.bottom().saturating_sub(1),
+        inner.width,
+        u16::from(inner.height > 0),
+    );
+    if inner.height > 1 {
+        frame.render_widget(
+            Line::styled(
+                "Tab moves · arrows select · Space toggles · Esc closes",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
+        );
+    }
+    ButtonRow::render(
+        frame,
+        footer,
+        &[
+            (Refresh, "Refresh choices", !dialog.saving),
+            (Cancel, "Cancel", true),
+            (
+                Save,
+                if dialog.saving { "Saving…" } else { "Save" },
+                dialog.can_save(),
+            ),
+        ],
+        &mut form,
+    );
+    form.end_frame(Enabled);
 }
 
 #[cfg(test)]
@@ -697,6 +876,7 @@ mod tests {
     use super::*;
     use crate::actions::CommandId;
     use crate::test_support::{config, dashboard_with_session, key, running_session};
+    use crossterm::event::KeyCode;
 
     fn open(dashboard: &mut DashboardState) -> DashboardAction {
         dashboard.dispatch_command(CommandId::ReviewSettings)
@@ -707,6 +887,68 @@ mod tests {
             panic!("expected review settings dialog")
         };
         dialog
+    }
+
+    fn choice(value: &str) -> SessionConfigChoice {
+        SessionConfigChoice {
+            value: value.to_owned(),
+            name: value.to_owned(),
+            description: None,
+        }
+    }
+
+    fn available(
+        model_choices: &[&str],
+        effort_choices: &[&str],
+        effort_known: bool,
+    ) -> ReviewSettingsDiscoveryResult {
+        ReviewSettingsDiscoveryResult::Available {
+            choices: ReviewSettingsChoices {
+                model_choices: model_choices.iter().map(|value| choice(value)).collect(),
+                effort_choices: effort_choices.iter().map(|value| choice(value)).collect(),
+                effort_capabilities_discovered: effort_known,
+            },
+            cleanup_warning: None,
+        }
+    }
+
+    #[test]
+    fn progress_choices_are_cached_before_cleanup_and_stale_replies_are_ignored() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.config.review.profile = Some("codex-1".into());
+        dashboard.config.review.enabled = true;
+        let DashboardAction::DiscoverReviewSettings {
+            generation,
+            profile_id,
+            model,
+        } = open(&mut dashboard)
+        else {
+            panic!("configured profile must start discovery")
+        };
+        assert!(dashboard.needs_fast_tick());
+        assert!(dashboard.apply_review_settings_choices(
+            generation,
+            &profile_id,
+            model.as_deref(),
+            ReviewSettingsChoices::default(),
+        ));
+        assert!(dialog(&dashboard).model_choices_discovered);
+        assert!(dialog(&dashboard).probing);
+        assert!(
+            dashboard
+                .review_settings_choices
+                .contains_key(&(profile_id.clone(), model.clone()))
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(!dashboard.needs_fast_tick());
+        open(&mut dashboard);
+        assert!(!dashboard.apply_review_settings_choices(
+            generation,
+            &profile_id,
+            model.as_deref(),
+            ReviewSettingsChoices::default(),
+        ));
+        assert!(dialog(&dashboard).model_choices_discovered);
     }
 
     #[test]
@@ -739,6 +981,31 @@ mod tests {
     }
 
     #[test]
+    fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
+        let mut dashboard = dashboard_with_session(running_session());
+        open(&mut dashboard);
+        dashboard.handle_key(key(KeyCode::Char(' ')));
+        dashboard.handle_key(key(KeyCode::Tab));
+        dashboard.handle_key(key(KeyCode::Tab));
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Right)),
+            DashboardAction::DiscoverReviewSettings { .. }
+        ));
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Home)),
+            DashboardAction::CancelReviewSettingsDiscovery
+        ));
+        assert!(dialog(&dashboard).review.profile.is_none());
+        assert!(dialog(&dashboard).review.enabled);
+        assert!(!dialog(&dashboard).can_save());
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::CancelReviewSettingsDiscovery
+        ));
+        assert!(!matches!(dashboard.mode, Mode::ReviewSettings(_)));
+    }
+
+    #[test]
     fn edit_and_save_action_contains_only_global_review_values() {
         let mut dashboard = dashboard_with_session(running_session());
         let _ = open(&mut dashboard);
@@ -746,13 +1013,16 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Tab));
         dashboard.handle_key(key(KeyCode::Tab));
         let probe = dashboard.handle_key(key(KeyCode::Right));
-        assert!(matches!(probe, DashboardAction::ProbeReviewSettings { .. }));
+        assert!(matches!(
+            probe,
+            DashboardAction::DiscoverReviewSettings { .. }
+        ));
 
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Tier {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Tier {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         dashboard.handle_key(key(KeyCode::Right));
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Save {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         let action = dashboard.handle_key(key(KeyCode::Enter));
@@ -761,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_probe_does_not_replace_choices_after_model_change() {
+    fn stale_discovery_does_not_replace_choices_after_model_change() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
         let mut dashboard = DashboardState::new(
@@ -770,39 +1040,39 @@ mod tests {
             Default::default(),
         );
         let initial = open(&mut dashboard);
-        let DashboardAction::ProbeReviewSettings {
+        let DashboardAction::DiscoverReviewSettings {
             generation,
             profile_id,
             model,
-            effort,
         } = initial
         else {
             panic!("expected initial probe")
         };
-        dashboard.apply_review_settings_probe(
+        dashboard.apply_review_settings_discovery(
             generation,
             &profile_id,
             model.as_deref(),
-            effort.as_deref(),
-            Ok(ReviewSettingsProbeResult {
-                model_choices: vec![SessionConfigChoice {
-                    value: "model-a".into(),
-                    name: "Model A".into(),
-                    description: None,
-                }],
-                effort_choices: vec![],
-                targets: vec![],
+            Ok(ReviewSettingsDiscoveryResult::Available {
+                choices: ReviewSettingsChoices {
+                    model_choices: vec![SessionConfigChoice {
+                        value: "model-a".into(),
+                        name: "Model A".into(),
+                        description: None,
+                    }],
+                    effort_choices: vec![],
+                    effort_capabilities_discovered: false,
+                },
+                cleanup_warning: None,
             }),
         );
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Model {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Model {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         let model_action = dashboard.handle_key(key(KeyCode::Right));
-        let DashboardAction::ProbeReviewSettings {
+        let DashboardAction::DiscoverReviewSettings {
             generation: newer,
             profile_id,
             model,
-            effort,
         } = model_action
         else {
             panic!("expected model probe")
@@ -811,39 +1081,39 @@ mod tests {
         assert!(dialog(&dashboard).probing);
         assert_eq!(dialog(&dashboard).model_choices[0].value, "model-a");
         assert!(dialog(&dashboard).effort_choices.is_empty());
-        dashboard.apply_review_settings_probe(
+        dashboard.apply_review_settings_discovery(
             generation,
             &profile_id,
             None,
-            None,
-            Ok(ReviewSettingsProbeResult {
-                model_choices: vec![SessionConfigChoice {
-                    value: "stale".into(),
-                    name: "Stale".into(),
-                    description: None,
-                }],
-                effort_choices: vec![],
-                targets: vec![],
+            Ok(ReviewSettingsDiscoveryResult::Available {
+                choices: ReviewSettingsChoices {
+                    model_choices: vec![SessionConfigChoice {
+                        value: "stale".into(),
+                        name: "Stale".into(),
+                        description: None,
+                    }],
+                    effort_choices: vec![],
+                    effort_capabilities_discovered: false,
+                },
+                cleanup_warning: None,
             }),
         );
         assert_eq!(dialog(&dashboard).model_choices[0].value, "model-a");
         assert!(dialog(&dashboard).probing);
-        dashboard.apply_review_settings_probe(
+        dashboard.apply_review_settings_discovery(
             newer,
             &profile_id,
             model.as_deref(),
-            effort.as_deref(),
-            Ok(ReviewSettingsProbeResult {
-                model_choices: vec![],
-                effort_choices: vec![],
-                targets: vec![],
+            Ok(ReviewSettingsDiscoveryResult::Available {
+                choices: ReviewSettingsChoices::default(),
+                cleanup_warning: None,
             }),
         );
         assert!(!dialog(&dashboard).probing);
     }
 
     #[test]
-    fn effort_change_starts_a_fresh_readiness_probe() {
+    fn selecting_the_current_value_does_not_restart_pending_discovery() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
         let mut dashboard = DashboardState::new(
@@ -851,37 +1121,59 @@ mod tests {
             hel::hel_state::HelState::default(),
             Default::default(),
         );
-        let DashboardAction::ProbeReviewSettings { generation, .. } = open(&mut dashboard) else {
+        let initial = open(&mut dashboard);
+        assert!(matches!(
+            initial,
+            DashboardAction::DiscoverReviewSettings { .. }
+        ));
+        let generation = dialog(&dashboard).generation;
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Model {
+            dashboard.handle_key(key(KeyCode::Tab));
+        }
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Home)),
+            DashboardAction::None
+        );
+        assert!(dialog(&dashboard).probing);
+        assert_eq!(dialog(&dashboard).generation, generation);
+    }
+
+    #[test]
+    fn effort_change_does_not_restart_discovery() {
+        let mut config = config();
+        config.review.profile = Some("codex-1".into());
+        let mut dashboard = DashboardState::new(
+            config,
+            hel::hel_state::HelState::default(),
+            Default::default(),
+        );
+        let DashboardAction::DiscoverReviewSettings { generation, .. } = open(&mut dashboard)
+        else {
             panic!("expected initial probe")
         };
-        dashboard.apply_review_settings_probe(
+        dashboard.apply_review_settings_discovery(
             generation,
             "codex-1",
             None,
-            None,
-            Ok(ReviewSettingsProbeResult {
-                model_choices: vec![],
-                effort_choices: vec![SessionConfigChoice {
-                    value: "low".into(),
-                    name: "Low".into(),
-                    description: None,
-                }],
-                targets: vec![ReviewTargetReadiness {
-                    target: "worker".into(),
-                    ready: true,
-                    message: String::new(),
-                }],
+            Ok(ReviewSettingsDiscoveryResult::Available {
+                choices: ReviewSettingsChoices {
+                    model_choices: vec![],
+                    effort_choices: vec![SessionConfigChoice {
+                        value: "low".into(),
+                        name: "Low".into(),
+                        description: None,
+                    }],
+                    effort_capabilities_discovered: true,
+                },
+                cleanup_warning: None,
             }),
         );
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Effort {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Effort {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         let action = dashboard.handle_key(key(KeyCode::Right));
-        assert!(matches!(
-            action,
-            DashboardAction::ProbeReviewSettings { generation: newer, .. } if newer > generation
-        ));
-        assert!(dialog(&dashboard).probing);
+        assert_eq!(action, DashboardAction::None);
+        assert!(!dialog(&dashboard).probing);
     }
 
     #[test]
@@ -897,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_and_reopening_drops_the_previous_dialog_probe() {
+    fn closing_and_reopening_uses_cached_choices() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
         let mut dashboard = DashboardState::new(
@@ -905,50 +1197,243 @@ mod tests {
             hel::hel_state::HelState::default(),
             Default::default(),
         );
-        let DashboardAction::ProbeReviewSettings {
+        let DashboardAction::DiscoverReviewSettings {
             generation,
             profile_id,
             model,
-            effort,
         } = open(&mut dashboard)
         else {
             panic!("expected initial probe")
         };
-        assert!(matches!(
+        assert_eq!(
             dashboard.handle_key(key(KeyCode::Esc)),
-            DashboardAction::CancelReviewSettingsProbe
-        ));
+            DashboardAction::CancelReviewSettingsDiscovery
+        );
         assert!(!dashboard.modal_open());
 
-        let DashboardAction::ProbeReviewSettings {
-            generation: reopened,
-            ..
-        } = open(&mut dashboard)
-        else {
-            panic!("expected reopened probe")
-        };
-        assert!(reopened > generation);
-        dashboard.apply_review_settings_probe(
+        assert!(!dashboard.apply_review_settings_discovery(
             generation,
             &profile_id,
             model.as_deref(),
-            effort.as_deref(),
-            Ok(ReviewSettingsProbeResult {
-                model_choices: vec![SessionConfigChoice {
-                    value: "old".into(),
-                    name: "Old".into(),
-                    description: None,
-                }],
-                effort_choices: vec![],
-                targets: vec![],
+            Ok(ReviewSettingsDiscoveryResult::Available {
+                choices: ReviewSettingsChoices {
+                    model_choices: vec![SessionConfigChoice {
+                        value: "old".into(),
+                        name: "Old".into(),
+                        description: None,
+                    }],
+                    effort_choices: vec![],
+                    effort_capabilities_discovered: false,
+                },
+                cleanup_warning: None,
+            }),
+        ));
+        let DashboardAction::DiscoverReviewSettings {
+            generation: reopened,
+            profile_id,
+            model,
+        } = open(&mut dashboard)
+        else {
+            panic!("expected reopened discovery")
+        };
+        dashboard.apply_review_settings_discovery(
+            reopened,
+            &profile_id,
+            model.as_deref(),
+            Ok(ReviewSettingsDiscoveryResult::Available {
+                choices: ReviewSettingsChoices {
+                    model_choices: vec![SessionConfigChoice {
+                        value: "old".into(),
+                        name: "Old".into(),
+                        description: None,
+                    }],
+                    effort_choices: vec![],
+                    effort_capabilities_discovered: false,
+                },
+                cleanup_warning: None,
             }),
         );
-        assert!(dialog(&dashboard).model_choices.is_empty());
-        assert!(dialog(&dashboard).probing);
+        dashboard.cancel_modal();
+        let reopened = open(&mut dashboard);
+        assert_eq!(reopened, DashboardAction::None);
+        assert!(dialog(&dashboard).model_choices_discovered);
+        assert_eq!(dialog(&dashboard).model_choices[0].value, "old");
     }
 
     #[test]
-    fn enabled_settings_block_while_checking_but_disabled_settings_can_save() {
+    fn refresh_clears_only_the_profile_cache_and_retains_current_choices() {
+        let mut config = config();
+        config.review.profile = Some("codex-1".into());
+        let mut dashboard = DashboardState::new(
+            config,
+            hel::hel_state::HelState::default(),
+            Default::default(),
+        );
+        dashboard.review_settings_choices.insert(
+            ("codex-1".into(), None),
+            ReviewSettingsChoices {
+                model_choices: vec![choice("tiny")],
+                effort_choices: vec![choice("high")],
+                effort_capabilities_discovered: true,
+            },
+        );
+        assert_eq!(open(&mut dashboard), DashboardAction::None);
+        assert_eq!(dialog(&dashboard).model_choices[0].value, "tiny");
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Refresh {
+            dashboard.handle_key(key(KeyCode::Tab));
+        }
+        let action = dashboard.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            action,
+            DashboardAction::DiscoverReviewSettings { model: None, .. }
+        ));
+        assert!(
+            !dashboard
+                .review_settings_choices
+                .contains_key(&("codex-1".into(), None))
+        );
+        assert_eq!(dialog(&dashboard).model_choices[0].value, "tiny");
+        assert!(dialog(&dashboard).probing);
+        assert!(dialog(&dashboard).choices_loading);
+    }
+
+    #[test]
+    fn profile_definition_changes_invalidate_cache_but_review_edits_do_not() {
+        let mut dashboard = DashboardState::new(
+            config(),
+            hel::hel_state::HelState::default(),
+            Default::default(),
+        );
+        let key = ("codex-1".to_owned(), None);
+        dashboard
+            .review_settings_choices
+            .insert(key.clone(), ReviewSettingsChoices::default());
+        let mut review_edit = dashboard.config.clone();
+        review_edit.review.enabled = true;
+        dashboard.set_config(review_edit);
+        assert!(dashboard.review_settings_choices.contains_key(&key));
+
+        let mut profile_edit = dashboard.config.clone();
+        profile_edit.profiles.get_mut("codex-1").unwrap().home = "/changed".into();
+        dashboard.set_config(profile_edit);
+        assert!(!dashboard.review_settings_choices.contains_key(&key));
+    }
+
+    #[test]
+    fn matching_discovery_replies_apply_through_help() {
+        let mut config = config();
+        config.review.profile = Some("codex-1".into());
+        let mut dashboard = DashboardState::new(
+            config,
+            hel::hel_state::HelState::default(),
+            Default::default(),
+        );
+        let DashboardAction::DiscoverReviewSettings {
+            generation,
+            profile_id,
+            model,
+        } = open(&mut dashboard)
+        else {
+            panic!("expected discovery")
+        };
+        dashboard.begin_help();
+        assert!(dashboard.apply_review_settings_choices(
+            generation,
+            &profile_id,
+            model.as_deref(),
+            ReviewSettingsChoices {
+                model_choices: vec![choice("tiny")],
+                effort_choices: vec![],
+                effort_capabilities_discovered: false,
+            },
+        ));
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("expected help")
+        };
+        let Mode::ReviewSettings(dialog) = overlay.return_to.as_ref() else {
+            panic!("help must cover review settings")
+        };
+        assert!(dialog.model_choices_discovered);
+        assert!(dialog.probing);
+        assert!(
+            dashboard
+                .review_settings_choices
+                .contains_key(&(profile_id, model))
+        );
+    }
+
+    #[test]
+    fn final_cleanup_warning_keeps_choices_and_zero_effort_is_known() {
+        let mut config = config();
+        config.review.profile = Some("codex-1".into());
+        let mut dashboard = DashboardState::new(
+            config,
+            hel::hel_state::HelState::default(),
+            Default::default(),
+        );
+        let DashboardAction::DiscoverReviewSettings {
+            generation,
+            profile_id,
+            model,
+        } = open(&mut dashboard)
+        else {
+            panic!("expected discovery")
+        };
+        let mut final_result = available(&["tiny"], &[], true);
+        if let ReviewSettingsDiscoveryResult::Available {
+            cleanup_warning, ..
+        } = &mut final_result
+        {
+            *cleanup_warning = Some("worker cleanup timed out".into());
+        }
+        assert!(dashboard.apply_review_settings_discovery(
+            generation,
+            &profile_id,
+            model.as_deref(),
+            Ok(final_result),
+        ));
+        assert!(!dialog(&dashboard).probing);
+        assert_eq!(
+            dialog(&dashboard).cleanup_warning.as_deref(),
+            Some("worker cleanup timed out")
+        );
+        assert!(dialog(&dashboard).model_choices_discovered);
+        assert!(dialog(&dashboard).effort_capabilities_discovered);
+        assert!(dialog(&dashboard).can_save());
+    }
+
+    #[test]
+    fn known_unsupported_values_disable_save_but_unknown_discovery_does_not() {
+        let mut config = config();
+        config.review.profile = Some("codex-1".into());
+        config.review.enabled = true;
+        config.review.model = Some("missing".into());
+        config.review.effort = Some("missing".into());
+        let mut dashboard = DashboardState::new(
+            config,
+            hel::hel_state::HelState::default(),
+            Default::default(),
+        );
+        let DashboardAction::DiscoverReviewSettings {
+            generation,
+            profile_id,
+            model,
+        } = open(&mut dashboard)
+        else {
+            panic!("expected discovery")
+        };
+        assert!(dialog(&dashboard).can_save());
+        assert!(dashboard.apply_review_settings_discovery(
+            generation,
+            &profile_id,
+            model.as_deref(),
+            Ok(available(&["tiny"], &["high"], true)),
+        ));
+        assert!(!dialog(&dashboard).can_save());
+    }
+
+    #[test]
+    fn save_is_local_while_loading_unavailable_or_failed() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
         config.review.enabled = true;
@@ -957,26 +1442,50 @@ mod tests {
             hel::hel_state::HelState::default(),
             Default::default(),
         );
-        let _ = open(&mut dashboard);
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Save {
-            dashboard.handle_key(key(KeyCode::Tab));
-        }
         assert!(matches!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
+            open(&mut dashboard),
+            DashboardAction::DiscoverReviewSettings { .. }
         ));
-        assert!(!dialog(&dashboard).saving);
-        // Disable automatic review and save despite the failed/unverified probe.
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Enabled {
-            dashboard.handle_key(key(KeyCode::BackTab));
-        }
-        dashboard.handle_key(key(KeyCode::Char(' ')));
-        while dialog(&dashboard).focus != ReviewSettingsFocus::Save {
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         assert!(matches!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::SaveReviewSettings { .. }
         ));
+        dashboard.cancel_modal();
+
+        let DashboardAction::DiscoverReviewSettings {
+            generation,
+            profile_id,
+            model,
+        } = open(&mut dashboard)
+        else {
+            panic!("expected rediscovery")
+        };
+        assert!(dashboard.apply_review_settings_discovery(
+            generation,
+            &profile_id,
+            model.as_deref(),
+            Ok(ReviewSettingsDiscoveryResult::Unavailable),
+        ));
+        assert!(dialog(&dashboard).can_save());
+        dashboard.cancel_modal();
+
+        let DashboardAction::DiscoverReviewSettings {
+            generation,
+            profile_id,
+            model,
+        } = open(&mut dashboard)
+        else {
+            panic!("expected rediscovery")
+        };
+        assert!(dashboard.apply_review_settings_discovery(
+            generation,
+            &profile_id,
+            model.as_deref(),
+            Err("offline".to_owned()),
+        ));
+        assert!(dialog(&dashboard).can_save());
     }
 }

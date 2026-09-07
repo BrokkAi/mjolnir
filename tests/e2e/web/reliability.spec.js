@@ -78,6 +78,29 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await expect(page).toHaveURL(/#workspace\//);
     const workspaceHash = new URL(page.url()).hash;
 
+    // This daemon has isolated config and a fake harness. Exercise the real
+    // bundle write/publish path without cloning or contacting a provider.
+    stage('bundle-create');
+    const bundles = await page.evaluate(async () => {
+      const create = async source => {
+        const response = await fetch('/api/bundles', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source }),
+        });
+        if (!response.ok) throw new Error(`bundle creation failed: ${response.status}`);
+        return response.json();
+      };
+      const [first, parallel] = await Promise.all([
+        create('example/browser-fixture'), create('example/browser-fixture-other'),
+      ]);
+      const reused = await create('https://github.com/example/browser-fixture.git');
+      const snapshot = await fetch('/api/snapshot').then(response => response.json());
+      return { first, parallel, reused, ids: snapshot.bundles.map(bundle => bundle.id) };
+    });
+    expect(bundles.reused.bundle_id).toBe(bundles.first.bundle_id);
+    expect(bundles.ids).toContain(bundles.first.bundle_id);
+    expect(bundles.ids).toContain(bundles.parallel.bundle_id);
+
     // Quota is a page reached from the menu, not a card on the dashboard.
     await page.locator('#menu-button').click();
     await page.getByRole('menuitem', { name: 'Quota' }).click();

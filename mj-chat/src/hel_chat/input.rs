@@ -3,12 +3,13 @@
 
 use std::collections::VecDeque;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::rendering::{display_width, sanitize_terminal_text};
-use super::{ChatState, PromptPayload, attachments};
+use super::{ChatAction, ChatState, PromptPayload, attachments};
 
 impl ChatState {
     pub(super) fn replace_input_range(
@@ -37,6 +38,17 @@ impl ChatState {
             self.input_cursor..self.input_cursor,
             &PromptPayload::text(character.to_string()),
         );
+    }
+
+    pub(super) fn handle_terminal_paste(&mut self, pasted: &str) -> ChatAction {
+        if pasted.is_empty() {
+            // Terminals signal non-text clipboard content (such as images)
+            // with an empty bracketed paste. Respect the same modal routing
+            // as Ctrl-V and let the background clipboard reader retrieve it.
+            return self.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        }
+        self.handle_paste(pasted);
+        ChatAction::None
     }
 
     pub(super) fn handle_paste(&mut self, pasted: &str) {

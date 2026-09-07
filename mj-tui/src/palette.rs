@@ -11,19 +11,23 @@
 //! It replaces the old session edit dialog, which existed only because the
 //! footer had no room for three more hints.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::cell::RefCell;
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use mj_chat::components::{ChoiceList, ControlKind, Form, Interaction, TextField};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 
 use crate::actions::{Availability, COMMANDS, CommandId, Scope, spec};
+use crate::render::render_session_scrollbar;
 use crate::widgets::centered_modal;
-use crate::{DashboardAction, DashboardState, Focus, Mode, move_index};
+use crate::{DashboardAction, DashboardState, Focus, Mode};
 
 /// One row of the palette: a command and whether it can be run.
 ///
@@ -46,6 +50,36 @@ pub(crate) struct CommandPalette {
     pub(crate) entries: Vec<PaletteEntry>,
     /// Index into `entries` of the highlighted row.
     pub(crate) selected: usize,
+    pub(crate) form: RefCell<Form<PaletteControl>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaletteControl {
+    Query,
+    Commands,
+}
+
+impl CommandPalette {
+    fn prepare(&self) {
+        let mut form = self.form.borrow_mut();
+        form.begin_frame();
+        form.register(
+            PaletteControl::Query,
+            ControlKind::TextField,
+            Rect::default(),
+            true,
+        );
+        form.register(
+            PaletteControl::Commands,
+            ControlKind::ChoiceList {
+                len: self.entries.len(),
+                selected: self.selected,
+            },
+            Rect::default(),
+            !self.entries.is_empty(),
+        );
+        form.end_frame(PaletteControl::Query);
+    }
 }
 
 /// The heading printed above the group `entry` opens, or `None` when the row
@@ -78,7 +112,7 @@ fn pane_scope(focus: Focus) -> Scope {
 /// The groups the palette walks, in the order it prints them.
 fn scope_order(dashboard: &DashboardState) -> Vec<Scope> {
     let mut order = vec![Scope::Session, pane_scope(dashboard.focus)];
-    for scope in [Scope::Setup, Scope::Pane, Scope::Global] {
+    for scope in [Scope::Setup, Scope::Pane, Scope::Settings, Scope::Global] {
         if !order.contains(&scope) {
             order.push(scope);
         }
@@ -144,11 +178,14 @@ impl DashboardState {
     /// Opens the palette over the dashboard.
     pub(crate) fn begin_palette(&mut self) {
         let entries = palette_entries(self, "");
-        self.mode = Mode::Palette(CommandPalette {
+        let palette = CommandPalette {
             query: TextInput::new(),
             entries,
             selected: 0,
-        });
+            form: RefCell::new(Form::default()),
+        };
+        palette.prepare();
+        self.mode = Mode::Palette(palette);
     }
 
     /// Recomputes the list after the query changed, keeping the highlight
@@ -163,44 +200,52 @@ impl DashboardState {
         };
         palette.selected = palette.selected.min(entries.len().saturating_sub(1));
         palette.entries = entries;
+        palette.prepare();
     }
 
-    /// Handles one key for the open palette.
-    ///
-    /// The palette is a typing surface, so every printable character and
-    /// Backspace edit the query. Only the keys that cannot be typed —
-    /// Up/Down, `Ctrl-P`/`Ctrl-N`, Enter, and Escape — drive the list.
-    pub(crate) fn handle_palette_key(&mut self, key: KeyEvent) -> DashboardAction {
+    pub(crate) fn handle_palette_event(&mut self, event: Event) -> DashboardAction {
         let Mode::Palette(palette) = &mut self.mode else {
             return DashboardAction::None;
         };
-        let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        let step = match key.code {
-            KeyCode::Up => Some(-1),
-            KeyCode::Down => Some(1),
-            KeyCode::Char('p') if control => Some(-1),
-            KeyCode::Char('n') if control => Some(1),
+        // Search palettes let arrows browse results while typing remains in the query.
+        let browse = match &event {
+            Event::Key(key)
+                if key.kind != KeyEventKind::Release
+                    && palette.form.borrow().is_focused(PaletteControl::Query) =>
+            {
+                match key.code {
+                    KeyCode::Up | KeyCode::Down => Some(key.code),
+                    KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                        Some(KeyCode::Up)
+                    }
+                    KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+                        Some(KeyCode::Down)
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         };
-        if let Some(step) = step {
-            let len = palette.entries.len();
-            let mut index = palette.selected;
-            move_index(&mut index, len, step);
-            palette.selected = index;
-            return DashboardAction::None;
-        }
-        match key.code {
-            KeyCode::Esc => {
-                self.cancel_modal();
-                return DashboardAction::None;
+        let interaction = if let Some(code) = browse {
+            let form = palette.form.get_mut();
+            form.focus(PaletteControl::Commands);
+            let result = form.handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+            form.focus(PaletteControl::Query);
+            result.action
+        } else {
+            palette.form.get_mut().handle(&event).action
+        };
+        match interaction {
+            Some(Interaction::Cancel) => self.cancel_modal(),
+            Some(Interaction::Edit(PaletteControl::Query, edit)) => {
+                TextField::apply(&mut palette.query, edit);
+                self.rebuild_palette_entries();
             }
-            KeyCode::Enter => {
+            Some(Interaction::Select(PaletteControl::Commands, index)) => palette.selected = index,
+            Some(Interaction::Activate(PaletteControl::Query | PaletteControl::Commands)) => {
                 let Some(entry) = palette.entries.get(palette.selected).cloned() else {
                     return DashboardAction::None;
                 };
-                // A blocked command explains itself and leaves the palette
-                // open, so the user can pick something else without pressing
-                // F2 again.
                 if let Availability::Blocked(reason) = entry.availability {
                     self.notices.set(format!(
                         "{} is unavailable: {reason}.",
@@ -212,9 +257,6 @@ impl DashboardState {
                 return self.dispatch_command(entry.id);
             }
             _ => {}
-        }
-        if palette.query.handle_key(key).changed() {
-            self.rebuild_palette_entries();
         }
         DashboardAction::None
     }
@@ -261,7 +303,11 @@ pub(crate) fn render_palette(
     palette: &CommandPalette,
     surfaces: &mut FrameSurfaces,
 ) {
-    let popup = centered_modal(frame, surfaces, 72, 22, area);
+    let lines = palette_lines(dashboard, palette);
+    // The popup grows with the complete list. The shared modal helper clamps
+    // it to the usable terminal bounds when the list cannot fit.
+    let popup_height = u16::try_from(lines.len().saturating_add(4).max(5)).unwrap_or(u16::MAX);
+    let popup = centered_modal(frame, surfaces, 72, popup_height, area);
     let outer = Block::default().borders(Borders::ALL).title(" Commands ");
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);
@@ -274,31 +320,50 @@ pub(crate) fn render_palette(
         ])
         .split(inner);
 
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            format!("> {}", palette.query.with_cursor_marker("▏")),
-            Style::default().bg(Color::DarkGray).fg(Color::White),
-        )),
+    let mut form = palette.form.borrow_mut();
+    form.begin_frame();
+    TextField::render(
+        frame,
         rows[0],
+        &palette.query,
+        &mut form,
+        PaletteControl::Query,
     );
 
-    let width = usize::from(rows[1].width).saturating_sub(2);
-    let lines = palette_lines(dashboard, palette);
-    let mut highlighted = None;
+    // Keep the rail outside the list's registered area. Besides leaving the
+    // command text untouched, this means clicking the scrollbar cannot be
+    // interpreted as clicking a command row.
+    let list_area = Rect::new(
+        rows[1].x,
+        rows[1].y,
+        rows[1].width.saturating_sub(1),
+        rows[1].height,
+    );
+    let scrollbar_area = Rect::new(
+        rows[1].x.saturating_add(list_area.width),
+        rows[1].y,
+        rows[1].width.saturating_sub(list_area.width),
+        rows[1].height,
+    );
+    let width = usize::from(list_area.width).saturating_sub(1);
+    let mut row_map = Vec::new();
+    let mut enabled = Vec::new();
     let items = lines
         .iter()
-        .enumerate()
-        .map(|(row, line)| match line {
-            PaletteLine::Heading(heading) => ListItem::new(Line::styled(
-                clip(heading, width),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
+        .map(|line| match line {
+            PaletteLine::Heading(heading) => {
+                row_map.push(None);
+                enabled.push(true);
+                Line::styled(
+                    clip(heading, width),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            }
             PaletteLine::Command(index) => {
-                if *index == palette.selected {
-                    highlighted = Some(row);
-                }
+                row_map.push(Some(*index));
+                enabled.push(palette.entries[*index].availability == Availability::Ready);
                 let entry = &palette.entries[*index];
                 let spec = spec(entry.id);
                 let keys = spec
@@ -320,28 +385,45 @@ pub(crate) fn render_palette(
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
-                ListItem::new(Line::from(vec![Span::styled(text, style)]))
+                Line::from(vec![Span::styled(text, style)])
             }
         })
         .collect::<Vec<_>>();
-    let empty = items.is_empty();
-    let items = if empty {
-        vec![ListItem::new("No matching command")]
+    if items.is_empty() {
+        frame.render_widget(Line::raw("No matching command"), list_area);
+        form.register(
+            PaletteControl::Commands,
+            ControlKind::ChoiceList {
+                len: 0,
+                selected: 0,
+            },
+            list_area,
+            false,
+        );
     } else {
-        items
-    };
-    let mut state = ListState::default().with_selected(highlighted);
-    frame.render_stateful_widget(
-        List::new(items)
-            .highlight_symbol("› ")
-            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White)),
-        rows[1],
-        &mut state,
+        ChoiceList::render_with_rows(
+            frame,
+            list_area,
+            &items,
+            palette.selected,
+            &row_map,
+            &enabled,
+            &mut form,
+            PaletteControl::Commands,
+        );
+    }
+    render_session_scrollbar(
+        frame,
+        scrollbar_area,
+        items.len(),
+        form.list_offset(PaletteControl::Commands),
+        usize::from(list_area.height).max(1),
     );
+    form.end_frame(PaletteControl::Query);
 
     frame.render_widget(
         Paragraph::new(Line::styled(
-            "type to filter · Up/Down · Enter runs · Esc closes",
+            "type to filter · Up/Down browse · Tab moves · Enter runs · Esc closes",
             Style::default().fg(Color::DarkGray),
         )),
         rows[2],
@@ -391,11 +473,67 @@ mod tests {
         let lines = drawn(&mut dashboard, 120, 44);
         let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
         let rename = row_of(&lines, "Rename session").expect("Rename session");
+        let settings = row_of(&lines, "Settings").expect("the settings heading");
+        let review = row_of(&lines, "Review settings").expect("Review settings");
+        let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");
         let workspaces = row_of(&lines, "Workspaces").expect("Workspaces");
         assert!(heading < rename, "{lines:#?}");
-        assert!(rename < workspaces, "{lines:#?}");
+        assert!(rename < settings, "{lines:#?}");
+        assert!(settings < review && review < anywhere, "{lines:#?}");
+        assert!(anywhere < workspaces, "{lines:#?}");
         // The palette never lists itself.
         assert!(row_of(&lines, "Command palette").is_none(), "{lines:#?}");
+    }
+
+    #[test]
+    fn palette_shows_the_selected_row_and_scrolls_the_list_on_a_short_terminal() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::F(2)));
+
+        // Focus the list and select its final command before drawing the
+        // constrained viewport. The shared list renderer must reveal it and
+        // publish the same offset used by the scrollbar.
+        dashboard.handle_key(key(KeyCode::Tab));
+        dashboard.handle_key(key(KeyCode::End));
+        let mut terminal = Terminal::new(TestBackend::new(100, 18)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .expect("draw the constrained palette");
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        let Mode::Palette(palette) = &dashboard.mode else {
+            panic!("F2 should leave the palette open")
+        };
+        assert_eq!(
+            palette.selected,
+            palette.entries.len().saturating_sub(1),
+            "End selects the final command"
+        );
+        assert!(
+            palette.form.borrow().list_offset(PaletteControl::Commands) > 0,
+            "the selected final command requires scrolling: {lines:#?}"
+        );
+        assert!(
+            row_of(&lines, "Help").is_some(),
+            "the selected row is visible"
+        );
+    }
+
+    #[test]
+    fn palette_searches_and_activates_review_settings() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::F(2)));
+        type_query(&mut dashboard, "review settings");
+
+        let lines = drawn(&mut dashboard, 120, 30);
+        assert!(row_of(&lines, "Review settings").is_some(), "{lines:#?}");
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::ReviewSettings(_)));
     }
 
     /// From the composer the selection is the conversation on screen, so the

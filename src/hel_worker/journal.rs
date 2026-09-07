@@ -194,6 +194,15 @@ pub(crate) fn open_relay_journal(
             }
             validate_relay_event(recovered_ordinal, &recovered_digest, &event)
                 .context("validate relay journal recovery tail")?;
+            // Replay lacks the process-local activity levels that accompanied
+            // a state change. Preserve known idle history across warnings, but
+            // do not manufacture a transition time after an interrupted save.
+            if observation_changes_state(&event.observation)
+                || matches!(event.observation, RelayObservation::SessionUpdate { .. })
+            {
+                snapshot.idle_since_ms = None;
+                snapshot.activity_was_idle = None;
+            }
             apply_relay_event(snapshot, &event)?;
             recovered_ordinal = event.ordinal;
             recovered_digest = event.digest.clone();
@@ -806,6 +815,7 @@ impl DurableRelay {
             // frontier, which `relay_event_digest` already validated.
             None => apply_relay_event(&mut self.snapshot, &event)?,
         }
+        let idle_changed = self.refresh_idle_clock(event.recorded_at_ms);
         self.record_journal_append(&path, &event);
         self.push_hot_event(event);
         self.unpersisted_journal_bytes =
@@ -814,7 +824,10 @@ impl DurableRelay {
         // streamed observation does not need its own snapshot write. Persisting
         // on every state move and once per bounded run of transcript bytes
         // keeps that replay short without paying two fsyncs per chunk.
-        if stage_snapshot || self.unpersisted_journal_bytes >= RELAY_SNAPSHOT_LAG_BYTE_LIMIT {
+        if stage_snapshot
+            || idle_changed
+            || self.unpersisted_journal_bytes >= RELAY_SNAPSHOT_LAG_BYTE_LIMIT
+        {
             self.persist_snapshot()?;
         }
         Ok(ordinal)

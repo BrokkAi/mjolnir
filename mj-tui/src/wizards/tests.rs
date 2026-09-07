@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crossterm::event::KeyCode;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::layout::Position;
 
 use hel::hel_config::{HarnessKind, HarnessProfile, SshConnection, TargetTemplate};
 use hel::hel_state::{HelState, HostContainerSize, STATE_VERSION, SessionResourceAllocation};
@@ -50,6 +51,7 @@ fn new_session_wizard_returns_all_three_choices() {
             }),
         }
     );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -261,7 +263,22 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         .collect::<String>();
     assert!(rendered.contains("Error: remote project directory /srv/project does not exist"));
 
-    dashboard.apply_project_directory_validation("/srv/project", Ok(()));
+    dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    dashboard.handle_paste("/srv/repaired");
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("invalid project validation should keep the wizard open");
+    };
+    assert_eq!(wizard.project_directory, "/srv/repaired");
+    assert_eq!(wizard.project_directory_error, None);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::ValidateProjectDirectory {
+            target_template_id: "machine".into(),
+            directory: "/srv/repaired".into(),
+        }
+    );
+
+    dashboard.apply_project_directory_validation("/srv/repaired", Ok(()));
 
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -273,15 +290,15 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Project directory: /srv/project"));
+    assert!(rendered.contains("Project directory: /srv/repaired"));
     assert!(!rendered.contains("Attached directories"));
 
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
             profile_id: "claude-1".into(),
-            bundle_id: raw_project_context_id("/srv/project"),
-            project_directory: Some("/srv/project".into()),
+            bundle_id: raw_project_context_id("/srv/repaired"),
+            project_directory: Some("/srv/repaired".into()),
             target_template_id: "machine".into(),
             additional_mounts: Vec::new(),
             allow_dirty_local: false,
@@ -570,9 +587,14 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
     );
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(wizard_mounts(&dashboard).focus, MountFocus::ReadOnly);
-    dashboard.handle_key(key(KeyCode::Char(' ')));
-    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected mount editor");
+    };
+    // The locked checkbox is disabled in the shared form, so traversal skips
+    // it and lands on Cancel. Space therefore belongs to the button rather
+    // than attempting to toggle the forced read-only state.
+    assert_eq!(wizard.form.borrow().focused(), Some(WizardControl::Cancel));
+    assert_eq!(wizard_mounts(&dashboard).focus, MountFocus::Cancel);
     assert!(
         wizard_mounts(&dashboard).read_only,
         "a forced source must stay read-only"
@@ -589,7 +611,12 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Read-only: [x] locked · nfs (network filesystem)"));
+    assert!(rendered.contains("[x] Read-only (locked)"));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -613,7 +640,20 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Source: ▏"));
+    assert!(rendered.contains("Source:"));
+    let lines = buffer_lines(terminal.backend().buffer());
+    let source_row = lines
+        .iter()
+        .position(|line| line.contains("Source:"))
+        .expect("source field");
+    let source_x = cell_column(&lines[source_row], "Source:");
+    assert_eq!(
+        terminal.get_cursor_position().expect("source cursor"),
+        Position {
+            x: source_x + 10,
+            y: source_row as u16,
+        }
+    );
     assert!(rendered.contains("Add directory"));
     for character in "/opt/cache".chars() {
         dashboard.handle_key(key(KeyCode::Char(character)));
@@ -657,6 +697,12 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
             }),
         }
     );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("mount validation should keep the new-session wizard open");
+    };
+    assert_eq!(wizard.mounts.mounts.len(), 1);
+    dashboard.finish_session_mount_preflight();
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -811,6 +857,62 @@ fn resume_can_convert_to_another_harness() {
             }),
         }
     );
+    assert!(matches!(dashboard.mode, Mode::Resume(_)));
+    dashboard.finish_resume_repository_preflight();
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn wizard_back_activation_preserves_the_draft_and_cancel_closes_it() {
+    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    // Target step: Tab reaches Cancel, then Back. Activating Back returns to
+    // Profile while keeping the wizard open with its draft state.
+    dashboard.handle_key(key(KeyCode::Tab));
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("Back should keep the new-session wizard open");
+    };
+    assert_eq!(wizard.step, WizardStep::Profile);
+
+    // The same explicit button path then closes the modal.
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn resume_back_activation_preserves_the_draft_and_cancel_closes_it() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    open_resume_wizard(&mut dashboard);
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    dashboard.handle_key(key(KeyCode::Tab));
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("Back should keep the resume wizard open");
+    };
+    assert_eq!(wizard.step, WizardStep::Profile);
+
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -1499,4 +1601,100 @@ fn ec2_size_controls_use_exact_doubling_steps() {
     assert_eq!(allocation_cpus(allocation.as_ref().unwrap()), 16);
     adjust_resources(&mut allocation, Some(&options), None, KeyCode::Char('r'));
     assert_eq!(allocation_cpus(allocation.as_ref().unwrap()), 8);
+}
+
+#[test]
+fn cancelling_a_wizard_invalidates_checks_before_reopening_the_same_form() {
+    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    dashboard.handle_key(alt_key('n'));
+    let pending = dashboard.session_preflight_generation();
+    dashboard.handle_key(key(KeyCode::Esc));
+    dashboard.handle_key(alt_key('n'));
+    assert!(matches!(dashboard.mode, Mode::New(_)));
+    assert_ne!(pending, dashboard.session_preflight_generation());
+}
+
+#[test]
+fn target_next_focuses_the_project_field_and_footer_keys_do_not_edit_it() {
+    let mut config = config();
+    config.targets.clear();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(key(KeyCode::Enter));
+    for _ in 0..3 {
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    assert!(dashboard.text_input_focused());
+    dashboard.handle_paste("/work/project");
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("project step");
+    };
+    assert_eq!(wizard.project_directory, "/work/project");
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert!(!dashboard.text_input_focused());
+    dashboard.handle_key(key(KeyCode::Char('x')));
+    dashboard.handle_paste("ignored");
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("project step");
+    };
+    assert_eq!(wizard.project_directory, "/work/project");
+}
+
+#[test]
+fn resume_target_next_mouse_release_advances_to_review() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut session = stopped_session();
+    session.target_template_id = "localhost".into();
+    session.project_directory = Some("/work/project".into());
+    let mut config = config();
+    config.targets.clear();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut state = HelState::default();
+    state.sessions.insert(session.id.clone(), session);
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
+    open_resume_wizard(&mut dashboard);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    dashboard.reset_component_geometry();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let (column, row) = (0..40)
+        .find_map(|row| {
+            let text = (0..140)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>();
+            text.find("[ Next ]").map(|column| (column as u16 + 2, row))
+        })
+        .expect("Next button");
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        dashboard.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        dashboard.reset_component_geometry();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+    }
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("resume wizard");
+    };
+    assert_eq!(wizard.step, WizardStep::Review);
 }

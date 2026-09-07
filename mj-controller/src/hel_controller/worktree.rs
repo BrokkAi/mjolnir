@@ -64,8 +64,8 @@ impl Controller {
     }
 
     /// Resolves a session's canonical project without doing process work on a
-    /// UI loop. Raw checkouts use their Git origin, which joins sibling linked
-    /// worktrees to configured bundles from the same repository.
+    /// UI loop. Raw checkouts use their Git origin when available, then their
+    /// canonical Git root or local directory.
     pub fn resolve_session_project_source(
         &self,
         session_id: &str,
@@ -112,16 +112,24 @@ impl Controller {
             0 => {
                 let origin =
                     String::from_utf8(output.stdout).context("project Git origin was not UTF-8")?;
-                Ok(ProjectSourceIdentity::git_remote(origin.trim())
-                    .unwrap_or_else(|| session.project_source(&self.config)))
+                if let Some(identity) = ProjectSourceIdentity::git_remote(origin.trim()) {
+                    return Ok(identity);
+                }
             }
-            // Git uses 1 when the repository has no origin configured.
-            1 => Ok(session.project_source(&self.config)),
+            // Git uses 1 when no origin is configured.
+            1 => {}
             status => bail!(
                 "resolve project Git origin failed with status {status}: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
         }
+        let root = resolve_git_root(&target, origin_directory, executor)?
+            .unwrap_or_else(|| origin_directory.to_path_buf());
+        let remote = match &target {
+            ManagedWorktreeTarget::Local => None,
+            ManagedWorktreeTarget::Ssh { destination, .. } => Some(destination.as_str()),
+        };
+        Ok(ProjectSourceIdentity::path(&root, remote))
     }
 
     /// Resolve the checkout a bundle session is moving into, and check that it
@@ -339,6 +347,74 @@ fn managed_git_stdout(
 ) -> Result<String> {
     let command = managed_git_command(target, directory, args, purpose);
     command_stdout(executor.execute(&command)?, purpose)
+}
+
+/// Resolve a checkout's stable repository root, collapsing linked worktrees
+/// onto the main worktree when Git exposes the shared `.git` directory.
+fn resolve_git_root(
+    target: &ManagedWorktreeTarget,
+    directory: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<Option<PathBuf>> {
+    // The expected non-repository diagnostic must be stable across locales;
+    // every other Git failure remains an error.
+    let args = [
+        "-C".to_owned(),
+        directory.to_string_lossy().into_owned(),
+        "rev-parse".into(),
+        "--path-format=absolute".into(),
+        "--show-toplevel".into(),
+    ];
+    let top_level = match target {
+        ManagedWorktreeTarget::Local => {
+            let mut command = CommandSpec::new("git", args);
+            command.env.insert("LC_ALL".into(), "C".into());
+            command
+        }
+        ManagedWorktreeTarget::Ssh { .. } => managed_target_command(
+            target,
+            "env",
+            ["LC_ALL=C".to_owned(), "git".into()]
+                .into_iter()
+                .chain(args),
+        ),
+    }
+    .purpose("resolve project Git root");
+    let output = executor.execute(&top_level)?;
+    if output.status != 0 {
+        if output.status == 128
+            && String::from_utf8_lossy(&output.stderr).starts_with("fatal: not a git repository")
+        {
+            return Ok(None);
+        }
+        bail!(
+            "resolve project Git root failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let root = PathBuf::from(
+        String::from_utf8(output.stdout)
+            .context("project Git root was not UTF-8")?
+            .trim_end_matches(['\r', '\n']),
+    );
+    if root.as_os_str().is_empty() {
+        bail!("resolve project Git root returned an empty path");
+    }
+
+    let common = PathBuf::from(managed_git_stdout(
+        executor,
+        target,
+        directory,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        "resolve project Git common directory",
+    )?);
+    if common.file_name() == Some(std::ffi::OsStr::new(".git"))
+        && let Some(main_root) = common.parent()
+    {
+        return Ok(Some(main_root.to_path_buf()));
+    }
+    Ok(Some(root))
 }
 
 /// Which checkout each still-empty target repository is seeded from, or `None`
@@ -1370,6 +1446,145 @@ mod tests {
             .unwrap();
 
         assert_eq!(source.key, "github:example/project");
+    }
+
+    #[test]
+    fn raw_no_origin_uses_the_canonical_main_repository_root() {
+        struct NoOriginExecutor {
+            commands: RefCell<Vec<CommandSpec>>,
+        }
+        impl CommandExecutor for NoOriginExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands.borrow_mut().push(command.clone());
+                if command.args.iter().any(|argument| argument == "config") {
+                    return Ok(CommandOutput {
+                        status: 1,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                let stdout = if command
+                    .args
+                    .iter()
+                    .any(|argument| argument == "--show-toplevel")
+                {
+                    "/worktrees/project-side\n"
+                } else if command
+                    .args
+                    .iter()
+                    .any(|argument| argument == "--git-common-dir")
+                {
+                    "/projects/project/.git\n"
+                } else {
+                    panic!("unexpected command {:?}", command.args);
+                };
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        let mut config = HelConfig::default();
+        config
+            .targets
+            .insert("localhost".into(), TargetTemplate::LocalBare);
+        let session = raw_session_on("localhost", "/worktrees/project-side");
+        let session_id = session.id.clone();
+        let controller = Controller {
+            config,
+            state: HelState {
+                sessions: [(session_id.clone(), session)].into_iter().collect(),
+                ..HelState::default()
+            },
+        };
+        let executor = NoOriginExecutor {
+            commands: RefCell::new(Vec::new()),
+        };
+
+        let source = controller
+            .resolve_session_project_source(&session_id, &executor)
+            .unwrap();
+
+        assert_eq!(source.key, "path:/projects/project");
+        assert_eq!(source.short, "project");
+        assert_eq!(source.full, "/projects/project");
+        assert_eq!(executor.commands.borrow().len(), 3);
+    }
+
+    #[test]
+    fn raw_non_git_directory_keeps_its_local_path_source() {
+        struct NonGitExecutor {
+            commands: RefCell<Vec<CommandSpec>>,
+        }
+        impl CommandExecutor for NonGitExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands.borrow_mut().push(command.clone());
+                let status = if command.args.iter().any(|argument| argument == "config") {
+                    1
+                } else {
+                    assert!(
+                        command
+                            .args
+                            .iter()
+                            .any(|argument| argument == "--show-toplevel")
+                    );
+                    128
+                };
+                Ok(CommandOutput {
+                    status,
+                    stdout: Vec::new(),
+                    stderr: b"fatal: not a git repository\n".to_vec(),
+                })
+            }
+        }
+
+        let mut config = HelConfig::default();
+        config
+            .targets
+            .insert("localhost".into(), TargetTemplate::LocalBare);
+        let session = raw_session_on("localhost", "/scratch/project");
+        let session_id = session.id.clone();
+        let controller = Controller {
+            config,
+            state: HelState {
+                sessions: [(session_id.clone(), session)].into_iter().collect(),
+                ..HelState::default()
+            },
+        };
+        let executor = NonGitExecutor {
+            commands: RefCell::new(Vec::new()),
+        };
+
+        let source = controller
+            .resolve_session_project_source(&session_id, &executor)
+            .unwrap();
+
+        assert_eq!(source.key, "path:/scratch/project");
+        assert_eq!(source.full, "/scratch/project");
+        assert_eq!(executor.commands.borrow().len(), 2);
+    }
+
+    #[test]
+    fn project_root_lookup_reports_git_failures_instead_of_treating_them_as_non_git() {
+        struct FailedGit;
+        impl CommandExecutor for FailedGit {
+            fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+                Ok(CommandOutput {
+                    status: 128,
+                    stdout: Vec::new(),
+                    stderr: b"fatal: detected dubious ownership in repository".to_vec(),
+                })
+            }
+        }
+        let error = resolve_git_root(
+            &ManagedWorktreeTarget::Local,
+            Path::new("/project"),
+            &FailedGit,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("dubious ownership"));
     }
 
     /// Answers the two Git reads that locate a checkout, and nothing else.

@@ -115,6 +115,7 @@ pub struct AwsTargetInput {
 pub enum SshTargetKind {
     Bare { permissions: PermissionMode },
     Podman { image: String },
+    Docker { image: String },
 }
 
 /// The answers that become a `[targets.<name>]` SSH entry.
@@ -615,6 +616,18 @@ fn build_config_with_runtimes(
                     workspace_storage: Default::default(),
                 },
             },
+            SshTargetKind::Docker { image } => TargetTemplate::SshDocker {
+                ssh: connection,
+                container: ContainerTemplate {
+                    image: image.clone(),
+                    pull_policy: Default::default(),
+                    platform: None,
+                    cpus: None,
+                    memory: None,
+                    environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
+                },
+            },
         };
         // The dialog already refuses a name that collides, so this only guards
         // a caller that builds a config without asking: a chosen SSH name must
@@ -956,34 +969,58 @@ fn prompt_ssh_target(
         }
     };
 
-    let kind = prompt(input, output, "Run agents in Podman on that host? [Y/n]: ")?;
-    let kind = if matches!(kind.to_ascii_lowercase().as_str(), "n" | "no") {
-        let permissions = loop {
-            let mode = prompt(
-                input,
-                output,
-                "Raw-host permissions, guardian or yolo [guardian]: ",
-            )?;
-            match mode.to_ascii_lowercase().as_str() {
-                "" | "guardian" => break PermissionMode::Guardian,
-                "yolo" => break PermissionMode::Yolo,
-                _ => writeln!(output, "Permissions must be `guardian` or `yolo`.")?,
+    let kind = loop {
+        let runtime = prompt(
+            input,
+            output,
+            "Container runtime on that host, podman, docker, or bare [podman]: ",
+        )?;
+        let runtime = runtime.to_ascii_lowercase();
+        if matches!(runtime.as_str(), "n" | "no" | "bare") {
+            let permissions = loop {
+                let mode = prompt(
+                    input,
+                    output,
+                    "Raw-host permissions, guardian or yolo [guardian]: ",
+                )?;
+                match mode.to_ascii_lowercase().as_str() {
+                    "" | "guardian" => break PermissionMode::Guardian,
+                    "yolo" => break PermissionMode::Yolo,
+                    _ => writeln!(output, "Permissions must be `guardian` or `yolo`.")?,
+                }
+            };
+            break SshTargetKind::Bare { permissions };
+        }
+        let kind = if matches!(runtime.as_str(), "" | "y" | "yes" | "podman") {
+            SshTargetKind::Podman {
+                image: String::new(),
             }
+        } else if runtime == "docker" {
+            SshTargetKind::Docker {
+                image: String::new(),
+            }
+        } else {
+            writeln!(
+                output,
+                "Runtime must be `podman`, `docker`, or `bare`; please choose again."
+            )?;
+            continue;
         };
-        SshTargetKind::Bare { permissions }
-    } else {
         let image = prompt(
             input,
             output,
             &format!("Container image [{DEFAULT_IMAGE}]: "),
         )?;
-        SshTargetKind::Podman {
-            image: if image.is_empty() {
-                DEFAULT_IMAGE.to_owned()
-            } else {
-                image
-            },
-        }
+        let image = if image.is_empty() {
+            DEFAULT_IMAGE.to_owned()
+        } else {
+            image
+        };
+        break match kind {
+            SshTargetKind::Podman { .. } => SshTargetKind::Podman { image },
+            SshTargetKind::Docker { .. } => SshTargetKind::Docker { image },
+            SshTargetKind::Bare { .. } => unreachable!("bare runtime returned above"),
+        };
     };
 
     let Some(name) = prompt_ssh_target_name(input, output, &host, configured)? else {
@@ -1169,6 +1206,13 @@ fn write_summary(
                 writeln!(
                     output,
                     "  SSH target {id} on {} using Podman image {}",
+                    ssh.host, container.image
+                )?;
+            }
+            TargetTemplate::SshDocker { ssh, container } => {
+                writeln!(
+                    output,
+                    "  SSH target {id} on {} using Docker image {}",
                     ssh.host, container.image
                 )?;
             }
@@ -1731,8 +1775,51 @@ Host builder
         let config = build_config_with_runtime(&[], None, None, None, None);
         assert!(!config.targets.values().any(|target| matches!(
             target,
-            TargetTemplate::SshBare { .. } | TargetTemplate::SshPodman { .. }
+            TargetTemplate::SshBare { .. }
+                | TargetTemplate::SshPodman { .. }
+                | TargetTemplate::SshDocker { .. }
         )));
+    }
+
+    #[test]
+    fn accepting_the_ssh_step_can_write_a_docker_target() {
+        let aliases = vec!["builder".to_owned()];
+        // yes, host 1, Docker, default image, and the default target name.
+        let mut input = b"y\n1\ndocker\n\n\n".as_slice();
+        let mut output = Vec::new();
+
+        let ssh = prompt_ssh_target(&mut input, &mut output, &aliases, &BTreeMap::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ssh.kind,
+            SshTargetKind::Docker {
+                image: DEFAULT_IMAGE.into()
+            }
+        );
+        let config = build_config_with_runtime(&[], None, None, None, Some(&ssh));
+        let TargetTemplate::SshDocker { ssh, container } = &config.targets["builder"] else {
+            panic!("setup must write an ssh-docker target");
+        };
+        assert_eq!(ssh.host, "builder");
+        assert_eq!(container.image, DEFAULT_IMAGE);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn the_ssh_step_rejects_an_unknown_runtime_before_asking_for_an_image() {
+        let aliases = vec!["builder".to_owned()];
+        let mut input = b"y\n1\ncontainerd\ndocker\n\n\n".as_slice();
+        let mut output = Vec::new();
+
+        let ssh = prompt_ssh_target(&mut input, &mut output, &aliases, &BTreeMap::new())
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(ssh.kind, SshTargetKind::Docker { .. }));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Runtime must be"), "{output}");
+        assert_eq!(output.matches("Container image").count(), 1);
     }
 
     #[test]

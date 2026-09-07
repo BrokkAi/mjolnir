@@ -12,6 +12,7 @@ mod import;
 mod logging;
 mod pollers;
 mod server;
+mod session_presentation;
 mod workspace_selector;
 
 use std::io;
@@ -342,20 +343,14 @@ async fn run_workspace_dashboard(
         let mut selected_workspace_id = None;
         loop {
             let suggested = suggested_workspace_name(&workspaces)?;
-            let mut selector_entries = Vec::with_capacity(workspaces.len());
-            for listing in &workspaces {
-                let snapshot = daemon.snapshot(listing.workspace.id.clone()).await?;
-                selector_entries.push(workspace_selector::SelectorWorkspace {
-                    listing: listing.clone(),
-                    snapshot,
-                });
-            }
             match workspace_selector::select_workspace(
-                &selector_entries,
+                &workspaces,
                 &suggested,
                 &notices,
                 selected_workspace_id.as_deref(),
-            )? {
+            )
+            .await?
+            {
                 workspace_selector::SelectorOutcome::Select(workspace_id) => break workspace_id,
                 workspace_selector::SelectorOutcome::Create(name) => {
                     match daemon.create_workspace(name).await {
@@ -417,11 +412,16 @@ async fn run_workspace_dashboard(
                         }
                     }
                 }
+                workspace_selector::SelectorOutcome::Interrupted => {
+                    return Ok(DashboardExit::Interrupted);
+                }
                 workspace_selector::SelectorOutcome::Cancel => {
                     if let Some(workspace_id) = &fallback_workspace {
                         break workspace_id.clone();
                     }
-                    return Ok(DashboardExit::Normal);
+                    // The picker has only disposable read work left. Do not
+                    // wait on cancelled blocking readers at process shutdown.
+                    return Ok(DashboardExit::Interrupted);
                 }
             }
         }

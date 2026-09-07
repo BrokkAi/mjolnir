@@ -569,7 +569,8 @@ fn migration_twenty_two_preserves_existing_podman_targets_as_container_layers() 
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE session_targets DROP COLUMN workspace_storage;
+            "DROP TABLE workspace_pane_sizes;
+             ALTER TABLE session_targets DROP COLUMN workspace_storage;
              DELETE FROM schema_migrations WHERE version > 21;
              PRAGMA user_version = 21;",
         )
@@ -952,6 +953,11 @@ fn rewind_schema_to(connection: &Connection, version: i64) {
     ] {
         connection
             .execute_batch(&format!("DROP TABLE IF EXISTS {table};"))
+            .unwrap();
+    }
+    if version < 25 {
+        connection
+            .execute_batch("DROP TABLE IF EXISTS workspace_pane_sizes;")
             .unwrap();
     }
     if version < 22 {
@@ -3490,6 +3496,229 @@ fn legacy_sessions_are_migrated_into_the_default_workspace_without_copying_state
     );
 }
 
+fn workspace_pane_size_row_count(path: &Path, workspace_id: &str) -> i64 {
+    Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM workspace_pane_sizes WHERE workspace_id = ?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn workspace_pane_sizes_default_without_creating_an_absent_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Defaults").unwrap();
+
+    assert_eq!(workspace_pane_size_row_count(&database, &workspace.id), 0);
+    assert_eq!(
+        load_workspace_pane_sizes_from(&database, &workspace.id).unwrap(),
+        PaneSizes::default()
+    );
+    assert_eq!(
+        workspace_pane_size_row_count(&database, &workspace.id),
+        0,
+        "loading defaults must not create a settings row"
+    );
+}
+
+#[test]
+fn workspace_pane_sizes_round_trip_after_reopening_the_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Roundtrip").unwrap();
+    let sizes = PaneSizes {
+        sessions: PaneSize::Maximized,
+        targets: PaneSize::Minimized,
+        quota: PaneSize::Standard,
+    };
+
+    save_workspace_pane_sizes_to(&database, &workspace.id, sizes).unwrap();
+    drop(open(&database).unwrap());
+    forget_verified_schema(&database);
+
+    assert_eq!(
+        load_workspace_pane_sizes_from(&database, &workspace.id).unwrap(),
+        sizes
+    );
+}
+
+#[test]
+fn workspace_pane_sizes_are_isolated_between_workspaces() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let first = create_workspace_at(&database, "First").unwrap();
+    let second = create_workspace_at(&database, "Second").unwrap();
+    let first_sizes = PaneSizes {
+        sessions: PaneSize::Minimized,
+        targets: PaneSize::Maximized,
+        quota: PaneSize::Standard,
+    };
+    let second_sizes = PaneSizes {
+        sessions: PaneSize::Standard,
+        targets: PaneSize::Minimized,
+        quota: PaneSize::Maximized,
+    };
+
+    save_workspace_pane_sizes_to(&database, &first.id, first_sizes).unwrap();
+    save_workspace_pane_sizes_to(&database, &second.id, second_sizes).unwrap();
+
+    assert_eq!(
+        load_workspace_pane_sizes_from(&database, &first.id).unwrap(),
+        first_sizes
+    );
+    assert_eq!(
+        load_workspace_pane_sizes_from(&database, &second.id).unwrap(),
+        second_sizes
+    );
+}
+
+#[test]
+fn workspace_pane_sizes_survive_rename_and_cascade_through_both_deletions() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let renamed = create_workspace_at(&database, "Before").unwrap();
+    let sizes = PaneSizes {
+        sessions: PaneSize::Standard,
+        targets: PaneSize::Maximized,
+        quota: PaneSize::Minimized,
+    };
+    save_workspace_pane_sizes_to(&database, &renamed.id, sizes).unwrap();
+
+    rename_workspace_at(&database, &renamed.id, "After").unwrap();
+    assert_eq!(
+        load_workspace_pane_sizes_from(&database, &renamed.id).unwrap(),
+        sizes,
+        "renaming changes the display name, not the stable settings owner"
+    );
+    delete_workspace_at(&database, &renamed.id).unwrap();
+    assert_eq!(workspace_pane_size_row_count(&database, &renamed.id), 0);
+
+    let force_deleted = create_workspace_at(&database, "Force").unwrap();
+    save_workspace_pane_sizes_to(
+        &database,
+        &force_deleted.id,
+        PaneSizes {
+            sessions: PaneSize::Minimized,
+            targets: PaneSize::Standard,
+            quota: PaneSize::Standard,
+        },
+    )
+    .unwrap();
+    force_delete_workspace_at(&database, &force_deleted.id).unwrap();
+    assert_eq!(
+        workspace_pane_size_row_count(&database, &force_deleted.id),
+        0
+    );
+}
+
+#[test]
+fn invalid_pane_size_save_preserves_the_previous_row_and_unknown_workspaces_fail() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Validated").unwrap();
+    let previous = PaneSizes {
+        sessions: PaneSize::Maximized,
+        targets: PaneSize::Minimized,
+        quota: PaneSize::Standard,
+    };
+    save_workspace_pane_sizes_to(&database, &workspace.id, previous).unwrap();
+
+    let invalid = PaneSizes {
+        sessions: PaneSize::Maximized,
+        targets: PaneSize::Maximized,
+        quota: PaneSize::Standard,
+    };
+    assert!(save_workspace_pane_sizes_to(&database, &workspace.id, invalid).is_err());
+    assert_eq!(
+        load_workspace_pane_sizes_from(&database, &workspace.id).unwrap(),
+        previous
+    );
+    assert!(load_workspace_pane_sizes_from(&database, "missing-workspace").is_err());
+    assert!(save_workspace_pane_sizes_to(&database, "missing-workspace", previous).is_err());
+}
+
+#[test]
+fn malformed_persisted_pane_size_is_reported_on_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Malformed").unwrap();
+    save_workspace_pane_sizes_to(
+        &database,
+        &workspace.id,
+        PaneSizes {
+            sessions: PaneSize::Standard,
+            targets: PaneSize::Minimized,
+            quota: PaneSize::Standard,
+        },
+    )
+    .unwrap();
+
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE workspace_pane_sizes SET sessions = 'corrupt' WHERE workspace_id = ?1",
+            [&workspace.id],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA ignore_check_constraints = OFF;")
+        .unwrap();
+
+    let error = load_workspace_pane_sizes_from(&database, &workspace.id).unwrap_err();
+    assert!(error.to_string().contains("unknown pane size"), "{error:#}");
+}
+
+#[test]
+fn migration_twenty_five_adds_pane_sizes_without_losing_workspaces() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Preexisting").unwrap();
+
+    let connection = open(&database).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE workspace_pane_sizes;
+             DELETE FROM schema_migrations WHERE version > 24;
+             PRAGMA user_version = 24;",
+        )
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&database);
+
+    assert_eq!(
+        load_workspace_pane_sizes_from(&database, &workspace.id).unwrap(),
+        PaneSizes::default()
+    );
+    let preserved_name: String = Connection::open(&database)
+        .unwrap()
+        .query_row(
+            "SELECT name FROM workspaces WHERE workspace_id = ?1",
+            [&workspace.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(preserved_name, "Preexisting");
+    assert_eq!(workspace_pane_size_row_count(&database, &workspace.id), 0);
+
+    let saved = PaneSizes {
+        sessions: PaneSize::Minimized,
+        targets: PaneSize::Standard,
+        quota: PaneSize::Maximized,
+    };
+    save_workspace_pane_sizes_to(&database, &workspace.id, saved).unwrap();
+    assert_eq!(
+        load_workspace_pane_sizes_from(&database, &workspace.id).unwrap(),
+        saved
+    );
+}
+
 #[test]
 fn workspace_crud_preserves_history_and_blocks_active_sessions_and_drafts() {
     let directory = tempfile::tempdir().unwrap();
@@ -3866,7 +4095,8 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "DELETE FROM schema_migrations WHERE version > 20;
+            "DROP TABLE workspace_pane_sizes;
+             DELETE FROM schema_migrations WHERE version > 20;
              PRAGMA user_version = 20;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
              CREATE TABLE turn_review_settings (
@@ -3963,5 +4193,68 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
         clear_interrupted_turn_reviews_in(&database).unwrap(),
         vec!["session-1".to_string()],
         "a pending handoff remains recoverable until its command is accepted"
+    );
+}
+
+#[test]
+fn migration_twenty_four_preserves_targets_and_accepts_ssh_docker() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut old = session("session-1", "project-1");
+    old.target = Some(TargetLocator::SshPodman {
+        host: "builder".into(),
+        container_id: "hel-session-1".into(),
+        workspace_storage: crate::hel_state::PodmanWorkspaceLocator::Volume {
+            name: "workspace-volume".into(),
+        },
+    });
+    save_session_to(&database, &old).unwrap();
+    let connection = open(&database).unwrap();
+    // Rebuild the preceding constrained schema so this tests the actual migration.
+    connection.execute_batch("PRAGMA writable_schema = ON;
+        UPDATE sqlite_master SET sql = replace(replace(sql, ',''ssh-docker''', ''), '''ssh-podman'',''ssh-docker''', '''ssh-podman''') WHERE name = 'session_targets';
+        PRAGMA writable_schema = OFF;
+        DROP TABLE workspace_pane_sizes;
+        DELETE FROM schema_migrations WHERE version > 23;
+        PRAGMA user_version = 23;").unwrap();
+    drop(connection);
+    forget_verified_schema(&database);
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["session-1"],
+        old
+    );
+    let mut docker = session("session-2", "project-1");
+    docker.target_template_id = "ssh-docker".into();
+    docker.target = Some(TargetLocator::SshDocker {
+        host: "docker-builder".into(),
+        container_id: "hel-session-2".into(),
+    });
+    save_session_to(&database, &docker).unwrap();
+    let state = load_state_from(&database).unwrap();
+    assert_eq!(state.sessions["session-1"], old);
+    assert_eq!(state.sessions["session-2"], docker);
+    let connection = open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT kind FROM session_targets WHERE session_id='session-2'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "ssh-docker"
+    );
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+    assert!(
+        connection
+            .query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
+            .optional()
+            .unwrap()
+            .is_none()
     );
 }

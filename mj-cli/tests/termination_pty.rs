@@ -168,8 +168,42 @@ fn wait_for_exit(
     }
 }
 
+struct DashboardStorage {
+    directory: Option<tempfile::TempDir>,
+    stop_daemon: bool,
+}
+
+impl DashboardStorage {
+    fn path(&self) -> &std::path::Path {
+        self.directory.as_ref().expect("fixture storage").path()
+    }
+}
+
+impl Drop for DashboardStorage {
+    fn drop(&mut self) {
+        if self.stop_daemon {
+            // Stop the writer before removing its database and working files.
+            match Command::new(env!("CARGO_BIN_EXE_mj"))
+                .args(["daemon", "stop"])
+                .env("MJ_CONFIG_DIR", self.path().join("config/hel"))
+                .env("MJ_DATA_DIR", self.path().join("data/hel"))
+                .status()
+            {
+                Ok(status) if status.success() => {}
+                result => {
+                    let retained = self.directory.take().expect("fixture storage").keep();
+                    eprintln!(
+                        "Could not stop PTY fixture daemon: {result:?}; retained {}",
+                        retained.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
 struct DashboardPty {
-    _storage: tempfile::TempDir,
+    _storage: DashboardStorage,
     master: File,
     slave: File,
     original_termios: libc::termios,
@@ -177,7 +211,14 @@ struct DashboardPty {
 }
 
 fn spawn_dashboard_pty() -> DashboardPty {
-    let storage = tempfile::tempdir().expect("create Hel test storage");
+    spawn_dashboard_pty_with_idle_exit(true)
+}
+
+fn spawn_dashboard_pty_with_idle_exit(exit_when_idle: bool) -> DashboardPty {
+    let storage = DashboardStorage {
+        directory: Some(tempfile::tempdir().expect("create Hel test storage")),
+        stop_daemon: !exit_when_idle,
+    };
     let config_root = storage.path().join("config");
     fs::create_dir_all(config_root.join("hel")).expect("create Hel config directory");
     fs::write(
@@ -245,8 +286,14 @@ image = "ubuntu:24.04"
         .stdout(Stdio::from(duplicate(slave.as_raw_fd())))
         .stderr(Stdio::from(duplicate(slave.as_raw_fd())))
         .env("MJ_CONFIG_DIR", config_root.join("hel"))
-        .env("MJ_DATA_DIR", storage.path().join("data/hel"))
-        .env("MJ_DAEMON_EXIT_WHEN_IDLE", "1");
+        .env("MJ_DATA_DIR", storage.path().join("data/hel"));
+    if exit_when_idle {
+        command.env("MJ_DAEMON_EXIT_WHEN_IDLE", "1");
+    } else {
+        command
+            .env_remove("MJ_DAEMON_EXIT_WHEN_IDLE")
+            .env_remove("HEL_DAEMON_EXIT_WHEN_IDLE");
+    }
     // Libtest may alter its signal mask. A real `hel` invocation should start
     // with SIGTERM unmasked, so establish that condition across exec.
     unsafe {
@@ -419,4 +466,70 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
         REATTACH_MESSAGE,
         "reattachment message was not the final output"
     );
+}
+
+#[test]
+fn live_workspace_preview_terminates_without_reopening_the_fallback_dashboard() {
+    let DashboardPty {
+        _storage,
+        mut master,
+        slave,
+        original_termios: before,
+        mut child,
+    } = spawn_dashboard_pty_with_idle_exit(false);
+    let mut output = Vec::new();
+    wait_for_output(
+        &mut master,
+        &mut output,
+        READY_MARKER,
+        Instant::now() + TIMEOUT,
+    );
+    output.clear();
+    // F3 leaves the dashboard and opens the picker for its existing workspace.
+    master.write_all(b"\x1bOR").expect("open workspace picker");
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"Workspaces",
+        Instant::now() + TIMEOUT,
+    );
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"No active sessions",
+        Instant::now() + TIMEOUT,
+    );
+    // PageDown and End are harmless even when there is no session to scroll.
+    master
+        .write_all(b"\x1b[6~\x1b[F")
+        .expect("scroll empty preview");
+    let started = Instant::now();
+    assert_eq!(
+        unsafe { libc::kill(child.child_mut().id() as i32, libc::SIGTERM) },
+        0
+    );
+    let status = wait_for_exit(
+        child.child_mut(),
+        &mut master,
+        &mut output,
+        "workspace selector SIGTERM",
+    );
+    assert!(status.success(), "selector exit: {status}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "selector shutdown was not bounded"
+    );
+    let after = termios(slave.as_raw_fd());
+    assert_eq!(after.c_iflag, before.c_iflag);
+    assert_eq!(after.c_oflag, before.c_oflag);
+    assert_eq!(
+        stable_local_flags(after.c_lflag),
+        stable_local_flags(before.c_lflag)
+    );
+    let output = String::from_utf8_lossy(&output);
+    let disable_mouse_capture = last_index(&output, MOUSE_CAPTURE_DISABLE);
+    let leave_screen = output
+        .rfind("\x1b[?1049l")
+        .expect("restore alternate screen");
+    assert!(disable_mouse_capture < leave_screen);
 }

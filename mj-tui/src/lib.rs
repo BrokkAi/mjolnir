@@ -28,19 +28,19 @@ use mj_controller::hel_quota::ProfileQuota;
 use mj_controller::hel_review_host::RuntimeReviewView;
 
 use crate::dialogs::{
-    ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, FORCE_STOP_CONFIRMATION,
-    ImportBundleConfirmation, ImportProgress, RenameEditor, RenameFocus, RepositoryOriginDialog,
-    TargetActionsDialog, WebDialog,
+    ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, ImportBundleConfirmation,
+    ImportProgress, RenameEditor, RepositoryOriginDialog, TargetActionsDialog, WebDialog,
 };
 use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
 use crate::review_settings::ReviewSettingsDialog;
-use crate::wizards::{MountFocus, NewWizard, ResumeWizard, WizardStep};
+use crate::wizards::{NewWizard, ResumeWizard};
 
 mod actions;
 mod combined;
+mod component_events;
 mod dialogs;
 mod help;
 mod ingest;
@@ -63,8 +63,10 @@ pub use crate::ingest::{
     MaterializedProjectionCache, PreparedMaterializedSessionDetail,
     PreparedMaterializedSessionSummary,
 };
+pub use crate::render::render_sessions_preview;
 pub use crate::resume::resume_profile_placeholders;
-pub use crate::review_settings::{ReviewSettingsProbeResult, ReviewTargetReadiness};
+pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
+pub use hel::hel_workspace::{PaneSize, PaneSizes};
 
 /// One drawn row of the Sessions pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +80,67 @@ pub(crate) enum SessionsRow {
     /// A live session, by index into `ordered_sessions()`. `expanded` picks
     /// the four-row form over the one-line form.
     Session { index: usize, expanded: bool },
+}
+
+/// Scroll state for the read-only Sessions preview.
+///
+/// The preview owns its viewport independently from the dashboard. Its
+/// position is measured in rendered content lines so callers can offer both
+/// line and page movement without changing dashboard selection or scroll
+/// state. The renderer remembers the first visible session as an anchor, so a
+/// refreshed session list keeps that session at the same rendered line when
+/// it is still present.
+#[derive(Debug, Clone, Default)]
+pub struct SessionsPreviewState {
+    preview_scroll: usize,
+    anchor_session_id: Option<String>,
+    anchor_line_offset: usize,
+    last_viewport: usize,
+    last_max_scroll: usize,
+    anchor_dirty: bool,
+}
+
+impl SessionsPreviewState {
+    /// Scroll by rendered content lines. The offset is clamped to the last
+    /// viewport seen by the renderer.
+    pub fn scroll_lines(&mut self, delta: isize) {
+        self.anchor_dirty = true;
+        if delta.is_negative() {
+            self.preview_scroll = self.preview_scroll.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.preview_scroll = self
+                .preview_scroll
+                .saturating_add(delta as usize)
+                .min(self.last_max_scroll);
+        }
+    }
+
+    /// Scroll by pages sized to the last rendered viewport.
+    pub fn scroll_page(&mut self, delta: isize) {
+        let page = self.last_viewport.max(1);
+        let magnitude = delta.unsigned_abs().saturating_mul(page);
+        self.anchor_dirty = true;
+        if delta.is_negative() {
+            self.preview_scroll = self.preview_scroll.saturating_sub(magnitude);
+        } else {
+            self.preview_scroll = self
+                .preview_scroll
+                .saturating_add(magnitude)
+                .min(self.last_max_scroll);
+        }
+    }
+
+    /// Move to the first rendered content line.
+    pub fn home(&mut self) {
+        self.anchor_dirty = true;
+        self.preview_scroll = 0;
+    }
+
+    /// Move to the last rendered viewport.
+    pub fn end(&mut self) {
+        self.anchor_dirty = true;
+        self.preview_scroll = self.last_max_scroll;
+    }
 }
 
 /// Sessions, targets, and quotas. Sessions that are not live live in
@@ -210,16 +273,15 @@ pub enum DashboardAction {
         include_untracked: bool,
     },
     OpenConfig,
-    /// Probe the selected reviewer profile against actual targets. The
-    /// generation ties the response to the current dialog draft.
-    ProbeReviewSettings {
+    /// Discover the selectors advertised by the selected reviewer profile.
+    /// The generation ties the response to the current dialog draft.
+    DiscoverReviewSettings {
         generation: u64,
         profile_id: String,
         model: Option<String>,
-        effort: Option<String>,
     },
-    /// Cancel a reviewer capability probe that is no longer visible.
-    CancelReviewSettingsProbe,
+    /// Cancel a reviewer selector discovery that is no longer visible.
+    CancelReviewSettingsDiscovery,
     /// Persist only the global `[review]` section.
     SaveReviewSettings {
         review: hel::hel_config::ReviewConfig,
@@ -327,55 +389,23 @@ pub(crate) enum SelectionDirection {
 pub(crate) const FOCUS_ORDER: [Focus; 4] =
     [Focus::Sessions, Focus::Prompt, Focus::Targets, Focus::Quota];
 
-/// The explicit height requested for one support pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PaneSize {
-    Minimized,
-    #[default]
-    Standard,
-    Maximized,
-}
-
-impl PaneSize {
-    /// The next title-bar control, wrapping from maximum to minimum.
-    #[must_use]
-    pub fn cycled(self) -> Self {
-        match self {
-            Self::Minimized => Self::Standard,
-            Self::Standard => Self::Maximized,
-            Self::Maximized => Self::Minimized,
-        }
+/// Read one pane size without making the shared workspace model depend on the
+/// TUI's pane enum.
+fn pane_size_for(sizes: PaneSizes, pane: SupportPane) -> PaneSize {
+    match pane {
+        SupportPane::Sessions => sizes.sessions,
+        SupportPane::Targets => sizes.targets,
+        SupportPane::Quota => sizes.quota,
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct PaneSizes {
-    sessions: PaneSize,
-    targets: PaneSize,
-    quota: PaneSize,
-}
-
-impl PaneSizes {
-    fn get(self, pane: SupportPane) -> PaneSize {
-        match pane {
-            SupportPane::Sessions => self.sessions,
-            SupportPane::Targets => self.targets,
-            SupportPane::Quota => self.quota,
-        }
-    }
-
-    fn get_mut(&mut self, pane: SupportPane) -> &mut PaneSize {
-        match pane {
-            SupportPane::Sessions => &mut self.sessions,
-            SupportPane::Targets => &mut self.targets,
-            SupportPane::Quota => &mut self.quota,
-        }
-    }
-
-    fn all_standard(self) -> bool {
-        [self.sessions, self.targets, self.quota]
-            .into_iter()
-            .all(|size| size == PaneSize::Standard)
+/// Mutably access one pane size without coupling the shared workspace model to
+/// the TUI's pane enum.
+fn pane_size_for_mut(sizes: &mut PaneSizes, pane: SupportPane) -> &mut PaneSize {
+    match pane {
+        SupportPane::Sessions => &mut sizes.sessions,
+        SupportPane::Targets => &mut sizes.targets,
+        SupportPane::Quota => &mut sizes.quota,
     }
 }
 
@@ -404,35 +434,11 @@ pub(crate) enum Mode {
     ReviewSettings(ReviewSettingsDialog),
 }
 
-/// What a key press means for a focusable button row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ButtonKey {
-    Focus(usize),
-    Activate(usize),
-    Cancel,
-    Ignored,
-}
-
-pub(crate) fn button_row_key(code: KeyCode, focus: usize, count: usize) -> ButtonKey {
-    match code {
-        KeyCode::Tab | KeyCode::Right => ButtonKey::Focus(cycle_button_focus(focus, count, false)),
-        KeyCode::BackTab | KeyCode::Left => {
-            ButtonKey::Focus(cycle_button_focus(focus, count, true))
-        }
-        KeyCode::Enter => ButtonKey::Activate(focus),
-        KeyCode::Esc => ButtonKey::Cancel,
-        _ => ButtonKey::Ignored,
-    }
-}
-
-pub(crate) fn cycle_button_focus(focus: usize, count: usize, reverse: bool) -> usize {
-    if count == 0 {
-        return 0;
-    }
-    if reverse {
-        focus.min(count - 1).checked_sub(1).unwrap_or(count - 1)
-    } else {
-        (focus + 1) % count
+fn mode_contains_review_settings(mode: &Mode) -> bool {
+    match mode {
+        Mode::ReviewSettings(_) => true,
+        Mode::Help(overlay) => mode_contains_review_settings(&overlay.return_to),
+        _ => false,
     }
 }
 
@@ -535,10 +541,15 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
-    /// Monotonic identity for global review settings probes. Keeping it on
+    /// Monotonic identity for global review settings discoveries. Keeping it on
     /// the dashboard prevents a late result from an older dialog instance
     /// matching a newly opened dialog with the same values.
     pub(crate) review_settings_generation: u64,
+    /// Successful reviewer selector discoveries, retained after the dialog
+    /// closes. The key is the profile definition's id and the optional model
+    /// whose effort choices were discovered.
+    pub(crate) review_settings_choices: BTreeMap<(String, Option<String>), ReviewSettingsChoices>,
+    session_preflight_generation: u64,
     pub(crate) notices: Notices,
     /// The workspace name, shown at the right of the Sessions title bar.
     pub(crate) workspace_name: String,
@@ -585,6 +596,8 @@ impl DashboardState {
             last_row_click: None,
             mode: Mode::Dashboard,
             review_settings_generation: 0,
+            review_settings_choices: BTreeMap::new(),
+            session_preflight_generation: 0,
             notices: Notices::default(),
             workspace_name: String::new(),
         };
@@ -639,7 +652,23 @@ impl DashboardState {
 
     #[must_use]
     pub fn pane_size(&self, pane: SupportPane) -> PaneSize {
-        self.pane_sizes.get(pane)
+        pane_size_for(self.pane_sizes, pane)
+    }
+
+    /// Capture the current dashboard arrangement for workspace persistence.
+    #[must_use]
+    pub fn pane_sizes(&self) -> PaneSizes {
+        self.pane_sizes
+    }
+
+    /// Restore a persisted dashboard arrangement and clamp list selections to
+    /// the current data. Restoring is independent of whether this frame has
+    /// enough room to grow a pane to its maximum size.
+    pub fn restore_pane_sizes(&mut self, sizes: PaneSizes) -> anyhow::Result<()> {
+        sizes.validate()?;
+        self.pane_sizes = sizes;
+        self.clamp_selections();
+        Ok(())
     }
 
     pub(crate) fn pane_maximize_enabled(&self, pane: SupportPane) -> bool {
@@ -669,12 +698,12 @@ impl DashboardState {
                 SupportPane::Targets,
                 SupportPane::Quota,
             ] {
-                if other != pane && self.pane_sizes.get(other) == PaneSize::Maximized {
-                    *self.pane_sizes.get_mut(other) = PaneSize::Standard;
+                if other != pane && pane_size_for(self.pane_sizes, other) == PaneSize::Maximized {
+                    *pane_size_for_mut(&mut self.pane_sizes, other) = PaneSize::Standard;
                 }
             }
         }
-        *self.pane_sizes.get_mut(pane) = size;
+        *pane_size_for_mut(&mut self.pane_sizes, pane) = size;
         self.clamp_selections();
     }
 
@@ -841,143 +870,50 @@ impl DashboardState {
             });
             return DashboardAction::None;
         }
-        // The resume dialog carries every scanned native session, so it is
-        // handled where it lives rather than through a copy of the mode.
-        if matches!(self.mode, Mode::ResumeDialog(_)) {
-            return self.handle_resume_dialog_key(key);
+        if self.component_modal_open() {
+            return self.handle_component_event(crossterm::event::Event::Key(key));
         }
-        // The palette is edited where it lives too: its entry list is rebuilt
-        // on every keystroke and there is no reason to copy it first.
-        if matches!(self.mode, Mode::Palette(_)) {
-            return self.handle_palette_key(key);
+        if matches!(self.mode, Mode::Help(_)) {
+            return self.handle_help_key(key);
         }
-        match self.mode.clone() {
-            Mode::Dashboard => self.handle_dashboard_key(key),
-            Mode::New(wizard) => self.handle_new_key(key, wizard),
-            Mode::Resume(wizard) => self.handle_resume_key(key, wizard),
-            Mode::ResumeDialog(_) => unreachable!("the resume dialog is handled in place"),
-            Mode::RepositoryOrigin(dialog) => self.handle_repository_origin_key(key, dialog),
-            Mode::ConfigId(editor) => self.handle_config_id_key(key, editor),
-            Mode::TargetActions(dialog) => self.handle_target_actions_key(key, dialog),
-            Mode::Web(_) => match key.code {
-                KeyCode::Esc | KeyCode::Enter => {
-                    self.cancel_modal();
-                    DashboardAction::None
-                }
-                _ => DashboardAction::None,
-            },
-            Mode::Rename(editor) => self.handle_rename_key(key, editor),
-            Mode::EditContainer(editor) => self.handle_container_edit_key(key, editor),
-            // The only control is the Cancel button, so Enter presses it too.
-            Mode::Importing(_) => match key.code {
-                KeyCode::Esc | KeyCode::Enter => DashboardAction::CancelImport,
-                _ => DashboardAction::None,
-            },
-            Mode::ConfirmImportBundle(confirmation) => {
-                self.handle_import_bundle_key(key.code, confirmation)
-            }
-            Mode::Confirm(dialog) => self.handle_confirmation_key(key, dialog),
-            Mode::Help(overlay) => self.handle_help_key(key, overlay),
-            Mode::Palette(_) => unreachable!("the command palette is handled in place"),
-            Mode::ReviewSettings(dialog) => self.handle_review_settings_key(key, dialog),
-        }
+        self.handle_dashboard_key(key)
     }
 
     fn text_input_focused(&self) -> bool {
         match &self.mode {
-            Mode::Rename(editor) => editor.focus == RenameFocus::Field,
-            Mode::RepositoryOrigin(dialog) => dialog.focus == dialogs::RepositoryOriginFocus::Field,
+            Mode::Rename(editor) => editor
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::Field),
+            Mode::RepositoryOrigin(dialog) => dialog
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::Field),
             Mode::EditContainer(editor) => editor.field().is_some(),
-            Mode::ResumeDialog(dialog) => dialog.focus == crate::resume::ResumeFocus::Search,
+            Mode::ResumeDialog(dialog) => dialog.focused() == crate::resume::ResumeFocus::Search,
             // The palette's query is a text field, so Ctrl-C closes it and a
             // paste lands in the query rather than on the dashboard.
-            Mode::Palette(_) => true,
+            Mode::Palette(palette) => palette
+                .form
+                .borrow()
+                .is_focused(palette::PaletteControl::Query),
+            Mode::ConfigId(editor) => editor
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::Field),
             Mode::New(wizard) => wizard.text_input_focused(),
             Mode::Resume(wizard) => wizard.text_input_focused(),
-            Mode::Confirm(ConfirmDialog {
-                confirmation: Confirmation::ForceStop { .. } | Confirmation::ForceDestroy { .. },
-                ..
-            }) => true,
+            Mode::Confirm(dialog) => dialog
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::TypedField),
             _ => false,
         }
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {
-        let pasted = single_line_paste(pasted);
-        if pasted.is_empty() {
-            return;
-        }
-        // The palette rebuilds its list from the query, so its paste is
-        // handled before the borrow the match below takes.
-        if let Mode::Palette(palette) = &mut self.mode {
-            palette.query.push_str(&pasted);
-            self.rebuild_palette_entries();
-            return;
-        }
-        match &mut self.mode {
-            Mode::Rename(editor) if editor.focus == RenameFocus::Field => {
-                let remaining = 64_usize.saturating_sub(editor.title.chars().count());
-                editor.title.extend(pasted.chars().take(remaining));
-            }
-            Mode::New(wizard) => match wizard.step {
-                WizardStep::ProjectDirectory => {
-                    wizard.project_directory.push_str(&pasted);
-                    wizard.project_directory_error = None;
-                }
-                WizardStep::NewBundle => wizard.new_bundle_source.push_str(&pasted),
-                WizardStep::Mounts => match wizard.mounts.focus {
-                    MountFocus::Source => wizard.mounts.source.push_str(&pasted),
-                    MountFocus::Destination => wizard.mounts.destination.push_str(&pasted),
-                    _ => {}
-                },
-                _ => {}
-            },
-            Mode::Resume(wizard) if wizard.step == WizardStep::Mounts => {
-                match wizard.mounts.focus {
-                    MountFocus::Source => wizard.mounts.source.push_str(&pasted),
-                    MountFocus::Destination => wizard.mounts.destination.push_str(&pasted),
-                    _ => {}
-                }
-            }
-            Mode::Confirm(ConfirmDialog {
-                confirmation: Confirmation::ForceStop { typed, .. },
-                ..
-            }) => {
-                let remaining = FORCE_STOP_CONFIRMATION.len().saturating_sub(typed.len());
-                typed.extend(
-                    pasted
-                        .chars()
-                        .filter(char::is_ascii_alphabetic)
-                        .take(remaining)
-                        .map(|character| character.to_ascii_uppercase()),
-                );
-            }
-            Mode::Confirm(ConfirmDialog {
-                confirmation:
-                    Confirmation::ForceDestroy {
-                        expected, typed, ..
-                    },
-                ..
-            }) => {
-                let remaining = expected
-                    .chars()
-                    .count()
-                    .saturating_sub(typed.chars().count());
-                typed.extend(
-                    pasted
-                        .chars()
-                        .filter(char::is_ascii_hexdigit)
-                        .take(remaining)
-                        .map(|character| character.to_ascii_lowercase()),
-                );
-            }
-            Mode::RepositoryOrigin(dialog)
-                if dialog.focus == dialogs::RepositoryOriginFocus::Field =>
-            {
-                dialog.replacement.push_str(&pasted);
-                dialog.error = None;
-            }
-            _ => {}
+        if self.component_modal_open() {
+            self.handle_component_event(crossterm::event::Event::Paste(pasted.to_owned()));
         }
     }
 
@@ -987,27 +923,8 @@ impl DashboardState {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
-        if matches!(self.mode, Mode::ResumeDialog(_)) {
-            let Some(area) = self.resume_sessions_area else {
-                return DashboardAction::None;
-            };
-            if !rect_contains(area, mouse.column, mouse.row) {
-                return DashboardAction::None;
-            }
-            // The resume list is a list, so a wheel notch moves by one row.
-            let delta = match mouse.kind {
-                MouseEventKind::ScrollUp => -1,
-                MouseEventKind::ScrollDown => 1,
-                _ => return DashboardAction::None,
-            };
-            let len = self.resume_rows().len();
-            let Mode::ResumeDialog(dialog) = &mut self.mode else {
-                return DashboardAction::None;
-            };
-            dialog.focus = crate::resume::ResumeFocus::Sessions;
-            let index = offset_index(dialog.row_index, len, delta);
-            self.select_resume_row(index);
-            return DashboardAction::None;
+        if self.component_modal_open() {
+            return self.handle_component_event(crossterm::event::Event::Mouse(mouse));
         }
         if !matches!(self.mode, Mode::Dashboard) {
             return DashboardAction::None;
@@ -1452,6 +1369,7 @@ impl DashboardState {
                 | HelTargetTemplate::LocalDocker { .. }
                 | HelTargetTemplate::AppleContainer { .. }
                 | HelTargetTemplate::SshPodman { .. }
+                | HelTargetTemplate::SshDocker { .. }
         )
         .then_some(session)
     }
@@ -1460,7 +1378,16 @@ impl DashboardState {
         self.config.profiles.is_empty() || self.config.targets.is_empty()
     }
 
+    /// Identity for supervised launch checks; cancellation invalidates late replies.
+    pub fn session_preflight_generation(&self) -> u64 {
+        self.session_preflight_generation
+    }
+
     pub fn cancel_modal(&mut self) {
+        if mode_contains_review_settings(&self.mode) {
+            self.review_settings_generation = self.review_settings_generation.wrapping_add(1);
+        }
+        self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);
         self.mode = Mode::Dashboard;
         self.rebuild_resume_rows();
     }
@@ -1582,19 +1509,6 @@ fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
 
-fn offset_index(index: usize, len: usize, delta: isize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    if delta.is_negative() {
-        index.saturating_sub(delta.unsigned_abs())
-    } else {
-        index
-            .saturating_add(delta as usize)
-            .min(len.saturating_sub(1))
-    }
-}
-
 pub(crate) fn move_index(index: &mut usize, len: usize, delta: isize) {
     if len == 0 {
         *index = 0;
@@ -1631,10 +1545,6 @@ fn dashboard_accelerator(modifiers: KeyModifiers) -> bool {
 #[cfg(not(target_os = "macos"))]
 fn dashboard_accelerator(modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::CONTROL)
-}
-
-fn single_line_paste(pasted: &str) -> String {
-    pasted.trim_matches(['\r', '\n']).replace(['\r', '\n'], " ")
 }
 
 #[cfg(test)]
@@ -1909,6 +1819,48 @@ mod tests {
             PaneSize::Minimized
         );
         assert_eq!(dashboard.focus, Focus::Targets);
+    }
+
+    #[test]
+    fn pane_sizes_capture_and_restore_a_nondefault_arrangement() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
+        dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
+        let captured = dashboard.pane_sizes();
+
+        dashboard.set_pane_size(SupportPane::Quota, PaneSize::Maximized);
+        dashboard.set_pane_maximize_enabled([
+            (SupportPane::Sessions, false),
+            (SupportPane::Targets, true),
+            (SupportPane::Quota, true),
+        ]);
+        dashboard.restore_pane_sizes(captured).unwrap();
+
+        assert_eq!(dashboard.pane_sizes(), captured);
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Sessions),
+            PaneSize::Maximized
+        );
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Targets),
+            PaneSize::Minimized
+        );
+        assert_eq!(dashboard.pane_size(SupportPane::Quota), PaneSize::Standard);
+    }
+
+    #[test]
+    fn invalid_pane_size_restore_leaves_the_current_arrangement_unchanged() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
+        let before = dashboard.pane_sizes();
+        let invalid = PaneSizes {
+            sessions: PaneSize::Maximized,
+            targets: PaneSize::Maximized,
+            quota: PaneSize::Standard,
+        };
+
+        assert!(dashboard.restore_pane_sizes(invalid).is_err());
+        assert_eq!(dashboard.pane_sizes(), before);
     }
 
     #[test]

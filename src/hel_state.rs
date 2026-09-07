@@ -687,6 +687,10 @@ pub enum TargetLocator {
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
     },
+    SshDocker {
+        host: String,
+        container_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -823,6 +827,7 @@ impl TargetLocator {
             | Self::LocalDocker { container_id }
             | Self::AppleContainer { container_id }
             | Self::SshPodman { container_id, .. }
+            | Self::SshDocker { container_id, .. }
                 if container_id.trim().is_empty() =>
             {
                 bail!("target locator has an empty container id")
@@ -847,6 +852,9 @@ impl TargetLocator {
             }
             Self::SshPodman { host, .. } if host.trim().is_empty() => {
                 bail!("SSH Podman target locator has an empty host")
+            }
+            Self::SshDocker { host, .. } if host.trim().is_empty() => {
+                bail!("SSH Docker target locator has an empty host")
             }
             _ => {}
         }
@@ -1014,9 +1022,11 @@ impl SessionRecord {
     }
 
     /// Stable source identity used to group sessions. Managed worktrees point
-    /// back at their source repository, and bundles use only their primary
-    /// repository, so temporary destinations never split one project.
-    pub fn project_source(&self, config: &HelConfig) -> ProjectSourceIdentity {
+    /// back at their source repository, raw sessions use their project
+    /// directory until their Git origin is resolved, and bundle sessions use
+    /// the bundle itself. The bundle identity keeps bundles separate even
+    /// when they happen to share a primary repository.
+    pub fn project_source(&self, _config: &HelConfig) -> ProjectSourceIdentity {
         if let Some(worktree) = &self.managed_worktree {
             return ProjectSourceIdentity::path(&worktree.source_repository, None);
         }
@@ -1026,20 +1036,6 @@ impl SessionRecord {
                 _ => None,
             };
             return ProjectSourceIdentity::path(project_directory, remote);
-        }
-        if let Some(repository) = config
-            .bundles
-            .get(&self.bundle_id)
-            .and_then(|bundle| bundle.primary().or_else(|| bundle.repositories.first()))
-        {
-            if let Some(source) = repository.github.as_deref()
-                && let Some(identity) = ProjectSourceIdentity::git_remote(source)
-            {
-                return identity;
-            }
-            if let Some(path) = repository.local.as_deref() {
-                return ProjectSourceIdentity::path(path, None);
-            }
         }
         let name = path_leaf(Path::new(&self.bundle_id));
         ProjectSourceIdentity {
@@ -1127,8 +1123,8 @@ pub struct ProjectSourceIdentity {
 }
 
 impl ProjectSourceIdentity {
-    /// Canonicalizes a Git remote so raw checkouts and configured GitHub
-    /// bundles group as the same project even when their worktree paths differ.
+    /// Canonicalizes a Git remote so raw checkouts group as the same project
+    /// even when their worktree paths differ.
     pub fn git_remote(source: &str) -> Option<Self> {
         if let Some(normalized) = normalize_github_source(source) {
             let short = normalized
@@ -1157,7 +1153,8 @@ impl ProjectSourceIdentity {
         })
     }
 
-    fn path(path: &Path, remote: Option<&str>) -> Self {
+    /// Build a local-root identity, qualified by host for remote directories.
+    pub fn path(path: &Path, remote: Option<&str>) -> Self {
         let normalized = path.components().collect::<PathBuf>();
         let path_text = normalized.to_string_lossy().into_owned();
         let full = remote.map_or_else(|| path_text.clone(), |host| format!("{host}:{path_text}"));
@@ -1815,10 +1812,13 @@ mod tests {
     }
 
     #[test]
-    fn project_source_normalizes_github_and_ignores_managed_worktree_destinations() {
+    fn project_source_uses_bundle_identity_and_ignores_managed_worktree_destinations() {
         let config = sample_config();
         let mut session = sample_session();
-        assert_eq!(session.project_source(&config).full, "BrokkAi/hel");
+        let source = session.project_source(&config);
+        assert_eq!(source.key, "bundle:hel");
+        assert_eq!(source.short, "hel");
+        assert_eq!(source.full, "hel");
         assert_eq!(
             ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git"),
             ProjectSourceIdentity::git_remote("https://github.com/BrokkAi/bifrost-dev.git")
@@ -1840,6 +1840,27 @@ mod tests {
         assert_eq!(source.short, "source");
         assert_eq!(source.full, "/home/test/Projects/source");
         assert!(!source.full.contains(".mj/worktrees"));
+    }
+
+    #[test]
+    fn bundle_project_sources_stay_separate_when_the_primary_repository_matches() {
+        let mut config = sample_config();
+        let shared_bundle = config.bundles["hel"].clone();
+        config.bundles.insert("other".into(), shared_bundle);
+
+        let first = sample_session();
+        let mut second = first.clone();
+        second.bundle_id = "other".into();
+
+        assert_eq!(
+            config.bundles["hel"].primary_repo,
+            config.bundles["other"].primary_repo
+        );
+        let first_source = first.project_source(&config);
+        let second_source = second.project_source(&config);
+        assert_eq!(first_source.short, "hel");
+        assert_eq!(second_source.short, "other");
+        assert_ne!(first_source.key, second_source.key);
     }
 
     #[test]

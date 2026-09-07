@@ -30,12 +30,14 @@ use agent_client_protocol::schema::v1::{
     AvailableCommand, ContentBlock, SessionConfigOption, SessionModeState, SessionUpdate,
 };
 use crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
+use rat_event::ConsumedEvent;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 
+use crate::components::{ControlKind, Form, Interaction};
 use crate::hel_clipboard::{ClipboardContent, ClipboardImage};
 use crate::hel_selection::{FrameSurfaces, SelectionRange};
 use hel::clock::epoch_seconds;
@@ -73,14 +75,26 @@ use rendering::voice_button_area;
 use rendering::{TranscriptRenderMode, sanitize_terminal_text};
 use second_opinion::{SecondOpinion, SecondOpinionIntent};
 use transcript::{
-    ToolDiffstatRequest, TranscriptAnchor, TranscriptRenderCache, TranscriptSelectionSpace,
-    materialized_chat_entries_reusing,
+    ToolDiffstatRequest, TranscriptAnchor, TranscriptRenderCache, TranscriptScrollbarState,
+    TranscriptSelectionSpace, materialized_chat_entries_reusing,
 };
 use turn_review::{TurnReview, TurnReviewIntent};
 
 const MOUSE_SCROLL_ROWS: usize = 3;
 
-pub use active::{ActiveChat, ChatDaemonRequest};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VoiceControl {
+    Microphone,
+}
+
+fn voice_form() -> Form<VoiceControl> {
+    let mut form = Form::new();
+    form.declare(VoiceControl::Microphone, ControlKind::Button);
+    form.end_frame(VoiceControl::Microphone);
+    form
+}
+
+pub use active::{ActiveChat, ChatDaemonRequest, PreparedChat};
 pub use second_opinion::SecondOpinionIntent as SecondOpinionRequest;
 pub use transcript::{
     TAIL_SEED_ITEMS, TranscriptSnapshot, format_event_time, render_agent_message_head,
@@ -475,6 +489,7 @@ pub struct ChatState {
     last_viewport_height: usize,
     render_mode: TranscriptRenderMode,
     render_cache: TranscriptRenderCache,
+    transcript_scrollbar: TranscriptScrollbarState,
     notices: Notices,
     /// Whether Codex OAuth credentials and the voice helper are available. The runtime
     /// owns discovering this asynchronously; the chat starts disabled until
@@ -484,6 +499,7 @@ pub struct ChatState {
     /// The last frame's microphone button, which sits on the prompt's bottom
     /// border rather than inside its selectable text surface.
     voice_button_area: Option<Rect>,
+    voice_form: Form<VoiceControl>,
     /// Session-list identity snapshotted when the chat opened.
     header_target: String,
     header_profile: String,
@@ -583,10 +599,12 @@ impl ChatState {
             last_viewport_height: 0,
             render_mode: TranscriptRenderMode::Rich,
             render_cache: TranscriptRenderCache::default(),
+            transcript_scrollbar: TranscriptScrollbarState::default(),
             notices: Notices::default(),
             voice_available: false,
             voice_active: false,
             voice_button_area: None,
+            voice_form: voice_form(),
             header_target: String::new(),
             header_profile: String::new(),
             turn_started_at_epoch_seconds: None,
@@ -1277,6 +1295,7 @@ impl ChatState {
         self.reveal_latest_agent_on_draw = true;
         self.last_viewport_height = 0;
         self.render_mode = TranscriptRenderMode::Rich;
+        self.transcript_scrollbar.clear();
         self.notices.clear();
         self.voice_active = false;
         self.submitting_images.clear();
@@ -1795,14 +1814,14 @@ impl ChatState {
         // The second-opinion view owns the frame while it is up: the composer
         // and the plan decision behind it are both part of what it is deciding.
         if reviewing && self.second_opinion_active() {
-            return self.handle_second_opinion_key(code, modifiers);
+            return self.handle_second_opinion_event(key);
         }
 
         // A turn review owns the frame on the same terms. Its actions are the
         // only input while it is unresolved, which is what holds the primary
         // agent still until the user has answered the findings.
         if reviewing && self.turn_review_active() {
-            return self.handle_turn_review_key(code, modifiers);
+            return self.handle_turn_review_event(key);
         }
 
         if let Some(dialog) = self.elicitation.as_mut() {
@@ -1812,7 +1831,7 @@ impl ChatState {
                 return ChatAction::PasteFromClipboard;
             }
             let request = dialog.request().clone();
-            if let Some(response) = dialog.handle_key(code, modifiers) {
+            if let Some(response) = dialog.handle_key_event(key) {
                 self.elicitation = None;
                 if std::mem::take(&mut self.elicitation_is_reviewers) {
                     return ChatAction::RespondReviewerElicitation {
@@ -1838,7 +1857,7 @@ impl ChatState {
         // The value selector owns the keyboard while it is up; it is checked
         // after the elicitation dialog because the dialog draws on top of it.
         if self.config_picker_active() {
-            return self.handle_config_picker_key(code, modifiers);
+            return self.handle_config_picker_event(key);
         }
 
         if code == KeyCode::Char('r')
@@ -2150,6 +2169,61 @@ impl ChatState {
         self.frame_surfaces_exclusive
     }
 
+    /// Whether a shared component should receive this pointer event before
+    /// text selection or the host surface. Captured presses remain owned even
+    /// after the pointer leaves the control's hitbox.
+    pub fn component_handles_mouse(&self, mouse: MouseEvent) -> bool {
+        if self.voice_form.captures_pointer()
+            || self
+                .voice_button_area
+                .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
+        {
+            return true;
+        }
+        if self.config_picker_handles_mouse(mouse.column, mouse.row) {
+            return true;
+        }
+        if let Some(dialog) = self.elicitation.as_ref()
+            && dialog.component_handles_mouse_at(mouse.column, mouse.row)
+        {
+            return true;
+        }
+        self.second_opinion_handles_mouse(mouse.column, mouse.row)
+            || self.turn_review_handles_mouse(mouse.column, mouse.row)
+    }
+
+    /// Whether a chat-owned modal currently replaces the ordinary composer.
+    pub fn component_modal_open(&self) -> bool {
+        self.elicitation.is_some()
+            || self.config_picker.is_some()
+            || matches!(self.second_opinion, Some(SecondOpinion::Setup { .. }))
+    }
+
+    /// Cancels any pointer gesture owned by a chat component.
+    pub fn cancel_component_pointer(&mut self) {
+        self.voice_form.cancel_pointer();
+        self.cancel_config_picker_pointer();
+        if let Some(dialog) = self.elicitation.as_ref() {
+            dialog.cancel_component_pointer();
+        }
+        self.cancel_second_opinion_pointer();
+        self.cancel_turn_review_pointer();
+    }
+
+    /// Clears rendered component geometry before a host redraw. Persistent
+    /// focus and pointer ownership survive a normal resize; only hitboxes are
+    /// invalidated until the next registration pass.
+    pub fn reset_component_geometry(&mut self) {
+        self.voice_form.reset_geometry();
+        self.voice_button_area = None;
+        self.reset_config_picker_geometry();
+        if let Some(dialog) = self.elicitation.as_ref() {
+            dialog.reset_component_geometry();
+        }
+        self.reset_second_opinion_geometry();
+        self.reset_turn_review_geometry();
+    }
+
     /// Scrolls the elicitation message pane, for a drag held at its edge.
     pub(super) fn scroll_elicitation_message(&self, rows: isize) {
         if let Some(dialog) = self.elicitation.as_ref() {
@@ -2168,10 +2242,47 @@ impl ChatState {
     /// scrollback repaints whole TUI frames and is unusably slow on long
     /// sessions.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> ChatAction {
+        // The topmost form receives the gesture before selection, scrollbars,
+        // or a review pane. This also lets reviewer elicitations stay above
+        // their split while a stale scrollbar is being redrawn.
+        if let Some(dialog) = self.elicitation.as_mut() {
+            let request = dialog.request().clone();
+            if let Some(response) = dialog.handle_mouse(mouse) {
+                self.elicitation = None;
+                if std::mem::take(&mut self.elicitation_is_reviewers) {
+                    return self.finish_reviewer_elicitation_response(request, response);
+                }
+                if let Some(proposal) =
+                    hel::hel_acp::plan_review_second_opinion(&request, &response).map(str::to_owned)
+                {
+                    return ChatAction::StartSecondOpinion { request, proposal };
+                }
+                return ChatAction::RespondElicitation { request, response };
+            }
+            return ChatAction::None;
+        }
+        if self.config_picker_active() {
+            return self.handle_config_picker_mouse(mouse).1;
+        }
+        if self.second_opinion_active() && !self.second_opinion_split() {
+            let (handled, action) = self.handle_second_opinion_mouse(mouse);
+            return if handled { action } else { ChatAction::None };
+        }
+        if self.handle_transcript_scrollbar_mouse(mouse) {
+            return ChatAction::None;
+        }
         // Hover decides which transcript scrolls while the split is up, so a
         // reviewer answer never moves the reader's place in the primary.
         if self.second_opinion_split() || self.turn_review_split() {
             let turn_review = self.turn_review_split();
+            let (component_handled, component_action) = if turn_review {
+                self.handle_turn_review_mouse(mouse)
+            } else {
+                self.handle_second_opinion_mouse(mouse)
+            };
+            if component_handled {
+                return component_action;
+            }
             let over_reviewer = self
                 .reviewer_area
                 .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)));
@@ -2204,22 +2315,26 @@ impl ChatState {
             }
             return ChatAction::None;
         }
-        if let Some(dialog) = self.elicitation.as_mut() {
-            dialog.handle_mouse(mouse);
-            return ChatAction::None;
-        }
-        // The value selector owns all clicks while it is open. Its modal body
-        // replaces the prompt surfaces, but the button area is retained until
-        // the next frame, so check the state before hit-testing it.
-        if self.config_picker_active() {
-            return ChatAction::None;
-        }
         // Setup modals do not enter the split branch above, but they still
         // own the frame and must not expose a stale prompt hitbox from the
         // preceding draw.
         if self.second_opinion_active() || self.turn_review_active() {
             return ChatAction::None;
         }
+        let voice_result = self.voice_form.handle(&Event::Mouse(mouse));
+        if let Some(Interaction::Activate(VoiceControl::Microphone)) = voice_result.action {
+            return if self.voice_available || self.voice_active {
+                ChatAction::ToggleVoice
+            } else {
+                ChatAction::None
+            };
+        }
+        if voice_result.outcome.is_consumed() {
+            return ChatAction::None;
+        }
+        // Keep the legacy hitbox usable for callers that have not rendered a
+        // frame yet. Once the shared form has registered its button, the
+        // branch above owns the complete press/release gesture.
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self
                 .voice_button_area
@@ -2236,6 +2351,18 @@ impl ChatState {
             _ => {}
         }
         ChatAction::None
+    }
+
+    fn finish_reviewer_elicitation_response(
+        &mut self,
+        request: ElicitationRequest,
+        response: ElicitationResponse,
+    ) -> ChatAction {
+        ChatAction::RespondReviewerElicitation {
+            role: self.elicitation_role.take(),
+            elicitation_id: request.id,
+            response,
+        }
     }
 
     fn apply_event(&mut self, event: &SequencedEvent) {
@@ -2942,8 +3069,10 @@ mod tests {
         let prompt = Rect::new(4, 2, 30, 5);
         let button = voice_button_area(prompt).expect("button fits");
         assert_eq!(button.y, prompt.bottom() - 1);
-        assert_eq!(button.right(), prompt.right() - 1);
-        assert_eq!(usize::from(button.width), rendering::display_width(" 🎙︎ "));
+        assert_eq!(button.x, prompt.x + 2);
+        assert_eq!(button.width, 3);
+        assert!(voice_button_area(Rect::new(0, 0, 5, 3)).is_none());
+        assert!(voice_button_area(Rect::new(0, 0, 6, 3)).is_some());
     }
 
     #[test]
@@ -2957,6 +3086,12 @@ mod tests {
             "microphone button missing from prompt border: {rows:?}"
         );
         let button = chat.voice_button_area.expect("button hitbox");
+        let border = &rows[usize::from(button.y)];
+        let mic_offset = border.find("🎙︎").expect("microphone on bottom border");
+        assert_eq!(
+            rendering::display_width(&border[..mic_offset]),
+            usize::from(button.x + 1)
+        );
         assert_eq!(
             button.y,
             chat.frame_surfaces()
@@ -4041,6 +4176,47 @@ mod tests {
             KeyModifiers::ALT | KeyModifiers::SHIFT,
         ));
         assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
+    }
+
+    #[test]
+    fn empty_terminal_paste_requests_clipboard_and_accepts_an_image() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("describe ".into());
+        assert_eq!(
+            chat.handle_terminal_paste(""),
+            ChatAction::PasteFromClipboard
+        );
+        assert_eq!(chat.input, "describe ");
+
+        let image = test_image();
+        chat.handle_clipboard_content(ClipboardContent::Image(image.clone()));
+        assert_eq!(chat.input, "describe [image 1]");
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::Prompt("describe [image 1]".into())
+        );
+        assert_eq!(chat.take_submitting_images()[0].image, image);
+    }
+
+    #[test]
+    fn terminal_text_paste_does_not_request_the_clipboard() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        for text in ["hello", " \t\n", "world"] {
+            assert_eq!(chat.handle_terminal_paste(text), ChatAction::None);
+        }
+        assert_eq!(chat.input, "hello \t\nworld");
+        chat.handle_clipboard_content(ClipboardContent::Text(String::new()));
+        assert_eq!(chat.input, "hello \t\nworld");
+    }
+
+    #[test]
+    fn empty_terminal_paste_respects_the_config_picker() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_config_options(&[select_config_option("model", "small", &["small", "large"])]);
+        assert!(chat.open_config_picker("model"));
+        assert_eq!(chat.handle_terminal_paste(""), ChatAction::None);
+        assert!(chat.input.is_empty());
+        assert!(chat.config_picker_active());
     }
 
     #[test]

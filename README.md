@@ -93,6 +93,7 @@ Issues and pull requests for new harnesses are welcome.
 | Apple container | `apple-container` | macOS 26+, Apple silicon | unrestricted |
 | SSH machine | `ssh-bare` | a Linux host you name | guardian or unrestricted |
 | Podman over SSH | `ssh-podman` | a Linux host you name | unrestricted |
+| Docker over SSH | `ssh-docker` | a Linux host with Docker Engine | unrestricted |
 | EC2 instance | `aws-ec2` | your AWS account | unrestricted |
 
 The controller (the `mj` binary you run) supports Linux and macOS. Windows is
@@ -307,6 +308,13 @@ image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 # Docker uses the same fields:
 # [targets.docker]
 # kind = "local-docker"
+# image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+
+# Docker over SSH runs the Docker CLI and OverlayFS operations on the named
+# Linux host. The SSH alias must be usable with BatchMode=yes.
+# [targets.builder-docker]
+# kind = "ssh-docker"
+# host = "builder"
 # image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 

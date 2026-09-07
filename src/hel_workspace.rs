@@ -6,6 +6,61 @@ use serde::{Deserialize, Serialize};
 /// Stable identity assigned to the workspace that receives pre-workspace data.
 pub const DEFAULT_WORKSPACE_ID: &str = "default";
 
+/// The explicit height requested for one support pane in the dashboard.
+///
+/// This lives with the workspace model because the dashboard persists the
+/// user's layout per workspace. The serialized spelling is part of that
+/// persisted representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneSize {
+    Minimized,
+    #[default]
+    Standard,
+    Maximized,
+}
+
+impl PaneSize {
+    /// The next title-bar control, wrapping from maximum to minimum.
+    #[must_use]
+    pub const fn cycled(self) -> Self {
+        match self {
+            Self::Minimized => Self::Standard,
+            Self::Standard => Self::Maximized,
+            Self::Maximized => Self::Minimized,
+        }
+    }
+}
+
+/// Persisted sizes for the dashboard's three support panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PaneSizes {
+    pub sessions: PaneSize,
+    pub targets: PaneSize,
+    pub quota: PaneSize,
+}
+
+impl PaneSizes {
+    /// Validate the exclusive maximum before applying a saved arrangement.
+    pub fn validate(&self) -> Result<()> {
+        let maximized = [self.sessions, self.targets, self.quota]
+            .into_iter()
+            .filter(|size| *size == PaneSize::Maximized)
+            .count();
+        if maximized > 1 {
+            bail!("at most one pane can be maximized");
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn all_standard(self) -> bool {
+        [self.sessions, self.targets, self.quota]
+            .into_iter()
+            .all(|size| size == PaneSize::Standard)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceRecord {
@@ -79,5 +134,35 @@ mod tests {
         assert_eq!(first.len(), 32);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn pane_sizes_round_trip_with_snake_case_values() {
+        let sizes = PaneSizes {
+            sessions: PaneSize::Maximized,
+            targets: PaneSize::Minimized,
+            quota: PaneSize::Standard,
+        };
+        let encoded = serde_json::to_value(sizes).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "sessions": "maximized",
+                "targets": "minimized",
+                "quota": "standard",
+            })
+        );
+        assert_eq!(serde_json::from_value::<PaneSizes>(encoded).unwrap(), sizes);
+    }
+
+    #[test]
+    fn pane_sizes_reject_multiple_maximized_panes() {
+        let invalid = PaneSizes {
+            sessions: PaneSize::Maximized,
+            targets: PaneSize::Maximized,
+            quota: PaneSize::Standard,
+        };
+        assert!(invalid.validate().is_err());
+        assert!(PaneSizes::default().validate().is_ok());
     }
 }

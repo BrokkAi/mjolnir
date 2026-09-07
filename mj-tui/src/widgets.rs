@@ -1,8 +1,6 @@
 //! Small drawing primitives shared by the dashboard, dialogs, and wizards.
 
-use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::layout::Rect;
 use ratatui::widgets::{BorderType, Paragraph};
 
 // Modal geometry is shared with the chat view, so it lives in `mj-chat`. These
@@ -80,35 +78,6 @@ pub(crate) fn format_resource_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1}T", bytes as f64 / TIB)
     }
-}
-
-pub(crate) fn action_buttons(buttons: &[(&str, bool)]) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (index, (label, focused)) in buttons.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("  "));
-        }
-        let style = if *focused {
-            Style::default()
-                .bg(Color::Cyan)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().bg(Color::DarkGray).fg(Color::White)
-        };
-        spans.push(Span::styled(format!(" {label} "), style));
-    }
-    Line::from(spans).alignment(Alignment::Center)
-}
-
-/// Renders a button row from its label list, highlighting the focused index.
-pub(crate) fn focused_buttons(labels: &[&'static str], focus: usize) -> Line<'static> {
-    let buttons = labels
-        .iter()
-        .enumerate()
-        .map(|(index, label)| (*label, index == focus))
-        .collect::<Vec<_>>();
-    action_buttons(&buttons)
 }
 
 #[cfg(test)]

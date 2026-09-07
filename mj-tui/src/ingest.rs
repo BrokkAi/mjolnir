@@ -472,6 +472,12 @@ impl DashboardState {
     }
 
     pub fn set_config(&mut self, config: HelConfig) {
+        // Background saves return a fresh snapshot even when configuration
+        // did not change. They must not close a dialog opened after submission.
+        if self.config == config {
+            return;
+        }
+        self.invalidate_review_settings_choices_for_config(&config);
         self.config = config;
         // Closing the modal drops the resume dialog, and with it its rows.
         self.cancel_modal();
@@ -999,6 +1005,22 @@ mod tests {
 
     use crate::render::unread_line;
     use crate::{DashboardState, SessionOperationKind};
+
+    #[test]
+    fn unchanged_config_after_a_save_preserves_a_new_palette_and_its_query() {
+        use crossterm::event::KeyCode;
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        let mut dashboard = dashboard_with_session(session);
+        let saved_config = dashboard.config.clone();
+        dashboard.handle_key(key(KeyCode::F(2)));
+        dashboard.handle_paste("container");
+        dashboard.set_config(saved_config);
+        assert!(matches!(dashboard.mode, crate::Mode::Palette(_)));
+        // The query still selects the same command after the background reply.
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(matches!(dashboard.mode, crate::Mode::EditContainer(_)));
+    }
 
     #[test]
     fn resume_is_projected_into_active_while_background_work_runs() {

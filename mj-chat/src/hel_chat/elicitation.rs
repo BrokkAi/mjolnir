@@ -1,9 +1,10 @@
 //! Modal editor for ACP form elicitations.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use rat_event::ConsumedEvent;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
@@ -11,6 +12,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
+use crate::components::{
+    ButtonRow, ChoiceList, ControlKind, FieldEdit, Form, Interaction, TextField,
+};
 use crate::hel_selection::{
     ContentPos, FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId, extract_rows,
 };
@@ -45,6 +49,14 @@ struct DisplayField {
     field: usize,
     custom: Option<usize>,
     custom_option: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElicitationControl {
+    Field(usize),
+    Submit,
+    Skip,
+    Cancel,
 }
 
 /// A process-local copy of an unanswered form. The request is retained in the
@@ -85,7 +97,8 @@ pub(super) struct ElicitationDialog {
     option_cursors: Vec<usize>,
     display_fields: Vec<DisplayField>,
     active_custom_fields: BTreeSet<usize>,
-    focus: usize,
+    /// The form is the sole focus and pointer authority for this modal.
+    form: RefCell<Form<ElicitationControl>>,
     error: Option<String>,
     message_scroll: Cell<u16>,
     message_page_height: Cell<u16>,
@@ -128,13 +141,28 @@ impl ElicitationDialog {
                 }
             }
         }
+        let mut form = Form::new();
+        for (index, display) in display_fields.iter().copied().enumerate() {
+            form.declare(
+                ElicitationControl::Field(index),
+                display_control_kind(&request, &values, &option_cursors, display),
+            );
+        }
+        form.declare(ElicitationControl::Submit, ControlKind::Button);
+        form.declare(ElicitationControl::Skip, ControlKind::Button);
+        form.declare(ElicitationControl::Cancel, ControlKind::Button);
+        form.end_frame(if display_fields.is_empty() {
+            ElicitationControl::Submit
+        } else {
+            ElicitationControl::Field(0)
+        });
         Self {
             request,
             values,
             option_cursors,
             display_fields,
             active_custom_fields,
-            focus: 0,
+            form: RefCell::new(form),
             error: None,
             message_scroll: Cell::new(0),
             message_page_height: Cell::new(0),
@@ -156,7 +184,7 @@ impl ElicitationDialog {
             values: self.values.clone(),
             option_cursors: self.option_cursors.clone(),
             active_custom_fields: self.active_custom_fields.clone(),
-            focus: self.focus,
+            focus: self.focus_index(),
             message_scroll: self.message_scroll.get(),
             message_anchor: self.message_anchor.get(),
             message_anchor_width: self.message_anchor_width.get(),
@@ -175,7 +203,18 @@ impl ElicitationDialog {
         dialog.values = draft.values;
         dialog.option_cursors = draft.option_cursors;
         dialog.active_custom_fields = draft.active_custom_fields;
-        dialog.focus = draft.focus.min(dialog.display_fields.len() + 2);
+        for (index, display) in dialog.display_fields.iter().copied().enumerate() {
+            dialog.form.borrow_mut().declare(
+                ElicitationControl::Field(index),
+                display_control_kind(
+                    &dialog.request,
+                    &dialog.values,
+                    &dialog.option_cursors,
+                    display,
+                ),
+            );
+        }
+        dialog.focus_control(draft.focus.min(dialog.display_fields.len() + 2));
         dialog.message_scroll = Cell::new(draft.message_scroll);
         dialog.message_anchor = Cell::new(draft.message_anchor);
         dialog.message_anchor_width = Cell::new(draft.message_anchor_width);
@@ -184,7 +223,7 @@ impl ElicitationDialog {
     }
 
     pub(super) fn paste(&mut self, text: &str) {
-        let text = sanitize_terminal_text(text);
+        let text = crate::hel_text_input::single_line_paste(&sanitize_terminal_text(text));
         let Some((field, custom)) = self.editable_field() else {
             return;
         };
@@ -197,15 +236,18 @@ impl ElicitationDialog {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn handle_key(
         &mut self,
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Option<ElicitationResponse> {
-        self.error = None;
-        if code == KeyCode::Esc {
-            return Some(ElicitationResponse::Cancel);
-        }
+        self.handle_key_event(KeyEvent::new(code, modifiers))
+    }
+
+    pub(super) fn handle_key_event(&mut self, key: KeyEvent) -> Option<ElicitationResponse> {
+        let (code, modifiers) = super::normalize_key(key.code, key.modifiers);
+        let key = KeyEvent::new_with_kind_and_state(code, modifiers, key.kind, key.state);
         if self.is_plan_review() {
             match code {
                 KeyCode::PageUp => {
@@ -221,47 +263,172 @@ impl ElicitationDialog {
                 _ => {}
             }
         }
-        let field_count = self.display_fields.len();
-        let focus_count = field_count + 3;
-        match code {
-            KeyCode::Tab if modifiers.contains(KeyModifiers::SHIFT) => {
-                self.focus = self.focus.checked_sub(1).unwrap_or(focus_count - 1);
-            }
-            KeyCode::BackTab => {
-                self.focus = self.focus.checked_sub(1).unwrap_or(focus_count - 1);
-            }
-            KeyCode::Tab => self.focus = (self.focus + 1) % focus_count,
-            KeyCode::Enter if self.focus == field_count => {
-                return self.accept();
-            }
-            KeyCode::Enter if self.focus == field_count + 1 => {
-                return Some(ElicitationResponse::Decline);
-            }
-            KeyCode::Enter if self.focus == field_count + 2 => {
-                return Some(ElicitationResponse::Cancel);
-            }
-            KeyCode::Enter => self.focus = (self.focus + 1).min(field_count),
-            KeyCode::Up => self.move_option(-1),
-            KeyCode::Down => self.move_option(1),
-            KeyCode::Char(' ') => self.toggle_current(),
-            _ => self.edit_text(KeyEvent::new(code, modifiers)),
+        self.error = None;
+        // Inline custom answers retain their parent question's focus. Text
+        // editing and option navigation are distinct operations on that page.
+        if key.kind != crossterm::event::KeyEventKind::Release
+            && self.editable_field().is_some_and(|(_, custom)| custom)
+            && !matches!(
+                code,
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Enter | KeyCode::Esc
+            )
+            && (!matches!(code, KeyCode::Up | KeyCode::Down) || !modifiers.is_empty())
+        {
+            self.form.borrow_mut().cancel_pointer();
+            self.edit_text(key);
+            return None;
+        }
+        let event = crossterm::event::Event::Key(key);
+        let result = self.form.borrow_mut().handle(&event);
+        if let Some(interaction) = result.action {
+            return self.apply_interaction(interaction);
+        }
+        if result.outcome.is_consumed() {
+            return None;
         }
         None
     }
 
-    pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+    fn apply_interaction(
+        &mut self,
+        interaction: Interaction<ElicitationControl>,
+    ) -> Option<ElicitationResponse> {
+        match interaction {
+            Interaction::Activate(ElicitationControl::Submit) => self.accept(),
+            Interaction::Activate(ElicitationControl::Skip) => Some(ElicitationResponse::Decline),
+            Interaction::Activate(ElicitationControl::Cancel) | Interaction::Cancel => {
+                Some(ElicitationResponse::Cancel)
+            }
+            Interaction::Activate(ElicitationControl::Field(_)) => {
+                self.advance_focus();
+                None
+            }
+            Interaction::Toggle(ElicitationControl::Field(index)) => {
+                self.focus_control(index);
+                self.toggle_current();
+                None
+            }
+            Interaction::Select(ElicitationControl::Field(index), selected) => {
+                self.focus_control(index);
+                self.select_option(selected);
+                None
+            }
+            Interaction::Edit(ElicitationControl::Field(index), edit) => {
+                self.focus_control(index);
+                match edit {
+                    FieldEdit::Key(key) => self.edit_text(key),
+                    FieldEdit::Paste(text) => self.paste(&text),
+                    FieldEdit::Cursor(offset) => {
+                        if let Some((field, _)) = self.editable_field()
+                            && let FieldValue::Text(value) = &mut self.values[field]
+                        {
+                            value.set_cursor(offset);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<ElicitationResponse> {
+        let event = crossterm::event::Event::Mouse(mouse);
+        let result = self.form.borrow_mut().handle(&event);
+        if let Some(interaction) = result.action {
+            let toggle = matches!(
+                mouse.kind,
+                MouseEventKind::Up(crossterm::event::MouseButton::Left)
+            ) && matches!(interaction, Interaction::Select(ElicitationControl::Field(index), _) if matches!(self.values[self.display_fields[index].field], FieldValue::Multi(_)));
+            let response = self.apply_interaction(interaction);
+            if toggle {
+                if let Some((custom, true)) = self.editable_field() {
+                    self.active_custom_fields.insert(custom);
+                } else {
+                    self.toggle_current();
+                }
+            }
+            return response;
+        }
+        if result.outcome.is_consumed() {
+            return None;
+        }
         if !self.is_plan_review()
             || !self
                 .message_area
                 .get()
                 .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
         {
-            return;
+            return None;
         }
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_message(-3),
             MouseEventKind::ScrollDown => self.scroll_message(3),
             _ => {}
+        }
+        None
+    }
+
+    pub(super) fn component_handles_mouse_at(&self, column: u16, row: u16) -> bool {
+        let form = self.form.borrow();
+        form.captures_pointer() || form.contains(column, row)
+    }
+
+    pub(super) fn cancel_component_pointer(&self) {
+        self.form.borrow_mut().cancel_pointer();
+    }
+
+    pub(super) fn reset_component_geometry(&self) {
+        self.form.borrow_mut().reset_geometry();
+    }
+
+    fn focus_index(&self) -> usize {
+        match self.form.borrow().focused() {
+            Some(ElicitationControl::Field(index)) => index,
+            Some(ElicitationControl::Submit) => self.display_fields.len(),
+            Some(ElicitationControl::Skip) => self.display_fields.len() + 1,
+            Some(ElicitationControl::Cancel) => self.display_fields.len() + 2,
+            None => 0,
+        }
+    }
+
+    fn focus_control(&mut self, index: usize) {
+        let field_count = self.display_fields.len();
+        let control = match index.cmp(&field_count) {
+            std::cmp::Ordering::Less => ElicitationControl::Field(index),
+            std::cmp::Ordering::Equal => ElicitationControl::Submit,
+            std::cmp::Ordering::Greater if index == field_count + 1 => ElicitationControl::Skip,
+            _ => ElicitationControl::Cancel,
+        };
+        self.form.borrow_mut().focus(control);
+    }
+
+    fn advance_focus(&mut self) {
+        let event = crossterm::event::Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let _ = self.form.borrow_mut().handle(&event);
+    }
+
+    fn select_option(&mut self, selected: usize) {
+        let index = self.focus_index();
+        let Some(display) = self.display_fields.get(index).copied() else {
+            return;
+        };
+        let option_count = select_option_count(&self.request.fields[display.field]).unwrap_or(0);
+        let count =
+            option_count + usize::from(display.custom.is_some() && display.custom_option.is_none());
+        if selected >= count {
+            return;
+        }
+        self.option_cursors[display.field] = selected;
+        if let FieldValue::Single(value) = &mut self.values[display.field] {
+            *value = (selected < option_count).then_some(selected);
+            if let Some(custom) = display.custom {
+                if display.custom_option == Some(selected) || selected == option_count {
+                    self.active_custom_fields.insert(custom);
+                } else {
+                    self.active_custom_fields.remove(&custom);
+                }
+            }
         }
     }
 
@@ -337,50 +504,12 @@ impl ElicitationDialog {
         }
     }
 
-    fn move_option(&mut self, delta: isize) {
-        let Some(display) = self.display_fields.get(self.focus).copied() else {
-            return;
-        };
-        let Some(option_count) = select_option_count(&self.request.fields[display.field]) else {
-            return;
-        };
-        let row_count =
-            option_count + usize::from(display.custom.is_some() && display.custom_option.is_none());
-        if row_count == 0 {
-            return;
-        }
-        let cursor = &mut self.option_cursors[display.field];
-        *cursor = if delta.is_negative() {
-            cursor.checked_sub(1).unwrap_or(row_count - 1)
-        } else {
-            (*cursor + 1) % row_count
-        };
-        if let FieldValue::Single(selected) = &mut self.values[display.field] {
-            if display.custom_option == Some(*cursor) {
-                *selected = Some(*cursor);
-                if let Some(custom) = display.custom {
-                    self.active_custom_fields.insert(custom);
-                }
-            } else if *cursor == option_count {
-                *selected = None;
-                if let Some(custom) = display.custom {
-                    self.active_custom_fields.insert(custom);
-                }
-            } else {
-                *selected = Some(*cursor);
-                if let Some(custom) = display.custom {
-                    self.active_custom_fields.remove(&custom);
-                }
-            }
-        }
-    }
-
     fn toggle_current(&mut self) {
         if self.editable_field().is_some() {
             self.edit_text(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
             return;
         }
-        let Some(display) = self.display_fields.get(self.focus).copied() else {
+        let Some(display) = self.display_fields.get(self.focus_index()).copied() else {
             return;
         };
         let value = &mut self.values[display.field];
@@ -439,7 +568,7 @@ impl ElicitationDialog {
                     Ok(None) => {}
                     Err(error) => {
                         self.error = Some(error);
-                        self.focus = display_index;
+                        self.focus_control(display_index);
                         if field_index != display.field
                             && let Some(option_count) =
                                 select_option_count(&self.request.fields[display.field])
@@ -456,7 +585,7 @@ impl ElicitationDialog {
     }
 
     fn editable_field(&self) -> Option<(usize, bool)> {
-        let display = self.display_fields.get(self.focus)?;
+        let display = self.display_fields.get(self.focus_index())?;
         if matches!(self.values[display.field], FieldValue::Text(_)) {
             return Some((display.field, false));
         }
@@ -602,6 +731,24 @@ fn select_option_index(field: &ElicitationField, value: &str) -> Option<usize> {
             options.iter().position(|option| option.value == value)
         }
         _ => None,
+    }
+}
+
+fn display_control_kind(
+    request: &ElicitationRequest,
+    values: &[FieldValue],
+    cursors: &[usize],
+    display: DisplayField,
+) -> ControlKind {
+    match &request.fields[display.field].kind {
+        ElicitationFieldKind::SingleSelect { options, .. }
+        | ElicitationFieldKind::MultiSelect { options, .. } => ControlKind::ChoiceList {
+            len: options.len()
+                + usize::from(display.custom.is_some() && display.custom_option.is_none()),
+            selected: cursors[display.field],
+        },
+        _ if matches!(values[display.field], FieldValue::Boolean(_)) => ControlKind::Checkbox,
+        _ => ControlKind::TextField,
     }
 }
 
@@ -823,6 +970,48 @@ fn render_elicitation_at(
         usize::from(total_lines),
     ));
     surfaces.push(SurfaceFrame::fixed(SurfaceId::ModalBody, chunks[1]));
+    let focused_field = dialog.focus_index();
+    let field_index = focused_field.min(dialog.display_fields.len().saturating_sub(1));
+    {
+        let mut form = dialog.form.borrow_mut();
+        form.begin_frame();
+        for (index, display) in dialog.display_fields.iter().copied().enumerate() {
+            let field_area = if index == focused_field {
+                chunks[1]
+            } else {
+                Rect::default()
+            };
+            form.register(
+                ElicitationControl::Field(index),
+                display_control_kind(
+                    &dialog.request,
+                    &dialog.values,
+                    &dialog.option_cursors,
+                    display,
+                ),
+                field_area,
+                true,
+            );
+        }
+        form.register(
+            ElicitationControl::Submit,
+            ControlKind::Button,
+            chunks[2],
+            true,
+        );
+        form.register(
+            ElicitationControl::Skip,
+            ControlKind::Button,
+            chunks[2],
+            true,
+        );
+        form.register(
+            ElicitationControl::Cancel,
+            ControlKind::Button,
+            chunks[2],
+            true,
+        );
+    }
     let focus_rows = u16::try_from(
         Paragraph::new(focus.lines.clone())
             .wrap(Wrap { trim: false })
@@ -859,33 +1048,93 @@ fn render_elicitation_at(
             .min(focus_max_scroll);
     }
     dialog.focus_scroll.set(focus_scroll);
-    render_focus(frame, chunks[1], focus, focus_scroll, focused);
-    let field_count = dialog.display_fields.len();
-    let buttons = ["Submit", "Skip", "Cancel"]
-        .into_iter()
-        .enumerate()
-        .flat_map(|(index, label)| {
-            let selected = dialog.focus == field_count + index;
-            [
-                Span::styled(
-                    format!(" {label} "),
-                    if selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    },
-                ),
-                Span::raw("  "),
-            ]
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(Line::from(buttons)).alignment(Alignment::Center),
-        chunks[2],
-    );
+    if let Some(display) = dialog.display_fields.get(dialog.focus_index()).copied() {
+        let id = ElicitationControl::Field(field_index);
+        let mut form = dialog.form.borrow_mut();
+        if select_option_count(&dialog.request.fields[display.field]).is_some() {
+            ChoiceList::render_wrapped(
+                frame,
+                chunks[1],
+                &focus.lines,
+                &focus.option_rows,
+                dialog.option_cursors[display.field],
+                focus_scroll,
+                &mut form,
+                id,
+            );
+        } else {
+            render_focus(frame, chunks[1], &focus, focus_scroll, focused);
+        }
+        if let Some((line, _)) = focus.text_cursor {
+            let prefix = Paragraph::new(focus.lines[..usize::from(line)].to_vec())
+                .wrap(Wrap { trim: false })
+                .line_count(chunks[1].width);
+            // The editor is a single row; scrolling belongs to the field,
+            // while the surrounding option descriptions keep their wrapping.
+            let row = prefix.saturating_sub(usize::from(focus_scroll));
+            if row < usize::from(chunks[1].height) {
+                let field = if matches!(dialog.values[display.field], FieldValue::Text(_)) {
+                    display.field
+                } else {
+                    display
+                        .custom
+                        .expect("inline text belongs to a custom answer")
+                };
+                if let FieldValue::Text(input) = &dialog.values[field] {
+                    let area = Rect::new(
+                        chunks[1].x.saturating_add(2),
+                        chunks[1].y.saturating_add(row as u16),
+                        chunks[1].width.saturating_sub(2),
+                        1,
+                    );
+                    if select_option_count(&dialog.request.fields[display.field]).is_none() {
+                        form.register(id, ControlKind::TextField, area, true);
+                    }
+                    TextField::render_inline(
+                        frame,
+                        area,
+                        input,
+                        dialog.request.fields[field].secret,
+                        focused,
+                        &mut form,
+                        id,
+                    );
+                }
+            }
+        } else if let FieldValue::Boolean(_) = dialog.values[display.field] {
+            let row = focus
+                .focused_row
+                .unwrap_or(0)
+                .saturating_sub(usize::from(focus_scroll));
+            let area = if row < usize::from(chunks[1].height) {
+                Rect::new(
+                    chunks[1].x,
+                    chunks[1].y + row as u16,
+                    chunks[1].width.min(5),
+                    1,
+                )
+            } else {
+                Rect::default()
+            };
+            form.register(id, ControlKind::Checkbox, area, true);
+        }
+    } else {
+        render_focus(frame, chunks[1], &focus, focus_scroll, focused);
+    }
+    {
+        let mut form = dialog.form.borrow_mut();
+        ButtonRow::render(
+            frame,
+            chunks[2],
+            &[
+                (ElicitationControl::Submit, "Submit", true),
+                (ElicitationControl::Skip, "Skip", true),
+                (ElicitationControl::Cancel, "Cancel", true),
+            ],
+            &mut form,
+        );
+        form.end_frame(ElicitationControl::Field(0));
+    }
     let scroll_help = if dialog.is_plan_review() && maximum_scroll > 0 {
         let start = message_scroll.saturating_add(1);
         let end = message_scroll
@@ -947,11 +1196,13 @@ struct FocusContent<'a> {
     text_cursor: Option<(u16, usize)>,
     focused_row: Option<usize>,
     centered: bool,
+    option_rows: Vec<Option<usize>>,
 }
 
 fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
-    let Some(display) = dialog.display_fields.get(dialog.focus).copied() else {
-        let label = match dialog.focus.saturating_sub(dialog.display_fields.len()) {
+    let focus = dialog.focus_index();
+    let Some(display) = dialog.display_fields.get(focus).copied() else {
+        let label = match focus.saturating_sub(dialog.display_fields.len()) {
             0 => "Submit these answers",
             1 => "Skip this question and let the agent continue",
             _ => "Cancel this question",
@@ -961,13 +1212,14 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             text_cursor: None,
             focused_row: None,
             centered: true,
+            option_rows: vec![],
         };
     };
     let field = &dialog.request.fields[display.field];
     let required = if field.required { " (required)" } else { "" };
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            format!("{}/{}  ", dialog.focus + 1, dialog.display_fields.len()),
+            format!("{}/{}  ", focus + 1, dialog.display_fields.len()),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
@@ -981,6 +1233,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             Style::default().fg(Color::Gray),
         ));
     }
+    let mut option_rows = vec![];
     let mut text_cursor = None;
     let mut focused_row = None;
     match (&field.kind, &dialog.values[display.field]) {
@@ -1025,6 +1278,8 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 if cursor {
                     focused_row = Some(lines.len());
                 }
+                option_rows.resize(lines.len(), None);
+                option_rows.push(Some(index));
                 lines.push(Line::styled(format!("{marker} {}", option.title), style));
                 if cursor {
                     if let Some(description) = &option.description {
@@ -1045,6 +1300,10 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                         render_custom_text(&mut lines, &mut text_cursor, dialog, custom);
                     }
                 }
+            }
+            if display.custom.is_some() && display.custom_option.is_none() {
+                option_rows.resize(lines.len(), None);
+                option_rows.push(Some(options.len()));
             }
             render_custom_answer(
                 &mut lines,
@@ -1076,7 +1335,13 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 } else {
                     Style::default()
                 };
+                option_rows.resize(lines.len(), None);
+                option_rows.push(Some(index));
                 lines.push(Line::styled(format!("{marker} {}", option.title), style));
+            }
+            if display.custom.is_some() && display.custom_option.is_none() {
+                option_rows.resize(lines.len(), None);
+                option_rows.push(Some(options.len()));
             }
             render_custom_answer(
                 &mut lines,
@@ -1103,13 +1368,14 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
         text_cursor,
         focused_row,
         centered: false,
+        option_rows,
     }
 }
 
 fn render_focus(
     frame: &mut Frame,
     area: Rect,
-    content: FocusContent<'_>,
+    content: &FocusContent<'_>,
     scroll: u16,
     focused: bool,
 ) {
@@ -1378,7 +1644,7 @@ mod tests {
     #[test]
     fn smallest_question_pane_keeps_other_and_its_draft_visible() {
         let mut dialog = ElicitationDialog::new(paired_request(1, true));
-        dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
         dialog.paste("custom draft");
         let buffer = rendered_in_pane(&dialog, 60, 6);
         let text = (0..6)
@@ -1696,7 +1962,7 @@ mod tests {
         }
         let last = rendered(&dialog);
         assert!(last.contains("plan-line-79"));
-        assert_eq!(dialog.focus, 0);
+        assert_eq!(dialog.focus_index(), 0);
     }
 
     #[test]
@@ -1713,8 +1979,36 @@ mod tests {
         });
 
         assert_eq!(dialog.message_scroll.get(), 3);
-        assert_eq!(dialog.focus, 0);
+        assert_eq!(dialog.focus_index(), 0);
         assert!(rendered(&dialog).contains("plan-line-03"));
+    }
+
+    #[test]
+    fn mouse_click_toggles_the_focused_boolean_through_the_form() {
+        let mut dialog = ElicitationDialog::new(request(
+            ElicitationFieldKind::Boolean {
+                default: Some(false),
+            },
+            false,
+        ));
+        let buffer = rendered_in_pane(&dialog, 100, 30);
+        let point = (0..100)
+            .flat_map(|column| (0..30).map(move |row| (column, row)))
+            .find(|&(column, row)| buffer[(column, row)].symbol() == "☐")
+            .expect("boolean control has a hitbox");
+        let mouse = |kind| MouseEvent {
+            kind,
+            column: point.0,
+            row: point.1,
+            modifiers: KeyModifiers::NONE,
+        };
+        dialog.handle_mouse(mouse(MouseEventKind::Down(
+            crossterm::event::MouseButton::Left,
+        )));
+        dialog.handle_mouse(mouse(MouseEventKind::Up(
+            crossterm::event::MouseButton::Left,
+        )));
+        assert!(matches!(dialog.values[0], FieldValue::Boolean(true)));
     }
 
     #[test]
@@ -1755,7 +2049,7 @@ mod tests {
         let mut dialog = plan_review(4);
         dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
         dialog.paste("stale revision");
-        dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(
@@ -1884,7 +2178,7 @@ mod tests {
     #[test]
     fn choosing_an_option_after_typing_other_omits_the_custom_draft() {
         let mut dialog = ElicitationDialog::new(paired_request(1, false));
-        dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
         dialog.paste("custom draft");
         dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
@@ -1903,7 +2197,7 @@ mod tests {
     #[test]
     fn toggling_a_multi_select_option_deactivates_other() {
         let mut dialog = ElicitationDialog::new(paired_request(1, true));
-        dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
         dialog.paste("custom draft");
         dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
@@ -1944,9 +2238,9 @@ mod tests {
             },
             true,
         ));
-        dialog.focus = 1;
+        dialog.focus_control(1);
         assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
-        assert_eq!(dialog.focus, 0);
+        assert_eq!(dialog.focus_index(), 0);
         assert_eq!(dialog.error.as_deref(), Some("Architecture is required"));
     }
 

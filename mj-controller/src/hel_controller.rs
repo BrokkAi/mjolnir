@@ -23,9 +23,12 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 
 use hel::hel_config::{
-    HelConfig, SshConnection, TargetTemplate, atomic_write, container_size_host, data_dir,
-    is_bare_project_target, mount_history_host,
+    HelConfig, ProjectBundle, ProjectRepository, SshConnection, TargetTemplate, atomic_write,
+    container_size_host, data_dir, is_bare_project_target, mount_history_host,
 };
+
+use crate::hel_import::{configured_bundle_for_local, configured_bundle_for_origin};
+use crate::hel_setup::github_repository_from_origin;
 
 const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
 
@@ -132,6 +135,136 @@ impl Drop for ControllerStoreGuard {
     }
 }
 
+/// The durable result of creating a quick bundle. The returned config is the
+/// same fresh config that was written, allowing a serving projection to publish
+/// the new bundle before acknowledging the request that created it.
+#[derive(Debug)]
+pub struct QuickBundleCreation {
+    pub config: HelConfig,
+    pub bundle_id: String,
+}
+
+/// Failure stages exposed to a viewer request without exposing the underlying
+/// filesystem/configuration error. The detailed error remains available to
+/// the caller for logs and terminal notices.
+#[derive(Debug)]
+pub enum QuickBundleFailure {
+    InvalidSource(anyhow::Error),
+    Persistence(anyhow::Error),
+}
+
+impl std::fmt::Display for QuickBundleFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSource(error) => write!(formatter, "invalid repository source: {error}"),
+            Self::Persistence(error) => write!(formatter, "persist quick bundle: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for QuickBundleFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidSource(error) | Self::Persistence(error) => Some(error.root_cause()),
+        }
+    }
+}
+
+/// Create a quick bundle from a local repository or GitHub source and persist
+/// it as one serialized fresh-config transaction. Identical sources reuse the
+/// existing configured bundle, matching the terminal's behavior. The returned
+/// config is the same fresh config that was written, allowing a serving
+/// projection to publish the new bundle before acknowledging the request.
+pub fn create_quick_bundle(
+    source: &str,
+) -> std::result::Result<QuickBundleCreation, QuickBundleFailure> {
+    let (config, bundle_id) = HelConfig::update(|config| {
+        create_quick_bundle_in_config(config, source)
+            .map_err(|error| anyhow::Error::new(QuickBundleFailure::InvalidSource(error)))
+    })
+    .map_err(|error| {
+        error
+            .downcast::<QuickBundleFailure>()
+            .unwrap_or_else(QuickBundleFailure::Persistence)
+    })?;
+    Ok(QuickBundleCreation { config, bundle_id })
+}
+
+/// Add a quick bundle to an already-loaded config. The helper still performs
+/// the local repository canonicalization/GitHub-source parsing, but callers
+/// that persist a config should use [`create_quick_bundle`] so concurrent saves
+/// cannot clobber one another.
+pub fn create_quick_bundle_in_config(config: &mut HelConfig, source: &str) -> Result<String> {
+    let source = source.trim();
+    if source.is_empty() {
+        bail!("repository source cannot be empty");
+    }
+    let candidate = Path::new(source);
+    let (name, github, local) = if candidate.exists() {
+        let root = hel::hel_local_git::canonical_repository(candidate)?;
+        if let Some(existing) = configured_bundle_for_local(config, &root) {
+            return Ok(existing);
+        }
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("local repository has no usable directory name")?
+            .to_owned();
+        (name, None, Some(root))
+    } else {
+        if candidate.is_absolute() || source.starts_with('.') || source.starts_with('~') {
+            bail!("local repository path {source:?} does not exist");
+        }
+        let repository = github_repository_from_origin(source).context(format!(
+            "{source:?} is not a GitHub owner/repository or URL"
+        ))?;
+        if let Some(existing) = configured_bundle_for_origin(config, &repository) {
+            return Ok(existing);
+        }
+        let name = repository.repository.clone();
+        let github = format!("{}/{}", repository.owner, repository.repository);
+        (name, Some(github), None)
+    };
+    let repository_id = quick_config_id(&name);
+    let mut bundle_id = repository_id.clone();
+    for suffix in 2_u32.. {
+        if !config.bundles.contains_key(&bundle_id) {
+            break;
+        }
+        bundle_id = format!("{repository_id}-{suffix}");
+    }
+    config.bundles.insert(
+        bundle_id.clone(),
+        ProjectBundle {
+            primary_repo: repository_id.clone(),
+            repositories: vec![ProjectRepository {
+                id: repository_id.clone(),
+                github,
+                local,
+                destination: PathBuf::from(repository_id),
+                git_ref: None,
+            }],
+        },
+    );
+    config.validate()?;
+    Ok(bundle_id)
+}
+
+fn quick_config_id(value: &str) -> String {
+    let id = value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+        .take(64)
+        .collect::<String>();
+    if id.is_empty() || matches!(id.as_str(), "." | "..") {
+        "repository".into()
+    } else {
+        id
+    }
+}
+
 pub struct SessionLaunchOptions {
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -231,7 +364,7 @@ impl Controller {
             | TargetTemplate::LocalDocker { .. }
             | TargetTemplate::AppleContainer { .. }
             | TargetTemplate::AwsEc2 { .. } => Ok(hel_targets::local_directory_completions(prefix)),
-            TargetTemplate::SshPodman { ssh, .. } => {
+            TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
                 hel_targets::ssh_directory_completions(&backend_ssh(ssh), prefix, executor)
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
@@ -271,7 +404,7 @@ impl Controller {
                     }
                 })
                 .with_context(|| format!("inspect resource source {}", source.display()))?,
-            TargetTemplate::SshPodman { ssh, .. } => {
+            TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
                 hel_targets::ssh_directory_exists(&backend_ssh(ssh), source, executor)?
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
@@ -295,7 +428,9 @@ impl Controller {
     ) -> Option<String> {
         let ssh = match target {
             TargetTemplate::LocalPodman { .. } | TargetTemplate::LocalDocker { .. } => None,
-            TargetTemplate::SshPodman { ssh, .. } => Some(backend_ssh(ssh)),
+            TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
+                Some(backend_ssh(ssh))
+            }
             // Apple Container already mounts read-only, and EC2 copies instead
             // of mounting, so neither has an overlay to lose.
             _ => return None,
@@ -804,6 +939,7 @@ fn target_kind(locator: &hel_targets::TargetLocator) -> &'static str {
         hel_targets::TargetLocator::AwsEc2 { .. } => "aws-ec2",
         hel_targets::TargetLocator::SshBare { .. } => "ssh-bare",
         hel_targets::TargetLocator::SshPodman { .. } => "ssh-podman",
+        hel_targets::TargetLocator::SshDocker { .. } => "ssh-docker",
     }
 }
 
@@ -817,7 +953,8 @@ fn target_profile_home(
         hel_targets::TargetLocator::LocalPodman { .. }
         | hel_targets::TargetLocator::LocalDocker { .. }
         | hel_targets::TargetLocator::AppleContainer { .. }
-        | hel_targets::TargetLocator::SshPodman { .. } => {
+        | hel_targets::TargetLocator::SshPodman { .. }
+        | hel_targets::TargetLocator::SshDocker { .. } => {
             format!("/var/lib/hel/profiles/{session_id}")
         }
         hel_targets::TargetLocator::AwsEc2 { .. } | hel_targets::TargetLocator::SshBare { .. } => {

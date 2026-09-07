@@ -43,6 +43,9 @@ use crate::daemon;
 use crate::dashboard::io::DashboardIoUpdate;
 use crate::short_id;
 
+#[cfg(test)]
+mod runtime_feed_tests;
+
 pub(crate) const QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// When a quota reading stops counting as current. A reading only goes stale
 /// once a scheduled refresh should already have replaced it, so this is
@@ -1154,61 +1157,154 @@ pub(crate) fn spawn_dashboard_capacity_poller() -> (
     tokio::sync::mpsc::Sender<()>,
     tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
 ) {
+    spawn_capacity_poller_with(|target| async move {
+        if let Some(error) = &target.probe_error {
+            bail!("capacity probe is unavailable: {error}");
+        }
+        if target.local {
+            return collect_local_capacity_with(collect_local_capacity)
+                .await
+                .map(Some);
+        }
+        tokio::time::timeout(RESOURCE_POLL_TIMEOUT, collect_capacity(&target))
+            .await
+            .context("capacity probe timed out")?
+    })
+}
+
+fn spawn_capacity_poller_with<F, Fut>(
+    collect: F,
+) -> (
+    tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+    tokio::sync::mpsc::Sender<()>,
+    tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
+)
+where
+    F: Fn(DeploymentCapacityTarget) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Option<DeploymentCapacityUsage>>> + Send + 'static,
+{
     let (targets_tx, mut targets_rx) =
         tokio::sync::watch::channel(Vec::<DeploymentCapacityTarget>::new());
     let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(64);
     let (triggers_tx, mut triggers_rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
         let mut targets = Vec::new();
-        let mut interval = tokio::time::interval(CAPACITY_POLL_INTERVAL);
+        let collect = Arc::new(collect);
+        let mut samples = CapacitySamples::default();
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + CAPACITY_POLL_INTERVAL,
+            CAPACITY_POLL_INTERVAL,
+        );
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                _ = updates_tx.closed() => break,
                 _ = interval.tick() => {
-                    schedule_capacity_samples(&targets, &updates_tx);
+                    samples.schedule(targets.iter().cloned(), &collect);
                 }
                 changed = targets_rx.changed() => {
                     if changed.is_err() {
                         tracing::debug!("capacity poll target feed closed; stopping capacity poller");
                         break;
                     }
-                    targets = targets_rx.borrow_and_update().clone();
-                    schedule_capacity_samples(&targets, &updates_tx);
+                    let updated = targets_rx.borrow_and_update().clone();
+                    samples.schedule(
+                        updated.iter().filter(|target| !targets.contains(target)).cloned(),
+                        &collect,
+                    );
+                    targets = updated;
                 }
                 trigger = triggers_rx.recv() => {
                     if trigger.is_none() {
                         break;
                     }
-                    schedule_capacity_samples(&targets, &updates_tx);
+                    samples.schedule(targets.iter().cloned(), &collect);
                 }
+                completed = samples.tasks.join_next_with_id(), if !samples.tasks.is_empty() => {
+                    let (id, result) = match completed.expect("capacity task exists") {
+                        Ok((id, result)) => (id, result.map_err(|error| format!("{error:#}"))),
+                        Err(error) => (error.id(), Err(format!("capacity probe task failed: {error}"))),
+                    };
+                    let sampled = samples.targets.remove(&id).expect("capacity task retains its target");
+                    if let Err(error) = &result {
+                        tracing::warn!(target_id = %sampled.id, %error, "capacity probe failed");
+                    }
+                    let Ok(permit) = updates_tx.reserve().await else {
+                        break;
+                    };
+                    // A watch update and completion can become ready together.
+                    // Revalidate after backpressure, with no await between
+                    // reading the latest target and publishing the result.
+                    let current = targets_rx.borrow().iter().find(|target| target.id == sampled.id).cloned();
+                    let Some(current) = current else {
+                        continue;
+                    };
+                    if current != sampled {
+                        // A changed target gets one follow-up; its old result
+                        // must not overwrite a reading for the new configuration.
+                        // If changed() is still pending, that arm will start it.
+                        if targets.contains(&current) {
+                            samples.schedule(std::iter::once(current), &collect);
+                        }
+                        continue;
+                    }
+                    permit.send(CapacityPollUpdate {
+                        target_id: sampled.id,
+                        result,
+                        sampled_at_epoch_seconds: epoch_seconds(),
+                    });
+                }
+            }
+        }
+        samples.tasks.abort_all();
+        while let Some(completed) = samples.tasks.join_next().await {
+            match completed {
+                Ok(Err(error)) => tracing::warn!(%error, "capacity probe failed during shutdown"),
+                Err(error) if !error.is_cancelled() => {
+                    tracing::error!(%error, "capacity probe task failed during shutdown");
+                }
+                _ => {}
             }
         }
     });
     (targets_tx, triggers_tx, updates_rx)
 }
 
-fn schedule_capacity_samples(
-    targets: &[DeploymentCapacityTarget],
-    updates: &tokio::sync::mpsc::Sender<CapacityPollUpdate>,
-) {
-    for target in targets.iter().cloned() {
-        let updates = updates.clone();
-        tokio::spawn(async move {
-            let result = tokio::time::timeout(RESOURCE_POLL_TIMEOUT, collect_capacity(&target))
-                .await
-                .map_err(|_| "capacity probe timed out".to_string())
-                .and_then(|result| result.map_err(|error| format!("{error:#}")));
-            if let Err(error) = updates
-                .send(CapacityPollUpdate {
-                    target_id: target.id.clone(),
-                    result,
-                    sampled_at_epoch_seconds: epoch_seconds(),
-                })
-                .await
-            {
-                tracing::debug!(target_id = %target.id, %error, "capacity probe result dropped after dashboard shutdown");
+#[derive(Default)]
+struct CapacitySamples {
+    tasks: tokio::task::JoinSet<Result<Option<DeploymentCapacityUsage>>>,
+    targets: std::collections::HashMap<tokio::task::Id, DeploymentCapacityTarget>,
+}
+
+impl CapacitySamples {
+    fn schedule<F, Fut>(
+        &mut self,
+        targets: impl IntoIterator<Item = DeploymentCapacityTarget>,
+        collect: &Arc<F>,
+    ) where
+        F: Fn(DeploymentCapacityTarget) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<DeploymentCapacityUsage>>> + Send + 'static,
+    {
+        for target in targets {
+            if self.targets.values().any(|running| running.id == target.id) {
+                continue;
             }
-        });
+            let collect = collect.clone();
+            let sampled = target.clone();
+            let task = self.tasks.spawn(async move {
+                let started = Instant::now();
+                let target_id = sampled.id.clone();
+                let result = collect(sampled).await;
+                tracing::debug!(
+                    %target_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    success = result.is_ok(),
+                    "capacity probe completed",
+                );
+                result
+            });
+            self.targets.insert(task.id(), target);
+        }
     }
 }
 
@@ -1217,12 +1313,6 @@ async fn collect_capacity(
 ) -> Result<Option<DeploymentCapacityUsage>> {
     if let Some(error) = &target.probe_error {
         anyhow::bail!("capacity probe is unavailable: {error}");
-    }
-    if target.local {
-        return tokio::task::spawn_blocking(collect_local_capacity)
-            .await
-            .context("join local capacity probe")?
-            .map(Some);
     }
     match target.kind {
         DeploymentCapacityKind::Host => {
@@ -1290,7 +1380,8 @@ pub(crate) fn aggregate_aws_capacity(
 fn collect_local_capacity() -> Result<DeploymentCapacityUsage> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
-    system.refresh_cpu_all();
+    // Frequency is unused and scans every core in parallel on each refresh.
+    system.refresh_cpu_usage();
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_cpu_usage();
     Ok(DeploymentCapacityUsage {
@@ -1306,6 +1397,32 @@ fn collect_local_capacity() -> Result<DeploymentCapacityUsage> {
             .context("logical CPU count overflow")?,
         disk_total_bytes: None,
     })
+}
+
+async fn collect_local_capacity_with(
+    collect: impl FnOnce() -> Result<DeploymentCapacityUsage> + Send + 'static,
+) -> Result<DeploymentCapacityUsage> {
+    // A blocking sample cannot be cancelled. Keep its slot occupied
+    // until it exits, even when the deadline has elapsed.
+    let mut sample = tokio::task::spawn_blocking(move || {
+        let result = collect();
+        // Shutdown can drop the awaiting future before this thread exits.
+        if let Err(error) = &result {
+            tracing::warn!(%error, "local capacity sample failed");
+        }
+        result
+    });
+    match tokio::time::timeout(RESOURCE_POLL_TIMEOUT, &mut sample).await {
+        Ok(result) => result.context("join local capacity probe")?,
+        Err(_) => {
+            match sample.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "timed-out capacity probe failed"),
+                Err(error) => tracing::error!(%error, "timed-out capacity probe task failed"),
+            }
+            bail!("capacity probe timed out")
+        }
+    }
 }
 
 async fn execute_resource_command(command: &CommandSpec) -> Result<CommandOutput> {
@@ -1427,6 +1544,247 @@ impl ProjectionConvergence {
     }
 }
 
+/// Read-only updates shared by the dashboard and workspace preview. A snapshot
+/// precedes its session views, so consumers can establish membership first.
+pub(crate) enum RuntimeFeedUpdate {
+    Snapshot(Box<daemon::RuntimeSnapshot>),
+    Session {
+        session_id: String,
+        view: Box<ManagedSessionView>,
+    },
+    Error(String),
+}
+
+/// Dropping a subscription cancels even a pending daemon long poll. The task
+/// owns no writer or relay connection; blocking projection reads are bounded.
+pub(crate) struct RuntimeFeed {
+    pub(crate) updates: tokio::sync::mpsc::Receiver<RuntimeFeedUpdate>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for RuntimeFeed {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+pub(crate) fn spawn_runtime_feed(workspace_id: String) -> RuntimeFeed {
+    spawn_runtime_feed_with(workspace_id, poll_daemon_runtime, load_runtime_projection)
+}
+
+type StoredProjection = Option<(MaterializedSession, hel::hel_state::ProjectionWindow)>;
+
+async fn load_runtime_projection(session_id: String) -> Result<StoredProjection> {
+    static READERS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
+    let permit = Arc::clone(&READERS)
+        .acquire_owned()
+        .await
+        .context("projection readers stopped")?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let result = hel::hel_database::load_materialized_projection_tail(
+            &session_id,
+            hel::hel_database::PROJECTION_TAIL_ITEMS,
+        );
+        // A blocking SQLite read can outlive cancellation of its subscriber.
+        if let Err(error) = &result {
+            tracing::warn!(%session_id, %error, "could not load runtime projection");
+        }
+        result
+    })
+    .await
+    .context("projection load task failed")?
+}
+
+fn spawn_runtime_feed_with<P, PF, L, LF>(workspace_id: String, poll: P, load: L) -> RuntimeFeed
+where
+    P: Fn(String, u64) -> PF + Send + 'static,
+    PF: Future<Output = Result<daemon::RuntimeSnapshot>> + Send,
+    L: Fn(String) -> LF + Clone + Send + 'static,
+    LF: Future<Output = Result<StoredProjection>> + Send + 'static,
+{
+    let (tx, updates) = tokio::sync::mpsc::channel(32);
+    let task = tokio::spawn(async move {
+        let result = run_runtime_feed(workspace_id, poll, load, &tx).await;
+        if let Err(error) = result {
+            let message = format!("Runtime feed stopped: {error:#}");
+            tracing::error!(%message);
+            let _ = tx.send(RuntimeFeedUpdate::Error(message)).await;
+        }
+    });
+    RuntimeFeed { updates, task }
+}
+
+async fn run_runtime_feed<P, PF, L, LF>(
+    workspace_id: String,
+    poll: P,
+    load: L,
+    tx: &tokio::sync::mpsc::Sender<RuntimeFeedUpdate>,
+) -> Result<()>
+where
+    P: Fn(String, u64) -> PF,
+    PF: Future<Output = Result<daemon::RuntimeSnapshot>>,
+    L: Fn(String) -> LF + Clone + Send + 'static,
+    LF: Future<Output = Result<StoredProjection>> + Send + 'static,
+{
+    let mut revision = 0;
+    let mut convergence = ProjectionConvergence::default();
+    let mut published = std::collections::BTreeMap::<String, PublishedView>::new();
+    loop {
+        let mut snapshot = match poll(workspace_id.clone(), revision).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if tx
+                    .send(RuntimeFeedUpdate::Error(format!(
+                        "Could not refresh sessions: {error:#}"
+                    )))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        };
+        let snapshot_revision = snapshot.revision;
+        let sessions = std::mem::take(&mut snapshot.sessions);
+        published.retain(|id, _| sessions.iter().any(|session| &session.session_id == id));
+        convergence
+            .attempts
+            .retain(|id, _| sessions.iter().any(|session| &session.session_id == id));
+        if tx
+            .send(RuntimeFeedUpdate::Snapshot(Box::new(snapshot)))
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        let mut pending = sessions
+            .into_iter()
+            .filter(|runtime| {
+                !published
+                    .get(&runtime.session_id)
+                    .is_some_and(|last| last.matches(runtime))
+            })
+            .collect::<std::collections::VecDeque<_>>();
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut retry = false;
+        while !pending.is_empty() || !tasks.is_empty() {
+            // Independent session reads overlap, without flooding SQLite or
+            // leaving an unbounded number of blocking reads after cancellation.
+            while tasks.len() < 4 {
+                let Some(runtime) = pending.pop_front() else {
+                    break;
+                };
+                let load = load.clone();
+                tasks.spawn(async move {
+                    let stored = if runtime.operational.is_some() {
+                        load(runtime.session_id.clone()).await
+                    } else {
+                        Ok(None)
+                    };
+                    (runtime, stored)
+                });
+            }
+            let Some(result) = tasks.join_next().await else {
+                break;
+            };
+            let (runtime, stored) = result.context("join runtime projection reader")?;
+            let session_id = runtime.session_id.clone();
+            let fingerprint = PublishedView::of(&runtime);
+            let Some(view) = runtime_projection_view(runtime, stored, &mut convergence) else {
+                retry = true;
+                continue;
+            };
+            if view.snapshot.is_some() {
+                published.insert(session_id.clone(), fingerprint);
+            } else {
+                published.remove(&session_id);
+            }
+            if tx
+                .send(RuntimeFeedUpdate::Session {
+                    session_id,
+                    view: Box::new(view),
+                })
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        if retry {
+            tokio::time::sleep(PROJECTION_CONVERGENCE_RETRY_DELAY).await;
+        } else {
+            revision = revision.max(snapshot_revision);
+        }
+    }
+}
+
+fn runtime_projection_view(
+    runtime: daemon::RuntimeSessionView,
+    stored: Result<StoredProjection>,
+    convergence: &mut ProjectionConvergence,
+) -> Option<ManagedSessionView> {
+    let Some(operational) = runtime.operational else {
+        return Some(ManagedSessionView {
+            snapshot: None,
+            connected: runtime.connected,
+            error: runtime.error,
+        });
+    };
+    let detail = match stored {
+        Ok(Some((materialized, window)))
+            if materialized.applied_event_ordinal > runtime.projection_ordinal
+                || (materialized.applied_event_ordinal == runtime.projection_ordinal
+                    && materialized.applied_event_digest == runtime.projection_digest) =>
+        {
+            convergence.converged(&runtime.session_id);
+            return Some(ManagedSessionView {
+                snapshot: Some(ManagedSessionSnapshot {
+                    materialized,
+                    window,
+                    operational,
+                    latest_credential_sync_signal: runtime.latest_credential_sync_signal,
+                    worker_build: None,
+                }),
+                connected: runtime.connected,
+                error: runtime.error,
+            });
+        }
+        Ok(Some((materialized, _))) => {
+            let mismatch = ProjectionMismatch {
+                published_ordinal: runtime.projection_ordinal,
+                published_digest: runtime.projection_digest,
+                durable_ordinal: materialized.applied_event_ordinal,
+                durable_digest: materialized.applied_event_digest.clone(),
+            };
+            if convergence.should_retry(&runtime.session_id, mismatch) {
+                return None;
+            }
+            if materialized.applied_event_ordinal < runtime.projection_ordinal {
+                format!(
+                    "daemon published projection {} but SQLite contains only {} after a bounded convergence retry",
+                    runtime.projection_ordinal, materialized.applied_event_ordinal
+                )
+            } else {
+                format!(
+                    "daemon and SQLite projection digests differ at ordinal {} after a bounded convergence retry",
+                    runtime.projection_ordinal
+                )
+            }
+        }
+        Ok(None) => "daemon published a session with no durable projection".into(),
+        Err(error) => format!("load daemon-owned projection: {error:#}"),
+    };
+    Some(ManagedSessionView {
+        snapshot: None,
+        connected: false,
+        error: Some(ViewError::ProjectionIntegrity(detail)),
+    })
+}
+
 pub(crate) fn spawn_remote_dashboard_worker_poller(
     workspace_id: String,
 ) -> Result<RemoteDashboardWorkerPoller> {
@@ -1445,191 +1803,38 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
     let (config_tx, config_rx) = tokio::sync::watch::channel(hel::hel_config::HelConfig::default());
     let (records_tx, records_rx) = tokio::sync::watch::channel(Vec::new());
     tokio::spawn(async move {
-        let mut revision = 0_u64;
-        let mut requests_open = true;
-        let mut projection_convergence = ProjectionConvergence::default();
-        // What was last published for each session, so an unchanged session
-        // costs nothing. Without this every poll re-read and re-deserialised
-        // every live session's whole transcript to discover that none of it
-        // had moved, which made the cost of showing anything proportional to
-        // everything that had ever happened in the conversation. The stored
-        // value is bounded by the relay's operational state; the transcript
-        // itself is never held here.
-        let mut published = std::collections::BTreeMap::<String, PublishedView>::new();
-        // One session's requests reach the daemon in the order they were made;
-        // different sessions still overlap.
+        let mut feed = spawn_runtime_feed(workspace_id);
         let mut request_order = mj_controller::hel_session_manager::SessionRequestOrder::new();
         loop {
             tokio::select! {
-                request = requests.recv(), if requests_open => {
-                    let Some(request) = request else {
-                        requests_open = false;
-                        continue;
-                    };
+                request = requests.recv() => {
+                    let Some(request) = request else { return; };
                     request_order.dispatch(request, forward_remote_session_request);
                 }
-                snapshot = poll_daemon_runtime(workspace_id.clone(), revision) => {
-                    match snapshot {
-                        Ok(snapshot) => {
-                            let snapshot_revision = snapshot.revision;
-                            let mut retry_projection = false;
+                update = feed.updates.recv() => {
+                    match update {
+                        Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
                             config_tx.send_if_modified(|config| {
-                                if *config == snapshot.config {
-                                    false
-                                } else {
-                                    *config = snapshot.config.clone();
-                                    true
-                                }
+                                if *config == snapshot.config { false }
+                                else { *config = snapshot.config.clone(); true }
                             });
                             records_tx.send_if_modified(|records| {
-                                if *records == snapshot.records {
-                                    false
-                                } else {
-                                    records.clone_from(&snapshot.records);
-                                    true
-                                }
+                                if *records == snapshot.records { false }
+                                else { records.clone_from(&snapshot.records); true }
                             });
                             lifecycle_tx.send_replace(snapshot.lifecycles);
                             reviews_tx.send_replace(snapshot.reviews);
                             notices_tx.send_replace(snapshot.notices);
-                            for runtime in snapshot.sessions {
-                                let session_id = runtime.session_id.clone();
-                                // Nothing about this session has moved, so
-                                // there is nothing to read and nothing to say.
-                                // Consumers hold the last view they were sent.
-                                if published
-                                    .get(&session_id)
-                                    .is_some_and(|last| last.matches(&runtime))
-                                {
-                                    continue;
-                                }
-                                let fingerprint = PublishedView::of(&runtime);
-                                let view = match runtime.operational.clone() {
-                                    Some(operational) => {
-                                        // Bounded: the window is everything any
-                                        // viewer shows. Reading the whole
-                                        // transcript here was work proportional
-                                        // to the conversation, on every poll a
-                                        // session moved.
-                                        let loaded = tokio::task::spawn_blocking({
-                                            let session_id = session_id.clone();
-                                            move || hel::hel_database::load_materialized_projection_tail(
-                                                &session_id,
-                                                hel::hel_database::PROJECTION_TAIL_ITEMS,
-                                            )
-                                        }).await;
-                                        match loaded {
-                                            Ok(Ok(Some((materialized, window))))
-                                                if materialized.applied_event_ordinal > runtime.projection_ordinal
-                                                    || (materialized.applied_event_ordinal == runtime.projection_ordinal
-                                                        && materialized.applied_event_digest == runtime.projection_digest) =>
-                                            {
-                                                projection_convergence.converged(&session_id);
-                                                ManagedSessionView {
-                                                    snapshot: Some(ManagedSessionSnapshot {
-                                                        materialized,
-                                                        window,
-                                                        operational,
-                                                        latest_credential_sync_signal:
-                                                            runtime.latest_credential_sync_signal,
-                                                        // Views rebuilt from a
-                                                        // daemon snapshot carry
-                                                        // no live connection,
-                                                        // so they report no
-                                                        // worker build.
-                                                        worker_build: None,
-                                                    }),
-                                                    connected: runtime.connected,
-                                                    error: runtime.error,
-                                                }
-                                            }
-                                            Ok(Ok(Some((materialized, _)))) => {
-                                                let mismatch = ProjectionMismatch {
-                                                    published_ordinal: runtime.projection_ordinal,
-                                                    published_digest: runtime.projection_digest.clone(),
-                                                    durable_ordinal: materialized.applied_event_ordinal,
-                                                    durable_digest: materialized.applied_event_digest.clone(),
-                                                };
-                                                if projection_convergence.should_retry(&session_id, mismatch) {
-                                                    retry_projection = true;
-                                                    continue;
-                                                }
-                                                let detail = if materialized.applied_event_ordinal
-                                                    < runtime.projection_ordinal
-                                                {
-                                                    format!(
-                                                        "daemon published projection {} but SQLite contains only {} after a bounded convergence retry",
-                                                        runtime.projection_ordinal,
-                                                        materialized.applied_event_ordinal,
-                                                    )
-                                                } else {
-                                                    format!(
-                                                        "daemon and SQLite projection digests differ at ordinal {} after a bounded convergence retry",
-                                                        runtime.projection_ordinal,
-                                                    )
-                                                };
-                                                ManagedSessionView {
-                                                    snapshot: None,
-                                                    connected: false,
-                                                    error: Some(ViewError::ProjectionIntegrity(detail)),
-                                                }
-                                            }
-                                            Ok(Ok(None)) => ManagedSessionView {
-                                                snapshot: None,
-                                                connected: false,
-                                                error: Some(ViewError::ProjectionIntegrity(
-                                                    "daemon published a session with no durable projection".into(),
-                                                )),
-                                            },
-                                            Ok(Err(error)) => ManagedSessionView {
-                                                snapshot: None,
-                                                connected: false,
-                                                error: Some(ViewError::ProjectionIntegrity(format!(
-                                                    "load daemon-owned projection: {error:#}",
-                                                ))),
-                                            },
-                                            Err(error) => ManagedSessionView {
-                                                snapshot: None,
-                                                connected: false,
-                                                error: Some(ViewError::ProjectionIntegrity(format!(
-                                                    "projection load task failed: {error}",
-                                                ))),
-                                            },
-                                        }
-                                    }
-                                    None => ManagedSessionView {
-                                        snapshot: None,
-                                        connected: runtime.connected,
-                                        error: runtime.error,
-                                    },
-                                };
-                                // Only a view that was actually built is
-                                // remembered: an error path must be retried on
-                                // the next poll rather than cached as current.
-                                if view.snapshot.is_some() {
-                                    published.insert(session_id.clone(), fingerprint);
-                                } else {
-                                    published.remove(&session_id);
-                                }
-                                if publisher.publish(session_id, view).await.is_err() {
-                                    return;
-                                }
-                            }
-                            if retry_projection {
-                                tokio::time::sleep(PROJECTION_CONVERGENCE_RETRY_DELAY).await;
-                            } else {
-                                revision = revision.max(snapshot_revision);
-                            }
                         }
-                        Err(error) => {
+                        Some(RuntimeFeedUpdate::Session { session_id, view }) => {
+                            if publisher.publish(session_id, *view).await.is_err() { return; }
+                        }
+                        Some(RuntimeFeedUpdate::Error(error)) => {
                             tracing::warn!(%error, "could not refresh sessions from controller daemon");
-                            tokio::time::sleep(Duration::from_millis(250)).await;
                         }
+                        None => return,
                     }
                 }
-            }
-            if !requests_open {
-                return;
             }
         }
     });
@@ -2375,9 +2580,268 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn capacity_samples_refresh_every_thirty_seconds() {
-        assert_eq!(CAPACITY_POLL_INTERVAL, Duration::from_secs(30));
+    struct PendingCapacityProbe {
+        target: DeploymentCapacityTarget,
+        finish: tokio::sync::oneshot::Sender<Result<Option<DeploymentCapacityUsage>>>,
+    }
+
+    struct CapacityPollerFixture {
+        targets: tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+        triggers: tokio::sync::mpsc::Sender<()>,
+        updates: tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
+        started: tokio::sync::mpsc::UnboundedReceiver<PendingCapacityProbe>,
+    }
+
+    impl CapacityPollerFixture {
+        fn new() -> Self {
+            let (started_tx, started) = tokio::sync::mpsc::unbounded_channel();
+            let (targets, triggers, updates) = spawn_capacity_poller_with(move |target| {
+                let started_tx = started_tx.clone();
+                async move {
+                    let (finish, result) = tokio::sync::oneshot::channel();
+                    started_tx
+                        .send(PendingCapacityProbe { target, finish })
+                        .unwrap();
+                    result.await.context("test probe completion dropped")?
+                }
+            });
+            Self {
+                targets,
+                triggers,
+                updates,
+                started,
+            }
+        }
+
+        async fn assert_no_start(&mut self) {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1), self.started.recv())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    fn capacity_target(id: &str) -> DeploymentCapacityTarget {
+        DeploymentCapacityTarget {
+            id: id.into(),
+            host: id.into(),
+            target_ids: vec![id.into()],
+            kind: DeploymentCapacityKind::Host,
+            local: true,
+            probes: Vec::new(),
+            probe_error: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_samples_follow_timer_and_manual_refresh_not_unchanged_publications() {
+        let mut fixture = CapacityPollerFixture::new();
+        let targets = vec![capacity_target("local")];
+        fixture.targets.send_replace(targets.clone());
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+
+        fixture.targets.send_replace(targets);
+        fixture.assert_no_start().await;
+        tokio::time::advance(Duration::from_secs(29)).await;
+        fixture.assert_no_start().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+
+        fixture.triggers.send(()).await.unwrap();
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+        fixture.assert_no_start().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_busy_targets_coalesce_requests_without_blocking_other_targets() {
+        let mut fixture = CapacityPollerFixture::new();
+        let first_target = capacity_target("first");
+        fixture.targets.send_replace(vec![first_target.clone()]);
+        let first = fixture.started.recv().await.unwrap();
+        fixture
+            .targets
+            .send_replace(vec![first_target, capacity_target("second")]);
+        let second = fixture.started.recv().await.unwrap();
+        assert_eq!(second.target.id, "second");
+
+        fixture.triggers.send(()).await.unwrap();
+        fixture.assert_no_start().await;
+        tokio::time::advance(CAPACITY_POLL_INTERVAL).await;
+        fixture.assert_no_start().await;
+        first.finish.send(Ok(None)).unwrap();
+        second.finish.send(Ok(None)).unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+        fixture.assert_no_start().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_discarded() {
+        let mut fixture = CapacityPollerFixture::new();
+        let mut target = capacity_target("local");
+        fixture.targets.send_replace(vec![target.clone()]);
+        let first = fixture.started.recv().await.unwrap();
+        target.host = "new-host".into();
+        fixture.targets.send_replace(vec![target.clone()]);
+        fixture.assert_no_start().await;
+        first.finish.send(Ok(None)).unwrap();
+        let changed = fixture.started.recv().await.unwrap();
+        assert_eq!(changed.target, target);
+        assert!(
+            fixture.updates.try_recv().is_err(),
+            "old configuration result escaped"
+        );
+        changed
+            .finish
+            .send(Err(anyhow::anyhow!("new host unavailable")))
+            .unwrap();
+        assert!(
+            fixture
+                .updates
+                .recv()
+                .await
+                .unwrap()
+                .result
+                .unwrap_err()
+                .contains("new host unavailable")
+        );
+
+        fixture.triggers.send(()).await.unwrap();
+        let removed = fixture.started.recv().await.unwrap();
+        fixture.targets.send_replace(Vec::new());
+        fixture.assert_no_start().await;
+        removed.finish.send(Ok(None)).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), fixture.updates.recv())
+                .await
+                .is_err()
+        );
+        fixture.targets.send_replace(vec![target]);
+        let mut last = fixture.started.recv().await.unwrap();
+        drop(fixture.updates);
+        last.finish.closed().await;
+    }
+
+    #[tokio::test]
+    async fn capacity_probe_panics_are_reported_and_do_not_prevent_retry() {
+        let first = AtomicBool::new(true);
+        let (targets, triggers, mut updates) = spawn_capacity_poller_with(move |_| {
+            if first.swap(false, Ordering::SeqCst) {
+                panic!("test capacity probe panic");
+            }
+            async { Ok(None) }
+        });
+        targets.send_replace(vec![capacity_target("local")]);
+        let failure = updates.recv().await.unwrap();
+        assert_eq!(failure.target_id, "local");
+        assert!(
+            failure
+                .result
+                .unwrap_err()
+                .contains("test capacity probe panic")
+        );
+        triggers.send(()).await.unwrap();
+        assert!(updates.recv().await.unwrap().result.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_results_are_revalidated_after_output_backpressure() {
+        let mut fixture = CapacityPollerFixture::new();
+        let mut targets: Vec<_> = (0..65).map(|id| capacity_target(&id.to_string())).collect();
+        fixture.targets.send_replace(targets.clone());
+        let mut pending = Vec::new();
+        for _ in 0..65 {
+            pending.push(fixture.started.recv().await.unwrap());
+        }
+        let last = pending.pop().unwrap();
+        let last_id = last.target.id;
+        for probe in pending {
+            probe.finish.send(Ok(None)).unwrap();
+        }
+        fixture.assert_no_start().await;
+        assert_eq!(fixture.updates.len(), 64);
+        last.finish.send(Ok(None)).unwrap();
+        fixture.assert_no_start().await;
+
+        targets
+            .iter_mut()
+            .find(|target| target.id == last_id)
+            .unwrap()
+            .host = "changed".into();
+        fixture.targets.send_replace(targets);
+        for _ in 0..64 {
+            let update = fixture.updates.recv().await.unwrap();
+            assert_ne!(update.target_id, last_id);
+        }
+        let changed = fixture.started.recv().await.unwrap();
+        assert_eq!(changed.target.id, last_id);
+        assert_eq!(changed.target.host, "changed");
+        assert!(
+            fixture.updates.try_recv().is_err(),
+            "stale blocked result escaped"
+        );
+        changed.finish.send(Ok(None)).unwrap();
+        assert_eq!(fixture.updates.recv().await.unwrap().target_id, last_id);
+        fixture.assert_no_start().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let sample = tokio::spawn(collect_local_capacity_with(move || {
+            started_tx.send(()).unwrap();
+            // Dropping finish_tx on a test failure also releases this thread.
+            finish_rx.recv().context("test sample was cancelled")?;
+            Ok(DeploymentCapacityUsage {
+                cpu_percent: Some(10),
+                memory_used_bytes: 1,
+                memory_total_bytes: 2,
+                logical_cores: 4,
+                disk_total_bytes: None,
+            })
+        }));
+        started_rx.await.unwrap();
+        tokio::time::advance(RESOURCE_POLL_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !sample.is_finished(),
+            "timeout released a still-running blocking sample"
+        );
+        finish_tx.send(()).unwrap();
+        assert!(
+            sample
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
     }
 
     #[test]
@@ -2488,6 +2952,10 @@ mod tests {
                 host: "ssh.example".into(),
                 container_id: "remote-podman".into(),
                 workspace_storage: Default::default(),
+            },
+            TargetLocator::SshDocker {
+                host: "ssh.example".into(),
+                container_id: "remote-docker".into(),
             },
         ];
         for target in &remotes {

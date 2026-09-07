@@ -6,26 +6,24 @@
 //! than being dropped.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle, ProjectRepository};
+use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle};
 use hel::hel_state::{
     HelState, MaterializedSession, ProjectSourceIdentity, SessionRecord, SessionState,
 };
 use hel::hel_targets::CancellableProcessExecutor;
 use hel_tui::{
     DashboardAction, PreparedMaterializedSessionDetail, PreparedMaterializedSessionSummary,
-    ReviewSettingsProbeResult, ReviewTargetReadiness, SessionOperationKind, WebViewerAccess,
+    ReviewSettingsChoices, ReviewSettingsDiscoveryResult, SessionOperationKind, WebViewerAccess,
 };
 use mj_controller::hel_controller::Controller;
 use mj_controller::hel_controller::ResumeRepositorySourcePreflight;
-use mj_controller::hel_import::{configured_bundle_for_local, configured_bundle_for_origin};
 use mj_controller::hel_session_manager::SessionManagerControl;
-use mj_controller::hel_setup::github_repository_from_origin;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
@@ -62,7 +60,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     ChatOpened {
         session_id: String,
-        result: Box<std::result::Result<mj_chat::hel_chat::ActiveChat, String>>,
+        result: Box<std::result::Result<mj_chat::hel_chat::PreparedChat, String>>,
     },
     /// The daemon refused a review action. The message is a sentence for the
     /// person who pressed the key, so it goes back to the chat that sent it.
@@ -91,12 +89,17 @@ pub(crate) enum DashboardIoUpdate {
     ConfigReloaded(std::result::Result<Controller, String>),
     WebAccess(WebViewerAccess),
     SetupReloaded(std::result::Result<Controller, String>),
-    ReviewSettingsProbed {
+    ReviewSettingsDiscovered {
         generation: u64,
         profile_id: String,
         model: Option<String>,
-        effort: Option<String>,
-        result: std::result::Result<ReviewSettingsProbeResult, String>,
+        result: std::result::Result<ReviewSettingsDiscoveryResult, String>,
+    },
+    ReviewSettingsChoices {
+        generation: u64,
+        profile_id: String,
+        model: Option<String>,
+        choices: mj_controller::hel_review_settings::ReviewCapabilityChoices,
     },
     ReviewSettingsSaved {
         result: std::result::Result<HelConfig, String>,
@@ -138,10 +141,12 @@ pub(crate) enum DashboardIoUpdate {
         result: std::result::Result<Option<String>, String>,
     },
     SessionMountValidation {
+        generation: u64,
         launch: Box<DashboardAction>,
         result: std::result::Result<Option<(String, String)>, String>,
     },
     ResumeRepositoryPreflight {
+        generation: u64,
         launch: Box<DashboardAction>,
         submitted_repository_id: Option<String>,
         result: Box<std::result::Result<ResumeRepositoryPreflightApply, String>>,
@@ -360,55 +365,82 @@ pub(crate) fn spawn_hidden_native_sessions_load(
     )
 }
 
-/// Discovers the advertised reviewer selectors and actual target readiness in
+/// Discovers advertised reviewer choices from one connected worker in
 /// a supervised asynchronous task. A fresh generation is included in the
 /// reply; the TUI drops replies for edits that happened after this request.
-pub(crate) fn spawn_review_settings_probe(
+pub(crate) fn spawn_review_settings_discovery(
     control: SessionManagerControl,
-    request: mj_controller::hel_review_settings::ReviewProbeRequest,
+    request: mj_controller::hel_review_settings::ReviewDiscoveryRequest,
     generation: u64,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> Arc<AtomicBool> {
     let profile_id = request.profile.clone();
     let model = request.model.clone();
-    let effort = request.effort.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
-    let guard = tracker.begin_cancellable("checking review readiness", cancelled.clone());
+    let guard = tracker.begin_cancellable("loading review choices", cancelled.clone());
     let worker_cancelled = cancelled.clone();
     tokio::spawn(async move {
-        let result = mj_controller::hel_review_settings::probe_review_settings(
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let discovery = mj_controller::hel_review_settings::discover_review_settings(
             control,
             request,
             worker_cancelled,
-        )
-        .await
-        .map(|report| ReviewSettingsProbeResult {
-            model_choices: report.model_choices,
-            effort_choices: report.effort_choices,
-            targets: report
-                .targets
-                .into_iter()
-                .map(|target| ReviewTargetReadiness {
-                    target: target.target,
-                    ready: target.ready,
-                    message: target.message,
-                })
-                .collect(),
+            progress_tx,
+        );
+        tokio::pin!(discovery);
+        let result = loop {
+            tokio::select! {
+                // Drain ready choices before final completion so a queued progress
+                // event can never arrive after the final discovery result.
+                biased;
+                Some(choices) = progress_rx.recv() => {
+                    if let Err(error) = updates.send(DashboardIoUpdate::ReviewSettingsChoices {
+                        generation,
+                        profile_id: profile_id.clone(),
+                        model: model.clone(),
+                        choices,
+                    }) {
+                        tracing::debug!(%error, "review choices dropped after dashboard shutdown");
+                    }
+                }
+                result = &mut discovery => break result,
+            }
+        }
+        .map(|outcome| match outcome {
+            mj_controller::hel_review_settings::ReviewDiscoveryOutcome::Available {
+                choices,
+                cleanup_warning,
+            } => ReviewSettingsDiscoveryResult::Available {
+                choices: review_settings_choices(choices),
+                cleanup_warning,
+            },
+            mj_controller::hel_review_settings::ReviewDiscoveryOutcome::Unavailable => {
+                ReviewSettingsDiscoveryResult::Unavailable
+            }
         })
         .map_err(|error| format!("{error:#}"));
-        if let Err(error) = updates.send(DashboardIoUpdate::ReviewSettingsProbed {
+        if let Err(error) = updates.send(DashboardIoUpdate::ReviewSettingsDiscovered {
             generation,
             profile_id,
             model,
-            effort,
             result,
         }) {
-            tracing::debug!(%error, "review settings probe result dropped after dashboard shutdown");
+            tracing::debug!(%error, "review settings discovery result dropped after dashboard shutdown");
         }
         drop(guard);
     });
     cancelled
+}
+
+fn review_settings_choices(
+    choices: mj_controller::hel_review_settings::ReviewCapabilityChoices,
+) -> ReviewSettingsChoices {
+    ReviewSettingsChoices {
+        model_choices: choices.model_choices,
+        effort_choices: choices.effort_choices,
+        effort_capabilities_discovered: choices.effort_capabilities_discovered,
+    }
 }
 
 pub(crate) fn spawn_review_settings_save(
@@ -848,9 +880,13 @@ pub(crate) fn spawn_create_bundle(
         "creating bundle",
         updates,
         move || {
-            let (config, bundle_id) =
-                HelConfig::update(|config| create_quick_bundle(config, &source))?;
-            Ok(CreatedBundleUpdate { config, bundle_id })
+            // Load fresh so a concurrent background save (e.g. an import
+            // apply) is not clobbered by a stale UI-time config snapshot.
+            let created = mj_controller::hel_controller::create_quick_bundle(&source)?;
+            Ok(CreatedBundleUpdate {
+                config: created.config,
+                bundle_id: created.bundle_id,
+            })
         },
         |result| DashboardIoUpdate::CreatedBundle {
             result: Box::new(result),
@@ -1231,7 +1267,7 @@ impl DashboardContext {
                 self.dashboard.set_opening_session(None);
                 match *result {
                     Ok(chat) => {
-                        let mut chat = chat;
+                        let mut chat = chat.open();
                         // The old warm chat continued receiving feed updates
                         // while this attach was in flight. Capture its latest
                         // local form state just before replacing it.
@@ -1361,26 +1397,37 @@ impl DashboardContext {
                         .set_notice(format!("Could not reload setup changes: {error}"));
                 }
             },
-            DashboardIoUpdate::ReviewSettingsProbed {
+            DashboardIoUpdate::ReviewSettingsChoices {
                 generation,
                 profile_id,
                 model,
-                effort,
-                result,
+                choices,
             } => {
-                if self.dashboard.apply_review_settings_probe(
+                self.dashboard.apply_review_settings_choices(
                     generation,
                     &profile_id,
                     model.as_deref(),
-                    effort.as_deref(),
+                    review_settings_choices(choices),
+                );
+            }
+            DashboardIoUpdate::ReviewSettingsDiscovered {
+                generation,
+                profile_id,
+                model,
+                result,
+            } => {
+                if self.dashboard.apply_review_settings_discovery(
+                    generation,
+                    &profile_id,
+                    model.as_deref(),
                     result,
                 ) {
-                    self.review_probe_cancel = None;
+                    self.review_discovery_cancel = None;
                 }
             }
             DashboardIoUpdate::ReviewSettingsSaved { result } => match result {
                 Ok(config) => {
-                    self.review_probe_cancel = None;
+                    self.review_discovery_cancel = None;
                     self.controller.config = config.clone();
                     self.dashboard.set_config(config);
                     self.refresh_chat_context();
@@ -1497,10 +1544,19 @@ impl DashboardContext {
             DashboardIoUpdate::MountValidation { source, result } => self
                 .dashboard
                 .apply_mount_source_validation(&source, result),
-            DashboardIoUpdate::SessionMountValidation { launch, result } => match result {
-                Ok(None) => {
-                    self.dashboard.finish_session_mount_preflight();
-                    match *launch {
+            DashboardIoUpdate::SessionMountValidation {
+                generation,
+                launch,
+                result,
+            } => {
+                if generation != self.dashboard.session_preflight_generation() {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "cancelled mount preflight failed");
+                    }
+                    return;
+                }
+                match result {
+                    Ok(None) => match *launch {
                         DashboardAction::PreflightResumeRepositories { launch } => {
                             if let Err(error) =
                                 super::actions::start_resume_repository_preflight(self, launch)
@@ -1510,69 +1566,81 @@ impl DashboardContext {
                                 ));
                             }
                         }
-                        launch => super::actions::start_session_launch(self, launch),
+                        launch => {
+                            self.dashboard.finish_session_mount_preflight();
+                            super::actions::start_session_launch(self, launch);
+                        }
+                    },
+                    Ok(Some((source, error))) => {
+                        self.dashboard
+                            .apply_session_mount_preflight_failure(&source, error);
                     }
+                    Err(error) => self
+                        .dashboard
+                        .set_notice(format!("Could not check attached directories: {error}")),
                 }
-                Ok(Some((source, error))) => {
-                    self.dashboard
-                        .apply_session_mount_preflight_failure(&source, error);
-                }
-                Err(error) => self
-                    .dashboard
-                    .set_notice(format!("Could not check attached directories: {error}")),
-            },
+            }
             DashboardIoUpdate::ResumeRepositoryPreflight {
+                generation,
                 launch,
                 submitted_repository_id,
                 result,
-            } => match *result {
-                Ok(applied) => {
-                    if let Some(config) = applied.config {
-                        self.controller.config = config.clone();
-                        self.dashboard.set_config(config);
+            } => {
+                if generation != self.dashboard.session_preflight_generation() {
+                    if let Err(error) = *result {
+                        tracing::warn!(%error, "cancelled repository preflight failed");
                     }
-                    match applied.preflight {
-                        ResumeRepositorySourcePreflight::Ready(receipt) => {
-                            self.dashboard.finish_resume_repository_preflight();
-                            super::actions::start_preflighted_session_launch(
-                                self, *launch, receipt,
-                            );
+                    return;
+                }
+                match *result {
+                    Ok(applied) => {
+                        if let Some(config) = applied.config {
+                            self.controller.config = config.clone();
+                            self.dashboard.set_config(config);
                         }
-                        ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) => {
-                            if submitted_repository_id.as_deref()
-                                == Some(mismatch.repository_id.as_str())
-                            {
-                                self.dashboard.apply_repository_origin_failure(
-                                    &mismatch.repository_id,
-                                    format!(
-                                        "That origin does not contain checkpoint base {}.",
-                                        mismatch.missing_commit
-                                    ),
+                        match applied.preflight {
+                            ResumeRepositorySourcePreflight::Ready(receipt) => {
+                                self.dashboard.finish_resume_repository_preflight();
+                                super::actions::start_preflighted_session_launch(
+                                    self, *launch, receipt,
                                 );
-                            } else {
-                                self.dashboard.show_repository_origin_dialog(
-                                    mismatch.session_id,
-                                    mismatch.repository_id,
-                                    mismatch.missing_commit,
-                                    mismatch.archived_origin,
-                                    mismatch.configured_origin,
-                                    *launch,
-                                );
+                            }
+                            ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) => {
+                                if submitted_repository_id.as_deref()
+                                    == Some(mismatch.repository_id.as_str())
+                                {
+                                    self.dashboard.apply_repository_origin_failure(
+                                        &mismatch.repository_id,
+                                        format!(
+                                            "That origin does not contain checkpoint base {}.",
+                                            mismatch.missing_commit
+                                        ),
+                                    );
+                                } else {
+                                    self.dashboard.show_repository_origin_dialog(
+                                        mismatch.session_id,
+                                        mismatch.repository_id,
+                                        mismatch.missing_commit,
+                                        mismatch.archived_origin,
+                                        mismatch.configured_origin,
+                                        *launch,
+                                    );
+                                }
                             }
                         }
                     }
-                }
-                Err(error) => {
-                    if let Some(repository_id) = submitted_repository_id {
-                        self.dashboard
-                            .apply_repository_origin_failure(&repository_id, error);
-                    } else {
-                        self.dashboard.set_notice(format!(
-                            "Could not check checkpoint repositories: {error}"
-                        ));
+                    Err(error) => {
+                        if let Some(repository_id) = submitted_repository_id {
+                            self.dashboard
+                                .apply_repository_origin_failure(&repository_id, error);
+                        } else {
+                            self.dashboard.set_notice(format!(
+                                "Could not check checkpoint repositories: {error}"
+                            ));
+                        }
                     }
                 }
-            },
+            }
             DashboardIoUpdate::ProjectValidation { directory, result } => self
                 .dashboard
                 .apply_project_directory_validation(&directory, result),
@@ -1735,79 +1803,11 @@ impl DashboardContext {
     }
 }
 
-fn create_quick_bundle(config: &mut HelConfig, source: &str) -> Result<String> {
-    let source = source.trim();
-    if source.is_empty() {
-        bail!("repository source cannot be empty");
-    }
-    let candidate = Path::new(source);
-    let (name, github, local) = if candidate.exists() {
-        let root = hel::hel_local_git::canonical_repository(candidate)?;
-        if let Some(existing) = configured_bundle_for_local(config, &root) {
-            return Ok(existing);
-        }
-        let name = root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("local repository has no usable directory name")?
-            .to_owned();
-        (name, None, Some(root))
-    } else {
-        if candidate.is_absolute() || source.starts_with('.') || source.starts_with('~') {
-            bail!("local repository path {source:?} does not exist");
-        }
-        let repository = github_repository_from_origin(source)
-            .with_context(|| format!("{source:?} is not a GitHub owner/repository or URL"))?;
-        if let Some(existing) = configured_bundle_for_origin(config, &repository) {
-            return Ok(existing);
-        }
-        let name = repository.repository.clone();
-        let github = format!("{}/{}", repository.owner, repository.repository);
-        (name, Some(github), None)
-    };
-    let repository_id = quick_config_id(&name);
-    let mut bundle_id = repository_id.clone();
-    for suffix in 2_u32.. {
-        if !config.bundles.contains_key(&bundle_id) {
-            break;
-        }
-        bundle_id = format!("{repository_id}-{suffix}");
-    }
-    config.bundles.insert(
-        bundle_id.clone(),
-        ProjectBundle {
-            primary_repo: repository_id.clone(),
-            repositories: vec![ProjectRepository {
-                id: repository_id.clone(),
-                github,
-                local,
-                destination: PathBuf::from(repository_id),
-                git_ref: None,
-            }],
-        },
-    );
-    config.validate()?;
-    Ok(bundle_id)
-}
-
-fn quick_config_id(value: &str) -> String {
-    let id = value
-        .chars()
-        .filter(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-        .take(64)
-        .collect::<String>();
-    if id.is_empty() || matches!(id.as_str(), "." | "..") {
-        "repository".into()
-    } else {
-        id
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hel::hel_config::ProjectRepository;
+    use mj_controller::hel_controller::create_quick_bundle_in_config as create_quick_bundle;
 
     #[test]
     fn quick_github_bundle_uses_collision_suffix_and_reuses_matching_source() {
@@ -1902,8 +1902,13 @@ mod tests {
             "a hel record is restored from what the write knew, not from the native set"
         );
         assert!(!state.sessions["session-1"].archived);
-        // The row is listed again, so archiving it asks for the same write the
-        // failed one attempted rather than an unarchive.
+        // Emptying the list moved focus to Cancel. Return to the restored row
+        // before archiving it; discovery must not steal focus from a button.
+        dashboard.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::BackTab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        // Archiving the row asks for the same write the failed one attempted.
         assert_eq!(
             dashboard.handle_key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('a'),

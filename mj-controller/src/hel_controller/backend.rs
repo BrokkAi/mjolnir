@@ -176,7 +176,9 @@ impl Controller {
                 | TargetTemplate::AppleContainer { .. } => {
                     local_ids.push(target_id.clone());
                 }
-                TargetTemplate::SshBare { ssh, .. } | TargetTemplate::SshPodman { ssh, .. } => {
+                TargetTemplate::SshBare { ssh, .. }
+                | TargetTemplate::SshPodman { ssh, .. }
+                | TargetTemplate::SshDocker { ssh, .. } => {
                     let entry = ssh_hosts.entry(ssh.host.clone()).or_default();
                     entry.0.push(target_id.clone());
                     let command = hel_targets::ssh_host_capacity_command(&backend_ssh(ssh));
@@ -283,6 +285,17 @@ pub(super) fn preflight_target(
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "remote Podman preflight failed for {}; run `mj doctor` for actionable prerequisites: {error:#}",
+                        ssh.destination
+                    )
+                })
+        }
+        TargetTemplate::SshDocker { ssh, .. } => {
+            let ssh = backend_ssh(ssh);
+            hel_targets::verify_ssh_docker(&ssh, executor)
+                .map(|_| ())
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "remote Docker preflight failed for {}; run `mj doctor` for actionable prerequisites: {error:#}",
                         ssh.destination
                     )
                 })
@@ -476,6 +489,12 @@ pub(super) fn backend_target(
                 container: backend,
             }
         }
+        TargetTemplate::SshDocker { ssh, container, .. } => {
+            hel_targets::TargetTemplate::SshDocker {
+                ssh: backend_ssh(ssh),
+                container: backend_container(container, allocation, overrides),
+            }
+        }
     })
 }
 
@@ -494,6 +513,9 @@ pub fn image_refresh_plan(config: &HelConfig) -> Vec<ImageRefresh> {
             TargetTemplate::LocalDocker { container } => (ImageHost::LocalDocker, container),
             TargetTemplate::SshPodman { ssh, container } => {
                 (ImageHost::SshPodman(backend_ssh(ssh)), container)
+            }
+            TargetTemplate::SshDocker { ssh, container } => {
+                (ImageHost::SshDocker(backend_ssh(ssh)), container)
             }
             TargetTemplate::LocalBare
             | TargetTemplate::AppleContainer { .. }
@@ -565,7 +587,8 @@ pub(super) fn configure_github_token_environment(target: &mut hel_targets::Targe
         hel_targets::TargetTemplate::LocalPodman(container)
         | hel_targets::TargetTemplate::LocalDocker(container)
         | hel_targets::TargetTemplate::AppleContainer(container)
-        | hel_targets::TargetTemplate::SshPodman { container, .. } => container,
+        | hel_targets::TargetTemplate::SshPodman { container, .. }
+        | hel_targets::TargetTemplate::SshDocker { container, .. } => container,
         hel_targets::TargetTemplate::LocalBare
         | hel_targets::TargetTemplate::AwsEc2(_)
         | hel_targets::TargetTemplate::SshBare { .. } => return false,
@@ -697,7 +720,8 @@ pub(super) fn validate_resource_allocation(
             TargetTemplate::LocalPodman { .. }
             | TargetTemplate::LocalDocker { .. }
             | TargetTemplate::AppleContainer { .. }
-            | TargetTemplate::SshPodman { .. },
+            | TargetTemplate::SshPodman { .. }
+            | TargetTemplate::SshDocker { .. },
             Some(SessionResourceAllocation::Container { .. }),
         )
         | (TargetTemplate::AwsEc2 { .. }, Some(SessionResourceAllocation::AwsEc2 { .. })) => Ok(()),
@@ -796,6 +820,10 @@ pub(super) fn locator_after_provision(
                 ),
             }
         }
+        TargetTemplate::SshDocker { ssh, .. } => TargetLocator::SshDocker {
+            host: ssh.host.clone(),
+            container_id: generated,
+        },
         TargetTemplate::AwsEc2 {
             aws_profile,
             region,
@@ -943,6 +971,19 @@ pub(super) fn backend_locator(
                 ssh: backend_ssh(ssh),
                 container_id: container_id.clone(),
                 workspace_storage: backend_workspace_locator(workspace_storage),
+            }
+        }
+        TargetLocator::SshDocker { host, container_id } => {
+            let TargetTemplate::SshDocker { ssh, .. } = template else {
+                bail!("session locator/template mismatch")
+            };
+            ensure!(
+                host == &ssh.host,
+                "session locator/template SSH host mismatch"
+            );
+            hel_targets::TargetLocator::SshDocker {
+                ssh: backend_ssh(ssh),
+                container_id: container_id.clone(),
             }
         }
         TargetLocator::AwsEc2 {
@@ -1498,6 +1539,51 @@ mod tests {
         assert!(
             !plan.iter().any(|refresh| refresh.image.contains("sha256:")),
             "a digest-pinned image was refreshed: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
+        use hel::hel_config::ImagePullPolicy;
+
+        let mut config = HelConfig::default();
+        config.targets.insert(
+            "docker".into(),
+            TargetTemplate::SshDocker {
+                ssh: SshConnection {
+                    host: "builder.example.test".into(),
+                    user: Some("dev".into()),
+                    identity_file: None,
+                    extra_args: Vec::new(),
+                },
+                container: ConfigContainer {
+                    image: "ghcr.io/example/dev:latest".into(),
+                    pull_policy: ImagePullPolicy::Auto,
+                    platform: Some("linux/amd64".into()),
+                    cpus: None,
+                    memory: None,
+                    environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
+                },
+            },
+        );
+
+        let refresh = image_refresh_plan(&config).pop().expect("refresh plan");
+        assert_eq!(
+            refresh.host,
+            ImageHost::SshDocker(backend_ssh(match config.targets.get("docker").unwrap() {
+                TargetTemplate::SshDocker { ssh, .. } => ssh,
+                _ => unreachable!(),
+            }))
+        );
+        assert_eq!(refresh.pull.program, "ssh");
+        assert_eq!(
+            refresh.pull.args.last().map(String::as_str),
+            Some("'docker' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
+        );
+        assert_eq!(
+            refresh.prune.args.last().map(String::as_str),
+            Some("'docker' 'image' 'prune' '-f'")
         );
     }
 

@@ -391,8 +391,20 @@ impl Controller {
                 Err(error)
             }
             Err(error) => {
-                apply_new_session_provisioning_result(&mut self.state, session_id, Err(error))?;
-                unreachable!("an unsuccessful provisioning result returned Ok")
+                let error = match apply_new_session_provisioning_result(
+                    &mut self.state,
+                    session_id,
+                    Err(error),
+                ) {
+                    Ok(()) => unreachable!("an unsuccessful provisioning result returned Ok"),
+                    Err(error) => error,
+                };
+                return match self.persist_session_state(session_id) {
+                    Ok(()) => Err(error),
+                    Err(persistence_error) => Err(error.context(format!(
+                        "persist removal of failed provisioning session {session_id}: {persistence_error:#}"
+                    ))),
+                };
             }
             Ok((locator, remainder, bundle)) => {
                 apply_new_session_provisioning_result(&mut self.state, session_id, Ok(locator))?;
@@ -593,7 +605,8 @@ impl Controller {
             hel_targets::TargetLocator::LocalPodman { .. }
             | hel_targets::TargetLocator::LocalDocker { .. }
             | hel_targets::TargetLocator::AppleContainer { .. }
-            | hel_targets::TargetLocator::SshPodman { .. } => "/workspace".to_owned(),
+            | hel_targets::TargetLocator::SshPodman { .. }
+            | hel_targets::TargetLocator::SshDocker { .. } => "/workspace".to_owned(),
             hel_targets::TargetLocator::AwsEc2 { workspace, .. }
             | hel_targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
             hel_targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
@@ -1062,6 +1075,12 @@ fn provisioned_locator(
                 container_id: container_id()?,
                 workspace_storage: hel_targets::podman_workspace_locator(container, session_id)
                     .ok()?,
+            }
+        }
+        hel_targets::TargetTemplate::SshDocker { ssh, .. } => {
+            hel_targets::TargetLocator::SshDocker {
+                ssh: ssh.clone(),
+                container_id: container_id()?,
             }
         }
         hel_targets::TargetTemplate::SshBare { ssh, .. } => hel_targets::TargetLocator::SshBare {
@@ -1579,7 +1598,8 @@ pub(super) fn enforce_overlay_capable_mounts(
     let ssh = match target {
         hel_targets::TargetTemplate::LocalPodman(_)
         | hel_targets::TargetTemplate::LocalDocker(_) => None,
-        hel_targets::TargetTemplate::SshPodman { ssh, .. } => Some(ssh),
+        hel_targets::TargetTemplate::SshPodman { ssh, .. }
+        | hel_targets::TargetTemplate::SshDocker { ssh, .. } => Some(ssh),
         _ => return Vec::new(),
     };
     let overlaid = mounts
@@ -1790,11 +1810,16 @@ mod tests {
 
     use std::sync::Mutex;
 
-    use hel::hel_config::ProjectRepository;
+    use hel::hel_config::{
+        ContainerTemplate as ConfigContainer, HarnessKind, HarnessProfile, HelConfig,
+        ProjectRepository, SshConnection,
+    };
     use hel::hel_state::{HelState, SessionRecord, SessionState, TargetLocator};
     use hel::hel_targets::{
         self, AdditionalMount, ContainerTemplate, ProjectBundleSpec, SshTarget,
     };
+
+    use crate::hel_controller::SessionLaunchOptions;
 
     use super::*;
 
@@ -1862,6 +1887,53 @@ mod tests {
                 reference: None,
             }],
         }
+    }
+
+    fn ssh_docker_registration_config() -> HelConfig {
+        let mut config = HelConfig::default();
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile {
+                kind: HarnessKind::Codex,
+                home: PathBuf::from("/home/dev/.codex"),
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+            },
+        );
+        config.bundles.insert(
+            "project".into(),
+            ProjectBundle {
+                primary_repo: "project".into(),
+                repositories: vec![ProjectRepository {
+                    id: "project".into(),
+                    github: Some("owner/project".into()),
+                    local: None,
+                    destination: PathBuf::from("project"),
+                    git_ref: None,
+                }],
+            },
+        );
+        config.targets.insert(
+            "docker".into(),
+            TargetTemplate::SshDocker {
+                ssh: SshConnection {
+                    host: "builder".into(),
+                    user: Some("agent".into()),
+                    identity_file: None,
+                    extra_args: Vec::new(),
+                },
+                container: ConfigContainer {
+                    image: "failimage:never".into(),
+                    pull_policy: Default::default(),
+                    platform: None,
+                    cpus: None,
+                    memory: None,
+                    environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
+                },
+            },
+        );
+        config
     }
 
     #[test]
@@ -2042,6 +2114,95 @@ mod tests {
         assert!(result.is_err());
         assert!(!state.sessions.contains_key(session_id));
     }
+
+    const SSH_DOCKER_FAILURE_CHILD: &str = "MJ_TEST_SSH_DOCKER_FAILURE_CHILD";
+
+    #[test]
+    fn failed_ssh_docker_preflight_removes_durable_provisioning_record() {
+        if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let test = "failed_ssh_docker_preflight_removes_durable_provisioning_record";
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    &format!("hel_controller::provisioning::tests::{test}"),
+                    "--nocapture",
+                ])
+                .env(SSH_DOCKER_FAILURE_CHILD, "1")
+                .env("MJ_DATA_DIR", directory.path())
+                .env("MJ_CONFIG_DIR", directory.path());
+            let output = hel::hel_subprocess::run_with_input(&mut command, &[]).unwrap();
+            assert!(
+                output.status.success(),
+                "isolated {test} failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let _writer = hel::hel_database::install_isolated_test_writer();
+        let config = ssh_docker_registration_config();
+        config.save().unwrap();
+        let mut controller = Controller {
+            config,
+            state: HelState::default(),
+        };
+        let session_id = controller
+            .register_session_with_resources(
+                "codex",
+                "project",
+                "docker",
+                "failed image",
+                SessionLaunchOptions {
+                    workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                    additional_mounts: Vec::new(),
+                    allow_dirty_local: false,
+                    resource_allocation: None,
+                    project_directory: None,
+                    session_title_override: None,
+                },
+            )
+            .unwrap();
+        assert!(
+            hel::hel_database::load_state()
+                .unwrap()
+                .sessions
+                .contains_key(&session_id)
+        );
+
+        let executor = RecordingExecutor::failing("check Docker daemon");
+        let error =
+            futures::executor::block_on(controller.provision_session_with_failure_disposition(
+                &session_id,
+                &executor,
+                None,
+                ProvisioningFailureDisposition::Discard,
+            ))
+            .unwrap_err();
+        let reported = format!("{error:#}");
+        assert!(
+            reported.contains("remote Docker preflight failed"),
+            "{reported}"
+        );
+        assert!(
+            executor.commands().iter().any(|argv| {
+                let command = argv.join(" ");
+                command.contains("'docker' 'version'")
+            }),
+            "the fake preflight did not run: {:?}",
+            executor.commands()
+        );
+        assert!(!controller.state.sessions.contains_key(&session_id));
+
+        let reloaded = Controller::load().unwrap();
+        assert!(
+            !reloaded.state.sessions.contains_key(&session_id),
+            "failed SSH Docker launch left a durable provisioning row"
+        );
+    }
+
     #[test]
     fn failed_new_worker_start_discards_session_only_after_target_cleanup() {
         let session_id = "0123456789abcdef0123456789abcdef";

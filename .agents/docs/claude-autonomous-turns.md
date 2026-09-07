@@ -98,15 +98,30 @@ session was running.
 ## Background work the agent leaves running
 
 `RelayOperationalState.background_commands` reports commands the agent started
-and then stopped waiting on, oldest first. Two harness families produce that
+and then stopped waiting on, oldest first. Harness families produce that
 evidence differently, and `BackgroundWorkPolicy` picks which one a relay reads
 (set beside the harness-turn policy in `src/hel_worker_runtime/unix.rs`):
 
-- `HostedTerminals` (Claude, Kimi, and every harness that is not Codex). Hel
+- `HostedTerminals` (Kimi and other harnesses without a dedicated policy). Hel
   spawned the process, so `active_agent_terminals` is exact: an entry leaves the
   list the moment the child exits. A terminal only counts as background work
   while no prompt and no harness turn is open; until then it is the turn's own
   work.
+- `ClaudeTasks` (Claude). Includes hosted terminals plus the SDK's full live
+  background-task list. New and resumed Claude sessions opt into only the
+  `system/background_tasks_changed` raw SDK message through
+  `_meta.claudeCode.emitRawSDKMessages`. The adapter forwards it as
+  `_claude/sdkMessage`; Hel excludes tasks marked `ambient` (SDK housekeeping),
+  replaces its task map on each notification, and
+  preserves the first observation time of IDs still present. An empty list
+  clears the tasks. These updates do not open a foreground turn, advance the
+  step clock, or enter the transcript. Prompt completion leaves the list
+  intact; bridge teardown, restart, and close clear it. The SDK level is
+  process-local and emits nothing at startup, so it must not be restored from
+  transcript history. Task starts and completion bookends are deliberately
+  not correlated with this level: their ordering is unspecified, and starts
+  include foreground tasks. This fixes idle being displayed while Claude's
+  own background agents are still running.
 - `CodexExecCards` (Codex). codex-acp runs its own shells and never calls
   `terminal/create`, so the only evidence is the tool card. An `exec_command`
   card carries its result under `rawOutput`, with `exit_code` parsed from
@@ -118,6 +133,13 @@ evidence differently, and `BackgroundWorkPolicy` picks which one a relay reads
   introduced with `kind: execute`. A later `rawOutput` without `kind` inherits
   that remembered identity. Raw output by itself is not execution evidence:
   Codex Guardian reviews and searches also return it.
+
+The Claude level contract was checked on 2026-09-06 against the installed
+claude-agent-acp 0.73.0 `dist/acp-agent.js` (raw SDK forwarding and
+`shouldEmitRawMessage`) and its SDK's `SDKBackgroundTasksChangedMessage` in
+`sdk.d.ts`. The latter specifies replacement semantics, process-local reset,
+unspecified ordering relative to edge events, and exclusion of `ambient`
+tasks from activity indicators.
 
 The completed-command shape and partial-update behavior were validated against
 codex-acp 1.8.0 on 2026-09-04. Ordinary commands ended with

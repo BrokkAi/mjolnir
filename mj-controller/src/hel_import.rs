@@ -2853,7 +2853,10 @@ fn default_import_target_id(config: &HelConfig) -> String {
             config.targets.iter().find_map(|(id, target)| {
                 matches!(
                     target,
-                    TargetTemplate::LocalPodman { .. } | TargetTemplate::LocalDocker { .. }
+                    TargetTemplate::LocalPodman { .. }
+                        | TargetTemplate::LocalDocker { .. }
+                        | TargetTemplate::SshPodman { .. }
+                        | TargetTemplate::SshDocker { .. }
                 )
                 .then_some(id)
             })
