@@ -849,9 +849,8 @@ impl ActiveChat {
     /// it opened.
     ///
     /// A record the daemon no longer publishes leaves the open-time copy in
-    /// place: the fields the chat reads from it are fixed for a session's life,
-    /// and a session that disappears from the list is not a reason to lose
-    /// them. A chat opened without a context stays without one.
+    /// place: disappearing from the list is not a reason to lose the last
+    /// known context. A chat opened without a context stays without one.
     pub fn refresh_context(&mut self, config: &HelConfig, session: Option<&SessionRecord>) {
         let Some(context) = self.context.as_mut() else {
             return;
@@ -860,6 +859,18 @@ impl ActiveChat {
         if let Some(session) = session.filter(|session| session.id == context.session.id) {
             context.session = session.clone();
         }
+        // The context and the session-list columns are two snapshots of the
+        // same durable record. A warm chat keeps its ChatState, so refreshing
+        // only the former leaves the pane title naming the pre-move target and
+        // profile. Re-derive the canonical display identity from the refreshed
+        // record while keeping all transcript and composer state in place.
+        let target = context
+            .session
+            .project_target(config, &context.session.target_template_id);
+        let profile = context.session.last_profile.clone();
+        let harness_kind = context.session.harness_kind;
+        self.state.set_header_summary(target, profile);
+        self.state.set_harness_kind(harness_kind);
         self.state.set_review_config(config.review.clone());
         self.refresh_voice_availability();
     }
@@ -3650,6 +3661,73 @@ mod tests {
         );
         bare.refresh_context(&reloaded, None);
         assert!(bare.reviewer_profiles().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_same_session_context_refresh_updates_the_visible_header_without_losing_chat_state() {
+        use hel::hel_config::HarnessKind;
+
+        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+            "session-header-refresh",
+            89,
+        );
+        let mut initial =
+            chat_context("session-header-refresh", &[("codex-1", HarnessKind::Codex)]);
+        initial.session.target_template_id = "localhost".into();
+        initial.session.last_profile = "codex-1".into();
+        let mut chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            Some(initial),
+            fixture.control,
+            SessionHeaderIdentity {
+                target: "localhost".into(),
+                profile: "codex-1".into(),
+                harness_kind: Some(HarnessKind::Codex),
+            },
+            "keep this draft".into(),
+            Notices::default(),
+        );
+        chat.state.entries.push(ChatEntry::plain(
+            1,
+            ChatRole::User,
+            "history that must remain",
+        ));
+
+        let reloaded = config_with_profiles(&[
+            ("codex-1", HarnessKind::Codex),
+            ("claude-2", HarnessKind::Claude),
+        ]);
+        let mut moved = context_session_record("session-header-refresh", "workspace-moved");
+        moved.target_template_id = "podman".into();
+        moved.last_profile = "claude-2".into();
+        moved.harness_kind = HarnessKind::Claude;
+        chat.refresh_context(&reloaded, Some(&moved));
+
+        assert_eq!(chat.draft(), "keep this draft");
+        assert!(
+            chat.state
+                .entries
+                .iter()
+                .any(|entry| entry.text == "history that must remain")
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render_full_frame(frame, &mut chat.state, false))
+            .expect("draw refreshed chat");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            rendered.contains("podman  [idle]  claude-2"),
+            "the refreshed target/profile must be visible in the conversation header: {rendered:?}"
+        );
+        assert!(!rendered.contains("localhost  [idle]  codex-1"));
     }
 
     #[tokio::test]

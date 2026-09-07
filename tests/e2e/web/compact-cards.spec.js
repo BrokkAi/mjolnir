@@ -407,6 +407,89 @@ test('transition cards show compact stages and suppress a late transcript respon
   await expect(card(page, 'stopping').locator('.session-activity')).toHaveText(/Stop target · Remove storage/);
 });
 
+test('a live route survives transition completion while its conversation projection catches up', async ({ page }) => {
+  const state = await mount(page, [
+    session('created', 'project-created', 'Created', {
+      capabilities: { open: true },
+    }),
+  ]);
+  state.conversation = transcript('old conversation must not return');
+  state.holdConversation = true;
+
+  await card(page, 'created').click();
+  await expect(page).toHaveURL(/#conversation\/created$/);
+  await expect.poll(() => state.conversationRequests).toBe(1);
+
+  const created = state.snapshot.sessions.find(item => item.id === 'created');
+  Object.assign(created, {
+    lifecycle: 'starting',
+    state: 'provisioning',
+    transitioning: true,
+    operation: {
+      id: 'create-operation-1',
+      session_id: 'created',
+      kind: 'create',
+      started_at_epoch_seconds: Math.floor((SERVER_TIME_MS - 60_000) / 1_000),
+      stages: [{
+        label: 'Starting target',
+        started_at_epoch_seconds: Math.floor((SERVER_TIME_MS - 60_000) / 1_000),
+      }],
+      notice: null,
+      cancellable: false,
+    },
+    capabilities: {
+      ...created.capabilities,
+      open: false,
+      cancel_operation: false,
+    },
+  });
+  await refresh(page, state);
+  await expect(page.locator('#conversation-transition')).toBeVisible();
+  await expect(page.locator('#conversation-scroll')).toBeHidden();
+  await expect(page.locator('#prompt-form')).toBeHidden();
+
+  // The daemon has finished the lifecycle operation, but its conversation
+  // projection has not caught up yet. Keep the selected route and show the
+  // loading panel instead of falling back to the dashboard.
+  Object.assign(created, {
+    lifecycle: 'live',
+    state: 'running',
+    transitioning: false,
+    operation: null,
+    capabilities: {
+      ...created.capabilities,
+      open: false,
+      cancel_operation: false,
+    },
+  });
+  await refresh(page, state);
+  await expect(page).toHaveURL(/#conversation\/created$/);
+  await expect(page.locator('#conversation-transition-title')).toHaveText('Loading conversation');
+  await expect(page.locator('#conversation-scroll')).toBeHidden();
+  await expect(page.locator('#prompt-form')).toBeHidden();
+  await expect(page.locator('#conversation-feed')).not.toContainText('old conversation must not return');
+
+  // Once the ready projection appears, the stale held request is retired and
+  // only a fresh transcript is painted.
+  state.conversation = transcript('fresh ready conversation');
+  state.holdConversation = false;
+  Object.assign(created, {
+    capabilities: {
+      ...created.capabilities,
+      open: true,
+      prompt: true,
+    },
+  });
+  await refresh(page, state);
+  state.releaseConversation?.();
+  await expect.poll(() => state.conversationResponses).toBeGreaterThan(1);
+  await expect(page.locator('#conversation-feed')).toContainText('fresh ready conversation');
+  await expect(page.locator('#conversation-feed')).not.toContainText('old conversation must not return');
+  await expect(page.locator('#conversation-transition')).toBeHidden();
+  await expect(page.locator('#conversation-scroll')).toBeVisible();
+  await expect(page.locator('#prompt-form')).toBeVisible();
+});
+
 test('ordinary checkpoint keeps the conversation and composer readable', async ({ page }) => {
   const checkpointAt = Math.floor((SERVER_TIME_MS - 30_000) / 1_000);
   const state = await mount(page, [

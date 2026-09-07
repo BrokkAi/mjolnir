@@ -1343,10 +1343,16 @@ impl DashboardState {
             .position(|index| sessions.get(index).is_some_and(|s| s.id == selected))
     }
 
-    /// The sessions the dashboard lists, in creation order. Only live
-    /// sessions appear here; everything else belongs to the resume dialog.
+    /// The sessions the dashboard lists, in creation order: live records and
+    /// terminal records still owned by a transition. Others belong in Resume.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
-        let active = partition_sessions(self.state.sessions.values()).0;
+        let (mut active, terminal) = partition_sessions(self.state.sessions.values());
+        active.extend(
+            terminal
+                .into_iter()
+                .filter(|session| self.transition_kind(&session.id).is_some()),
+        );
+        active.sort_by(|left, right| left.compare_by_creation(right));
         let mut groups = BTreeMap::<String, Vec<&SessionRecord>>::new();
         for session in active {
             groups

@@ -10,13 +10,15 @@ During New, Resume, Move, Stop, force-stop, target destruction, or retained clea
 
 - [x] Inspected lifecycle ownership, TUI rendering/attachment, browser projection, and stage reporting; user selected both interfaces, current-stage progress, and a compact status panel.
 - [x] Implement shared transition classification, coherent lifecycle updates, operation identities, and missing shutdown stages.
-- [x] Implement TUI placeholders and transcript/input gating with behavior tests (integration validation in progress).
-- [x] Implement web placeholders, stale-request protection, and shared creation progress/cancellation with behavior tests. Browser unit tests (15) and compact-card Playwright tests (7) passed; an additional status-clock regression is being added.
+- [x] Implement TUI placeholders and transcript/input gating with behavior tests, including completed startup and stopped cleanup row ownership.
+- [x] Implement web placeholders, stale-request protection, and shared creation progress/cancellation with behavior tests. Browser unit tests (15) and compact-card Playwright tests (8) pass, including transition completion before conversation projection catches up.
 - [x] Complete automated integration checks: Rust suites, affected-crate reruns, all-target Clippy, formatting, browser regressions, and isolated local-worker Move acceptance.
-- [ ] Complete real-provider tmux/browser tests in disposable plandiag sessions. Blocked on detaching older TUI clients that replace the new daemon; user coordination requested.
-- [x] Stop the isolated test resources and record evidence. No new real-provider session was created; the private tmux startup attempt exited.
+- [x] Complete real-provider New, cancellation, Stop/cleanup, and Resume checks in disposable plandiag sessions through tmux and desktop/mobile Chromium. Older clients were safely detached after user authorization.
+- [ ] Finish patched live Move-back/header/draft acceptance; fix the retained local branch collision found by live return Move preflight.
+- [x] Stop isolated test resources and verify the first real Podman Stop removed its container while preserving recovery data.
+- [ ] Stop remaining disposable real-provider sessions after final Move retesting.
 - [x] Commit the validated implementation checkpoint on the current branch.
-- [ ] Finish live acceptance after client coordination and push only task changes.
+- [ ] Commit final live-found fixes and push only task changes after acceptance.
 
 ## Surprises & Discoveries
 
@@ -60,7 +62,7 @@ No database migration is intended. Wire changes use the repository's daemon prot
 
 ## Outcomes & Retrospective
 
-The implementation is complete across daemon, terminal, and browser. Automated validation passes, including the isolated end-to-end Move scenario and cleanup. Review found and fixed the cleanup handoff visibility gap, stale browser record/operation pairing, late conversation rendering, question-control reset ordering, missing Stop recovery-copy reporting, and cleanup error persistence. Real-provider plandiag acceptance remains incomplete because older TUI clients restart the prior daemon. Their workers have not been stopped. The implementation checkpoint can be committed, but push remains pending the requested live acceptance.
+The transition implementation is complete across daemon, terminal, and browser. Automated validation and real-provider New/cancellation/Stop/Resume acceptance pass. Live testing additionally found and fixed stale TUI startup state, warm conversation header identity, and the web transition-to-ready route gap. Podman Stop visibly retained its compact row through stopped Cleanup and removed the container. Return Move currently exposes a retained local branch collision, which must be fixed and retested before final cleanup and push. Primary session workers have not been stopped.
 
 Revision note (2026-09-07): recorded the approved plan, observed gaps, ownership strategy, acceptance checks, and live-test boundaries before implementation.
 
@@ -77,3 +79,7 @@ Final-review note (2026-09-07): graceful Stop called the ordinary checkpoint wra
 Final affected-crate result (2026-09-07): `cargo test -q -p brokk-mj-controller -p brokk-mjolnir -- --test-threads=1` passed: 678 controller tests, 192 CLI unit tests, and the CLI integration suites. The earlier full workspace run passed the unchanged chat/core/TUI/worker suites (409/838/342/108 tests respectively) before encountering the now-corrected protocol assertion. Clippy is the remaining automated check.
 
 Checkpoint handoff note (2026-09-07): `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `git diff --check`, and JavaScript syntax checking pass. Clippy requested only equivalent control-flow and test-expression simplifications. All automated validation is complete. No permission to detach the older primary TUI clients has arrived; do not stop their workers or silently downgrade the requested live acceptance to the isolated fake-provider harness. After coordination, rebuild the latest binary before restarting the shared daemon because the final Stop-stage fix was made after the earlier live-test binary build.
+
+Live continuation (2026-09-07): the user detached the active TUI and authorized treating remaining clients as stale. The sole remaining suspended TUI PID 960517 was terminated; its workers were left alone. Supported restart loaded daemon PID 3623562, and private tmux `mj-transition-live` successfully opened `plandiag`. Disposable Codex session `c50ece9c675833cebd14e56a0e0873bb` read `LIVE_SESSION_TRANSITION_OK`, stopped with a visible Recovery copy placeholder, resumed with Start/Installing Codex stages, and moved from localhost to local Podman. Browser captures stayed in transition through closing/destroying/stopped/provisioning/disconnected and overlapping Sync/Restore stages. Independent `podman exec` on the exact test container confirmed the marker survived.
+
+Live findings (2026-09-07): the warm conversation header still named localhost after Move to Podman; same-session context refresh now re-derives the target/profile/harness header without discarding draft/history. Web-created sessions `ce02a3c7fb99eadb68ec194e93630af1` and `2007e284185bf2d21311a0f189f58190` demonstrated immediate compact New rows across surfaces. The latter exposed a stale TUI Starting placeholder: operation projection overwrote the durable Running state with Provisioning before completion removed ownership. Operation visibility now includes stopped records explicitly without rewriting their durable state, also preserving stopped Cleanup rows. Focused chat/TUI tests pass (410/344). Browser New had no transcript/composer visibility violations in 43 sampled transition frames, but its selected route was lost while the first transcript projection arrived; that final loading-state fix is in progress. The first web-created test session has been stopped. Remaining disposable sessions will be stopped after patched live retesting.

@@ -220,7 +220,10 @@ function applyRoute() {
   // has one. Otherwise it is a stale link, and the dashboard is the answer.
   if (route.name === 'conversation') {
     const session = snapshot.sessions.find(s => s.id === route.sessionId);
-    if (!session || (!session.capabilities?.open && !isTransitioningSession(session))) {
+    if (!session
+      || (!session.capabilities?.open
+        && !isTransitioningSession(session)
+        && !isLoadingConversationSession(session))) {
       navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
       return;
     }
@@ -509,6 +512,24 @@ function isTransitioningSession(session) {
   // enough information to protect its transcript: every operation except a
   // normal checkpoint owns the conversation until completion.
   return Boolean(session.operation && session.operation.kind !== 'checkpoint');
+}
+
+/// A live session can briefly lose its conversation projection just after a
+/// lifecycle operation hands it back to the running worker. This is not a
+/// lifecycle transition (and therefore must not make ordinary checkpoints or
+/// reconnects hide a readable conversation): it is only the completion gap of
+/// the transition route already open in this tab.
+function isLoadingConversationSession(session) {
+  return Boolean(
+    session
+    && session.id === currentSession
+    && !session.capabilities?.open
+    && !isTransitioningSession(session)
+    && session.operation?.kind !== 'checkpoint'
+    && session.lifecycle === 'live'
+    && !session.has_error
+    && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')),
+  );
 }
 
 function isDashboardSession(session) {
@@ -2075,7 +2096,10 @@ async function refresh() {
     menuButton.classList.remove('hidden');
     if (currentSession) {
       const session = snapshot.sessions.find(x => x.id === currentSession);
-      if (!session || (!session.capabilities?.open && !isTransitioningSession(session))) {
+      if (!session
+        || (!session.capabilities?.open
+          && !isTransitioningSession(session)
+          && !isLoadingConversationSession(session))) {
         navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
         return true;
       }
@@ -3385,8 +3409,9 @@ function clearConversationContents() {
 /// still-valid session is just as stale once its operation owns the session.
 function syncConversationMode(session) {
   const transition = isTransitioningSession(session);
+  const loading = !transition && isLoadingConversationSession(session);
   const operationId = session?.operation?.id || session?.state || session?.lifecycle || '';
-  const next = transition ? `transition:${operationId}` : 'conversation';
+  const next = transition ? `transition:${operationId}` : loading ? 'loading' : 'conversation';
   if (next === conversationMode) return;
   conversationMode = next;
   conversationGeneration += 1;
@@ -3399,20 +3424,24 @@ function syncConversationMode(session) {
 
 function renderConversationTransition(session) {
   const transition = isTransitioningSession(session);
-  conversationTransition.hidden = !transition;
-  feedScroll.hidden = transition;
-  jumpToLatest.hidden = transition;
-  elicitations.hidden = transition;
-  reviewHost.hidden = transition;
-  if (transition) conversationSide.hidden = true;
+  const loading = !transition && isLoadingConversationSession(session);
+  const unavailable = transition || loading;
+  conversationTransition.hidden = !unavailable;
+  feedScroll.hidden = unavailable;
+  jumpToLatest.hidden = unavailable;
+  elicitations.hidden = unavailable;
+  reviewHost.hidden = unavailable;
+  if (unavailable) conversationSide.hidden = true;
   else conversationSide.hidden = (queue.children.length === 0 && shells.children.length === 0);
-  document.querySelector('#prompt-form').hidden = transition;
-  cancelTurnButton.classList.toggle('hidden', transition || !session?.capabilities?.cancel_turn);
-  if (!transition) return;
-  conversationTransitionTitle.textContent = session.title || session.id;
-  conversationTransitionStage.textContent = sessionActivityLabel(session);
-  const notice = session.operation?.notice
-    || (session.has_error ? 'The operation needs recovery. Use the available action to try again.' : '');
+  document.querySelector('#prompt-form').hidden = unavailable;
+  cancelTurnButton.classList.toggle('hidden', unavailable || !session?.capabilities?.cancel_turn);
+  if (!unavailable) return;
+  conversationTransitionTitle.textContent = loading ? 'Loading conversation' : session.title || session.id;
+  conversationTransitionStage.textContent = loading ? 'Waiting for the conversation…' : sessionActivityLabel(session);
+  const notice = loading
+    ? ''
+    : session.operation?.notice
+      || (session.has_error ? 'The operation needs recovery. Use the available action to try again.' : '');
   conversationTransitionNotice.textContent = notice;
   conversationTransitionNotice.hidden = !notice;
   conversationTransitionCancel.dataset.id = session.id;
@@ -3428,7 +3457,9 @@ async function loadConversation(delta = false) {
   if (!currentSession) return;
   const current = snapshot?.sessions.find(session => session.id === currentSession);
   if (!current?.capabilities?.open || isTransitioningSession(current)) {
-    if (isTransitioningSession(current)) renderConversationTransition(current);
+    if (isTransitioningSession(current) || isLoadingConversationSession(current)) {
+      renderConversationTransition(current);
+    }
     return;
   }
   // Revisions arrive in bursts. One load runs at a time and remembers that
@@ -3538,7 +3569,9 @@ function renderConversationHeader(session) {
   renderConversationTransition(session);
   cancelTurnButton.classList.toggle(
     'hidden',
-    isTransitioningSession(session) || !session.capabilities?.cancel_turn,
+    isTransitioningSession(session)
+      || isLoadingConversationSession(session)
+      || !session.capabilities?.cancel_turn,
   );
 
   const running = session.chat_phase === 'running';

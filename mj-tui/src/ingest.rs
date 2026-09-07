@@ -8,8 +8,8 @@ use hel::hel_config::HelConfig;
 use hel::hel_elicitation::ElicitationRequest;
 use hel::hel_state::{
     HelState, MaterializedExecutionState, MaterializedSession, MaterializedSessionSummary,
-    MoveOperation, SessionRecord, SessionResourceAllocation, SessionState, TranscriptBody,
-    TranscriptItem, normalize_session_title,
+    MoveOperation, SessionRecord, SessionResourceAllocation, TranscriptBody, TranscriptItem,
+    normalize_session_title,
 };
 use hel::hel_targets::{
     DeploymentCapacityTarget, DeploymentCapacityUsage, ProvisionStage, SessionResourceUsage,
@@ -768,15 +768,6 @@ impl DashboardState {
                     .entry(session_id.clone())
                     .or_insert_with(|| placeholder.clone());
             }
-            if matches!(
-                operation.kind,
-                SessionOperationKind::Launching
-                    | SessionOperationKind::Resuming
-                    | SessionOperationKind::Moving
-            ) && let Some(session) = self.state.sessions.get_mut(session_id)
-            {
-                session.state = SessionState::Provisioning;
-            }
         }
     }
 
@@ -1160,12 +1151,50 @@ mod tests {
 
         assert_eq!(
             dashboard.state.sessions["session-1"].state,
-            SessionState::Provisioning
+            SessionState::Stopped
         );
+        assert_eq!(dashboard.ordered_sessions().len(), 1);
         assert_eq!(
             dashboard.session_operations["session-1"].kind,
             SessionOperationKind::Resuming
         );
+    }
+
+    #[test]
+    fn a_completed_remote_launch_restores_the_ready_row_without_another_record_change() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Launching,
+            None,
+        );
+        let mut ready = stopped_session();
+        ready.state = SessionState::Running;
+        let mut state = dashboard.state.clone();
+        state.sessions.insert(ready.id.clone(), ready);
+        dashboard.set_state(state);
+        assert!(dashboard.transition_kind("session-1").is_some());
+        dashboard.finish_session_operation("session-1");
+        assert_eq!(dashboard.transition_kind("session-1"), None);
+        assert_eq!(dashboard.ordered_sessions()[0].state, SessionState::Running);
+        dashboard.select_active_session("session-1");
+        assert!(matches!(
+            dashboard.open_selected_session(),
+            crate::DashboardAction::Open { .. }
+        ));
+    }
+
+    #[test]
+    fn stopped_cleanup_keeps_one_row_only_until_its_owner_finishes() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
+        assert_eq!(dashboard.ordered_sessions().len(), 1);
+        assert_eq!(
+            dashboard.state.sessions["session-1"].state,
+            SessionState::Stopped
+        );
+        dashboard.finish_session_operation("session-1");
+        assert!(dashboard.ordered_sessions().is_empty());
     }
 
     #[test]
