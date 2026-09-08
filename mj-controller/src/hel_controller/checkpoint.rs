@@ -2309,6 +2309,7 @@ mod tests {
                 native_session_id: Some("native-session".into()),
                 agent_capabilities: None,
                 agent_info: None,
+                steering_supported: None,
                 config_options: Vec::new(),
                 modes: None,
                 available_commands: Vec::new(),

@@ -500,6 +500,8 @@ pub enum RuntimeEvent {
         capabilities: Option<Box<AgentCapabilities>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_info: Option<Implementation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steering_supported: Option<bool>,
     },
     SessionStarted {
         native_session_id: String,
@@ -2300,6 +2302,7 @@ async fn serve_session(
             protocol_version: Some(initialized.protocol_version),
             capabilities: Some(Box::new(initialized.agent_capabilities.clone())),
             agent_info: initialized.agent_info.clone(),
+            steering_supported: Some(steering_supported),
         },
     )
     .await?;

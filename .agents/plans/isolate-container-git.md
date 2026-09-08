@@ -26,6 +26,13 @@ such as GitHub. No import UI or new user configuration is introduced.
   managed workspace policy.
 - [x] (2026-09-08) Completed formatting, elevated full tests and all-target Clippy;
   prepared this isolated worktree for its implementation commit.
+- [x] (2026-09-08) Committed the implementation as 61930b8c in the detached worktree.
+- [x] (2026-09-08) User authorized pushing to master. Merged upstream 14b99cb3
+  into this worktree without conflicts.
+- [x] (2026-09-08) Validated the combined result: 2,759 tests passed, 16 ignored,
+  no failures; formatting and all-target Clippy passed.
+- [x] (2026-09-08) User changed delivery to a pull request before any master push.
+  Prepared the integration commit for a PR branch targeting master.
 
 ## Surprises & Discoveries
 
@@ -45,7 +52,8 @@ The complete test run produced 2,756 passes, 16 ignored tests, and one unrelated
 failure in `render::tests::minimized_sessions_truncate_only_the_top_line`.
 An untouched archive of base cd6262f7 reproduced the identical narrow-layout
 failure. Master independently advanced to 14b99cb3 with a fix for that test during
-validation; this task did not integrate that commit or change its worktree base.
+the initial validation. The subsequent authorized integration includes that fix
+and passes the entire suite.
 
 ## Decision Log
 
@@ -61,6 +69,13 @@ validation; this task did not integrate that commit or change its worktree base.
   explicitly rejected implementation in master and requested a fresh start.
 - Decision: Code only, no deployment, running-session changes, history repair,
   push, or integration into master. Rationale: explicit user-selected scope.
+- Decision: Integrate and push to master after the implementation commit.
+  Rationale: the user subsequently requested "push it to master". Resolve and
+  validate integration in the existing worktree, then fast-forward master and
+  push its configured upstream. No release or running-session migration is requested.
+- Decision: Publish a PR branch targeting master instead of pushing master.
+  Rationale: the user's latest instruction is "ok make a pr". This supersedes
+  the direct master push; the implementation and validation remain in this worktree.
 
 ## Outcomes & Retrospective
 
@@ -69,11 +84,14 @@ The read-only source bridge, upstream publishing configuration, automatic sessio
 branches, source-based checkpoints, and backward-compatible migration are
 implemented in the isolated worktree. Real Git tests prove distinct ordinary
 pushes and preservation of committed, staged, unstaged, and untracked work.
-Formatting and all-target Clippy pass. The full test run passes every target
-except the independently reproduced TUI layout failure described above.
+Formatting and all-target Clippy pass. After integrating current master, the full
+test run passes with 2,759 passed tests, no failures, and 16 ignored tests.
 
-The implementation and validation are complete. The final action is the required
-commit in this detached worktree, without integration into master or a push.
+The implementation was committed as 61930b8c in this detached worktree. The user
+then authorized integration against upstream 14b99cb3, which includes the
+independent TUI fix. Integration validation is complete. The user subsequently
+requested a pull request, so the validated result will be published on a PR branch
+targeting master. Master has not been changed or pushed by this task.
 No real session was stopped or migrated. Running binaries are not protected
 merely by source edits; an updated controller must enforce the new policy.
 
@@ -238,3 +256,12 @@ Revision 2026-09-08: recorded completed validation, the independent baseline tes
 failure, and final compatibility details. New Git test process execution uses
 the shared subprocess helper. Remote path text is normalized only when constructing
 target command arguments, preserving native Path and PathBuf handling internally.
+
+Revision 2026-09-08: the user explicitly authorized pushing the finished fix to
+master. Keep integration work in the existing detached worktree, validate the
+merged source, then publish by a normal fast-forward push. This supersedes the
+earlier restriction against integration and pushing.
+
+Revision 2026-09-08: recorded successful integration validation and the user's
+subsequent change to PR delivery. Publish a dedicated branch and open its pull
+request against master; do not push master directly.

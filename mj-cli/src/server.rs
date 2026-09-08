@@ -3496,6 +3496,7 @@ mod tests {
             acp_ready: None,
             agent_capabilities,
             agent_info: None,
+            steering_supported: None,
             config_options: Vec::new(),
             modes: None,
             available_commands: Vec::new(),
@@ -3557,6 +3558,7 @@ mod tests {
             acp_ready: None,
             agent_capabilities: None,
             agent_info: None,
+            steering_supported: None,
             config_options: Vec::new(),
             modes: Some(SessionModeState::new(
                 "default",

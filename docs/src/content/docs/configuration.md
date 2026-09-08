@@ -31,17 +31,18 @@ Mjolnir appends `config.toml` to it.
 Every current file starts with the required schema version:
 
 ```toml
-version = 4
+version = 5
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `4`. |
+| `version` | integer | yes | none | Configuration schema version; use `5`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | `true` | Show stopped sessions in the Sessions panel; also toggled by its checkbox or `h`. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
+| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, or `dracula`. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
 | `startup` | table | no | automatic Codex session and target selection | Defaults for New and the first session in an empty terminal workspace. |
@@ -49,7 +50,7 @@ The only accepted top-level keys are:
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
 | `targets` | table of named tables | no | empty | Named places where sessions run. |
 
-A missing or empty file is treated as an empty version 4 configuration. Older
+A missing or empty file is treated as an empty version 5 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -461,7 +462,7 @@ This example contains the sections most installations need. Add other target
 kinds from the examples above rather than mixing fields between variants.
 
 ```toml
-version = 4
+version = 5
 
 [phone]
 enabled = true

@@ -5085,8 +5085,8 @@ mod tests {
 
         let rows = minimized_content_rows(&mut dashboard, 44, 22);
         assert!(
-            rows.iter().any(|line| line.contains("ACP pretty name")),
-            "the narrow summary keeps the session name: {rows:?}"
+            rows.iter().any(|line| line.contains("ACP pretty")),
+            "the narrow summary keeps the start of the session name beside its status and menu: {rows:?}"
         );
         assert!(!rows.iter().any(|line| line.contains("You:")), "{rows:?}");
         assert!(!rows.iter().any(|line| line.contains("Agent:")), "{rows:?}");

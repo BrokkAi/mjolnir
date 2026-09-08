@@ -2279,7 +2279,10 @@ fn stop_worker_script_kills_a_matching_daemon_and_is_idempotent() {
     std::fs::write(&fake_hel, "#!/bin/sh\nwhile true; do sleep 1; done\n").unwrap();
     std::fs::set_permissions(&fake_hel, std::fs::Permissions::from_mode(0o700)).unwrap();
     let root = worker_root.to_str().unwrap();
-    let mut child = std::process::Command::new(&fake_hel)
+    // Interpret the fixture so a concurrent fork retaining its write fd cannot
+    // make the kernel reject a freshly written executable with ETXTBSY.
+    let mut child = std::process::Command::new("sh")
+        .arg(&fake_hel)
         .args(["worker", "run", "--root", root, "--config", "launch.json"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
