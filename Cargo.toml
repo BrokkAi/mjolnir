@@ -64,7 +64,7 @@ rust-version = "1.96"
 # `node scripts/release-version.mjs check` (run in CI) fails when these fall
 # behind the workspace version.
 [workspace.dependencies]
-anvil-client = { package = "brokk-anvil-client", version = "0.28.1" }
+anvil-client = { package = "brokk-anvil-client", version = "0.28.2" }
 hel = { path = ".", package = "brokk-mj-core", version = "2.4.0", default-features = false }
 mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.4.0" }
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.4.0" }

@@ -568,9 +568,9 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
 name = "brokk-anvil-client"
-version = "0.28.1"
+version = "0.28.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b73af61305a3591406d8624d57db897f3c7a8da5837dba7ffdf3e42f381f956"
+checksum = "8e88cd91e25fea589e58a59c5ddb21cd1da4dde312c810ca9890bd6a4cbfcffb"
 dependencies = [
  "anyhow",
  "base64",

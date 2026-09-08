@@ -478,8 +478,8 @@ A session recorded under one harness can be resumed under another; Mjolnir
 condenses the transcript into a size-bounded handoff for the new harness. That
 compaction is direct, tool-free inference and does not create an ACP session.
 Mjolnir chooses a configured profile with usable quota and a current model in
-this precedence: Codex GPT Luna, Grok, Kimi, then DeepSeek Flash. Model versions
-come from each provider's live catalog. Claude profiles are never utility
+this precedence: Codex GPT Luna, Muse Spark, Grok, Kimi, then DeepSeek Flash.
+Model versions come from each provider's live catalog. Claude profiles are never utility
 models; if Claude is the only configured harness, cross-harness compaction has
 no utility model and resume reports that error.
 

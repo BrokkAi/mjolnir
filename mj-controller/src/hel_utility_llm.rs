@@ -14,6 +14,7 @@ use anvil_client::infer::{
 };
 use anvil_client::kimi_auth::KimiBackendConfig;
 use anvil_client::llm_client::{LlmBackend, ModelMetadata, OpenAiClient};
+use anvil_client::meta_client::{MetaClient, MetaClientConfig};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -87,7 +88,9 @@ impl UtilityLlmRuntime {
             .filter(|(_, profile)| utility_precedence(profile.kind).is_some())
             .collect::<Vec<_>>();
         if supported.is_empty() {
-            bail!("no utility model is configured; add a Codex, Grok, Kimi, or DeepSeek profile")
+            bail!(
+                "no utility model is configured; add a Codex, Muse, Grok, Kimi, or DeepSeek profile"
+            )
         }
         let quotas = self.quotas(config, &supported).await;
         if cancel.is_cancelled() {
@@ -408,11 +411,12 @@ fn classify_quota(report: &ProfileQuota) -> Option<(UtilityQuotaClass, u8)> {
 
 fn utility_precedence(kind: HarnessKind) -> Option<u8> {
     match kind {
-        HarnessKind::Codex => Some(4),
+        HarnessKind::Codex => Some(5),
+        HarnessKind::Muse => Some(4),
         HarnessKind::Grok => Some(3),
         HarnessKind::Kimi => Some(2),
         HarnessKind::Deepseek => Some(1),
-        HarnessKind::Claude | HarnessKind::Muse => None,
+        HarnessKind::Claude => None,
     }
 }
 
@@ -447,8 +451,19 @@ fn family_matches(kind: HarnessKind, id: &str) -> bool {
                     .is_some_and(|character| character.is_ascii_digit())
         }
         HarnessKind::Deepseek => id.starts_with("deepseek-") && id.contains("flash"),
-        HarnessKind::Claude | HarnessKind::Muse => false,
+        HarnessKind::Muse => muse_spark_model(&id),
+        HarnessKind::Claude => false,
     }
+}
+
+fn muse_spark_model(id: &str) -> bool {
+    let Some(version) = id.strip_prefix("muse-spark-") else {
+        return false;
+    };
+    !version.is_empty()
+        && version.split('.').all(|part| {
+            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+        })
 }
 
 fn model_version_cmp(left: &str, right: &str) -> Ordering {
@@ -518,7 +533,16 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
                 )) as Arc<dyn LlmBackend>
             }))
         }
-        HarnessKind::Claude | HarnessKind::Muse => Ok(None),
+        HarnessKind::Muse => {
+            let mut config = MetaClientConfig::from_home(&profile.home);
+            if let Some(base_url) = profile.environment.get("TBH_MINT_BASE_URL") {
+                config.mint_base_url.clone_from(base_url);
+            } else if let Ok(base_url) = std::env::var("TBH_MINT_BASE_URL") {
+                config.mint_base_url = base_url;
+            }
+            MetaClient::load_with_config(config)
+        }
+        HarnessKind::Claude => Ok(None),
     }
 }
 
@@ -556,6 +580,13 @@ mod tests {
         assert!(family_matches(HarnessKind::Grok, "grok-4.6"));
         assert!(family_matches(HarnessKind::Kimi, "k3"));
         assert!(family_matches(HarnessKind::Deepseek, "deepseek-v4-flash"));
+        assert!(family_matches(HarnessKind::Muse, "muse-spark-1.3"));
+        assert!(!family_matches(
+            HarnessKind::Muse,
+            "muse-spark-1.3-contributor"
+        ));
+        assert!(!family_matches(HarnessKind::Muse, "muse-spark-1.3-image"));
+        assert!(!family_matches(HarnessKind::Muse, "muse-spark-1.3-voice"));
     }
 
     #[test]
@@ -567,6 +598,64 @@ mod tests {
         assert_eq!(
             model_version_cmp("gpt-5.10-luna", "gpt-5.9-luna"),
             Ordering::Greater
+        );
+        let catalog = [
+            model_with_window("muse-spark-1.2", None),
+            model_with_window("muse-spark-1.3-contributor", None),
+            model_with_window("muse-spark-1.3", None),
+            model_with_window("muse-spark-1.4-image", None),
+        ];
+        assert_eq!(
+            newest_family_model(HarnessKind::Muse, &catalog)
+                .expect("regular Muse Spark model")
+                .id,
+            "muse-spark-1.3"
+        );
+    }
+
+    fn candidate_for(
+        profile_id: &str,
+        harness: HarnessKind,
+        quota_class: UtilityQuotaClass,
+        quota_score: u8,
+    ) -> UtilityCandidate {
+        UtilityCandidate {
+            profile_id: profile_id.into(),
+            harness,
+            model: "test-model".into(),
+            quota_class,
+            quota_score,
+            reasoning_effort: None,
+            page_bytes: DEFAULT_CONTEXT_BYTES,
+            backend: Arc::new(CodexClient::with_auth_path(PathBuf::from("auth.json"))),
+        }
+    }
+
+    #[test]
+    fn utility_order_keeps_quota_class_then_provider_priority() {
+        let mut candidates = [
+            candidate_for(
+                "deepseek",
+                HarnessKind::Deepseek,
+                UtilityQuotaClass::Healthy,
+                99,
+            ),
+            candidate_for("muse", HarnessKind::Muse, UtilityQuotaClass::Healthy, 20),
+            candidate_for("codex", HarnessKind::Codex, UtilityQuotaClass::Healthy, 20),
+            candidate_for(
+                "grok-reserve",
+                HarnessKind::Grok,
+                UtilityQuotaClass::Reserve,
+                10,
+            ),
+        ];
+        candidates.sort_by(candidate_order);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            ["codex", "muse", "deepseek", "grok-reserve"]
         );
     }
 
@@ -744,5 +833,57 @@ mod tests {
         .collect::<Vec<_>>()
         .await;
         assert_eq!(results.len(), 4);
+    }
+
+    /// Exercises the native Muse backend and its Spark-family model selection.
+    /// Set MJ_UTILITY_LIVE_MUSE_PROFILE to a configured Muse profile ID.
+    #[tokio::test]
+    #[ignore = "requires a real Muse profile, network access, and paid quota"]
+    async fn utility_llm_live_muse() {
+        let profile_id = std::env::var("MJ_UTILITY_LIVE_MUSE_PROFILE")
+            .expect("set MJ_UTILITY_LIVE_MUSE_PROFILE to a configured Muse profile id");
+        let loaded = HelConfig::load().expect("load Mjolnir configuration");
+        let profile = loaded
+            .profiles
+            .get(&profile_id)
+            .unwrap_or_else(|| panic!("profile {profile_id:?} is not configured"));
+        assert_eq!(
+            profile.kind,
+            HarnessKind::Muse,
+            "profile {profile_id:?} must be a Muse profile"
+        );
+        let mut config = HelConfig::default();
+        config.profiles.insert(profile_id.clone(), profile.clone());
+
+        let cancel = CancellationToken::new();
+        let mut candidates = UtilityLlmRuntime::default()
+            .resolve(&config, &cancel)
+            .await
+            .expect("resolve the live Muse utility profile");
+        assert_eq!(candidates.len(), 1);
+        let candidate = candidates.remove(0);
+        assert_eq!(candidate.profile_id, profile_id);
+        assert_eq!(candidate.harness, HarnessKind::Muse);
+        assert!(family_matches(HarnessKind::Muse, &candidate.model));
+        assert!(candidate.model.starts_with("muse-spark-"));
+        assert!(!candidate.model.contains("contributor"));
+        assert!(!candidate.model.contains("image"));
+        assert!(!candidate.model.contains("voice"));
+
+        let model = candidate.model.clone();
+        let backend = UtilityCompactionBackend::new(vec![candidate], cancel);
+        let summary = backend
+            .compact(
+                "Facts: the utility backend selected the newest regular Muse Spark model. Facts: the selected model returned a schema-valid state snapshot. Summarize these facts faithfully in the state_snapshot field."
+                    .to_string(),
+            )
+            .await
+            .expect("Muse Spark utility inference");
+        assert!(!summary.trim().is_empty());
+        assert!(summary.len() <= MAX_SUMMARY_BYTES);
+        eprintln!(
+            "Muse utility live ok: model={model}, summary_bytes={}",
+            summary.len()
+        );
     }
 }
