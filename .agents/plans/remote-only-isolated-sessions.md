@@ -13,7 +13,7 @@ An isolated session must behave like an ordinary independent Git checkout. Start
 - [x] (2026-09-08) Implemented remote-only provisioning and removed host bridge lifecycle/protocol entrypoints.
 - [x] (2026-09-08) Integrated creation previews and policy validation across surfaces; retry and cancellation are covered in TUI and browser tests.
 - [x] (2026-09-08) Completed full-suite execution, corrected the retry test fixture, passed the affected reruns, format and diff checks, and warning-free clippy.
-- [x] (2026-09-08) Integrated origin/master at d324aaa0 on hel4 and staged the reviewed implementation for the authorized commit and push.
+- [x] (2026-09-08) Committed implementation as 470cec62 on hel4, merged upstream through 18df6112, and validated the merged CLI and cleanup behavior. Publication is the final authorized operation.
 
 ## Surprises & Discoveries
 
@@ -110,3 +110,5 @@ Revision note: Recorded final integration review, safe explicit raw moves, priva
 Revision note: A final lifecycle audit found raw-to-isolated moves must be rejected by the shared target-compatibility check, not merely by restore, so a live raw source is never stopped for an unsupported destination. Updated the compatibility behavior test and removed stale host-bridge guidance from targets, security, and troubleshooting documentation.
 
 Revision note: Closed implementation and validation milestones with exact suite results, corrected-test reruns, and the PTY environment constraint.
+
+Revision note: The initial push was rejected because upstream advanced during publication. Merged 63b2ec37 (bounded daemon stop and test cleanup) and 18df6112 (README/docs), without conflicts. On the actual merged code, `cargo test --bin mj --test logging --test store_divergence --test termination_pty -- --quiet --test-threads=1` with four Tokio workers passed 211 CLI unit tests, two logging tests, two persistence tests, and all six PTY tests. `cargo clippy --all-targets -- -D warnings` and formatting checks passed again. No implementation work remains.
