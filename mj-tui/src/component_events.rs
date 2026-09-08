@@ -29,6 +29,18 @@ impl DashboardState {
     /// Whether a form owns this pointer event, ahead of selectable body text.
     pub fn component_handles_mouse(&self, mouse: MouseEvent) -> bool {
         match &self.mode {
+            Mode::Dashboard => {
+                let form = self.surface_form.borrow();
+                form.captures_pointer() || form.contains(mouse.column, mouse.row)
+            }
+            Mode::Help(overlay) => {
+                let form = overlay.form.borrow();
+                form.captures_pointer()
+                    || overlay
+                        .area
+                        .get()
+                        .contains((mouse.column, mouse.row).into())
+            }
             Mode::EditContainer(editor) => {
                 let form = editor.form.borrow();
                 form.captures_pointer() || form.contains(mouse.column, mouse.row)
@@ -89,12 +101,13 @@ impl DashboardState {
                 let form = wizard.form.borrow();
                 form.captures_pointer() || form.contains(mouse.column, mouse.row)
             }
-            _ => false,
         }
     }
 
     pub(crate) fn cancel_component_pointer(&mut self) {
+        self.surface_form.get_mut().cancel_pointer();
         match &mut self.mode {
+            Mode::Help(overlay) => overlay.form.get_mut().cancel_pointer(),
             Mode::EditContainer(editor) => editor.form.get_mut().cancel_pointer(),
             Mode::ReviewSettings(dialog) => dialog.form.get_mut().cancel_pointer(),
             Mode::Setup(dialog) => dialog.form.get_mut().cancel_pointer(),
@@ -115,7 +128,12 @@ impl DashboardState {
     }
 
     pub(crate) fn reset_component_geometry(&mut self) {
+        self.surface_form.get_mut().reset_geometry();
         match &mut self.mode {
+            Mode::Help(overlay) => {
+                overlay.form.get_mut().reset_geometry();
+                overlay.area.set(Default::default());
+            }
             Mode::EditContainer(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::ReviewSettings(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::Setup(dialog) => dialog.form.get_mut().reset_geometry(),

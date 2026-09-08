@@ -2418,6 +2418,11 @@ impl ActiveChat {
         );
     }
 
+    /// Visible host footer commands, indexed through the supplied chords then functions.
+    pub fn footer_command_areas(&self) -> Vec<(usize, Rect)> {
+        self.state.footer_command_areas.borrow().clone()
+    }
+
     /// Whether the last frame's surfaces stand alone, because a modal owned
     /// the frame.
     pub fn frame_surfaces_exclusive(&self) -> bool {
@@ -2570,6 +2575,7 @@ pub(super) fn render_in(
     prompt_focused: bool,
     transcript_selected: bool,
 ) {
+    chat.footer_command_areas.borrow_mut().clear();
     chat.voice_form.begin_frame();
     if chat.component_modal_open() || chat.second_opinion_split() || chat.turn_review_split() {
         chat.voice_form.cancel_pointer();
@@ -2850,18 +2856,58 @@ pub(super) fn render_chat_footer(
     } else {
         "Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Alt-T rendering · Shift-Enter newline"
     };
-    let default_footer = fit_footer(
-        composer_keys,
-        footer.chords,
-        footer.functions,
+    let groups = theme::fit_footer_items(
+        [
+            composer_keys
+                .split(theme::FOOTER_SEPARATOR)
+                .map(|text| (None, text))
+                .collect(),
+            footer
+                .chords
+                .iter()
+                .enumerate()
+                .map(|(index, text)| (Some(index), *text))
+                .collect(),
+            footer
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(index, text)| (Some(footer.chords.len() + index), *text))
+                .collect(),
+        ],
         footer_area.width,
+        |(_, text)| *text,
     );
+    let default_footer = theme::footer_items_text(&groups, |(_, text)| *text);
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
     let notice = chat.notices.current();
     let footer = search_footer
         .as_deref()
         .or(notice.as_deref())
         .unwrap_or(&default_footer);
+    let mut command_areas = chat.footer_command_areas.borrow_mut();
+    command_areas.clear();
+    if search_footer.is_none() && notice.is_none() {
+        let mut x = footer_area.x;
+        for group in groups.iter().filter(|group| !group.is_empty()) {
+            if x > footer_area.x {
+                x += display_width(theme::FOOTER_GROUP_SEPARATOR) as u16;
+            }
+            for (index, (command, text)) in group.iter().enumerate() {
+                if index > 0 {
+                    x += display_width(theme::FOOTER_SEPARATOR) as u16;
+                }
+                let width = display_width(text) as u16;
+                if let Some(command) = command {
+                    command_areas.push((
+                        *command,
+                        Rect::new(x, footer_area.y, width, footer_area.height),
+                    ));
+                }
+                x += width;
+            }
+        }
+    }
     // Notices keep a warm accent; navigation hints remain quiet.
     let footer_color = if search_footer.is_none() && notice.is_some() {
         theme::WARNING
@@ -2888,18 +2934,6 @@ pub(super) fn render_chat_footer(
             footer_area.y,
         ));
     }
-}
-
-/// Fit the composer's hints with the dashboard's shared priority rules.
-fn fit_footer(composer_keys: &str, chords: &[&str], functions: &[&str], width: u16) -> String {
-    theme::fit_footer(
-        &composer_keys
-            .split(theme::FOOTER_SEPARATOR)
-            .collect::<Vec<_>>(),
-        chords,
-        functions,
-        width,
-    )
 }
 
 #[cfg(test)]

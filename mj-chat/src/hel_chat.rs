@@ -23,6 +23,7 @@ mod turn_review;
 #[cfg(test)]
 mod test_support;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -538,6 +539,8 @@ pub struct ChatState {
     /// Selectable surfaces, rebuilt by every frame in render order so the
     /// selection engine can hit-test the screen the user is looking at.
     pub(super) frame_surfaces: FrameSurfaces,
+    /// Visible host shortcuts, indexed through chords followed by function keys.
+    footer_command_areas: RefCell<Vec<(usize, Rect)>>,
     /// Whether the last frame's surfaces replace everything behind them. The
     /// host uses this only for chat-local modals that truly own the frame;
     /// questions stay in the session content area and remain mergeable with
@@ -637,6 +640,7 @@ impl ChatState {
             session_activity: crate::usage_format::SessionActivity::default(),
             current_step_started_at_ms: None,
             frame_surfaces: FrameSurfaces::new(),
+            footer_command_areas: RefCell::new(Vec::new()),
             frame_surfaces_exclusive: false,
             transcript_selection: None,
             transcript_selection_invalid: false,
@@ -2437,6 +2441,9 @@ impl ChatState {
     /// scrollback repaints whole TUI frames and is unusably slow on long
     /// sessions.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> ChatAction {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.notices.dismiss(std::time::Instant::now());
+        }
         // The topmost form receives the gesture before selection, scrollbars,
         // or a review pane. This also lets reviewer elicitations stay above
         // their split while a stale scrollbar is being redrawn.

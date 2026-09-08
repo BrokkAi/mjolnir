@@ -97,31 +97,61 @@ pub const FOOTER_GROUP_SEPARATOR: &str = " │ ";
 /// Keep complete footer hints within the terminal width. Pane hints give way
 /// before global chords, then function keys; palette and help survive longest.
 pub fn fit_footer(pane: &[&str], chords: &[&str], functions: &[&str], width: u16) -> String {
-    let mut pane = pane.to_vec();
-    let mut chords = chords.to_vec();
-    let mut functions = functions.to_vec();
+    footer_items_text(
+        &fit_footer_items(
+            [pane.to_vec(), chords.to_vec(), functions.to_vec()],
+            width,
+            |text| *text,
+        ),
+        |text| *text,
+    )
+}
+
+/// Fit structured command hints while retaining their identities for hit testing.
+pub fn fit_footer_items<T>(
+    [mut pane, mut chords, mut functions]: [Vec<T>; 3],
+    width: u16,
+    label: impl Fn(&T) -> &str,
+) -> [Vec<T>; 3] {
     loop {
-        let text = [&pane, &chords, &functions]
-            .into_iter()
-            .filter(|group| !group.is_empty())
-            .map(|group| group.join(FOOTER_SEPARATOR))
-            .collect::<Vec<_>>()
-            .join(FOOTER_GROUP_SEPARATOR);
+        let groups = [pane, chords, functions];
+        let text = footer_items_text(&groups, &label);
         if unicode_width::UnicodeWidthStr::width(text.as_str()) <= usize::from(width) {
-            return text;
+            return groups;
         }
+        [pane, chords, functions] = groups;
         if pane.pop().is_some() || chords.pop().is_some() {
             continue;
         }
         let removable = functions
             .iter()
-            .rposition(|hint| !hint.starts_with("F1 ") && !hint.starts_with("F2 "))
-            .or_else(|| functions.iter().rposition(|hint| !hint.starts_with("F1 ")))
+            .rposition(|hint| !label(hint).starts_with("F1 ") && !label(hint).starts_with("F2 "))
+            .or_else(|| {
+                functions
+                    .iter()
+                    .rposition(|hint| !label(hint).starts_with("F1 "))
+            })
             .or_else(|| functions.len().checked_sub(1));
         if let Some(index) = removable {
             functions.remove(index);
         } else {
-            return String::new();
+            return [pane, chords, functions];
         }
     }
+}
+
+/// Render the same complete segments used to register footer controls.
+pub fn footer_items_text<T>(groups: &[Vec<T>; 3], label: impl Fn(&T) -> &str) -> String {
+    groups
+        .iter()
+        .filter(|group| !group.is_empty())
+        .map(|group| {
+            group
+                .iter()
+                .map(&label)
+                .collect::<Vec<_>>()
+                .join(FOOTER_SEPARATOR)
+        })
+        .collect::<Vec<_>>()
+        .join(FOOTER_GROUP_SEPARATOR)
 }

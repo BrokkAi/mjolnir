@@ -14,7 +14,7 @@
 use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use mj_chat::components::{ChoiceList, ControlKind, Form, Interaction, TextField};
+use mj_chat::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -52,33 +52,39 @@ pub(crate) struct CommandPalette {
     /// Index into `entries` of the highlighted row.
     pub(crate) selected: usize,
     pub(crate) form: RefCell<Form<PaletteControl>>,
+    session_only: bool,
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaletteControl {
     Query,
     Commands,
+    Run,
+    Close,
 }
 
 impl CommandPalette {
     fn prepare(&self) {
         let mut form = self.form.borrow_mut();
-        form.begin_frame();
-        form.register(
-            PaletteControl::Query,
-            ControlKind::TextField,
-            Rect::default(),
-            true,
-        );
-        form.register(
+        form.begin_update();
+        form.declare_with_enabled(PaletteControl::Query, ControlKind::TextField, true);
+        form.declare_with_enabled(
             PaletteControl::Commands,
             ControlKind::ChoiceList {
                 len: self.entries.len(),
                 selected: self.selected,
             },
-            Rect::default(),
             !self.entries.is_empty(),
         );
+        form.declare_with_enabled(
+            PaletteControl::Run,
+            ControlKind::Button,
+            self.entries
+                .get(self.selected)
+                .is_some_and(|entry| entry.availability == Availability::Ready),
+        );
+        form.declare_with_enabled(PaletteControl::Close, ControlKind::Button, true);
         form.end_frame(PaletteControl::Query);
     }
 }
@@ -184,9 +190,22 @@ impl DashboardState {
             entries,
             selected: 0,
             form: RefCell::new(Form::default()),
+            session_only: false,
+            session_id: self.selected_session_id.clone(),
         };
         palette.prepare();
         self.mode = Mode::Palette(palette);
+    }
+
+    pub(crate) fn begin_session_palette(&mut self) {
+        self.begin_palette();
+        if let Mode::Palette(palette) = &mut self.mode {
+            palette.session_only = true;
+            palette
+                .entries
+                .retain(|entry| spec(entry.id).scope == Scope::Session);
+            palette.prepare();
+        }
     }
 
     /// Recomputes the list after the query changed, keeping the highlight
@@ -195,7 +214,10 @@ impl DashboardState {
         let Mode::Palette(palette) = &self.mode else {
             return;
         };
-        let entries = palette_entries(self, palette.query.value());
+        let mut entries = palette_entries(self, palette.query.value());
+        if palette.session_only {
+            entries.retain(|entry| spec(entry.id).scope == Scope::Session);
+        }
         let Mode::Palette(palette) = &mut self.mode else {
             return;
         };
@@ -237,13 +259,17 @@ impl DashboardState {
             palette.form.get_mut().handle(&event).action
         };
         match interaction {
-            Some(Interaction::Cancel) => self.cancel_modal(),
+            Some(Interaction::Cancel | Interaction::Activate(PaletteControl::Close)) => {
+                self.cancel_modal()
+            }
             Some(Interaction::Edit(PaletteControl::Query, edit)) => {
                 TextField::apply(&mut palette.query, edit);
                 self.rebuild_palette_entries();
             }
             Some(Interaction::Select(PaletteControl::Commands, index)) => palette.selected = index,
-            Some(Interaction::Activate(PaletteControl::Query | PaletteControl::Commands)) => {
+            Some(Interaction::Activate(
+                PaletteControl::Query | PaletteControl::Commands | PaletteControl::Run,
+            )) => {
                 let Some(entry) = palette.entries.get(palette.selected).cloned() else {
                     return DashboardAction::None;
                 };
@@ -254,8 +280,19 @@ impl DashboardState {
                     ));
                     return DashboardAction::None;
                 }
+                if spec(entry.id).scope == Scope::Session {
+                    let Some(id) = palette
+                        .session_id
+                        .clone()
+                        .filter(|id| self.state.sessions.contains_key(id))
+                    else {
+                        self.set_notice("This session is no longer available.");
+                        return DashboardAction::None;
+                    };
+                    self.selected_session_id = Some(id);
+                }
                 self.mode = Mode::Dashboard;
-                return self.dispatch_command(entry.id);
+                return self.run_available_command(entry.id);
             }
             _ => {}
         }
@@ -307,7 +344,7 @@ pub(crate) fn render_palette(
     let lines = palette_lines(dashboard, palette);
     // The popup grows with the complete list. The shared modal helper clamps
     // it to the usable terminal bounds when the list cannot fit.
-    let popup_height = u16::try_from(lines.len().saturating_add(4).max(5)).unwrap_or(u16::MAX);
+    let popup_height = u16::try_from(lines.len().saturating_add(5).max(6)).unwrap_or(u16::MAX);
     let popup = centered_modal(frame, surfaces, 72, popup_height, area);
     let outer = theme::modal()
         .title(" ✦ Commands ")
@@ -329,6 +366,7 @@ pub(crate) fn render_palette(
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(inner);
@@ -461,6 +499,22 @@ pub(crate) fn render_palette(
         items.len(),
         form.list_offset(PaletteControl::Commands),
         usize::from(list_area.height).max(1),
+    );
+    ButtonRow::render(
+        frame,
+        rows[3],
+        &[
+            (
+                PaletteControl::Run,
+                "Run",
+                palette
+                    .entries
+                    .get(palette.selected)
+                    .is_some_and(|entry| entry.availability == Availability::Ready),
+            ),
+            (PaletteControl::Close, "Close", true),
+        ],
+        &mut form,
     );
     form.end_frame(PaletteControl::Query);
 

@@ -8,7 +8,10 @@
 //! overlay closes. That is why closing help does not go through
 //! `cancel_modal`, which resets the surface to the dashboard.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use std::cell::{Cell, RefCell};
+
+use crossterm::event::{Event, KeyCode, KeyEvent, MouseEvent, MouseEventKind};
+use mj_chat::components::{Button, Form, Interaction};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -32,6 +35,13 @@ pub(crate) struct HelpOverlay {
     pub(crate) scroll: usize,
     /// The mode help opened over, restored when it closes.
     pub(crate) return_to: Box<Mode>,
+    pub(crate) form: RefCell<Form<HelpControl>>,
+    pub(crate) area: Cell<Rect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HelpControl {
+    Close,
 }
 
 /// The composer's own keys, which the chat handles rather than the dashboard,
@@ -89,6 +99,8 @@ impl DashboardState {
         self.mode = Mode::Help(HelpOverlay {
             scroll: 0,
             return_to: Box::new(previous),
+            form: RefCell::new(Form::default()),
+            area: Cell::new(Rect::default()),
         });
     }
 
@@ -98,6 +110,33 @@ impl DashboardState {
         if let Mode::Help(overlay) = std::mem::replace(&mut self.mode, Mode::Dashboard) {
             self.mode = *overlay.return_to;
         }
+    }
+
+    pub(crate) fn handle_help_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
+        let last = help_lines(self).len().saturating_sub(1);
+        let Mode::Help(overlay) = &mut self.mode else {
+            return DashboardAction::None;
+        };
+        let result = overlay.form.get_mut().handle(&Event::Mouse(mouse));
+        if matches!(
+            result.action,
+            Some(Interaction::Activate(HelpControl::Close))
+        ) {
+            self.close_help();
+        } else if overlay
+            .area
+            .get()
+            .contains((mouse.column, mouse.row).into())
+        {
+            match mouse.kind {
+                MouseEventKind::ScrollDown => {
+                    overlay.scroll = overlay.scroll.saturating_add(3).min(last)
+                }
+                MouseEventKind::ScrollUp => overlay.scroll = overlay.scroll.saturating_sub(3),
+                _ => {}
+            }
+        }
+        DashboardAction::None
     }
 
     pub(crate) fn handle_help_key(&mut self, key: KeyEvent) -> DashboardAction {
@@ -229,6 +268,24 @@ pub(crate) fn render_help(
                 )),
         );
     frame.render_widget(paragraph, popup);
+    overlay.area.set(popup);
+    let mut form = overlay.form.borrow_mut();
+    form.begin_frame();
+    let width = popup.width.min(9);
+    Button::render(
+        frame,
+        Rect::new(
+            popup.right().saturating_sub(width + 1).max(popup.x),
+            popup.y,
+            width,
+            u16::from(popup.height > 0),
+        ),
+        "Close",
+        true,
+        &mut form,
+        HelpControl::Close,
+    );
+    form.end_frame(HelpControl::Close);
 }
 
 #[cfg(test)]

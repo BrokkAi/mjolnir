@@ -21,6 +21,10 @@ At startup, Mjolnir opens the session in your opened workspace whose agent spoke
 
 The **Workspace** switcher above Sessions shows the workspace you opened. Click it, or press `F3`, to open the workspace picker and choose where new sessions will belong. The switcher stays above the list on either side and at every sidebar size.
 
+The picker supports mouse navigation: click a workspace to preview it, then **Open** to switch. **New**, **Rename**, **Recover**, and **Delete** manage the selected workspace; **Back** returns to the dashboard. Create and rename dialogs have editable name fields and submission/cancel buttons. Deleting a workspace with active sessions or recoverable drafts still requires typing its name.
+
+Below the switcher, **New…** opens the session options wizard and **Quick new** creates a session using saved defaults (**Quick** in a narrow sidebar). **Resume** opens session history, and **Commands** opens the command palette. Commands remains available while you type and while a notice replaces the footer. Each session row has a **⋯** button for its actions. Displayed dashboard shortcut hints are clickable, including global shortcuts in the composer's footer. Help supports wheel scrolling and a **Close** button.
+
 Click **Show stopped** at the bottom of the Sessions panel, or press `h` while Sessions has focus, to hide or show stopped sessions. The preference is saved and also appears in Setup. Stopped sessions remain available through Resume when hidden from the panel.
 
 ## Focus and scrolling
@@ -89,7 +93,7 @@ Function keys and `Alt` chords work no matter which dashboard pane has focus:
 
 ## Command palette
 
-Press `F2` to expose both shortcut-backed and palette-only actions. Commands for the selected session come first, followed by commands for the focused pane and then global commands.
+Click **Commands** or press `F2` to expose both shortcut-backed and palette-only actions. Commands for the selected session come first, followed by commands for the focused pane and then global commands. Click a command and **Run** to execute it, or **Close** to dismiss the palette. A session row's **⋯** button opens a palette limited to that session's actions.
 
 <figure class="shot">
   <a class="shot__zoom" href={shotCommandPalette.src} aria-label="Open the full-size screenshot: Mjolnir command palette">

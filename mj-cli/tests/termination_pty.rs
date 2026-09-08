@@ -662,10 +662,11 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
         mut child,
     } = spawn_dashboard_pty_fixture(false, true);
     let mut output = Vec::new();
+    // The quit hint can be split by cursor movements during a differential redraw.
     wait_for_output(
         &mut master,
         &mut output,
-        b"Alt-Q quits.",
+        b"quits.",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\x1b").expect("cancel opening");
@@ -681,13 +682,13 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
     // A background tick must not restart the cancelled request.
     thread::sleep(Duration::from_millis(1100));
     drain(&mut master, &mut output);
-    assert!(!String::from_utf8_lossy(&output).contains("Alt-Q quits."));
+    assert!(!String::from_utf8_lossy(&output).contains("quits."));
     output.clear();
     master.write_all(b"\r").expect("retry opening");
     wait_for_output(
         &mut master,
         &mut output,
-        b"Alt-Q quits.",
+        b"quits.",
         Instant::now() + TIMEOUT,
     );
     let quit_started = Instant::now();
