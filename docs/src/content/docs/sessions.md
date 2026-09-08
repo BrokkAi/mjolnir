@@ -5,6 +5,29 @@ description: Create, queue, detach, checkpoint, stop, resume, import, and recove
 
 A Mjolnir session is a durable conversation plus the target on which its coding harness runs. The dashboard may come and go: the target-side worker owns the durable prompt queue and event journal, while the per-user daemon owns connection, lifecycle, and checkpoint orchestration plus a local projection of that state.
 
+## Session status symbols
+
+Each terminal session row starts with a fixed status symbol. Symbols stay visible in collapsed projects, minimized session lists, narrow sidebars, and workspace previews.
+
+| Symbol | Status |
+| --- | --- |
+| `◐` | Working, including reviews and background commands |
+| `!` | Waiting for your input or a review decision |
+| `✓` | Idle with unread activity, or a completed clean review |
+| `○` | Idle with no unread activity |
+| `·` | Activity not yet available |
+| `?` | Disconnected or unreachable |
+| `×` | Failed or lost |
+| `↑` | Starting |
+| `↻` | Resuming |
+| `⇄` | Moving |
+| `▣` | Checkpointing |
+| `↓` | Stopping |
+| `■` | Stopped |
+| `⊗` | Destroying |
+
+Active work and requests for input take precedence over unread activity. Reading a completed session changes its check mark to the idle circle.
+
 ## Create a session
 
 Press `Alt+N` anywhere in the terminal dashboard. The wizard resolves four things:
