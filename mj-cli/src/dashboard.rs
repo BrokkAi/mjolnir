@@ -1741,6 +1741,7 @@ impl DashboardContext {
             target: session_record
                 .project_target(&self.controller.config, &session_record.target_template_id),
             profile: session_record.last_profile.clone(),
+            title: session_record.display_title().to_owned(),
             harness_kind: Some(session_record.harness_kind),
         };
         let sessions = self.worker_commands_tx.clone();

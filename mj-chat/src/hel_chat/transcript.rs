@@ -2113,7 +2113,7 @@ pub(super) fn render_transcript(
     let top = window.top;
     let title = transcript_title(chat, hel::clock::epoch_seconds());
     let block = block.title(truncate_line_to_width(
-        Line::styled(title, theme::title(false)),
+        title,
         usize::from(area.width.saturating_sub(2)),
     ));
     frame.render_widget(block, area);
@@ -2150,7 +2150,7 @@ pub(super) fn render_transcript(
     }
 }
 
-fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> String {
+fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line<'static> {
     let review_activity = chat
         .turn_review()
         .and_then(|review| review.view.activity_label());
@@ -2178,17 +2178,26 @@ fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> String {
             &chat.header_profile,
         )
     };
-    match (chat.anchor, chat.render_mode) {
-        (TranscriptAnchor::Bottom, TranscriptRenderMode::Rich) => format!(" {summary} "),
-        (TranscriptAnchor::Bottom, TranscriptRenderMode::Raw) => {
-            format!(" {summary} · raw source ")
-        }
+    let style = theme::title(false);
+    let mut spans = vec![Span::styled(format!(" {summary}"), style)];
+    if !chat.header_title.is_empty() {
+        spans.push(Span::styled("  ", style));
+        spans.push(Span::styled(
+            chat.header_title.clone(),
+            style.fg(theme::SECONDARY),
+        ));
+    }
+    let suffix = match (chat.anchor, chat.render_mode) {
+        (TranscriptAnchor::Bottom, TranscriptRenderMode::Rich) => " ".to_owned(),
+        (TranscriptAnchor::Bottom, TranscriptRenderMode::Raw) => " · raw source ".to_owned(),
         (TranscriptAnchor::Row { entry, .. }, _) => format!(
-            " {summary} · message {} of {} · End to follow ",
+            " · message {} of {} · End to follow ",
             entry.saturating_add(1),
             chat.entries.len()
         ),
-    }
+    };
+    spans.push(Span::styled(suffix, style));
+    Line::from(spans)
 }
 
 const ROLE_GUTTER: &str = "│ ";
