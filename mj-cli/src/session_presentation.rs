@@ -100,13 +100,10 @@ mod tests {
     };
     use hel::hel_targets::ProvisionStage;
     use hel::hel_worker::{RELAY_EVENT_GENESIS_DIGEST, RelayExecutionState, RelayOperationalState};
-    use hel_tui::{
-        DashboardState, SessionOperationKind, SessionsPreviewState, render_sessions_preview,
-    };
+    use hel_tui::{DashboardState, PaneSize, SessionOperationKind, SupportPane, render_combined};
     use mj_controller::hel_session_manager::ManagedSessionView;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::layout::Rect;
     use ratatui::style::Color;
 
     use super::{apply_lifecycle_display, apply_session_activity, lifecycle_kind};
@@ -225,14 +222,14 @@ mod tests {
         }
     }
 
-    fn preview_text(dashboard: &DashboardState) -> (String, Vec<Color>) {
-        let mut terminal = Terminal::new(TestBackend::new(120, 12)).expect("test terminal");
-        let mut preview = SessionsPreviewState::default();
+    fn dashboard_text(dashboard: &mut DashboardState) -> (String, Vec<Color>) {
+        let mut terminal = Terminal::new(TestBackend::new(240, 30)).expect("test terminal");
+        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
         terminal
             .draw(|frame| {
-                render_sessions_preview(frame, Rect::new(0, 0, 120, 12), dashboard, &mut preview);
+                render_combined(frame, dashboard, None, false);
             })
-            .expect("render session preview");
+            .expect("render dashboard");
         let buffer = terminal.backend().buffer();
         let text = (buffer.area.y..buffer.area.bottom())
             .map(|y| {
@@ -271,7 +268,7 @@ mod tests {
 
         apply_session_activity(&mut dashboard, "session-1", &view);
 
-        let (text, colors) = preview_text(&dashboard);
+        let (text, colors) = dashboard_text(&mut dashboard);
         assert!(
             text.contains("Turn"),
             "activity clock missing from {text:?}"
@@ -292,7 +289,7 @@ mod tests {
             dashboard.session_operation_kind("session-1"),
             Some(SessionOperationKind::Launching)
         );
-        let (text, _) = preview_text(&dashboard);
+        let (text, _) = dashboard_text(&mut dashboard);
         assert!(text.contains("Boot"), "stage missing from {text:?}");
         assert!(
             text.contains("profile-2"),

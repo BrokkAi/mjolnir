@@ -501,16 +501,16 @@ impl DashboardState {
         };
         dialog_animates
             || self.opening_session.is_some()
-            || !self.session_operations.is_empty()
-            || self.state.sessions.values().any(|session| {
-                (session.last_error.is_none()
-                    && matches!(
-                        session.state,
-                        SessionState::Provisioning
-                            | SessionState::Checkpointing
-                            | SessionState::Closing
-                            | SessionState::Destroying
-                    ))
+            || self.ordered_sessions().iter().any(|session| {
+                self.session_operations.contains_key(&session.id)
+                    || (session.last_error.is_none()
+                        && matches!(
+                            session.state,
+                            SessionState::Provisioning
+                                | SessionState::Checkpointing
+                                | SessionState::Closing
+                                | SessionState::Destroying
+                        ))
                     || (session.state == SessionState::Running
                         && !self.unreachable_sessions.contains(&session.id)
                         && (self.session_details.get(&session.id).is_some_and(|detail| {
@@ -1895,7 +1895,7 @@ mod tests {
     /// appears in both, and a stop in progress stays on the dashboard until
     /// the state machine reaches Stopped.
     #[test]
-    fn the_sidebar_shows_all_sessions_and_resume_also_lists_stopped_sessions() {
+    fn the_sidebar_shows_live_work_and_resume_lists_settled_history() {
         let mut sessions = Vec::new();
         for (index, state) in [
             SessionState::Provisioning,
@@ -1926,8 +1926,8 @@ mod tests {
             .iter()
             .map(|session| session.state)
             .collect::<Vec<_>>();
-        assert_eq!(on_dashboard.len(), 10);
-        assert!(on_dashboard.contains(&SessionState::Stopped));
+        assert_eq!(on_dashboard.len(), 7);
+        assert!(!on_dashboard.contains(&SessionState::Stopped));
         // Closing and Checkpointing are mid-stop and must not vanish.
         assert!(on_dashboard.contains(&SessionState::Closing));
         assert!(on_dashboard.contains(&SessionState::Checkpointing));
@@ -1943,8 +1943,8 @@ mod tests {
             .map(|session| ResumeRowKey::Hel(session.id.clone()))
             .collect::<Vec<_>>();
         assert!(
-            in_dialog.iter().all(|key| dashboard_ids.contains(key)),
-            "resume entries are also accessible from the global sidebar"
+            in_dialog.iter().all(|key| !dashboard_ids.contains(key)),
+            "settled history stays in Resume rather than the active sidebar"
         );
     }
 

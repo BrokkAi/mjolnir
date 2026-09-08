@@ -3,7 +3,7 @@ title: CLI reference
 description: Public mj commands for the dashboard, setup, diagnosis, login, import, checkpoints, daemon control, and recovery.
 ---
 
-Running `mj` without a subcommand starts the per-user daemon when necessary and opens the terminal dashboard. If no workspace exists, it creates one using the current directory name. Empty workspaces launch the default session and focus its prompt; configure the profile and target in `[startup]`. Existing workspace selection is unchanged.
+Running `mj` without a subcommand starts the per-user daemon when necessary and opens the terminal dashboard. If no workspace exists, it creates one using the current directory name and leaves it ready for an explicit new session. Otherwise it opens the requested workspace or the most recently opened workspace. The terminal surface requires at least 80 columns.
 
 ```text
 mj [--workspace <name>] [command]
@@ -17,7 +17,7 @@ mj [--workspace <name>] [command]
 | --- | --- |
 | `mj` | Open or attach to the terminal dashboard. |
 | `mj --workspace <name>` | Open a particular workspace. |
-| `mj workspaces` | Open the workspace selector even when Mjolnir could auto-attach. |
+| `mj workspaces` | Open the workspace manager in the dashboard. |
 | `mj app` | Open the authenticated web viewer in the separate `mj-desktop` application. |
 
 Use `Alt+Q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers `mj app` and browser access.

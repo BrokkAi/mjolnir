@@ -18,11 +18,9 @@ Persistent project memory follows the project identity, not the workspace name.
 ## Workspaces organize the dashboard
 
 Run `mj` to open a workspace. If none exists, Mjolnir creates one using the
-current directory name. An empty workspace starts its default agent and focuses
-the prompt; see [startup defaults](/configuration/#first-session-defaults-startup).
-If there is one usable workspace, Mjolnir selects
-it automatically; with several, it opens the workspace picker. Use either of
-these forms when you want to choose explicitly:
+current directory name, then leaves the dashboard ready for an explicit new
+session. Otherwise it opens the requested workspace or the most recently
+opened workspace. Use either of these forms when you want to choose explicitly:
 
 ```console
 mj workspaces
@@ -30,13 +28,16 @@ mj --workspace "Release work"
 ```
 
 `--workspace` matches names case-insensitively. In the terminal surface, `F3`
-opens the same picker from anywhere. The web viewer shows each workspace as a
-separate tab.
+opens the workspace manager from anywhere. The dashboard keeps workspace tabs
+above Sessions; selecting a tab changes the local session filter immediately.
+The web viewer shows each workspace as a separate tab. The terminal surface
+requires at least 80 columns.
 
-The picker can create, rename, and delete workspaces. Names are trimmed, must be
-1–64 Unicode characters, cannot contain control characters, and are unique
-case-insensitively. `Release work` and `release work` therefore name the same
-workspace.
+The manager can create, rename, and delete workspaces and recover drafts. Names
+are trimmed, must be 1–64 Unicode characters, cannot contain control characters,
+and are unique case-insensitively. `Release work` and `release work` therefore
+name the same workspace. Deleting the last workspace leaves the manager open;
+Mjolnir does not create a session automatically.
 
 ### What belongs to a workspace
 

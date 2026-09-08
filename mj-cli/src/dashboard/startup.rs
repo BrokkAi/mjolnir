@@ -20,6 +20,7 @@ pub(super) fn prepare_session_launch(
     profile_id: String,
     explicit_target: Option<String>,
     directory: PathBuf,
+    workspace_id: String,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<(HelConfig, DashboardAction)> {
     prepare_session_launch_at(
@@ -27,6 +28,7 @@ pub(super) fn prepare_session_launch(
         profile_id,
         explicit_target,
         directory,
+        workspace_id,
         cancelled,
     )
 }
@@ -36,6 +38,7 @@ fn prepare_session_launch_at(
     profile_id: String,
     explicit_target: Option<String>,
     directory: PathBuf,
+    workspace_id: String,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<(HelConfig, DashboardAction)> {
     ensure!(!cancelled.load(Ordering::Acquire), "operation cancelled");
@@ -92,6 +95,7 @@ fn prepare_session_launch_at(
     Ok((
         config,
         DashboardAction::CreateSession {
+            workspace_id,
             profile_id,
             target_template_id: target_id,
             bundle_id,
@@ -193,6 +197,7 @@ mod tests {
                 "codex".into(),
                 Some("custom-container".into()),
                 project.clone(),
+                "workspace-test".into(),
                 &cancelled,
             )
             .unwrap();
@@ -229,6 +234,7 @@ mod tests {
             "codex".into(),
             None,
             directory.path().to_path_buf(),
+            "workspace-test".into(),
             &cancelled,
         )
         .unwrap();
@@ -254,6 +260,7 @@ mod tests {
                 "codex".into(),
                 Some("missing".into()),
                 directory.path().to_path_buf(),
+                "workspace-test".into(),
                 &cancelled
             )
             .unwrap_err()
@@ -267,6 +274,7 @@ mod tests {
                 "codex".into(),
                 None,
                 directory.path().to_path_buf(),
+                "workspace-test".into(),
                 &cancelled
             )
             .unwrap_err()

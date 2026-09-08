@@ -995,12 +995,14 @@ fn validate_environment(owner: &str, environment: &BTreeMap<String, String>) -> 
     Ok(())
 }
 
-/// The first session opened when a terminal workspace has no live sessions.
+/// Defaults used by the explicit quick-session action for a new session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartupConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub prompt: bool,
+    /// Retained so older configuration files remain readable. Mjolnir no
+    /// longer creates or opens a session automatically from this flag.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

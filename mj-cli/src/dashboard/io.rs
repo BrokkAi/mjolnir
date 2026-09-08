@@ -23,6 +23,7 @@ use hel_tui::{
     DashboardAction, PreparedMaterializedSessionDetail, PreparedMaterializedSessionSummary,
     ReviewSettingsChoices, ReviewSettingsDiscoveryResult, SessionOperationKind, WebViewerAccess,
 };
+use hel_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 use mj_controller::hel_controller::Controller;
 use mj_controller::hel_controller::ResumeRepositorySourcePreflight;
 use mj_controller::hel_session_manager::SessionManagerControl;
@@ -39,6 +40,16 @@ use crate::short_id;
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
+    /// A workspace manager snapshot loaded away from the event loop. The
+    /// selection hint is set only by a successful create; the dashboard must
+    /// still verify the modal generation before applying it.
+    WorkspaceManagement {
+        generation: u64,
+        result: std::result::Result<WorkspaceManagementResult, String>,
+    },
+    WorkspacePaneSizes {
+        result: std::result::Result<BTreeMap<String, hel::hel_workspace::PaneSizes>, String>,
+    },
     WorkerRecordPersistence {
         operation: WorkerRecordPersistence,
         result: std::result::Result<WorkerRecordPersistenceOutcome, String>,
@@ -245,6 +256,13 @@ pub(crate) struct ActiveLifecycleOperation {
     pub(crate) kind: SessionOperationKind,
 }
 
+pub(crate) struct WorkspaceManagementResult {
+    revision: u64,
+    pub(crate) entries: Vec<WorkspaceManagementEntry>,
+    pub(crate) select_workspace: Option<String>,
+    pub(crate) deleted_workspace_id: Option<String>,
+}
+
 pub(crate) struct RegisteredDashboardSession {
     generation: Option<u64>,
     session: SessionRecord,
@@ -346,8 +364,8 @@ where
 /// Network waits must not hold a blocking-pool thread: connecting to the
 /// daemon itself needs a blocking metadata read. Bound acknowledgement waits
 /// so a silent daemon cannot indefinitely prevent dashboard exit.
-fn spawn_critical_async<T: Send + 'static>(
-    tracker: CriticalOperationTracker,
+fn spawn_async_job<T: Send + 'static>(
+    tracker: Option<CriticalOperationTracker>,
     label: impl Into<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
     timeout: Duration,
@@ -355,7 +373,7 @@ fn spawn_critical_async<T: Send + 'static>(
     report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
 ) -> JoinHandle<()> {
     let label = label.into();
-    let guard = tracker.begin(label.clone());
+    let guard = tracker.map(|tracker| tracker.begin(label.clone()));
     tokio::spawn(async move {
         let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(work));
         let result = match tokio::time::timeout(timeout, task).await {
@@ -374,6 +392,237 @@ fn spawn_critical_async<T: Send + 'static>(
         }
         drop(guard);
     })
+}
+
+fn spawn_critical_async<T: Send + 'static>(
+    tracker: CriticalOperationTracker,
+    label: impl Into<String>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    timeout: Duration,
+    work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+) -> JoinHandle<()> {
+    spawn_async_job(Some(tracker), label, updates, timeout, work, report)
+}
+
+fn spawn_background_async<T: Send + 'static>(
+    label: impl Into<String>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    timeout: Duration,
+    work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+) -> JoinHandle<()> {
+    spawn_async_job(None, label, updates, timeout, work, report)
+}
+
+/// Loads the manager's complete view from the daemon. Workspace listings and
+/// their detached-draft previews are read through the same client so the
+/// snapshot is ordered and every failure reaches the dashboard.
+async fn load_workspace_management_entries(
+    daemon: &mut daemon::DaemonClient,
+) -> Result<Vec<WorkspaceManagementEntry>> {
+    let listings = daemon.list_workspaces().await?;
+    let mut entries = Vec::with_capacity(listings.len());
+    for listing in listings {
+        let snapshot = daemon.snapshot(listing.workspace.id.clone()).await?;
+        let drafts = snapshot
+            .drafts
+            .into_iter()
+            .map(|draft| WorkspaceDraftEntry {
+                id: draft.id,
+                session_id: draft.session_id,
+                source: draft.source,
+                saved_at: draft.saved_at,
+                owner_pid: draft.owner_pid,
+            })
+            .collect();
+        entries.push(WorkspaceManagementEntry {
+            workspace: snapshot.workspace,
+            drafts,
+        });
+    }
+    Ok(entries)
+}
+
+fn spawn_workspace_management_operation(
+    generation: u64,
+    label: impl Into<String>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: Option<CriticalOperationTracker>,
+    work: impl std::future::Future<Output = Result<WorkspaceManagementResult>> + Send + 'static,
+) -> JoinHandle<()> {
+    let report = move |result| DashboardIoUpdate::WorkspaceManagement { generation, result };
+    match tracker {
+        Some(tracker) => {
+            spawn_critical_async(tracker, label, updates, SAVE_ACK_TIMEOUT, work, report)
+        }
+        None => spawn_background_async(label, updates, SAVE_ACK_TIMEOUT, work, report),
+    }
+}
+
+pub(crate) fn spawn_workspace_management_load(
+    generation: u64,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) -> JoinHandle<()> {
+    spawn_workspace_management_operation(generation, "loading workspaces", updates, None, async {
+        let mut daemon = daemon::connect_or_start().await?;
+        let revision = daemon
+            .runtime_snapshot(String::new(), 0, true)
+            .await?
+            .revision;
+        Ok(WorkspaceManagementResult {
+            revision,
+            entries: load_workspace_management_entries(&mut daemon).await?,
+            select_workspace: None,
+            deleted_workspace_id: None,
+        })
+    })
+}
+
+/// Reads layouts for workspace ids discovered after the dashboard opened.
+/// Loading is deliberately separate from the runtime snapshot so a late
+/// result cannot overwrite a pane size the local client already edited.
+pub(crate) fn spawn_workspace_pane_sizes_load(
+    workspace_ids: Vec<String>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) -> JoinHandle<()> {
+    spawn_io(
+        "load workspace pane sizes",
+        updates,
+        move || {
+            workspace_ids
+                .into_iter()
+                .map(|workspace_id| {
+                    let sizes = hel::hel_database::load_workspace_pane_sizes(&workspace_id)?;
+                    Ok((workspace_id, sizes))
+                })
+                .collect()
+        },
+        |result| DashboardIoUpdate::WorkspacePaneSizes { result },
+    )
+}
+
+pub(crate) fn spawn_workspace_create(
+    generation: u64,
+    name: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_workspace_management_operation(
+        generation,
+        "creating workspace",
+        updates,
+        Some(tracker),
+        async move {
+            let mut daemon = daemon::connect_or_start().await?;
+            let workspace = daemon.create_workspace(name).await?;
+            let revision = daemon
+                .runtime_snapshot(String::new(), 0, true)
+                .await?
+                .revision;
+            Ok(WorkspaceManagementResult {
+                revision,
+                entries: load_workspace_management_entries(&mut daemon).await?,
+                select_workspace: Some(workspace.id),
+                deleted_workspace_id: None,
+            })
+        },
+    )
+}
+
+pub(crate) fn spawn_workspace_rename(
+    generation: u64,
+    workspace_id: String,
+    name: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_workspace_management_operation(
+        generation,
+        "renaming workspace",
+        updates,
+        Some(tracker),
+        async move {
+            let mut daemon = daemon::connect_or_start().await?;
+            daemon.rename_workspace(workspace_id, name).await?;
+            let revision = daemon
+                .runtime_snapshot(String::new(), 0, true)
+                .await?
+                .revision;
+            Ok(WorkspaceManagementResult {
+                revision,
+                entries: load_workspace_management_entries(&mut daemon).await?,
+                select_workspace: None,
+                deleted_workspace_id: None,
+            })
+        },
+    )
+}
+
+pub(crate) fn spawn_workspace_delete(
+    generation: u64,
+    workspace_id: String,
+    force: bool,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    let deleted_workspace_id = workspace_id.clone();
+    spawn_workspace_management_operation(
+        generation,
+        if force {
+            "force deleting workspace"
+        } else {
+            "deleting workspace"
+        },
+        updates,
+        Some(tracker),
+        async move {
+            let mut daemon = daemon::connect_or_start().await?;
+            if force {
+                daemon.force_delete_workspace(workspace_id).await?;
+            } else {
+                daemon.delete_workspace(workspace_id).await?;
+            }
+            let revision = daemon
+                .runtime_snapshot(String::new(), 0, true)
+                .await?
+                .revision;
+            Ok(WorkspaceManagementResult {
+                revision,
+                entries: load_workspace_management_entries(&mut daemon).await?,
+                select_workspace: None,
+                deleted_workspace_id: Some(deleted_workspace_id),
+            })
+        },
+    )
+}
+
+pub(crate) fn spawn_workspace_draft_recovery(
+    generation: u64,
+    draft_id: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_workspace_management_operation(
+        generation,
+        "recovering workspace draft",
+        updates,
+        Some(tracker),
+        async move {
+            let mut daemon = daemon::connect_or_start().await?;
+            daemon.recover_draft(draft_id).await?;
+            let revision = daemon
+                .runtime_snapshot(String::new(), 0, true)
+                .await?
+                .revision;
+            Ok(WorkspaceManagementResult {
+                revision,
+                entries: load_workspace_management_entries(&mut daemon).await?,
+                select_workspace: None,
+                deleted_workspace_id: None,
+            })
+        },
+    )
 }
 
 const SAVE_ACK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1212,6 +1461,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 profile_id,
                 target_template_id,
                 project_directory,
+                workspace_id.clone(),
                 &cancelled,
             )
             .and_then(|(config, action)| {
@@ -1237,6 +1487,7 @@ pub(crate) fn spawn_dashboard_create_session(
             }
         };
         let DashboardAction::CreateSession {
+            workspace_id,
             profile_id,
             bundle_id,
             project_directory,
@@ -1290,7 +1541,7 @@ pub(crate) fn spawn_dashboard_create_session(
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
                         initial_prompt: initial_prompt.clone(),
-                        workspace_id: workspace_id.clone(),
+                        workspace_id,
                         profile_id,
                         bundle_id,
                         project_directory,
@@ -1381,6 +1632,73 @@ impl DashboardContext {
     /// Folds one finished background job into dashboard and controller state.
     pub(super) fn apply_dashboard_io_update(&mut self, update: DashboardIoUpdate) {
         match update {
+            DashboardIoUpdate::WorkspacePaneSizes { result } => match result {
+                Ok(layouts) => {
+                    for (workspace_id, sizes) in layouts {
+                        if !self.known_workspace_layouts.contains(&workspace_id) {
+                            continue;
+                        }
+                        self.dashboard
+                            .cache_workspace_pane_sizes(&workspace_id, sizes);
+                        self.pane_size_persistence.remember(workspace_id, sizes);
+                    }
+                }
+                Err(error) => self
+                    .dashboard
+                    .set_notice(format!("Could not load workspace pane sizes: {error}")),
+            },
+            DashboardIoUpdate::WorkspaceManagement { generation, result } => match result {
+                Ok(result) => {
+                    let WorkspaceManagementResult {
+                        revision,
+                        entries,
+                        select_workspace,
+                        deleted_workspace_id,
+                    } = result;
+                    // A management response may precede an already queued
+                    // runtime feed message. Do not let that older message
+                    // remove a newly created tab or resurrect a deleted one.
+                    let names_are_current = revision >= self.runtime_state_revision;
+                    self.runtime_state_revision = self.runtime_state_revision.max(revision);
+                    let names: BTreeMap<String, String> = entries
+                        .iter()
+                        .map(|entry| (entry.workspace.id.clone(), entry.workspace.name.clone()))
+                        .collect();
+                    if let Some(deleted_workspace_id) = deleted_workspace_id.as_ref() {
+                        self.pane_size_persistence.forget(deleted_workspace_id);
+                        self.known_workspace_layouts.remove(deleted_workspace_id);
+                    }
+                    // The TUI owns the modal generation guard. It returns
+                    // whether this result still belongs to the visible
+                    // manager, so a late create cannot switch another tab.
+                    let foreground = self
+                        .dashboard
+                        .finish_workspace_management(generation, Ok(entries));
+                    let next_workspace = deleted_workspace_id
+                        .as_ref()
+                        .and_then(|deleted_id| names.keys().find(|id| *id != deleted_id).cloned());
+                    if names_are_current {
+                        self.dashboard.set_workspace_names(names);
+                    }
+                    if foreground
+                        && let Some(workspace_id) = select_workspace
+                        && (names_are_current
+                            || self.known_workspace_layouts.contains(&workspace_id))
+                    {
+                        self.dashboard.cancel_modal();
+                        self.select_workspace(Some(workspace_id));
+                    } else if let Some(deleted_workspace_id) = deleted_workspace_id
+                        && self.dashboard.active_workspace_id()
+                            == Some(deleted_workspace_id.as_str())
+                    {
+                        self.select_workspace(next_workspace);
+                    }
+                }
+                Err(error) => {
+                    self.dashboard
+                        .finish_workspace_management(generation, Err(error));
+                }
+            },
             DashboardIoUpdate::StartupConfig(config) => {
                 self.controller.config = config.clone();
                 self.dashboard.set_config(config);
@@ -1814,9 +2132,13 @@ impl DashboardContext {
                         "Imported {} session {}.",
                         applied.harness, applied.native_session_id
                     ));
-                    if let DashboardAction::ResolveAwsResourceOptions {
-                        target_template_ids,
-                    } = self.dashboard.begin_resume_for(&session_id)
+                    // Import completion can arrive after a tab switch. Keep
+                    // the imported record globally visible, but only open
+                    // the resume modal in the workspace that owns it.
+                    if self.session_in_active_workspace(&session_id)
+                        && let DashboardAction::ResolveAwsResourceOptions {
+                            target_template_ids,
+                        } = self.dashboard.begin_resume_for(&session_id)
                     {
                         self.resolve_aws_resource_options(target_template_ids);
                     }
@@ -2032,20 +2354,28 @@ impl DashboardContext {
         self.controller = loaded;
         self.dashboard.set_state(self.controller.state.clone());
         self.resolve_project_sources();
+        // A lifecycle may finish after the user changed tabs. Its durable
+        // record still belongs in the global controller, but completion must
+        // not move the visible selection or replace another workspace's chat.
+        let focus_session = self.session_in_active_workspace(&session_id);
         if update.result.is_ok() {
             self.drop_warm_chat_for(&session_id);
         }
         match update.result {
             Ok(LifecycleSuccess::Created) => {
-                self.dashboard.select_active_session(&session_id);
-                self.dashboard.focus_prompt();
+                if focus_session {
+                    self.dashboard.select_active_session(&session_id);
+                    self.dashboard.focus_prompt();
+                }
                 self.dashboard
                     .set_notice(format!("Session {} is ready", short_id(&session_id)));
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::CreatedWithPromptFailure(error)) => {
-                self.dashboard.select_active_session(&session_id);
-                self.dashboard.focus_prompt();
+                if focus_session {
+                    self.dashboard.select_active_session(&session_id);
+                    self.dashboard.focus_prompt();
+                }
                 self.dashboard.set_failure_notice(format!("Session is ready, but its initial task could not be completed: {error}. Check the transcript before retrying the saved draft."));
                 self.request_quota_refresh();
             }
@@ -2058,8 +2388,10 @@ impl DashboardContext {
                 // keeps `TAIL_SEED_ITEMS` and discards everything before it,
                 // so reading the whole projection was work proportional to
                 // history for a result that was thrown away.
-                self.request_transcript_tail_seed(&session_id);
-                self.open_chat_session(&session_id);
+                if focus_session {
+                    self.request_transcript_tail_seed(&session_id);
+                    self.open_chat_session(&session_id);
+                }
                 self.dashboard.set_notice(format!(
                     "Resumed {} with {profile_id} on {target_id}",
                     short_id(&session_id)
@@ -2067,8 +2399,10 @@ impl DashboardContext {
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Moved(outcome)) => {
-                self.request_transcript_tail_seed(&session_id);
-                self.open_chat_session(&session_id);
+                if focus_session {
+                    self.request_transcript_tail_seed(&session_id);
+                    self.open_chat_session(&session_id);
+                }
                 let destination = format!("{}/{}", outcome.profile_id, outcome.target_template_id);
                 self.dashboard
                     .set_notice(if outcome.outcome == "unchanged" {

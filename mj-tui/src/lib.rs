@@ -38,6 +38,7 @@ use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
 use crate::review_settings::ReviewSettingsDialog;
 use crate::wizards::{NewWizard, ResumeWizard};
+use crate::workspaces::WorkspaceManager;
 
 mod actions;
 mod combined;
@@ -53,6 +54,7 @@ mod review_settings;
 mod setup;
 mod widgets;
 mod wizards;
+pub(crate) mod workspaces;
 
 #[cfg(test)]
 mod docs_screenshots;
@@ -66,9 +68,9 @@ pub use crate::ingest::{
     MaterializedProjectionCache, PreparedMaterializedSessionDetail,
     PreparedMaterializedSessionSummary,
 };
-pub use crate::render::render_sessions_preview;
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
+pub use crate::workspaces::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 pub use hel::hel_workspace::{PaneSize, PaneSizes};
 
 /// One drawn row of the Sessions pane.
@@ -83,67 +85,6 @@ pub(crate) enum SessionsRow {
     /// A live session, by index into `ordered_sessions()`. `expanded` picks
     /// the four-row form over the one-line form.
     Session { index: usize, expanded: bool },
-}
-
-/// Scroll state for the read-only Sessions preview.
-///
-/// The preview owns its viewport independently from the dashboard. Its
-/// position is measured in rendered content lines so callers can offer both
-/// line and page movement without changing dashboard selection or scroll
-/// state. The renderer remembers the first visible session as an anchor, so a
-/// refreshed session list keeps that session at the same rendered line when
-/// it is still present.
-#[derive(Debug, Clone, Default)]
-pub struct SessionsPreviewState {
-    preview_scroll: usize,
-    anchor_session_id: Option<String>,
-    anchor_line_offset: usize,
-    last_viewport: usize,
-    last_max_scroll: usize,
-    anchor_dirty: bool,
-}
-
-impl SessionsPreviewState {
-    /// Scroll by rendered content lines. The offset is clamped to the last
-    /// viewport seen by the renderer.
-    pub fn scroll_lines(&mut self, delta: isize) {
-        self.anchor_dirty = true;
-        if delta.is_negative() {
-            self.preview_scroll = self.preview_scroll.saturating_sub(delta.unsigned_abs());
-        } else {
-            self.preview_scroll = self
-                .preview_scroll
-                .saturating_add(delta as usize)
-                .min(self.last_max_scroll);
-        }
-    }
-
-    /// Scroll by pages sized to the last rendered viewport.
-    pub fn scroll_page(&mut self, delta: isize) {
-        let page = self.last_viewport.max(1);
-        let magnitude = delta.unsigned_abs().saturating_mul(page);
-        self.anchor_dirty = true;
-        if delta.is_negative() {
-            self.preview_scroll = self.preview_scroll.saturating_sub(magnitude);
-        } else {
-            self.preview_scroll = self
-                .preview_scroll
-                .saturating_add(magnitude)
-                .min(self.last_max_scroll);
-        }
-    }
-
-    /// Move to the first rendered content line.
-    pub fn home(&mut self) {
-        self.anchor_dirty = true;
-        self.preview_scroll = 0;
-    }
-
-    /// Move to the last rendered viewport.
-    pub fn end(&mut self) {
-        self.anchor_dirty = true;
-        self.preview_scroll = self.last_max_scroll;
-    }
 }
 
 /// The full-height session sidebar, targets, and quotas.
@@ -176,6 +117,10 @@ pub enum DashboardAction {
         project_directory: std::path::PathBuf,
     },
     CreateSession {
+        /// Workspace selected when the creation request was submitted. The
+        /// dashboard may switch tabs while validation or dirty-repository
+        /// confirmation is still in flight, so the request keeps its origin.
+        workspace_id: String,
         profile_id: String,
         bundle_id: String,
         project_directory: Option<std::path::PathBuf>,
@@ -202,6 +147,9 @@ pub enum DashboardAction {
         directory: String,
     },
     ResumeSession {
+        /// Workspace selected when resume was submitted. Nested mount and
+        /// repository preflight actions carry this launch unchanged.
+        workspace_id: String,
         session_id: String,
         profile_id: String,
         target_template_id: String,
@@ -210,8 +158,8 @@ pub enum DashboardAction {
         discard_queue: bool,
     },
     /// Move a live session through one daemon-owned stop/resume operation.
-    /// The workspace is intentionally absent: it is fixed by the dashboard
-    /// attachment and never offered as a move selector.
+    /// The workspace is intentionally absent: it is fixed by the session
+    /// record and never offered as a move selector.
     MoveSession {
         session_id: String,
         profile_id: String,
@@ -352,7 +300,33 @@ pub enum DashboardAction {
         additional_mounts: Vec<AdditionalMount>,
         mount_history: Vec<std::path::PathBuf>,
     },
-    OpenWorkspacePicker,
+    /// Select a workspace in the dashboard's local tab strip. The controller
+    /// captures any chat/composer draft before applying the selection.
+    SelectWorkspace {
+        workspace_id: String,
+    },
+    /// Load the workspace list and detached drafts for the F3 manager.
+    LoadWorkspaceManagement {
+        generation: u64,
+    },
+    CreateWorkspace {
+        generation: u64,
+        name: String,
+    },
+    RenameWorkspace {
+        generation: u64,
+        workspace_id: String,
+        name: String,
+    },
+    DeleteWorkspace {
+        generation: u64,
+        workspace_id: String,
+        force: bool,
+    },
+    RecoverWorkspaceDraft {
+        generation: u64,
+        draft_id: String,
+    },
     QuitDetach,
 }
 
@@ -484,6 +458,7 @@ pub(crate) enum Mode {
     ConfigId(ConfigIdEditor),
     TargetActions(TargetActionsDialog),
     Web(WebDialog),
+    WorkspaceManager(WorkspaceManager),
     Rename(RenameEditor),
     EditContainer(ContainerEditor),
     Importing(ImportProgress),
@@ -627,6 +602,47 @@ pub struct DashboardState {
     /// The attached workspace name, used by the first-run screen.
     pub(crate) workspace_name: String,
     pub(crate) workspace_names: BTreeMap<String, String>,
+    /// Stable tab order. Runtime snapshots may arrive in a different map
+    /// order, so existing ids retain their position and new ids append.
+    pub(crate) workspace_order: Vec<String>,
+    /// The local filter applied to the one global live session feed.
+    active_workspace_id: Option<String>,
+    /// Dashboard-only state retained while the user switches tabs.
+    workspace_views: BTreeMap<String, WorkspaceViewState>,
+    /// A pane-size update from the controller may not overwrite a local edit
+    /// made in this client, even when it arrives after the edit.
+    workspace_pane_sizes_modified: BTreeSet<String>,
+    workspace_tab_areas: Vec<(String, Rect)>,
+    workspace_management_generation: u64,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceViewState {
+    selected_session_id: Option<String>,
+    sessions_scroll: usize,
+    targets_scroll: usize,
+    quota_scroll: usize,
+    capacity_index: usize,
+    quota_index: usize,
+    pane_sizes: PaneSizes,
+    collapsed_project_keys: BTreeSet<String>,
+    focus: Focus,
+}
+
+impl WorkspaceViewState {
+    fn from_dashboard(dashboard: &DashboardState) -> Self {
+        Self {
+            selected_session_id: dashboard.selected_session_id.clone(),
+            sessions_scroll: dashboard.sessions_scroll.get(),
+            targets_scroll: dashboard.targets_scroll.get(),
+            quota_scroll: dashboard.quota_scroll.get(),
+            capacity_index: dashboard.capacity_index,
+            quota_index: dashboard.quota_index,
+            pane_sizes: dashboard.pane_sizes,
+            collapsed_project_keys: dashboard.collapsed_project_keys.clone(),
+            focus: dashboard.focus,
+        }
+    }
 }
 
 impl DashboardState {
@@ -682,6 +698,12 @@ impl DashboardState {
             notices: Notices::default(),
             workspace_name: String::new(),
             workspace_names: BTreeMap::new(),
+            workspace_order: vec![hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned()],
+            active_workspace_id: Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned()),
+            workspace_views: BTreeMap::new(),
+            workspace_pane_sizes_modified: BTreeSet::new(),
+            workspace_tab_areas: Vec::new(),
+            workspace_management_generation: 0,
         };
         dashboard.session_details = dashboard
             .state
@@ -693,9 +715,125 @@ impl DashboardState {
         dashboard
     }
 
+    /// The workspace currently used as the Sessions-pane filter.
+    pub fn active_workspace_id(&self) -> Option<&str> {
+        self.active_workspace_id.as_deref()
+    }
+
+    /// Workspace ids in stable tab order. Runtime snapshots may remove an id;
+    /// the controller decides which replacement tab to select.
+    pub(crate) fn workspace_ids(&self) -> Vec<String> {
+        self.workspace_order.clone()
+    }
+
+    pub(crate) fn workspace_display_name<'a>(&'a self, workspace_id: &'a str) -> &'a str {
+        self.workspace_names
+            .get(workspace_id)
+            .map(String::as_str)
+            .unwrap_or(workspace_id)
+    }
+
+    /// Select a tab locally. The caller should save any open chat draft before
+    /// invoking this setter; the setter itself performs no external work.
+    pub fn set_active_workspace(&mut self, workspace_id: Option<String>) {
+        if self.active_workspace_id == workspace_id {
+            self.clamp_selections();
+            return;
+        }
+        if let Some(current) = self.active_workspace_id.clone() {
+            self.workspace_views
+                .insert(current, WorkspaceViewState::from_dashboard(self));
+        }
+
+        self.active_workspace_id = workspace_id.clone();
+        self.workspace_name = workspace_id
+            .as_deref()
+            .map(|id| self.workspace_display_name(id).to_owned())
+            .unwrap_or_default();
+        self.current_session_id = None;
+        self.opening_session = None;
+        if let Some(workspace_id) = workspace_id {
+            if let Some(view) = self.workspace_views.get(&workspace_id).cloned() {
+                self.selected_session_id = view.selected_session_id;
+                self.sessions_scroll.set(view.sessions_scroll);
+                self.targets_scroll.set(view.targets_scroll);
+                self.quota_scroll.set(view.quota_scroll);
+                self.capacity_index = view.capacity_index;
+                self.quota_index = view.quota_index;
+                self.pane_sizes = view.pane_sizes;
+                self.collapsed_project_keys = view.collapsed_project_keys;
+                self.focus = view.focus;
+            } else {
+                self.selected_session_id = None;
+                self.sessions_scroll.set(0);
+                self.targets_scroll.set(0);
+                self.quota_scroll.set(0);
+                self.capacity_index = 0;
+                self.quota_index = 0;
+                self.pane_sizes = PaneSizes::default();
+                self.collapsed_project_keys.clear();
+                self.focus = Focus::Sessions;
+            }
+        } else {
+            self.selected_session_id = None;
+            self.sessions_scroll.set(0);
+            self.targets_scroll.set(0);
+            self.quota_scroll.set(0);
+            self.capacity_index = 0;
+            self.quota_index = 0;
+            self.pane_sizes = PaneSizes::default();
+            self.collapsed_project_keys.clear();
+            self.focus = Focus::Sessions;
+        }
+        self.clamp_selections();
+    }
+
+    /// Applies a controller-provided pane-size cache unless this client has
+    /// edited that workspace's layout since the cache was requested.
+    pub fn cache_workspace_pane_sizes(&mut self, workspace_id: &str, sizes: PaneSizes) {
+        if sizes.validate().is_err() || self.workspace_pane_sizes_modified.contains(workspace_id) {
+            return;
+        }
+        if self.active_workspace_id.as_deref() == Some(workspace_id) {
+            self.pane_sizes = sizes;
+            self.clamp_selections();
+        }
+        self.workspace_views
+            .entry(workspace_id.to_owned())
+            .or_insert_with(|| WorkspaceViewState {
+                selected_session_id: None,
+                sessions_scroll: 0,
+                targets_scroll: 0,
+                quota_scroll: 0,
+                capacity_index: 0,
+                quota_index: 0,
+                pane_sizes: sizes,
+                collapsed_project_keys: BTreeSet::new(),
+                focus: Focus::Sessions,
+            })
+            .pane_sizes = sizes;
+    }
+
+    /// Whether the local client has edited this workspace's pane layout.
+    pub fn workspace_pane_sizes_modified(&self, workspace_id: &str) -> bool {
+        self.workspace_pane_sizes_modified.contains(workspace_id)
+    }
+
+    pub(crate) fn register_workspace_tab_area(&mut self, workspace_id: String, area: Rect) {
+        self.workspace_tab_areas.push((workspace_id, area));
+    }
+
+    pub(crate) fn clear_workspace_tab_areas(&mut self) {
+        self.workspace_tab_areas.clear();
+    }
+
     /// Moves the Sessions selection onto `session_id` without changing focus.
     pub fn select_active_session(&mut self, session_id: &str) {
-        if self.state.sessions.contains_key(session_id) {
+        if self
+            .ordered_sessions()
+            .iter()
+            .any(|session| session.id == session_id)
+        {
             self.selected_session_id = Some(session_id.to_owned());
         }
     }
@@ -781,6 +919,10 @@ impl DashboardState {
             }
         }
         *pane_size_for_mut(&mut self.pane_sizes, pane) = size;
+        if let Some(workspace_id) = &self.active_workspace_id {
+            self.workspace_pane_sizes_modified
+                .insert(workspace_id.clone());
+        }
         self.clamp_selections();
     }
 
@@ -991,6 +1133,16 @@ impl DashboardState {
             });
             return DashboardAction::None;
         }
+        if !self.modal_open() && key.modifiers.contains(KeyModifiers::CONTROL) {
+            let workspace_command = match key.code {
+                KeyCode::PageUp => Some(CommandId::SelectWorkspacePrevious),
+                KeyCode::PageDown => Some(CommandId::SelectWorkspaceNext),
+                _ => None,
+            };
+            if let Some(command) = workspace_command {
+                return self.dispatch_command(command);
+            }
+        }
         if self.component_modal_open() {
             return self.handle_component_event(crossterm::event::Event::Key(key));
         }
@@ -1026,6 +1178,10 @@ impl DashboardState {
             Mode::Resume(wizard) => wizard.text_input_focused(),
             Mode::Setup(dialog) => dialog.form.borrow().is_focused(setup::SetupControl::Field),
             Mode::QuickNew(dialog) => !dialog.preparing,
+            Mode::WorkspaceManager(dialog) => dialog
+                .form
+                .borrow()
+                .is_focused(crate::workspaces::WorkspaceControl::Name),
             _ => false,
         }
     }
@@ -1049,6 +1205,11 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(action) =
+                crate::workspaces::workspace_tab_click(self, mouse.column, mouse.row)
+            {
+                return action;
+            }
             if let Some(&(pane, size, _)) = self
                 .pane_size_control_areas
                 .iter()
@@ -1378,12 +1539,23 @@ impl DashboardState {
             .position(|index| sessions.get(index).is_some_and(|s| s.id == selected))
     }
 
-    /// Every session across workspaces, grouped by project and ordered by creation.
+    /// Live, unarchived sessions in the selected workspace, grouped by project
+    /// and ordered by creation. The controller may feed all workspaces into
+    /// one state snapshot; the tab is the local view filter.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
+        let Some(active_workspace_id) = self.active_workspace_id.as_deref() else {
+            return Vec::new();
+        };
         let mut active = self.state.sessions.values().collect::<Vec<_>>();
         active.sort_by(|left, right| left.compare_by_creation(right));
         let mut groups = BTreeMap::<String, Vec<&SessionRecord>>::new();
         for session in active {
+            if session.workspace_id != active_workspace_id
+                || session.archived
+                || (!session.state.is_active() && self.transition_kind(&session.id).is_none())
+            {
+                continue;
+            }
             groups
                 .entry(self.project_source(session).key)
                 .or_default()
@@ -1543,6 +1715,10 @@ impl DashboardState {
             self.review_settings_generation = self.review_settings_generation.wrapping_add(1);
         }
         self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);
+        if matches!(self.mode, Mode::WorkspaceManager(_)) {
+            self.workspace_management_generation =
+                self.workspace_management_generation.wrapping_add(1);
+        }
         self.mode = Mode::Dashboard;
         self.rebuild_resume_rows();
     }
@@ -1749,8 +1925,9 @@ mod tests {
 
         assert_eq!(
             dashboard.handle_key(key(KeyCode::F(3))),
-            DashboardAction::OpenWorkspacePicker
+            DashboardAction::LoadWorkspaceManagement { generation: 1 }
         );
+        dashboard.cancel_modal();
         assert_eq!(
             dashboard.handle_key(key(KeyCode::F(7))),
             DashboardAction::LoadWebAccess
@@ -2263,8 +2440,8 @@ mod tests {
         );
     }
 
-    /// A session that disappears must not take the selection somewhere the
-    /// user did not put it: the anchor is an id, so it lands on a real row.
+    /// A session that becomes history must be removed from the live list and
+    /// the selection must land on a real remaining row.
     #[test]
     fn the_selection_survives_the_list_changing_under_it() {
         let mut dashboard = dashboard_with_live_sessions(3, 3);
@@ -2282,8 +2459,8 @@ mod tests {
         dashboard.set_state(state);
         assert_eq!(
             dashboard.selected_session().unwrap().id,
-            "session-1",
-            "stopping a session keeps its selection"
+            "session-0",
+            "history is excluded and selection clamps to the first live row"
         );
     }
 
@@ -2452,28 +2629,107 @@ mod tests {
     }
 
     #[test]
-    fn all_workspaces_and_stopped_sessions_are_visible_and_switchable() {
-        let mut dashboard = dashboard_with_session(stopped_session());
-        let mut remote = stopped_session();
+    fn workspace_tabs_filter_live_sessions_and_keep_transitions_visible() {
+        let mut local = running_session();
+        local.id = "local".into();
+        let mut dashboard = dashboard_with_session(local);
+        let mut remote = running_session();
         remote.id = "remote".into();
         remote.workspace_id = "another-workspace".into();
-        remote.state = SessionState::Running;
         dashboard.state.sessions.insert(remote.id.clone(), remote);
+        let mut archived = running_session();
+        archived.id = "archived".into();
+        archived.archived = true;
+        dashboard
+            .state
+            .sessions
+            .insert(archived.id.clone(), archived);
+        let mut history = stopped_session();
+        history.id = "history".into();
+        dashboard.state.sessions.insert(history.id.clone(), history);
         dashboard.clamp_selections();
-        assert_eq!(dashboard.ordered_sessions().len(), 2);
-        for id in ["session-1", "remote"] {
-            dashboard.focus_sessions();
-            dashboard.selected_session_id = Some(id.into());
-            assert_eq!(
-                dashboard.handle_key(key(KeyCode::Enter)),
-                DashboardAction::Open {
-                    session_id: id.into()
-                }
-            );
-        }
-        let state = dashboard.state.clone();
-        dashboard.set_state(state);
-        assert_eq!(dashboard.ordered_sessions().len(), 2);
+        assert_eq!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["local"]
+        );
+        dashboard.set_active_workspace(Some("another-workspace".into()));
+        assert_eq!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["remote"]
+        );
+        dashboard.session_operations.insert(
+            "history".into(),
+            operation(SessionOperationKind::Launching, None),
+        );
+        dashboard.set_active_workspace(Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID.into()));
+        assert!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .any(|session| session.id == "local")
+        );
+        assert!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .any(|session| session.id == "history")
+        );
+    }
+
+    #[test]
+    fn workspace_switch_restores_selection_and_pane_layout_without_losing_local_edits() {
+        let mut local = running_session();
+        local.id = "local".into();
+        let mut remote = running_session();
+        remote.id = "remote".into();
+        remote.workspace_id = "remote-workspace".into();
+        let mut dashboard = dashboard_with_session(local);
+        dashboard.state.sessions.insert(remote.id.clone(), remote);
+        dashboard.select_active_session("local");
+        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+
+        dashboard.cache_workspace_pane_sizes(
+            "remote-workspace",
+            PaneSizes {
+                sessions: PaneSize::Maximized,
+                targets: PaneSize::Standard,
+                quota: PaneSize::Standard,
+            },
+        );
+        dashboard.set_active_workspace(Some("remote-workspace".into()));
+        dashboard.select_active_session("remote");
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Sessions),
+            PaneSize::Maximized
+        );
+        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Standard);
+        dashboard.cache_workspace_pane_sizes(
+            "remote-workspace",
+            PaneSizes {
+                sessions: PaneSize::Minimized,
+                targets: PaneSize::Standard,
+                quota: PaneSize::Standard,
+            },
+        );
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Sessions),
+            PaneSize::Standard
+        );
+
+        dashboard.set_active_workspace(Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID.into()));
+        assert_eq!(dashboard.selected_session_id(), Some("local"));
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Sessions),
+            PaneSize::Minimized
+        );
     }
 
     #[test]
@@ -2485,7 +2741,7 @@ mod tests {
             ("session-y", "2026-08-09T00:30:00-02:00"),
             ("session-a", "unknown"),
         ] {
-            let mut session = stopped_session();
+            let mut session = running_session();
             session.id = id.into();
             session.created_at = created.into();
             dashboard.state.sessions.insert(id.into(), session);
@@ -2705,15 +2961,12 @@ mod tests {
         let mut active = stopped_session();
         active.id = "session-0".into();
         active.state = SessionState::Running;
-        let archived = stopped_session();
+        let other = running_session();
         let mut dashboard = DashboardState::new(
             config(),
             HelState {
                 version: STATE_VERSION,
-                sessions: BTreeMap::from([
-                    (active.id.clone(), active),
-                    (archived.id.clone(), archived),
-                ]),
+                sessions: BTreeMap::from([(active.id.clone(), active), (other.id.clone(), other)]),
                 mount_history: BTreeMap::new(),
                 container_sizes: BTreeMap::new(),
             },
@@ -3066,10 +3319,10 @@ mod tests {
         assert_eq!(dashboard.selected_session().unwrap().id, "new-session");
     }
 
-    /// Stopping the last session empties the dashboard rather than moving the
-    /// row to another pane: it belongs to the resume dialog now.
+    /// Stopping the last session empties the live dashboard; it belongs to the
+    /// resume dialog now.
     #[test]
-    fn stopping_the_last_session_keeps_it_in_the_sidebar_and_panes_still_cycle() {
+    fn stopping_the_last_session_removes_it_and_panes_still_cycle() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
@@ -3080,8 +3333,8 @@ mod tests {
         state.sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
         dashboard.set_state(state);
         assert_eq!(dashboard.focus, Focus::Sessions);
-        assert_eq!(dashboard.ordered_sessions().len(), 1);
-        assert_eq!(dashboard.selected_session().unwrap().id, "session-1");
+        assert_eq!(dashboard.ordered_sessions().len(), 0);
+        assert_eq!(dashboard.selected_session(), None);
 
         for expected in [Focus::Prompt, Focus::Targets, Focus::Quota, Focus::Sessions] {
             dashboard.handle_key(key(KeyCode::Tab));

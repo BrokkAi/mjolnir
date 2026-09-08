@@ -145,24 +145,22 @@ pub enum SetupOutcome {
     Cancelled,
 }
 
-/// Give an unconfigured terminal installation a local Codex session without
-/// making remote/container setup a prerequisite for the first prompt.
+/// Give an unconfigured terminal installation a local Codex profile and target
+/// without making remote/container setup a prerequisite for explicit session
+/// creation. This only writes configuration; it never creates a session.
 pub fn initialize_local_startup_config(config_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         let config = HelConfig::load_from(config_path)?;
-        if config.startup.enabled
-            && config.is_unconfigured()
-            && config.newer_config_version.is_none()
-        {
+        if config.is_unconfigured() && config.newer_config_version.is_none() {
             let kind = HarnessKind::Codex;
             let home = std::env::var_os(kind.home_env())
                 .map(|value| kind.home_from_environment(value))
                 .or_else(|| dirs::home_dir().map(|home| home.join(kind.default_home_leaf())))
-                .context("locate Codex home for the first session")?;
-            let home = std::path::absolute(home).context("resolve Codex home")?;
+                .context("locate Codex home for the default local profile")?;
+            let home = std::path::absolute(home).context("resolve Codex profile home")?;
             HelConfig::update_to(config_path, |fresh| {
-                if fresh.is_unconfigured() && fresh.startup.enabled {
+                if fresh.is_unconfigured() {
                     configure_local_startup(fresh, home);
                 }
                 Ok(())
@@ -1339,7 +1337,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn local_startup_preserves_existing_settings_and_respects_disabled_startup() {
+    fn local_startup_preserves_existing_settings_and_ignores_disabled_startup() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         let mut config = HelConfig::default();
@@ -1358,7 +1356,13 @@ mod tests {
         let disabled = "version = 2\n[startup]\nenabled = false\n";
         fs::write(&path, disabled).unwrap();
         initialize_local_startup_config(&path).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), disabled);
+        let bootstrapped = HelConfig::load_from(&path).unwrap();
+        assert!(!bootstrapped.startup.enabled);
+        assert_eq!(bootstrapped.profiles["codex"].kind, HarnessKind::Codex);
+        assert!(matches!(
+            bootstrapped.targets["localhost"],
+            TargetTemplate::LocalBare
+        ));
 
         let newer = "version = 999\nfuture_field = true\n";
         fs::write(&path, newer).unwrap();

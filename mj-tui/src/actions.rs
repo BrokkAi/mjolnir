@@ -39,6 +39,8 @@ pub enum CommandId {
     CycleFocusedPaneSize,
     TogglePanePreset,
     Workspaces,
+    SelectWorkspacePrevious,
+    SelectWorkspaceNext,
     WebViewer,
     QuitDetach,
     Palette,
@@ -136,11 +138,21 @@ impl KeyHint {
         }
     }
 
-    /// Whether this hint is a chord: an Alt letter or a function key. Chords
+    const fn ctrl(code: KeyCode, label: &'static str) -> Self {
+        Self {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+            label,
+        }
+    }
+
+    /// Whether this hint is a chord: an Alt letter, Ctrl page key, or function key. Chords
     /// are the keys [`global_chord`] answers from every surface, including
     /// while the composer owns the keyboard.
     const fn is_chord(self) -> bool {
-        matches!(self.code, KeyCode::F(_)) || self.modifiers.contains(KeyModifiers::ALT)
+        matches!(self.code, KeyCode::F(_))
+            || self.modifiers.contains(KeyModifiers::ALT)
+            || self.modifiers.contains(KeyModifiers::CONTROL)
     }
 
     /// Whether a pressed key is this hint. `plain` is the caller's reading of
@@ -151,6 +163,8 @@ impl KeyHint {
         }
         if self.modifiers.contains(KeyModifiers::ALT) {
             key.modifiers.contains(KeyModifiers::ALT)
+        } else if self.modifiers.contains(KeyModifiers::CONTROL) {
+            key.modifiers.contains(KeyModifiers::CONTROL)
         } else if matches!(self.code, KeyCode::Char(_)) {
             // Plain letters are pane keys: a modifier means something else.
             plain
@@ -596,6 +610,28 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::SelectWorkspacePrevious,
+        label: "Previous workspace",
+        description: "Select the previous workspace tab.",
+        scope: Scope::Global,
+        keys: &[KeyHint::ctrl(KeyCode::PageUp, "Ctrl-PageUp")],
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::SelectWorkspaceNext,
+        label: "Next workspace",
+        description: "Select the next workspace tab.",
+        scope: Scope::Global,
+        keys: &[KeyHint::ctrl(KeyCode::PageDown, "Ctrl-PageDown")],
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::WebViewer,
         label: "Web viewer",
         description: "Show the address and code for the browser and phone viewer.",
@@ -690,6 +726,8 @@ const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::Help,
     CommandId::Palette,
     CommandId::Workspaces,
+    CommandId::SelectWorkspacePrevious,
+    CommandId::SelectWorkspaceNext,
     CommandId::WebViewer,
     CommandId::Refresh,
     CommandId::NewSession,
@@ -935,7 +973,9 @@ impl DashboardState {
                 self.toggle_pane_preset();
                 DashboardAction::None
             }
-            CommandId::Workspaces => DashboardAction::OpenWorkspacePicker,
+            CommandId::Workspaces => self.begin_workspace_manager(),
+            CommandId::SelectWorkspacePrevious => self.select_adjacent_workspace(-1),
+            CommandId::SelectWorkspaceNext => self.select_adjacent_workspace(1),
             CommandId::WebViewer => self.open_web_dialog(),
             CommandId::QuitDetach => DashboardAction::QuitDetach,
             // Help toggles: the same key that opens the reference closes it

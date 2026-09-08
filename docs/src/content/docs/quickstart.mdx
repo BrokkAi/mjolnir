@@ -14,26 +14,25 @@ cd path/to/your/repository
 mj
 ```
 
-## 1. Open your first prompt
+## 1. Open the dashboard
 
 When no workspace exists, Mjolnir creates one using the current directory's
-name. An empty workspace starts a session automatically and focuses the prompt.
-On Linux and macOS, a fresh configuration uses your Codex home (`CODEX_HOME` or
-`~/.codex`). If you already have profiles, Codex is preferred; otherwise Mjolnir
-uses the first configured profile.
+name, then leaves the dashboard ready for an explicit session. On Linux and
+macOS, an unconfigured installation prepares a local Codex profile and
+`localhost` target; it does not start a session.
 
-Startup checks for usable Podman, then Docker, and finally uses a local directory
-session. Containers start from your current Git repository, including its
-uncommitted contents. Plain directories use the local target. You can change the
-agent and target with `[startup] profile` and `target` in
-[configuration](/configuration/#first-session-defaults-startup).
+Press `Alt+N` for Quick New with saved defaults, or `N` for the full creation
+wizard. Quick New uses the configured Codex profile when available, then the
+first configured profile, and uses the saved target default. You can change
+these defaults with `[startup] profile` and `target` in
+[configuration](/configuration/#quick-new-defaults-startup).
 
-Launch progress and failures appear on the dashboard. Once ready, type a prompt
-and press `Enter`. Existing workspace selection and live-session startup retain
-their current behavior. Windows retains guided setup for its supported targets.
-Use `mj setup` explicitly when you want guided discovery of other environments.
+Launch progress and failures appear on the dashboard. Once Quick New opens,
+type a prompt and press `Enter`. Windows retains guided setup for its supported
+targets. Use `mj setup` when you want guided discovery of other environments.
 
-The normal dashboard then opens. Its session list, Conversation and Prompt regions, target capacity, and profile quota stay visible together.
+The dashboard keeps its session list, Conversation and Prompt regions, target
+capacity, and profile quota visible together.
 
 <figure class="shot">
   <a class="shot__zoom" href={shotDashboard.src} aria-label="Open the full-size screenshot: Mjolnir dashboard layout">

@@ -55,7 +55,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 14;
+pub(crate) const PROTOCOL_VERSION: u32 = 15;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -104,7 +104,6 @@ struct DaemonMetadata {
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkspaceListing {
     pub workspace: WorkspaceRecord,
-    pub attached_pids: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,11 +320,13 @@ enum DaemonAction {
         workspace_id: String,
         name: String,
     },
+    TouchWorkspace {
+        workspace_id: String,
+    },
     DeleteWorkspace {
         workspace_id: String,
     },
     Attach {
-        workspace_id: String,
         client_id: String,
         pid: u32,
     },
@@ -609,7 +610,6 @@ impl std::fmt::Display for WebViewerStatus {
 
 #[derive(Debug, Clone)]
 struct Attachment {
-    workspace_id: String,
     pid: u32,
 }
 
@@ -892,6 +892,17 @@ impl RuntimeState {
             .retain(|_, attachment| process_is_alive(attachment.pid));
     }
 
+    fn workspace_has_active_resume(&self, workspace_id: &str) -> bool {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .any(|active| {
+                active.result.borrow().is_none()
+                    && active.resume_workspace_id.as_deref() == Some(workspace_id)
+            })
+    }
+
     pub(crate) fn publish_web_access(&self, access: mj_controller::hel_server::WebViewerAccess) {
         use mj_controller::hel_server::WebViewerAccess;
         let status = match &access {
@@ -1000,6 +1011,7 @@ impl RuntimeState {
 
     fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
         self.workspaces_tx.send_replace(workspaces);
+        self.publish_revision();
     }
 
     pub(crate) async fn reload_controller(&self) -> Result<()> {
@@ -2094,8 +2106,8 @@ impl RuntimeState {
     /// [`RuntimeState::force_destroy_session`]), drop its detached drafts, and
     /// remove the workspace row. Stopped histories stay globally resumable.
     ///
-    /// Attached clients and in-flight resumes into the workspace still refuse
-    /// the deletion: those are live interfaces, not wedges. A session that
+    /// In-flight resumes into the workspace still refuse the deletion because
+    /// they have not yet claimed a durable session workspace. A session that
     /// fails to destroy stops the sequence with the remainder named, so the
     /// operation can be retried without losing progress.
     pub(crate) async fn force_delete_workspace(
@@ -2103,22 +2115,7 @@ impl RuntimeState {
         workspace_id: String,
     ) -> Result<()> {
         ensure!(
-            !self
-                .attachments()
-                .values()
-                .any(|attachment| attachment.workspace_id == workspace_id),
-            "workspace still has attached clients"
-        );
-        ensure!(
-            !self
-                .lifecycle
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .values()
-                .any(|active| {
-                    active.result.borrow().is_none()
-                        && active.resume_workspace_id.as_deref() == Some(workspace_id.as_str())
-                }),
+            !self.workspace_has_active_resume(&workspace_id),
             "workspace has a session resume in progress"
         );
         let sessions = blocking({
@@ -2852,6 +2849,16 @@ impl DaemonClient {
         }
     }
 
+    pub(crate) async fn touch_workspace(&mut self, workspace_id: String) -> Result<()> {
+        match self
+            .request(DaemonAction::TouchWorkspace { workspace_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected touch-workspace reply {reply:?}"),
+        }
+    }
+
     pub(crate) async fn delete_workspace(&mut self, workspace_id: String) -> Result<()> {
         match self
             .request(DaemonAction::DeleteWorkspace { workspace_id })
@@ -2862,18 +2869,9 @@ impl DaemonClient {
         }
     }
 
-    pub(crate) async fn attach(
-        &mut self,
-        workspace_id: String,
-        client_id: String,
-        pid: u32,
-    ) -> Result<()> {
+    pub(crate) async fn attach(&mut self, client_id: String, pid: u32) -> Result<()> {
         match self
-            .request(DaemonAction::Attach {
-                workspace_id,
-                client_id,
-                pid,
-            })
+            .request(DaemonAction::Attach { client_id, pid })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -3721,7 +3719,6 @@ async fn signal_daemon(metadata: &DaemonMetadata) -> Result<()> {
 }
 
 pub(crate) fn maintain_attachment(
-    workspace_id: String,
     client_id: String,
     pid: u32,
     cancellation: CancellationToken,
@@ -3736,10 +3733,10 @@ pub(crate) fn maintain_attachment(
                     match connect_or_start().await {
                         Ok(mut daemon) => {
                             if let Err(error) = daemon
-                                .attach(workspace_id.clone(), client_id.clone(), pid)
+                                .attach(client_id.clone(), pid)
                                 .await
                             {
-                                tracing::warn!(%error, "could not refresh daemon workspace attachment");
+                                tracing::warn!(%error, "could not refresh daemon client presence");
                             }
                         }
                         Err(error) => {
@@ -4511,23 +4508,10 @@ async fn handle_action(
         DaemonAction::ListWorkspaces => {
             state.prune_dead_clients();
             let workspaces = blocking(hel::hel_database::list_workspaces).await?;
-            let attachments = state.attachments();
             Ok(DaemonReply::Workspaces(
                 workspaces
                     .into_iter()
-                    .map(|workspace| {
-                        let attached_pids = attachments
-                            .values()
-                            .filter(|attachment| attachment.workspace_id == workspace.id)
-                            .map(|attachment| attachment.pid)
-                            .collect::<BTreeSet<_>>()
-                            .into_iter()
-                            .collect();
-                        WorkspaceListing {
-                            workspace,
-                            attached_pids,
-                        }
-                    })
+                    .map(|workspace| WorkspaceListing { workspace })
                     .collect(),
             ))
         }
@@ -4545,61 +4529,23 @@ async fn handle_action(
             refresh_runtime_workspaces(state).await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::TouchWorkspace { workspace_id } => {
+            blocking(move || hel::hel_database::touch_workspace(&workspace_id)).await?;
+            refresh_runtime_workspaces(state).await?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::DeleteWorkspace { workspace_id } => {
             ensure!(
-                !state
-                    .attachments()
-                    .values()
-                    .any(|attachment| attachment.workspace_id == workspace_id),
-                "workspace still has attached clients"
-            );
-            ensure!(
-                !state
-                    .lifecycle
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .values()
-                    .any(|active| {
-                        active.result.borrow().is_none()
-                            && active.resume_workspace_id.as_deref() == Some(workspace_id.as_str())
-                    }),
+                !state.workspace_has_active_resume(&workspace_id),
                 "workspace has a session resume in progress"
             );
             blocking(move || hel::hel_database::delete_workspace(&workspace_id)).await?;
             refresh_runtime_workspaces(state).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::Attach {
-            workspace_id,
-            client_id,
-            pid,
-        } => {
-            let exists = blocking({
-                let workspace_id = workspace_id.clone();
-                move || {
-                    Ok(hel::hel_database::list_workspaces()?
-                        .iter()
-                        .any(|workspace| workspace.id == workspace_id))
-                }
-            })
-            .await?;
-            ensure!(exists, "unknown workspace {workspace_id:?}");
-            let changed = state
-                .attachments()
-                .insert(
-                    client_id,
-                    Attachment {
-                        workspace_id: workspace_id.clone(),
-                        pid,
-                    },
-                )
-                .is_none_or(|previous| {
-                    previous.workspace_id != workspace_id || previous.pid != pid
-                });
+        DaemonAction::Attach { client_id, pid } => {
+            state.attachments().insert(client_id, Attachment { pid });
             state.ever_attached.store(true, Ordering::Release);
-            if changed {
-                blocking(move || hel::hel_database::touch_workspace(&workspace_id)).await?;
-            }
             Ok(DaemonReply::Done)
         }
         DaemonAction::Detach { client_id } => {
@@ -5258,6 +5204,82 @@ mod tests {
         let _ = process_is_alive(pid);
         let status = child.wait().expect("attachment probe left child waitable");
         assert!(status.success());
+    }
+
+    #[tokio::test]
+    async fn client_presence_is_global_and_detach_and_prune_remove_it() {
+        let state = test_runtime_state();
+        let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+        let cancellation = CancellationToken::new();
+
+        handle_action(
+            DaemonAction::Attach {
+                client_id: "client-a".into(),
+                pid: std::process::id(),
+            },
+            &metadata,
+            &state,
+            &cancellation,
+        )
+        .await
+        .expect("attach presence");
+        state
+            .attachments()
+            .insert("dead-client".into(), Attachment { pid: u32::MAX });
+
+        let DaemonReply::Status(status) =
+            handle_action(DaemonAction::Status, &metadata, &state, &cancellation)
+                .await
+                .expect("status")
+        else {
+            panic!("status action returned a different reply");
+        };
+        assert_eq!(status.attached_clients, 1);
+
+        handle_action(
+            DaemonAction::Detach {
+                client_id: "client-a".into(),
+            },
+            &metadata,
+            &state,
+            &cancellation,
+        )
+        .await
+        .expect("detach presence");
+        assert!(state.attachments().is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_deletion_guard_ignores_global_client_presence() {
+        let state = test_runtime_state();
+        state.attachments().insert(
+            "client-a".into(),
+            Attachment {
+                pid: std::process::id(),
+            },
+        );
+        assert!(!state.workspace_has_active_resume("workspace-a"));
+
+        let (_completed, result) = tokio::sync::watch::channel(None);
+        state.lifecycle.lock().unwrap().insert(
+            "session-a".into(),
+            ActiveLifecycle {
+                operation_id: "resume-operation".into(),
+                create_control: None,
+                kind: LifecycleKind::Resume,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                started_at_epoch_seconds: 1,
+                active_stages: BTreeMap::new(),
+                resume_workspace_id: Some("workspace-a".into()),
+                resume_destination: None,
+                notice: None,
+                request_key: None,
+                _move_guard: None,
+                move_source_closed: false,
+                result,
+            },
+        );
+        assert!(state.workspace_has_active_resume("workspace-a"));
     }
 
     #[cfg(target_os = "macos")]
@@ -5978,6 +6000,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn client_presence_and_workspace_listing_use_global_wire_shapes() {
+        let attach = serde_json::to_value(DaemonAction::Attach {
+            client_id: "client-a".into(),
+            pid: 4242,
+        })
+        .unwrap();
+        assert_eq!(
+            attach,
+            serde_json::json!({
+                "action": "attach",
+                "arguments": {"client_id": "client-a", "pid": 4242},
+            })
+        );
+
+        let listing = serde_json::to_value(WorkspaceListing {
+            workspace: WorkspaceRecord {
+                id: "workspace-a".into(),
+                name: "Workspace A".into(),
+                created_at: "2026-09-01T00:00:00Z".into(),
+                last_opened_at: "2026-09-01T00:00:00Z".into(),
+                session_count: 0,
+            },
+        })
+        .unwrap();
+        assert!(listing.get("attached_pids").is_none());
+    }
+
     #[tokio::test]
     async fn daemon_serves_management_actions_for_any_protocol_version() {
         // 3 is an older shipped client; 5 stands in for a future one. Both
@@ -6096,6 +6146,15 @@ mod tests {
                 responses: [
                     r#"{"protocol_version":14,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.1.4","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
                     r#"{"protocol_version":14,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+                ],
+            },
+            ProtocolTranscript {
+                protocol_version: 15,
+                daemon_build: "2.2.0",
+                expected_requests: requests(15),
+                responses: [
+                    r#"{"protocol_version":15,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.2.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                    r#"{"protocol_version":15,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
                 ],
             },
         ]

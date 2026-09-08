@@ -17,7 +17,7 @@ use crate::render::render;
 use crate::{DashboardAction, DashboardState, Mode, nth_key};
 
 #[test]
-fn empty_workspace_prepares_codex_before_focusing_the_new_session_prompt() {
+fn explicit_quick_creation_uses_defaults_before_focusing_the_new_session_prompt() {
     let mut config = config();
     config
         .targets
@@ -25,7 +25,7 @@ fn empty_workspace_prepares_codex_before_focusing_the_new_session_prompt() {
     let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
     let directory = std::env::current_dir().unwrap().join("project with spaces");
     assert_eq!(
-        dashboard.begin_startup_session(directory.clone()).unwrap(),
+        dashboard.quick_session_action(directory.clone()).unwrap(),
         DashboardAction::CreateStartupSession {
             generation: None,
             initial_prompt: None,
@@ -57,7 +57,7 @@ fn empty_workspace_prepares_codex_before_focusing_the_new_session_prompt() {
 }
 
 #[test]
-fn startup_respects_the_configured_agent_and_uses_an_existing_agent_without_codex() {
+fn explicit_quick_creation_respects_the_configured_agent_and_fallback() {
     let mut config = config();
     config
         .targets
@@ -74,48 +74,33 @@ fn startup_respects_the_configured_agent_and_uses_an_existing_agent_without_code
         let mut dashboard =
             DashboardState::new(config.clone(), HelState::default(), BTreeMap::new());
         assert!(
-            matches!(dashboard.begin_startup_session(std::env::current_dir().unwrap()).unwrap(),
+            matches!(dashboard.quick_session_action(std::env::current_dir().unwrap()).unwrap(),
             DashboardAction::CreateStartupSession { profile_id, target_template_id, .. } if profile_id == "claude-1" && target_template_id.as_deref() == Some("localhost"))
         );
     }
 }
 
 #[test]
-fn startup_leaves_live_sessions_and_disabled_workspaces_alone() {
-    for state in [
-        SessionState::Running,
-        SessionState::Provisioning,
-        SessionState::Disconnected,
-        SessionState::Error,
-    ] {
-        let mut session = running_session();
-        session.state = state;
-        let mut dashboard = dashboard_with_session(session);
-        let selected = dashboard.selected_session_id().map(str::to_owned);
-        let focus = dashboard.focus();
-        assert_eq!(
-            dashboard
-                .begin_startup_session(std::env::current_dir().unwrap())
-                .unwrap(),
-            DashboardAction::None
-        );
-        assert_eq!(dashboard.selected_session_id(), selected.as_deref());
-        assert_eq!(dashboard.focus(), focus);
-    }
+fn explicit_quick_creation_ignores_deprecated_startup_enabled() {
     let mut config = config();
     config.startup.enabled = false;
     let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
     assert_eq!(
         dashboard
-            .begin_startup_session(std::env::current_dir().unwrap())
+            .quick_session_action(std::env::current_dir().unwrap())
             .unwrap(),
-        DashboardAction::None
+        DashboardAction::CreateStartupSession {
+            profile_id: "codex-1".into(),
+            target_template_id: None,
+            generation: None,
+            initial_prompt: None,
+            project_directory: std::env::current_dir().unwrap(),
+        }
     );
-    assert!(!dashboard.prompt_has_focus());
 }
 
 #[test]
-fn stopped_history_does_not_block_the_first_prompt() {
+fn stopped_history_does_not_block_explicit_quick_creation() {
     let mut config = config();
     config
         .targets
@@ -126,7 +111,7 @@ fn stopped_history_does_not_block_the_first_prompt() {
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
     assert!(matches!(
         dashboard
-            .begin_startup_session(std::env::current_dir().unwrap())
+            .quick_session_action(std::env::current_dir().unwrap())
             .unwrap(),
         DashboardAction::CreateStartupSession { .. }
     ));
@@ -134,13 +119,13 @@ fn stopped_history_does_not_block_the_first_prompt() {
 }
 
 #[test]
-fn startup_reports_missing_agent_profiles() {
+fn explicit_quick_creation_reports_missing_agent_profiles() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
     let directory = std::env::current_dir().unwrap();
     dashboard.config.startup.profile = Some("missing".into());
     assert!(
         dashboard
-            .begin_startup_session(directory.clone())
+            .quick_session_action(directory.clone())
             .unwrap_err()
             .contains("not configured")
     );
@@ -148,7 +133,7 @@ fn startup_reports_missing_agent_profiles() {
     dashboard.config.profiles.clear();
     assert!(
         dashboard
-            .begin_startup_session(directory)
+            .quick_session_action(directory)
             .unwrap_err()
             .contains("F4")
     );
@@ -177,6 +162,7 @@ fn new_session_wizard_returns_all_three_choices() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "codex-1".into(),
             bundle_id: "hel".into(),
             project_directory: None,
@@ -434,6 +420,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "claude-1".into(),
             bundle_id: raw_project_context_id("/srv/repaired"),
             project_directory: Some("/srv/repaired".into()),
@@ -541,6 +528,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "kimi".into(),
             bundle_id: raw_project_context_id("/home/me/project"),
             project_directory: Some("/home/me/project".into()),
@@ -585,6 +573,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "codex-1".into(),
             bundle_id: "zebra-recent".into(),
             project_directory: None,
@@ -818,6 +807,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                 read_only: false,
             }],
             launch: Box::new(DashboardAction::CreateSession {
+                workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
                 bundle_id: "hel".into(),
                 project_directory: None,
@@ -973,7 +963,10 @@ fn failed_source_validation_does_not_add_new_or_resume_mounts() {
 
 #[test]
 fn resume_can_convert_to_another_harness() {
-    let mut dashboard = dashboard_with_session(stopped_session());
+    let mut session = stopped_session();
+    session.workspace_id = "workspace-history".into();
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.set_active_workspace(Some("workspace-origin".into()));
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     open_resume_wizard(&mut dashboard);
     dashboard.handle_key(key(KeyCode::Up));
@@ -983,6 +976,7 @@ fn resume_can_convert_to_another_harness() {
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::PreflightResumeRepositories {
             launch: Box::new(DashboardAction::ResumeSession {
+                workspace_id: "workspace-origin".into(),
                 session_id: "session-1".into(),
                 profile_id: "claude-1".into(),
                 target_template_id: "podman".into(),
@@ -1204,6 +1198,7 @@ fn resume_dialog_attaches_an_additional_resource() {
             }],
             launch: Box::new(DashboardAction::PreflightResumeRepositories {
                 launch: Box::new(DashboardAction::ResumeSession {
+                    workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
                     session_id: "session-1".into(),
                     profile_id: "codex-1".into(),
                     target_template_id: "podman".into(),

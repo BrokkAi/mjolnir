@@ -573,7 +573,7 @@ mod tests {
         };
         assert_eq!(editor.focused(), ContainerEditFocus::Source);
         dashboard.handle_paste("/srv/資料 with spaces");
-        let lines = draw(&mut dashboard, 72, 18);
+        let lines = draw(&mut dashboard, 80, 18);
         assert!(
             lines
                 .iter()
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(editor.source.value(), "/srv/資料 with spaces");
         let lines = draw(&mut dashboard, 40, 10);
         assert!(lines.iter().any(|line| line.contains("Terminal too small")));
-        let lines = draw(&mut dashboard, 72, 18);
+        let lines = draw(&mut dashboard, 80, 18);
         assert!(lines.iter().any(|line| line.contains("  Save  ")));
     }
 

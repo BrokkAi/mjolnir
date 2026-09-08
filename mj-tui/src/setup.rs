@@ -95,7 +95,12 @@ impl SetupDialog {
         match self.current() {
             Value::Object(entries) => entries
                 .keys()
-                .filter(|key| key.as_str() != "version")
+                .filter(|key| {
+                    key.as_str() != "version"
+                        && !(self.path.len() == 1
+                            && self.path[0] == "startup"
+                            && key.as_str() == "enabled")
+                })
                 .cloned()
                 .collect(),
             Value::Array(entries) => (0..entries.len()).map(|i| i.to_string()).collect(),
@@ -764,6 +769,16 @@ mod tests {
     }
 
     #[test]
+    fn deprecated_startup_enabled_is_preserved_but_hidden_from_setup() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.config.startup.enabled = false;
+        dashboard.begin_setup();
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(!dialog.keys().iter().any(|key| key == "enabled"));
+        assert_eq!(dialog.draft["startup"]["enabled"], false);
+    }
+
+    #[test]
     fn setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_draft() {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.begin_setup();
@@ -823,10 +838,10 @@ mod tests {
     fn cancelling_setup_preserves_configuration_and_render_keeps_controls_visible() {
         let mut dashboard = dashboard_with_session(stopped_session());
         let original = dashboard.config.clone();
-        for (width, height) in [(72, 18), (100, 30), (140, 42)] {
+        for (width, height) in [(80, 18), (100, 30), (140, 42)] {
             dashboard.begin_setup();
             choose(&mut dashboard, "startup");
-            choose(&mut dashboard, "enabled");
+            choose(&mut dashboard, "prompt");
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| crate::render::render(frame, &mut dashboard))

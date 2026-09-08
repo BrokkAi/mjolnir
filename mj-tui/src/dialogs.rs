@@ -2980,7 +2980,7 @@ mod tests {
 
     #[test]
     fn deleting_a_session_only_asks_yes_or_no() {
-        let mut dashboard = dashboard_with_session(stopped_session());
+        let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         dashboard.handle_key(key(KeyCode::Delete));
         let Mode::Confirm(dialog) = &dashboard.mode else {
@@ -3043,7 +3043,7 @@ mod tests {
             },
         ];
         for confirmation in confirmations {
-            for (width, height) in [(120, 30), (100, 24), (72, 22)] {
+            for (width, height) in [(120, 30), (100, 24), (80, 22)] {
                 let mut dashboard = dashboard_with_session(stopped_session());
                 dashboard.mode = Mode::Confirm(ConfirmDialog::new(confirmation.clone()));
                 let mut terminal =
@@ -3084,6 +3084,7 @@ mod tests {
     #[test]
     fn dirty_local_confirmation_continues_or_cancels_from_its_buttons() {
         let create = |allow_dirty_local| DashboardAction::CreateSession {
+            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "codex-1".into(),
             bundle_id: "hel".into(),
             project_directory: None,
@@ -3095,6 +3096,7 @@ mod tests {
 
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.show_dirty_local_confirmation(create(false), vec!["project".into()]);
+        dashboard.set_active_workspace(Some("workspace-other".into()));
         assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), create(true));
         assert!(matches!(dashboard.mode, Mode::Dashboard));
 
@@ -3192,6 +3194,7 @@ mod tests {
     #[test]
     fn missing_checkpoint_history_dialog_accepts_a_replacement_origin() {
         let launch = DashboardAction::ResumeSession {
+            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
             session_id: "session-1".into(),
             profile_id: "codex-1".into(),
             target_template_id: "podman".into(),

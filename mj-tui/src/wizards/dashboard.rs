@@ -1456,6 +1456,7 @@ impl DashboardState {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
+            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             profile_id: nth_key(&self.config.profiles, wizard.profile),
             bundle_id: if raw_project {
                 raw_project_context_id(&wizard.project_directory)
@@ -2339,6 +2340,7 @@ impl DashboardState {
             return action;
         }
         let launch = DashboardAction::ResumeSession {
+            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             session_id: wizard.session_id.clone(),
             profile_id,
             target_template_id: target_template_id.clone(),
@@ -2457,24 +2459,6 @@ impl DashboardState {
 
     pub fn finish_session_mount_preflight(&mut self) {
         self.cancel_modal();
-    }
-
-    /// Prepare the first prompt without opening the new-session wizard.
-    /// Called once when the surface opens, never on subsequent state refreshes.
-    pub fn begin_startup_session(
-        &mut self,
-        project_directory: std::path::PathBuf,
-    ) -> Result<DashboardAction, String> {
-        if !self.config.startup.enabled
-            || self
-                .state
-                .sessions
-                .values()
-                .any(|session| session.state.is_active())
-        {
-            return Ok(DashboardAction::None);
-        }
-        self.quick_session_action(project_directory)
     }
 
     /// Use the saved creation defaults without opening any selector.

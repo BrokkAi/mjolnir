@@ -1576,14 +1576,6 @@ impl Drop for RuntimeFeed {
     }
 }
 
-pub(crate) fn spawn_runtime_feed(workspace_id: String) -> RuntimeFeed {
-    spawn_runtime_feed_with(
-        workspace_id,
-        |workspace, revision| poll_daemon_runtime(workspace, revision, false),
-        load_runtime_projection,
-    )
-}
-
 type StoredProjection = Option<(MaterializedSession, hel::hel_state::ProjectionWindow)>;
 
 async fn load_runtime_projection(session_id: String) -> Result<StoredProjection> {

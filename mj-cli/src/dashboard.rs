@@ -152,11 +152,17 @@ impl StartupSession {
 /// on the first key and creation time decides, which is the intended fallback
 /// rather than an accident.
 fn startup_session_choice<'a>(
+    workspace_id: Option<&str>,
     sessions: impl IntoIterator<Item = &'a SessionRecord>,
     activity_at_ms: impl Fn(&str) -> Option<u64>,
 ) -> Option<String> {
     sessions
         .into_iter()
+        .filter(|session| {
+            Some(session.workspace_id.as_str()) == workspace_id
+                && session.state.is_active()
+                && !session.archived
+        })
         .max_by(|left, right| {
             activity_at_ms(&left.id)
                 .unwrap_or(0)
@@ -181,7 +187,6 @@ pub(crate) enum DashboardExit {
     Normal,
     Detached,
     Interrupted,
-    WorkspacePicker,
 }
 
 #[derive(Clone)]
@@ -325,6 +330,7 @@ pub(crate) struct DashboardContext {
     pub(crate) client_id: String,
     pub(crate) dashboard: DashboardState,
     pane_size_persistence: pane_sizes::PaneSizePersistence,
+    known_workspace_layouts: BTreeSet<String>,
     /// One notifications bar for the whole process: the dashboard and every
     /// chat view opened from it report through this shared handle.
     notices: mj_chat::hel_chat::Notices,
@@ -363,7 +369,6 @@ pub(crate) struct DashboardContext {
     /// changed.
     pub(crate) controller_changed: bool,
     pub(crate) quit_detached: bool,
-    workspace_switch_requested: bool,
     shutdown_requested: bool,
     pub(crate) critical_operations: CriticalOperationTracker,
     critical_operations_changed: watch::Receiver<u64>,
@@ -502,6 +507,7 @@ pub(super) fn retain_workspace_sessions(
 pub(crate) async fn run_dashboard_for_workspace(
     workspace_id: &str,
     client_id: &str,
+    open_workspace_manager: bool,
 ) -> Result<DashboardExit> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
@@ -519,6 +525,10 @@ pub(crate) async fn run_dashboard_for_workspace(
     let Some(mut context) = DashboardContext::open(workspace_id, client_id)? else {
         return Ok(DashboardExit::Normal);
     };
+    if open_workspace_manager {
+        let action = context.dashboard.begin_workspace_manager();
+        actions::apply_dashboard_action(&mut context, action).await?;
+    }
     let termination = hel::termination::Coordinator::install().token();
     // `interval_at` so the first tick is a period away rather than immediate,
     // and `Delay` so a tick that was gated off does not fire a burst to catch
@@ -638,8 +648,8 @@ pub(crate) async fn run_dashboard_for_workspace(
             // whether or not the chat is on screen, which is what keeps an
             // off-screen chat current.
             () = mj_chat::hel_chat::ActiveChat::pump(context.active_chat.as_mut()) => {
-                // The conversation is always on screen, so its own feeds
-                // always redraw it and always advance its read receipt.
+                // A warm chat may be hidden by another tab or selection.
+                // Only visible conversation updates advance its read receipt.
                 context.dirty = true;
                 context.acknowledge_visible_chat();
             }
@@ -731,9 +741,16 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
         }
         context.drain_feeds();
-        context
-            .pane_size_persistence
-            .update(context.dashboard.pane_sizes());
+        if let Some(workspace_id) = context.dashboard.active_workspace_id()
+            && context.known_workspace_layouts.contains(workspace_id)
+            && context
+                .dashboard
+                .workspace_pane_sizes_modified(workspace_id)
+        {
+            context
+                .pane_size_persistence
+                .update(workspace_id, context.dashboard.pane_sizes());
+        }
         if !context.shutdown_requested {
             context.apply_chat_outcome(chat_outcome).await;
             actions::apply_dashboard_action(&mut context, action).await?;
@@ -750,7 +767,6 @@ pub(crate) async fn run_dashboard_for_workspace(
     }
     context.cancel_background_work();
     let quit_detached = context.quit_detached;
-    let workspace_switch_requested = context.workspace_switch_requested;
     // Hand the terminal back before saying anything on it; the warm chat and
     // the background feeds are torn down after, as the rest of the context
     // drops.
@@ -768,9 +784,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             .await
             .context("shut down dashboard session manager")?;
     }
-    Ok(if workspace_switch_requested {
-        DashboardExit::WorkspacePicker
-    } else if quit_detached {
+    Ok(if quit_detached {
         DashboardExit::Detached
     } else if context.shutdown_requested {
         DashboardExit::Interrupted
@@ -784,9 +798,37 @@ impl DashboardContext {
         self.begin_shutdown(true);
     }
 
-    pub(crate) fn request_workspace_switch(&mut self) {
-        self.workspace_switch_requested = true;
-        self.begin_shutdown(false);
+    pub(crate) fn select_workspace(&mut self, workspace_id: Option<String>) {
+        if self.dashboard.active_workspace_id() == workspace_id.as_deref() {
+            return;
+        }
+        if let Some(id) = self.dashboard.active_workspace_id()
+            && self.known_workspace_layouts.contains(id)
+            && self.dashboard.workspace_pane_sizes_modified(id)
+        {
+            self.pane_size_persistence
+                .update(id, self.dashboard.pane_sizes());
+        }
+        self.acknowledge_visible_chat();
+        self.capture_active_composer_draft();
+        self.save_active_question_draft();
+        self.cancel_startup_session();
+        self.defer_chat_open();
+        self.workspace_id = workspace_id.clone().unwrap_or_default();
+        self.dashboard.set_active_workspace(workspace_id);
+        self.dashboard.set_current_session(None);
+        self.follow_selected_session();
+        self.dirty = true;
+    }
+
+    pub(crate) fn session_in_active_workspace(&self, session_id: &str) -> bool {
+        self.controller
+            .state
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| {
+                Some(session.workspace_id.as_str()) == self.dashboard.active_workspace_id()
+            })
     }
 
     fn begin_shutdown(&mut self, detached: bool) {
@@ -826,8 +868,7 @@ impl DashboardContext {
 
     pub(super) fn acknowledge_visible_chat(&mut self) {
         let Some((session_id, through)) = self
-            .active_chat
-            .as_ref()
+            .visible_chat()
             .map(|chat| (chat.session_id().to_owned(), chat.latest_event_ordinal()))
         else {
             return;
@@ -915,25 +956,33 @@ impl DashboardContext {
         let launch_directory = std::env::current_dir().context("read the launch directory")?;
         let mut controller = Controller::load()?;
         retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
-        let workspace_name = hel::hel_database::list_workspaces()?
-            .into_iter()
-            .find(|workspace| workspace.id == workspace_id)
-            .with_context(|| format!("unknown workspace {workspace_id:?}"))?
-            .name;
+        let workspaces = hel::hel_database::list_workspaces()?;
+        let workspace_names = workspaces
+            .iter()
+            .map(|workspace| (workspace.id.clone(), workspace.name.clone()))
+            .collect();
+        let layouts = workspaces
+            .iter()
+            .map(|workspace| {
+                hel::hel_database::load_workspace_pane_sizes(&workspace.id)
+                    .map(|sizes| (workspace.id.clone(), sizes))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
         let mut dashboard = DashboardState::new(
             controller.config.clone(),
             controller.state.clone(),
             BTreeMap::new(),
         );
-        let pane_sizes = hel::hel_database::load_workspace_pane_sizes(workspace_id)
-            .context("load workspace pane sizes")?;
-        dashboard.restore_pane_sizes(pane_sizes)?;
+        dashboard.set_workspace_names(workspace_names);
+        for (id, sizes) in &layouts {
+            dashboard.cache_workspace_pane_sizes(id, *sizes);
+        }
+        dashboard.set_active_workspace(Some(workspace_id.to_owned()));
         let notices = mj_chat::hel_chat::Notices::default();
         dashboard.share_notices(notices.clone());
         for (session_id, queued) in projected_queued_prompts(&controller)? {
             dashboard.apply_queued_prompts(&session_id, queued);
         }
-        dashboard.set_workspace_name(workspace_name);
         let terminal = TerminalGuard::enter()?;
         if configuration_needs_setup(&controller.config) {
             dashboard.begin_setup();
@@ -997,11 +1046,9 @@ impl DashboardContext {
             tokio::sync::mpsc::channel::<DashboardImportUpdate>(8);
         let (dashboard_io_tx, dashboard_io_rx) =
             tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
-        let pane_size_persistence = pane_sizes::PaneSizePersistence::start(
-            workspace_id.to_owned(),
-            pane_sizes,
-            notices.clone(),
-        );
+        let known_workspace_layouts = layouts.keys().cloned().collect();
+        let pane_size_persistence =
+            pane_sizes::PaneSizePersistence::start(layouts, notices.clone());
 
         let mut context = Self {
             terminal,
@@ -1011,6 +1058,7 @@ impl DashboardContext {
             client_id: client_id.to_owned(),
             dashboard,
             pane_size_persistence,
+            known_workspace_layouts,
             notices,
             events: Some(event::EventStream::new()),
             active_chat: None,
@@ -1024,7 +1072,6 @@ impl DashboardContext {
             drawn_notice_generation: 0,
             controller_changed: true,
             quit_detached: false,
-            workspace_switch_requested: false,
             shutdown_requested: false,
             critical_operations,
             critical_operations_changed,
@@ -1178,22 +1225,12 @@ impl DashboardContext {
         // The startup pick compares recorded activity, which is exactly what
         // these summaries carry, so it waits for them.
         self.startup = StartupSession::begin(
-            sessions.iter().map(|(id, _)| id.clone()),
+            sessions
+                .iter()
+                .filter(|(id, _)| self.session_in_active_workspace(id))
+                .map(|(id, _)| id.clone()),
             std::time::Instant::now(),
         );
-        if sessions.is_empty() {
-            let action = self
-                .dashboard
-                .begin_startup_session(self.launch_directory.clone());
-            match action {
-                Ok(DashboardAction::None) => self.dashboard.focus_sessions(),
-                Ok(action) => actions::start_session_launch(self, action),
-                Err(error) => {
-                    self.dashboard.focus_sessions();
-                    self.dashboard.set_failure_notice(error);
-                }
-            }
-        }
         for (session_id, viewed_through_event_ordinal) in sessions {
             spawn_stored_session_summary(
                 session_id,
@@ -1284,9 +1321,9 @@ impl DashboardContext {
             return;
         }
         let Some(session_id) = startup_session_choice(
+            self.dashboard.active_workspace_id(),
             self.controller.state.sessions.values().filter(|session| {
-                session.state.is_active()
-                    && self.dashboard.transition_kind(&session.id).is_none()
+                self.dashboard.transition_kind(&session.id).is_none()
                     && self
                         .dashboard
                         .transition_failure_kind(&session.id)
@@ -1696,6 +1733,9 @@ impl DashboardContext {
     }
 
     pub(crate) fn open_chat_session(&mut self, session_id: &str) {
+        if !self.session_in_active_workspace(session_id) {
+            return;
+        }
         // The warm chat remains alive while another session attaches. Capture
         // its current composer before any background snapshot can arrive.
         self.capture_active_composer_draft();
@@ -2070,7 +2110,38 @@ impl DashboardContext {
             return;
         }
         self.runtime_state_revision = update.revision;
+        let removed_layouts = self
+            .known_workspace_layouts
+            .iter()
+            .filter(|id| !update.workspace_names.contains_key(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in removed_layouts {
+            self.pane_size_persistence.forget(&id);
+            self.known_workspace_layouts.remove(&id);
+        }
+        let new_layouts = update
+            .workspace_names
+            .keys()
+            .filter(|id| !self.known_workspace_layouts.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !new_layouts.is_empty() {
+            self.known_workspace_layouts
+                .extend(new_layouts.iter().cloned());
+            io::spawn_workspace_pane_sizes_load(new_layouts, self.dashboard_io_tx.clone());
+        }
+        let next_workspace = if self
+            .dashboard
+            .active_workspace_id()
+            .is_some_and(|id| update.workspace_names.contains_key(id))
+        {
+            self.dashboard.active_workspace_id().map(str::to_owned)
+        } else {
+            update.workspace_names.keys().next().cloned()
+        };
         self.dashboard.set_workspace_names(update.workspace_names);
+        self.select_workspace(next_workspace);
         self.apply_runtime_records(update.records);
         self.dashboard.set_move_operations(update.moves);
         self.apply_runtime_lifecycles(update.lifecycles);
@@ -2487,6 +2558,15 @@ impl DashboardContext {
             .map(mj_chat::hel_chat::ActiveChat::session_id)?
             .to_owned();
         let draft = self.composer_drafts.get(&session_id)?.clone();
+        let last_seen_event_ordinal = detach_read_frontier(
+            self.visible_chat().is_some(),
+            last_seen_event_ordinal,
+            self.controller
+                .state
+                .sessions
+                .get(&session_id)
+                .map_or(0, |session| session.viewed_through_event_ordinal),
+        );
         record_chat_detach_state(
             &mut self.controller,
             &mut self.dashboard,
@@ -2520,6 +2600,15 @@ impl DashboardContext {
             .map_or_else(String::new, |session| session.draft_input.clone());
         self.composer_drafts
             .capture(&session_id, text, &inherited_input);
+    }
+}
+
+/// Background events in a warm, hidden chat have not been read.
+fn detach_read_frontier(visible: bool, latest: u64, acknowledged: u64) -> u64 {
+    if visible {
+        latest.max(acknowledged)
+    } else {
+        acknowledged
     }
 }
 
@@ -2883,6 +2972,13 @@ fn configuration_needs_setup(config: &HelConfig) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn detaching_hidden_chat_preserves_unread_background_events() {
+        assert_eq!(super::detach_read_frontier(false, 20, 12), 12);
+        assert_eq!(super::detach_read_frontier(true, 20, 12), 20);
+        assert_eq!(super::detach_read_frontier(true, 10, 12), 12);
+    }
+
     use super::*;
     use hel::hel_state::HelState;
     use mj_chat::hel_chat::{ActiveChat, Notices, SessionHeaderIdentity};
@@ -3162,7 +3258,7 @@ mod tests {
             .frame_surfaces()
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized sessions list registered");
-        assert_eq!(surface.rect.height, 17);
+        assert_eq!(surface.rect.height, 16);
 
         let start = (surface.rect.x, surface.rect.y);
         let end = (surface.rect.right() - 1, surface.rect.bottom() - 1);
@@ -3456,7 +3552,7 @@ mod tests {
                     crossterm::event::KeyModifiers::NONE,
                 )),
             ),
-            DashboardAction::OpenWorkspacePicker
+            DashboardAction::LoadWorkspaceManagement { .. }
         ));
     }
 
@@ -3609,7 +3705,33 @@ mod tests {
     }
 
     #[test]
-    fn f3_opens_the_workspace_picker_from_any_pane() {
+    fn workspace_tab_chords_reach_the_local_filter_from_the_composer() {
+        let mut dashboard = populated_dashboard();
+        let original = dashboard.active_workspace_id().unwrap().to_owned();
+        dashboard.set_workspace_names(BTreeMap::from([
+            (original.clone(), "Current".into()),
+            ("other".into(), "Other".into()),
+        ]));
+        dashboard.focus_prompt();
+        let key = crossterm::event::KeyEvent::new(KeyCode::PageDown, KeyModifiers::CONTROL);
+        let command = chord(&dashboard, key).expect("workspace tab shortcut reaches dashboard");
+        assert!(
+            matches!(dashboard.dispatch_command(command), DashboardAction::SelectWorkspace { workspace_id } if workspace_id == "other")
+        );
+        assert_eq!(
+            dashboard.active_workspace_id(),
+            Some(original.as_str()),
+            "the controller captures drafts before changing the local filter"
+        );
+        dashboard.begin_workspace_manager();
+        assert!(
+            chord(&dashboard, key).is_none(),
+            "tab shortcuts do not escape the modal"
+        );
+    }
+
+    #[test]
+    fn f3_opens_workspace_management_from_any_pane() {
         for focus in [
             hel_tui::Focus::Sessions,
             hel_tui::Focus::Prompt,
@@ -3622,7 +3744,7 @@ mod tests {
             assert_eq!(command, CommandId::Workspaces, "{focus:?}");
             assert!(matches!(
                 dashboard.dispatch_command(command),
-                DashboardAction::OpenWorkspacePicker
+                DashboardAction::LoadWorkspaceManagement { .. }
             ));
         }
     }
@@ -3762,7 +3884,11 @@ mod tests {
         };
 
         assert_eq!(
-            startup_session_choice(sessions.iter(), activity),
+            startup_session_choice(
+                Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                sessions.iter(),
+                activity
+            ),
             Some("session-b".into())
         );
     }
@@ -3777,7 +3903,11 @@ mod tests {
             live_session("session-c", "2026-08-02T00:00:00Z"),
         ];
         assert_eq!(
-            startup_session_choice(sessions.iter(), |_| None),
+            startup_session_choice(
+                Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                sessions.iter(),
+                |_| None
+            ),
             Some("session-b".into())
         );
 
@@ -3788,11 +3918,19 @@ mod tests {
             live_session("session-z", "2026-08-01T00:00:00Z"),
         ];
         assert_eq!(
-            startup_session_choice(tied.iter(), |_| None),
+            startup_session_choice(
+                Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                tied.iter(),
+                |_| None
+            ),
             Some("session-z".into())
         );
         assert_eq!(
-            startup_session_choice(tied.iter().rev(), |_| None),
+            startup_session_choice(
+                Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                tied.iter().rev(),
+                |_| None
+            ),
             Some("session-z".into())
         );
     }
@@ -3800,9 +3938,42 @@ mod tests {
     #[test]
     fn a_workspace_with_no_live_session_has_nothing_to_open() {
         assert_eq!(
-            startup_session_choice(std::iter::empty(), |_| Some(1)),
+            startup_session_choice(
+                Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                std::iter::empty(),
+                |_| Some(1)
+            ),
             None
         );
+    }
+
+    #[test]
+    fn startup_filters_global_records_without_creating_a_session_for_an_empty_workspace() {
+        let mut active = live_session("active", "2026-08-01T00:00:00Z");
+        active.workspace_id = "a".into();
+        let mut archived = active.clone();
+        archived.id = "archived".into();
+        archived.archived = true;
+        archived.workspace_id = "b".into();
+        let mut stopped = archived.clone();
+        stopped.id = "stopped".into();
+        stopped.archived = false;
+        stopped.state = hel::hel_state::SessionState::Stopped;
+        let records = [active, archived, stopped];
+        assert_eq!(
+            startup_session_choice(Some("b"), records.iter(), |_| Some(99)),
+            None
+        );
+        assert_eq!(
+            startup_session_choice(None, records.iter(), |_| Some(99)),
+            None
+        );
+        assert_eq!(
+            startup_session_choice(Some("a"), records.iter(), |_| Some(99)),
+            Some("active".into())
+        );
+        let mut startup = StartupSession::begin(std::iter::empty(), std::time::Instant::now());
+        assert!(!startup.ready(std::time::Instant::now() + STARTUP_SESSION_WAIT));
     }
 
     /// The pick waits for the summaries it compares, but not for ever, and it

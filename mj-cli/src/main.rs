@@ -14,7 +14,6 @@ mod pollers;
 mod server;
 mod session_presentation;
 mod web_viewer;
-mod workspace_selector;
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -322,9 +321,9 @@ async fn run_command(
     requested_workspace: Option<String>,
 ) -> Result<DashboardExit> {
     match command {
-        None => run_workspace_dashboard(requested_workspace.as_deref(), false, None).await,
+        None => run_workspace_dashboard(requested_workspace.as_deref(), false).await,
         Some(Command::Workspaces) => {
-            run_workspace_dashboard(requested_workspace.as_deref(), true, None).await
+            run_workspace_dashboard(requested_workspace.as_deref(), true).await
         }
         Some(Command::App) => desktop::run_desktop_app()
             .await
@@ -694,12 +693,11 @@ fn print_move_human(outcome: &hel::hel_state::MoveOutcome) {
 
 async fn run_workspace_dashboard(
     requested_workspace: Option<&str>,
-    force_selector: bool,
-    fallback_workspace: Option<String>,
+    open_workspace_manager: bool,
 ) -> Result<DashboardExit> {
     let mut daemon = daemon::connect_or_start().await?;
-    let mut workspaces = daemon.list_workspaces().await?;
-    let selected = if let Some(requested) = requested_workspace.filter(|_| !force_selector) {
+    let workspaces = daemon.list_workspaces().await?;
+    let selected = if let Some(requested) = requested_workspace {
         workspaces
             .iter()
             .find(|candidate| {
@@ -707,126 +705,30 @@ async fn run_workspace_dashboard(
             })
             .map(|candidate| candidate.workspace.id.clone())
             .with_context(|| format!("unknown workspace {requested:?}"))?
-    } else if !force_selector && workspaces.is_empty() {
+    } else if let Some(workspace) = workspaces.first() {
+        // The database orders workspaces by most recent opening.
+        workspace.workspace.id.clone()
+    } else {
         daemon
             .create_workspace(suggested_workspace_name(&workspaces)?)
             .await?
             .id
-    } else if !force_selector && workspaces.len() == 1 && workspaces[0].attached_pids.is_empty() {
-        workspaces[0].workspace.id.clone()
-    } else if !std::io::IsTerminal::is_terminal(&std::io::stdin())
-        || !std::io::IsTerminal::is_terminal(&std::io::stdout())
-    {
-        match workspaces.as_slice() {
-            [workspace] => workspace.workspace.id.clone(),
-            [] => bail!("no workspace exists; run `mj` in a terminal to create one"),
-            _ => bail!("several workspaces exist; pass `--workspace NAME`"),
-        }
-    } else {
-        let notices = mj_chat::hel_chat::Notices::default();
-        let mut selected_workspace_id = None;
-        loop {
-            let suggested = suggested_workspace_name(&workspaces)?;
-            match workspace_selector::select_workspace(
-                &workspaces,
-                &suggested,
-                &notices,
-                selected_workspace_id.as_deref(),
-            )
-            .await?
-            {
-                workspace_selector::SelectorOutcome::Select(workspace_id) => break workspace_id,
-                workspace_selector::SelectorOutcome::Create(name) => {
-                    match daemon.create_workspace(name).await {
-                        Ok(workspace) => break workspace.id,
-                        Err(error) => {
-                            notices.set_failure(format!("Could not create workspace: {error:#}"))
-                        }
-                    }
-                }
-                workspace_selector::SelectorOutcome::Rename { workspace_id, name } => {
-                    selected_workspace_id = Some(workspace_id.clone());
-                    match daemon.rename_workspace(workspace_id, name).await {
-                        Ok(()) => {
-                            notices.clear();
-                            workspaces = daemon.list_workspaces().await?;
-                        }
-                        Err(error) => {
-                            notices.set_failure(format!("Could not rename workspace: {error:#}"))
-                        }
-                    }
-                }
-                workspace_selector::SelectorOutcome::Delete(workspace_id) => {
-                    selected_workspace_id = Some(workspace_id.clone());
-                    match daemon.delete_workspace(workspace_id).await {
-                        Ok(()) => {
-                            notices.clear();
-                            selected_workspace_id = None;
-                            workspaces = daemon.list_workspaces().await?;
-                        }
-                        Err(error) => {
-                            notices.set_failure(format!("Could not delete workspace: {error:#}"))
-                        }
-                    }
-                }
-                workspace_selector::SelectorOutcome::ForceDelete(workspace_id) => {
-                    selected_workspace_id = Some(workspace_id.clone());
-                    match daemon.force_delete_workspace(workspace_id).await {
-                        Ok(()) => {
-                            notices.clear();
-                            selected_workspace_id = None;
-                            workspaces = daemon.list_workspaces().await?;
-                        }
-                        Err(error) => notices
-                            .set_failure(format!("Could not force-delete workspace: {error:#}")),
-                    }
-                }
-                workspace_selector::SelectorOutcome::RecoverDraft {
-                    workspace_id,
-                    draft_id,
-                } => {
-                    selected_workspace_id = Some(workspace_id);
-                    match daemon.recover_draft(draft_id).await {
-                        Ok(()) => {
-                            notices.clear();
-                            workspaces = daemon.list_workspaces().await?;
-                        }
-                        Err(error) => {
-                            notices.set_failure(format!("Could not recover draft: {error:#}"))
-                        }
-                    }
-                }
-                workspace_selector::SelectorOutcome::Interrupted => {
-                    return Ok(DashboardExit::Interrupted);
-                }
-                workspace_selector::SelectorOutcome::Cancel => {
-                    if let Some(workspace_id) = &fallback_workspace {
-                        break workspace_id.clone();
-                    }
-                    // The picker has only disposable read work left. Do not
-                    // wait on cancelled blocking readers at process shutdown.
-                    return Ok(DashboardExit::Interrupted);
-                }
-            }
-        }
     };
+    daemon.touch_workspace(selected.clone()).await?;
 
     let client_id = format!(
         "tui-{}-{}",
         std::process::id(),
         hel::hel_workspace::new_workspace_id()?
     );
-    daemon
-        .attach(selected.clone(), client_id.clone(), std::process::id())
-        .await?;
+    daemon.attach(client_id.clone(), std::process::id()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
     let attachment_task = daemon::maintain_attachment(
-        selected.clone(),
         client_id.clone(),
         std::process::id(),
         attachment_cancellation.clone(),
     );
-    let result = run_dashboard_for_workspace(&selected, &client_id).await;
+    let result = run_dashboard_for_workspace(&selected, &client_id, open_workspace_manager).await;
     attachment_cancellation.cancel();
     if let Err(error) = attachment_task.await {
         tracing::warn!(%error, "workspace attachment task failed");
@@ -839,11 +741,7 @@ async fn run_workspace_dashboard(
         }
         Err(error) => tracing::warn!(%error, "daemon unavailable while dashboard detached"),
     }
-    if matches!(result, Ok(DashboardExit::WorkspacePicker)) {
-        Box::pin(run_workspace_dashboard(None, true, Some(selected))).await
-    } else {
-        result
-    }
+    result
 }
 
 async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {

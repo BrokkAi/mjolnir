@@ -19,6 +19,7 @@ impl DashboardState {
                 | Mode::RepositoryOrigin(_)
                 | Mode::TargetActions(_)
                 | Mode::Web(_)
+                | Mode::WorkspaceManager(_)
                 | Mode::Importing(_)
                 | Mode::ConfirmImportBundle(_)
                 | Mode::Confirm(_)
@@ -74,6 +75,10 @@ impl DashboardState {
                 let form = dialog.form.borrow();
                 form.captures_pointer() || form.contains(mouse.column, mouse.row)
             }
+            Mode::WorkspaceManager(dialog) => {
+                let form = dialog.form.borrow();
+                form.captures_pointer() || form.contains(mouse.column, mouse.row)
+            }
             Mode::Importing(dialog) => {
                 let form = dialog.form.borrow();
                 form.captures_pointer() || form.contains(mouse.column, mouse.row)
@@ -111,6 +116,7 @@ impl DashboardState {
             Mode::RepositoryOrigin(dialog) => dialog.form.get_mut().cancel_pointer(),
             Mode::TargetActions(dialog) => dialog.form.get_mut().cancel_pointer(),
             Mode::Web(dialog) => dialog.form.get_mut().cancel_pointer(),
+            Mode::WorkspaceManager(dialog) => dialog.form.get_mut().cancel_pointer(),
             Mode::Importing(dialog) => dialog.form.get_mut().cancel_pointer(),
             Mode::ConfirmImportBundle(dialog) => dialog.form.get_mut().cancel_pointer(),
             Mode::Confirm(dialog) => dialog.form.get_mut().cancel_pointer(),
@@ -133,6 +139,7 @@ impl DashboardState {
             Mode::RepositoryOrigin(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::TargetActions(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::Web(dialog) => dialog.form.get_mut().reset_geometry(),
+            Mode::WorkspaceManager(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::Importing(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::ConfirmImportBundle(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::Confirm(dialog) => dialog.form.get_mut().reset_geometry(),
@@ -148,6 +155,9 @@ impl DashboardState {
         }
         if matches!(self.mode, Mode::ResumeDialog(_)) {
             return self.handle_resume_dialog_event(event);
+        }
+        if matches!(self.mode, Mode::WorkspaceManager(_)) {
+            return self.handle_workspace_manager_event(event);
         }
         match std::mem::replace(&mut self.mode, Mode::Dashboard) {
             Mode::EditContainer(editor) => self.handle_container_edit_event(event, editor),

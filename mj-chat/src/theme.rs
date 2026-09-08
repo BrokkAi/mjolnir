@@ -17,6 +17,14 @@ pub const SUCCESS: Color = rgb(135, 214, 176);
 pub const WARNING: Color = rgb(240, 195, 123);
 pub const ERROR: Color = rgb(242, 143, 156);
 
+/// Semantic colors used by the dashboard's session summaries. These are
+/// deliberately separate from the general-purpose palette: changing a panel
+/// or dialog color must not change what a session's state means.
+pub const SESSION_ERROR: Color = ERROR;
+pub const SESSION_ACTIVITY: Color = WARNING;
+pub const SESSION_ATTENTION: Color = rgb(255, 220, 96);
+pub const SESSION_IDLE: Color = rgb(111, 177, 255);
+
 #[allow(
     clippy::disallowed_methods,
     reason = "The shared theme paints both foreground and background, so its RGB contrast does not depend on the terminal palette."

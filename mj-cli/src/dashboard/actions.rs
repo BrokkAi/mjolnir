@@ -22,6 +22,8 @@ use crate::dashboard::io::{
     spawn_clipboard_read, spawn_config_rename, spawn_create_bundle,
     spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
     spawn_lifecycle_operation, spawn_review_settings_discovery, spawn_review_settings_save,
+    spawn_workspace_create, spawn_workspace_delete, spawn_workspace_draft_recovery,
+    spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -45,8 +47,58 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::QuitDetach => {
             context.request_shutdown();
         }
-        DashboardAction::OpenWorkspacePicker => {
-            context.request_workspace_switch();
+        DashboardAction::SelectWorkspace { workspace_id } => {
+            if context.dashboard.active_workspace_id() != Some(workspace_id.as_str()) {
+                context.select_workspace(Some(workspace_id));
+            }
+        }
+        DashboardAction::LoadWorkspaceManagement { generation } => {
+            spawn_workspace_management_load(generation, context.dashboard_io_tx.clone());
+        }
+        DashboardAction::CreateWorkspace { generation, name } => {
+            spawn_workspace_create(
+                generation,
+                name,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::RenameWorkspace {
+            generation,
+            workspace_id,
+            name,
+        } => {
+            spawn_workspace_rename(
+                generation,
+                workspace_id,
+                name,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::DeleteWorkspace {
+            generation,
+            workspace_id,
+            force,
+        } => {
+            spawn_workspace_delete(
+                generation,
+                workspace_id,
+                force,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::RecoverWorkspaceDraft {
+            generation,
+            draft_id,
+        } => {
+            spawn_workspace_draft_recovery(
+                generation,
+                draft_id,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
         }
         DashboardAction::OpenConfig => context.dashboard.begin_setup(),
         DashboardAction::DiscoverSetup { generation } => {
@@ -245,17 +297,25 @@ pub(crate) async fn apply_dashboard_action(
             profile_id,
             native_session_id,
             display_title,
-        } => context.start_import(
-            PendingDashboardImport {
-                profile_id,
-                native_session_id,
-                display_title,
-            },
-            DashboardImportSafety {
-                accepted: false,
-                include_untracked: true,
-            },
-        ),
+        } => {
+            if context.dashboard.active_workspace_id().is_none() {
+                context
+                    .dashboard
+                    .set_notice("Select a workspace before importing a session.");
+            } else {
+                context.start_import(
+                    PendingDashboardImport {
+                        profile_id,
+                        native_session_id,
+                        display_title,
+                    },
+                    DashboardImportSafety {
+                        accepted: false,
+                        include_untracked: true,
+                    },
+                );
+            }
+        }
         DashboardAction::CancelImport => {
             if let Some(active) = context.active_import.take() {
                 active.cancelled.store(true, Ordering::Release);
@@ -275,13 +335,20 @@ pub(crate) async fn apply_dashboard_action(
                 return Ok(());
             };
             if accepted {
-                context.start_import(
-                    pending,
-                    DashboardImportSafety {
-                        accepted: true,
-                        include_untracked,
-                    },
-                );
+                if context.dashboard.active_workspace_id().is_none() {
+                    context.dashboard.finish_import();
+                    context
+                        .dashboard
+                        .set_notice("Select a workspace before importing a session.");
+                } else {
+                    context.start_import(
+                        pending,
+                        DashboardImportSafety {
+                            accepted: true,
+                            include_untracked,
+                        },
+                    );
+                }
             } else {
                 context.dashboard.finish_import();
                 context
@@ -467,6 +534,13 @@ pub(crate) async fn apply_dashboard_action(
             generation,
             initial_prompt,
         } => {
+            if context.dashboard.active_workspace_id().is_none() {
+                context.dashboard.quick_new_failed(
+                    generation,
+                    "Select a workspace before creating a session.".into(),
+                );
+                return Ok(());
+            }
             match context
                 .dashboard
                 .quick_session_action(context.launch_directory.clone())
@@ -677,7 +751,13 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::ResumeMove { operation } => {
             let operation = *operation;
+            let workspace_id = operation
+                .recovery_session
+                .as_ref()
+                .map(|session| session.workspace_id.clone())
+                .unwrap_or_else(|| context.workspace_id.clone());
             let action = DashboardAction::ResumeSession {
+                workspace_id,
                 session_id: operation.selection.session_id,
                 profile_id: operation.source_profile_id,
                 target_template_id: operation.source_target_template_id,
@@ -916,6 +996,17 @@ fn start_session_launch_with_repository_preflight(
     action: DashboardAction,
     repository_preflight: Option<ResumeRepositorySourceReceipt>,
 ) {
+    let workspace_available = match &action {
+        DashboardAction::CreateSession { workspace_id, .. }
+        | DashboardAction::ResumeSession { workspace_id, .. } => !workspace_id.is_empty(),
+        _ => context.dashboard.active_workspace_id().is_some(),
+    };
+    if !workspace_available {
+        context
+            .dashboard
+            .set_notice("Select a workspace before starting a session.");
+        return;
+    }
     match action {
         action @ (DashboardAction::CreateSession { .. }
         | DashboardAction::CreateStartupSession { .. }) => {
@@ -931,6 +1022,7 @@ fn start_session_launch_with_repository_preflight(
             );
         }
         DashboardAction::ResumeSession {
+            workspace_id,
             session_id,
             profile_id,
             target_template_id,
@@ -943,13 +1035,8 @@ fn start_session_launch_with_repository_preflight(
                 &profile_id,
                 &target_template_id,
             ));
-            let workspace_id = context
-                .controller
-                .state
-                .sessions
-                .get(&session_id)
-                .map(|session| session.workspace_id.clone())
-                .unwrap_or_else(|| context.workspace_id.clone());
+            // Resume places historical work in the workspace where the
+            // explicit request began, even if another tab is selected later.
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Resuming);
             context.dashboard.set_resume_destination(

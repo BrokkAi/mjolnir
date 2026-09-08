@@ -41,7 +41,7 @@ The only accepted top-level keys are:
 | `version` | integer | yes | none | Configuration schema version; use `2`. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
-| `startup` | table | no | automatic Codex session and target selection | First-session defaults for empty terminal workspaces. |
+| `startup` | table | no | explicit Quick New defaults | Defaults used when you create a session without opening the full wizard. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
 | `targets` | table of named tables | no | empty | Named places where sessions run. |
@@ -56,40 +56,35 @@ Profile, bundle, repository, and target IDs all use the same rule: 1–64 ASCII
 letters, digits, `.`, `-`, or `_`. The IDs `.` and `..` are not allowed. IDs are
 the TOML table names, for example `work` in `[profiles.work]`.
 
-## First-session defaults `[startup]`
+## Quick New defaults `[startup]`
 
-When a terminal workspace has no live sessions, Mjolnir automatically starts
-one using the launch directory as its project source and focuses the prompt.
-Existing workspace selection and live-session startup are unchanged. This runs
-once when the dashboard opens; stopping the last session does not immediately
-create a replacement.
+The `[startup]` table supplies defaults for an explicit Quick New action. An
+empty workspace does not create or open a session automatically. The legacy
+`enabled` field remains accepted for older configuration files but is ignored.
 
 ```toml
 [startup]
 # profile = "my-codex"
 # target = "my-podman"
-enabled = true
+# `enabled` is accepted for compatibility and ignored.
 ```
 
 | Field | TOML type | Default | Behavior |
 | --- | --- | --- | --- |
-| `enabled` | boolean | `true` | Set `false` to create sessions manually. |
+| `enabled` | boolean | `true` | Retained for compatibility; ignored. |
 | `profile` | string | first configured Codex profile, otherwise first profile by ID | Must name a configured profile. |
 | `target` | string | usable Podman, then Docker, then local directory | Must name a configured target; an explicit selection never silently switches targets. |
 
-Automatic selection checks local runtime readiness in the background. It reuses
-an existing target of the selected kind, preserving its image and resource
-settings, or adds a standard target if needed. It never selects SSH or AWS
-implicitly. Podman and Docker use a bundle sourced from the current Git
-repository, including uncommitted contents. A plain directory uses a local
-session. Local Git sessions follow the existing managed-worktree behavior.
-The local-directory fallback is supported on Linux and macOS; Windows retains
-its setup flow and requires a supported target.
+When `target` is unset, Quick New checks the current project and prefers a
+usable local Podman runtime, then Docker, then a local worktree on Unix. It
+adds the selected local target or bundle to the configuration as needed. A
+configured `target` is used directly and is never replaced by an automatic
+fallback.
 
-A completely unconfigured Linux or macOS installation gets a `codex` profile
-using `CODEX_HOME` or `~/.codex`, and a `localhost` target. Existing configuration
-is preserved. Authentication or provisioning failures appear on the dashboard;
-use `mj doctor`, `mj login`, or `Alt+N` to resolve them.
+On Linux and macOS, a completely unconfigured installation receives a local
+Codex profile and `localhost` target during dashboard startup. The dashboard
+remains session-empty until you use Quick New or the full creation wizard; use
+`mj setup` when you want guided discovery of other profiles and targets.
 
 ## Web viewer `[phone]`
 

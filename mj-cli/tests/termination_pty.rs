@@ -374,7 +374,7 @@ image = "ubuntu:24.04"
 }
 
 #[test]
-fn first_launch_creates_a_workspace_and_local_session_without_terminal_input() {
+fn first_launch_waits_for_explicit_new_before_creating_a_session() {
     let DashboardPty {
         _storage: storage,
         mut master,
@@ -383,6 +383,30 @@ fn first_launch_creates_a_workspace_and_local_session_without_terminal_input() {
     } = spawn_dashboard_pty_with_startup(false, false, true);
     let database = storage.path().join("data/hel/mj.sqlite3");
     let mut output = Vec::new();
+    wait_for_output(
+        &mut master,
+        &mut output,
+        READY_MARKER,
+        Instant::now() + TIMEOUT,
+    );
+    // Allow ordinary background ticks to settle. Legacy enabled=true must
+    // still leave a workspace empty until the user explicitly starts work.
+    thread::sleep(Duration::from_millis(1100));
+    drain(&mut master, &mut output);
+    assert!(
+        hel::hel_database::load_state_from(&database)
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    master.write_all(b"\x1bn").expect("open Quick New");
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"New session",
+        Instant::now() + TIMEOUT,
+    );
+    master.write_all(b"\r").expect("explicitly create session");
     let deadline = Instant::now() + TIMEOUT;
     let session = loop {
         drain(&mut master, &mut output);
@@ -560,7 +584,7 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
 }
 
 #[test]
-fn live_workspace_preview_terminates_without_reopening_the_fallback_dashboard() {
+fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
     let DashboardPty {
         _storage,
         mut master,
@@ -576,8 +600,8 @@ fn live_workspace_preview_terminates_without_reopening_the_fallback_dashboard() 
         Instant::now() + TIMEOUT,
     );
     output.clear();
-    // F3 leaves the dashboard and opens the picker for its existing workspace.
-    master.write_all(b"\x1bOR").expect("open workspace picker");
+    // F3 opens management inside the existing dashboard and terminal.
+    master.write_all(b"\x1bOR").expect("open workspace manager");
     wait_for_output(
         &mut master,
         &mut output,
@@ -587,14 +611,18 @@ fn live_workspace_preview_terminates_without_reopening_the_fallback_dashboard() 
     wait_for_output(
         &mut master,
         &mut output,
-        // The settled preview has its final geometry after the loading row.
-        b"No sessions",
+        // Wait for the manager snapshot after its loading message.
+        b"active sessions",
         Instant::now() + TIMEOUT,
     );
-    // PageDown and End are harmless even when there is no session to scroll.
+    assert!(
+        !String::from_utf8_lossy(&output).contains("\x1b[?1049l"),
+        "opening management must keep the terminal attached"
+    );
+    // Navigation remains responsive while management owns the keyboard.
     master
         .write_all(b"\x1b[6~\x1b[F")
-        .expect("scroll empty preview");
+        .expect("navigate workspace manager");
     let started = Instant::now();
     assert_eq!(
         unsafe { libc::kill(child.child_mut().id() as i32, libc::SIGTERM) },
@@ -604,12 +632,12 @@ fn live_workspace_preview_terminates_without_reopening_the_fallback_dashboard() 
         child.child_mut(),
         &mut master,
         &mut output,
-        "workspace selector SIGTERM",
+        "workspace manager SIGTERM",
     );
-    assert!(status.success(), "selector exit: {status}");
+    assert!(status.success(), "manager exit: {status}");
     assert!(
         started.elapsed() < Duration::from_secs(1),
-        "selector shutdown was not bounded"
+        "manager shutdown was not bounded"
     );
     let after = termios(slave.as_raw_fd());
     assert_eq!(after.c_iflag, before.c_iflag);

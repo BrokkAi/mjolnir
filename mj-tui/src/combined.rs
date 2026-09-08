@@ -16,14 +16,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::render::{
-    MINIMUM_TERMINAL_WIDTH, TerminalSizeRequirement, minimized_pane_size_controls,
-    minimized_quota_line, minimized_sessions_content_height, minimized_targets_line,
-    pane_size_control_areas, pane_title_content_width, render_capacity, render_footer,
-    render_modal, render_onboarding_surface, render_quotas, render_sessions,
-    render_terminal_too_small, sessions_content_height,
+    MINIMUM_TERMINAL_WIDTH, TerminalSizeRequirement, capacity_table_width,
+    minimized_pane_size_controls, minimized_quota_line, minimized_sessions_content_height,
+    minimized_targets_line, pane_size_control_areas, pane_title_content_width, quota_table_width,
+    render_capacity, render_footer, render_modal, render_onboarding_surface, render_quotas,
+    render_sessions, render_terminal_too_small, sessions_content_height,
 };
 use crate::resume::resume_sessions_pane;
 use crate::widgets::bordered_content;
+use crate::workspaces::render_workspace_tabs;
 use crate::{DashboardState, Focus, Mode, PaneSize, SupportPane};
 
 /// Rows the footer always keeps.
@@ -279,6 +280,11 @@ fn sized_band(size: PaneSize, minimized_height: u16, full: u16, standard_cap: u1
     }
 }
 
+fn support_panes_fit(area_width: u16, dashboard: &DashboardState) -> bool {
+    let hypothetical_content_width = area_width.saturating_sub(area_width / 2);
+    capacity_table_width(dashboard).max(quota_table_width(dashboard)) <= hypothetical_content_width
+}
+
 /// Draws the whole combined surface: Sessions, the conversation, Prompt,
 /// Targets, Quota, the footer, and any modal over the top.
 ///
@@ -297,6 +303,7 @@ pub fn render_combined(
         chat.reset_component_geometry();
     }
     dashboard.pane_areas = None;
+    dashboard.clear_workspace_tab_areas();
     dashboard.session_row_areas.clear();
     dashboard.project_heading_areas.clear();
     dashboard.pane_size_control_areas.clear();
@@ -332,16 +339,6 @@ pub fn render_combined(
         area.y,
         area.width.saturating_sub(sidebar_width),
         area.height,
-    );
-    let sessions_area = Rect::new(
-        if sidebar_right {
-            content_area.right()
-        } else {
-            area.x
-        },
-        area.y,
-        sidebar_width,
-        area.height.saturating_sub(FOOTER_HEIGHT),
     );
     let selected_transition = dashboard.selected_session().and_then(|session| {
         dashboard
@@ -421,6 +418,10 @@ pub fn render_combined(
     };
     let targets = bands[1];
     let quota = bands[2];
+    // The support panes stay stacked together. Their placement is based on
+    // the width left by a hypothetical maximized Sessions pane so that
+    // minimizing Sessions cannot make the arrangement jump between frames.
+    let supports_adjacent = support_panes_fit(area.width, dashboard);
     let mut maximize_enabled =
         maximized_pane_is_effective(area.height, dimensions, desired_prompt, sizes);
     maximize_enabled[0].1 = area.width / 2 > (area.width / 3).clamp(28, 44);
@@ -441,19 +442,62 @@ pub fn render_combined(
         }
     };
 
-    let bands = Layout::default()
+    let upper_content_height = heights.transcript.saturating_add(heights.prompt);
+    let sessions_height = if supports_adjacent {
+        area.height.saturating_sub(FOOTER_HEIGHT).saturating_sub(1)
+    } else {
+        upper_content_height.saturating_sub(1)
+    };
+    let sessions_area = Rect::new(
+        if sidebar_right {
+            content_area.right()
+        } else {
+            area.x
+        },
+        area.y.saturating_add(1),
+        sidebar_width,
+        sessions_height,
+    );
+    let upper_bands = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(heights.sessions),
             Constraint::Length(heights.transcript),
             Constraint::Length(heights.prompt),
+        ])
+        .split(Rect::new(
+            content_area.x,
+            content_area.y,
+            content_area.width,
+            upper_content_height,
+        ));
+    let (transcript_area, prompt_area) = (upper_bands[0], upper_bands[1]);
+    let support_area = Rect::new(
+        if supports_adjacent {
+            content_area.x
+        } else {
+            area.x
+        },
+        area.y.saturating_add(upper_content_height),
+        if supports_adjacent {
+            content_area.width
+        } else {
+            area.width
+        },
+        heights.targets.saturating_add(heights.quota),
+    );
+    let support_bands = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
             Constraint::Length(heights.targets),
             Constraint::Length(heights.quota),
-            Constraint::Length(heights.footer),
         ])
-        .split(content_area);
-    let (transcript_area, prompt_area, targets_area, quota_area) =
-        (bands[1], bands[2], bands[3], bands[4]);
+        .split(support_area);
+    let (targets_area, quota_area) = (support_bands[0], support_bands[1]);
+    render_workspace_tabs(
+        frame,
+        Rect::new(sessions_area.x, area.y, sessions_area.width, 1),
+        dashboard,
+    );
     let footer_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     dashboard.pane_areas = Some([sessions_area, targets_area, quota_area]);
     for (pane, pane_area) in [
@@ -813,6 +857,7 @@ fn table_height(rows: usize) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{dashboard_with_session, running_session};
 
     #[test]
     fn minimized_sessions_use_one_row_per_visible_item() {
@@ -916,5 +961,38 @@ mod tests {
                 required_frame_height: 13,
             }
         );
+    }
+
+    #[test]
+    fn support_layout_moves_both_panes_at_the_measured_threshold_for_every_sidebar_size() {
+        use hel::hel_config::SessionsSide;
+        use ratatui::{Terminal, backend::TestBackend};
+        for side in [SessionsSide::Left, SessionsSide::Right] {
+            for size in [PaneSize::Minimized, PaneSize::Standard, PaneSize::Maximized] {
+                let mut dashboard = dashboard_with_session(running_session());
+                dashboard.config.sessions_side = side;
+                dashboard.set_pane_size(SupportPane::Sessions, size);
+                let required = capacity_table_width(&dashboard).max(quota_table_width(&dashboard));
+                let threshold = required.saturating_mul(2).saturating_sub(1);
+                for width in [threshold - 1, threshold, 80] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+                    terminal
+                        .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+                        .unwrap();
+                    let [sessions, targets, quota] = dashboard.pane_areas.expect("rendered panes");
+                    assert_eq!(targets.x, quota.x);
+                    assert_eq!(targets.width, quota.width);
+                    assert_eq!(targets.bottom(), quota.y);
+                    assert_eq!(sessions.y, 1, "tabs occupy only the sidebar's first row");
+                    if width < threshold {
+                        assert_eq!(targets.width, width);
+                        assert_eq!(targets.y, sessions.bottom());
+                    } else {
+                        assert_eq!(targets.width, width - sessions.width);
+                        assert_eq!(sessions.bottom(), 39);
+                    }
+                }
+            }
+        }
     }
 }
