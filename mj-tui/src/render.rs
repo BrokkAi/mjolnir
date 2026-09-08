@@ -250,7 +250,7 @@ fn render_onboarding(frame: &mut Frame, area: Rect, dashboard: &DashboardState) 
             Line::raw(""),
             Line::raw(format!("Setup can create {missing} from this machine.")),
             Line::raw(
-                "Press F4 to open Setup, then Detect machine to find your accounts and runtimes.",
+                "Press F7 to open Setup, then Detect machine to find your accounts and runtimes.",
             ),
         ])
         .alignment(Alignment::Center)
@@ -2492,6 +2492,28 @@ pub(crate) fn render_quotas(
     );
 }
 
+/// One group of registry hints, shared by pane and composer footers.
+pub(crate) fn footer_hints(
+    dashboard: &DashboardState,
+    group: crate::actions::FooterGroup,
+) -> Vec<String> {
+    let mut hints = crate::actions::available(dashboard, None)
+        .into_iter()
+        .filter_map(|id| {
+            let spec = crate::actions::spec(id);
+            if spec.footer_group != group {
+                return None;
+            }
+            let word = (spec.footer)(dashboard)?;
+            let hint = spec.keys.first()?;
+            Some((spec.footer_rank, format!("{} {word}", hint.label)))
+        })
+        .collect::<Vec<_>>();
+    // Stable, so commands sharing a rank keep the table's order.
+    hints.sort_by_key(|(rank, _)| *rank);
+    hints.into_iter().map(|(_, text)| text).collect()
+}
+
 /// The hotkey hints for whatever applies right now.
 ///
 /// Built from the action registry ([`crate::actions`]) rather than written out
@@ -2515,33 +2537,15 @@ pub(crate) fn render_quotas(
 /// what it is doing (a queued prompt, dictation, a history search); this text
 /// is only drawn when a pane has the keyboard.
 pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> String {
-    let mut hints = crate::actions::available(dashboard, None)
-        .into_iter()
-        .filter_map(|id| {
-            let spec = crate::actions::spec(id);
-            let word = (spec.footer)(dashboard)?;
-            let hint = spec.keys.first()?;
-            Some((
-                spec.footer_group,
-                spec.footer_rank,
-                format!("{} {word}", hint.label),
-            ))
-        })
-        .collect::<Vec<_>>();
-    // Stable, so commands sharing a rank keep the table's order.
-    hints.sort_by_key(|(group, rank, _)| (*group, *rank));
-
-    let group_of = |wanted: crate::actions::FooterGroup| {
-        hints
-            .iter()
-            .filter(|(group, _, _)| *group == wanted)
-            .map(|(_, _, text)| text.as_str())
-            .collect::<Vec<_>>()
-    };
-    let pane = group_of(crate::actions::FooterGroup::Pane);
-    let chords = group_of(crate::actions::FooterGroup::Chord);
-    let functions = group_of(crate::actions::FooterGroup::Function);
-
+    let groups = [
+        crate::actions::FooterGroup::Pane,
+        crate::actions::FooterGroup::Chord,
+        crate::actions::FooterGroup::Function,
+    ]
+    .map(|group| footer_hints(dashboard, group));
+    let [pane, chords, functions] = groups
+        .each_ref()
+        .map(|hints| hints.iter().map(String::as_str).collect::<Vec<_>>());
     theme::fit_footer(&pane, &chords, &functions, width)
 }
 
@@ -3041,7 +3045,7 @@ mod tests {
         drawn(&mut dashboard, 120, 32);
         let switcher = dashboard.workspace_switcher_area.unwrap();
         let click = || mouse_at_row(MouseEventKind::Down(MouseButton::Left), switcher, 1);
-        dashboard.handle_key(key(KeyCode::F(4)));
+        dashboard.handle_key(key(KeyCode::F(7)));
         drawn(&mut dashboard, 120, 32);
         assert_ne!(
             dashboard.handle_mouse(click()),
@@ -3998,7 +4002,7 @@ mod tests {
         assert_eq!(
             combined_footer_text(&dashboard, 200),
             "Enter open · s stop · Del delete │ Alt-N new · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
-             · Alt-Q detach │ F2 palette · F3 workspaces · F4 setup · F7 web · F5 refresh · F1 help"
+             · Alt-Q detach │ F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help"
         );
 
         // The cancel chord takes its fixed place before detach, and only while
@@ -4026,7 +4030,7 @@ mod tests {
         dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
         dashboard.focus_sessions();
         const FUNCTION_KEYS: &str =
-            "F2 palette · F3 workspaces · F4 setup · F7 web · F5 refresh · F1 help";
+            "F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help";
 
         let full = combined_footer_text(&dashboard, 200);
         assert!(

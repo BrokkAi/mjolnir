@@ -305,7 +305,7 @@ fn container_session(dashboard: &DashboardState) -> Availability {
 
 fn quick_new_available(dashboard: &DashboardState) -> Availability {
     if dashboard.config.profiles.is_empty() {
-        Availability::Blocked("add an agent account in Setup (F4) first")
+        Availability::Blocked("add an agent account in Setup (F7) first")
     } else {
         Availability::Ready
     }
@@ -564,10 +564,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Open setup",
         description: "Edit all configuration in the Setup modal.",
         scope: Scope::Settings,
-        keys: &[KeyHint::plain(KeyCode::F(4), "F4")],
+        keys: &[KeyHint::plain(KeyCode::F(7), "F7")],
         footer: footer_word!("setup"),
         footer_group: FooterGroup::Function,
-        footer_rank: 2,
+        footer_rank: 4,
         available: always_ready,
     },
     CommandSpec {
@@ -622,7 +622,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Web viewer",
         description: "Show the address and code for the browser and phone viewer.",
         scope: Scope::Global,
-        keys: &[KeyHint::plain(KeyCode::F(7), "F7")],
+        keys: &[KeyHint::plain(KeyCode::F(4), "F4")],
         footer: footer_word!("web"),
         footer_group: FooterGroup::Function,
         footer_rank: 2,
