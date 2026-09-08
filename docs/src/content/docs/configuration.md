@@ -462,7 +462,7 @@ This example contains the sections most installations need. Add other target
 kinds from the examples above rather than mixing fields between variants.
 
 ```toml
-version = 4
+version = 5
 
 [phone]
 enabled = true
