@@ -55,7 +55,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 12;
+pub(crate) const PROTOCOL_VERSION: u32 = 13;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -340,7 +340,7 @@ enum DaemonAction {
         session_id: String,
         through: u64,
         owner_pid: u32,
-        draft: String,
+        draft: hel::hel_database::DetachedSessionDraft,
     },
     SetSessionArchived {
         session_id: String,
@@ -2828,7 +2828,7 @@ impl DaemonClient {
         session_id: String,
         through: u64,
         owner_pid: u32,
-        draft: String,
+        draft: hel::hel_database::DetachedSessionDraft,
     ) -> Result<()> {
         match self
             .request(DaemonAction::PersistDetachedSessionState {
@@ -4535,12 +4535,12 @@ async fn handle_action(
                 .map(|_| ());
                 // Draft durability is independent of receipt validity. A
                 // stale or malformed receipt must never discard typed text.
-                let saved_draft = hel::hel_database::save_detached_draft(
+                let saved_draft = hel::hel_database::save_detached_session_draft(
                     &workspace_id,
-                    Some(&session_id),
+                    &session_id,
                     &client_id,
-                    Some(owner_pid),
-                    &draft,
+                    owner_pid,
+                    draft,
                 )
                 .map(|_| ());
                 receipt.and(saved_draft)

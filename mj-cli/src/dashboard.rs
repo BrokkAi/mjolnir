@@ -12,6 +12,7 @@
 
 pub(crate) mod actions;
 mod attachment;
+mod composer_drafts;
 pub(crate) mod io;
 mod pane_sizes;
 mod startup;
@@ -28,6 +29,7 @@ use crossterm::event::{
 };
 use hel::hel_config::{HelConfig, config_path};
 use hel::hel_credentials::CredentialSyncHandle;
+use hel::hel_database::DetachedSessionDraft;
 use hel::hel_state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
 use hel::hel_targets::DeploymentCapacityTarget;
 use hel_tui::{
@@ -49,6 +51,7 @@ use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio_stream::StreamExt as _;
 
+use crate::dashboard::composer_drafts::ComposerDraftCache;
 use crate::dashboard::io::{
     ActiveLifecycleOperation, DashboardIoUpdate, LifecycleReload, checkpoint_archive_targets,
     spawn_checkpoint_archive_size_refresh, spawn_clipboard_write, spawn_io, spawn_lifecycle_reload,
@@ -337,6 +340,10 @@ pub(crate) struct DashboardContext {
     /// primary and one deferred reviewer form), so an id reused by a changed
     /// form cannot inherit old answers.
     question_drafts: BTreeMap<String, Vec<CachedQuestionDraft>>,
+    /// Composer text is owned by this terminal once a session is opened. The
+    /// inherited shared value is retained only as a compare-and-clear baseline
+    /// for the detach persistence task.
+    composer_drafts: ComposerDraftCache,
     /// Retain save failures so quitting cannot erase their notice before it is read.
     draft_save_failures: BTreeMap<String, String>,
     /// Session-manager attachment is asynchronous: an actor may need to
@@ -793,6 +800,16 @@ impl DashboardContext {
         if self.shutdown_requested {
             return;
         }
+        // The warm chat may be hidden while another session opens. Every
+        // shutdown path must save it, including global quit and workspace
+        // switching, before the process-local composer cache goes away.
+        if let Some(ordinal) = self
+            .active_chat
+            .as_ref()
+            .map(mj_chat::hel_chat::ActiveChat::latest_event_ordinal)
+        {
+            self.record_detach(ordinal);
+        }
         self.shutdown_requested = true;
         self.web_request_cancel = None;
         self.web_request_generation = self.web_request_generation.wrapping_add(1);
@@ -1010,6 +1027,7 @@ impl DashboardContext {
             events: Some(event::EventStream::new()),
             active_chat: None,
             question_drafts: BTreeMap::new(),
+            composer_drafts: ComposerDraftCache::default(),
             draft_save_failures: BTreeMap::new(),
             opening_chat_session: None,
             attachment: attachment::SessionAttachment::default(),
@@ -1597,6 +1615,16 @@ impl DashboardContext {
             .as_ref()
             .is_some_and(|chat| chat.session_id() == session_id)
         {
+            if let Some(ordinal) = self
+                .active_chat
+                .as_ref()
+                .map(mj_chat::hel_chat::ActiveChat::latest_event_ordinal)
+            {
+                // A completed lifecycle retires the warm actor without
+                // passing through the normal session-switch path. Preserve
+                // its latest composer before dropping that actor as well.
+                self.record_detach(ordinal);
+            }
             self.active_chat = None;
         }
     }
@@ -1606,8 +1634,8 @@ impl DashboardContext {
     /// back through the dashboard I/O channel and the surface stays responsive
     /// while it is in flight.
     ///
-    /// The conversation being replaced is saved first: it holds unsent input
-    /// and a read position that a quit or a crash would otherwise lose.
+    /// Cache pending question forms from the warm chat before it is replaced.
+    /// The composer itself is tracked by [`ComposerDraftCache`].
     fn save_active_question_draft(&mut self) {
         let Some(chat) = self.active_chat.as_ref() else {
             return;
@@ -1680,6 +1708,9 @@ impl DashboardContext {
     }
 
     pub(crate) fn open_chat_session(&mut self, session_id: &str) {
+        // The warm chat remains alive while another session attaches. Capture
+        // its current composer before any background snapshot can arrive.
+        self.capture_active_composer_draft();
         self.dashboard.select_active_session(session_id);
         self.attachment.select(session_id);
         self.save_active_question_draft();
@@ -1715,14 +1746,6 @@ impl DashboardContext {
             ));
             return;
         };
-        if let Some(ordinal) = self
-            .active_chat
-            .as_ref()
-            .filter(|chat| chat.session_id() != session_id)
-            .map(mj_chat::hel_chat::ActiveChat::latest_event_ordinal)
-        {
-            self.record_detach(ordinal);
-        }
         let header = mj_chat::hel_chat::SessionHeaderIdentity {
             target: session_record
                 .project_target(&self.controller.config, &session_record.target_template_id),
@@ -1734,7 +1757,10 @@ impl DashboardContext {
         let updates = self.dashboard_io_tx.clone();
         let session_id = session_id.to_owned();
         let bundle_id = session_record.bundle_id.clone();
-        let draft = session_record.draft_input.clone();
+        let draft = self
+            .composer_drafts
+            .open(&session_id, &session_record.draft_input)
+            .text;
         let context = mj_chat::hel_chat::ChatSessionContext {
             config: self.controller.config.clone(),
             session: session_record,
@@ -2471,15 +2497,7 @@ impl DashboardContext {
                 self.dashboard.cycle_focus(reverse);
                 self.dirty = true;
             }
-            mj_chat::hel_chat::ChatEventOutcome::QuitDetach {
-                last_seen_event_ordinal,
-            } => {
-                // The warm chat goes on holding this input in memory, so save
-                // it before the process goes away. The critical-operation
-                // guard keeps the TUI alive until the durable write finishes,
-                // while unrelated reads remain free to be abandoned.
-                let persist = self.record_detach(last_seen_event_ordinal);
-                drop(persist);
+            mj_chat::hel_chat::ChatEventOutcome::QuitDetach { .. } => {
                 self.request_shutdown();
             }
         }
@@ -2490,11 +2508,13 @@ impl DashboardContext {
         &mut self,
         last_seen_event_ordinal: u64,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        let detached = self
+        self.capture_active_composer_draft();
+        let session_id = self
             .active_chat
             .as_ref()
-            .map(|chat| (chat.session_id().to_owned(), chat.draft().to_owned()))?;
-        let (session_id, draft) = detached;
+            .map(mj_chat::hel_chat::ActiveChat::session_id)?
+            .to_owned();
+        let draft = self.composer_drafts.get(&session_id)?.clone();
         record_chat_detach_state(
             &mut self.controller,
             &mut self.dashboard,
@@ -2503,11 +2523,32 @@ impl DashboardContext {
                 workspace_id: &self.workspace_id,
                 session_id: &session_id,
                 event_ordinal: last_seen_event_ordinal,
-                draft: &draft,
+                draft,
             },
             &self.dashboard_io_tx,
             self.critical_operations.clone(),
         )
+    }
+
+    /// Capture the currently visible chat's composer while retaining the
+    /// first shared value it inherited. The text remains process-local until
+    /// an explicit detach persistence task archives it.
+    fn capture_active_composer_draft(&mut self) {
+        let Some((session_id, text)) = self
+            .active_chat
+            .as_ref()
+            .map(|chat| (chat.session_id().to_owned(), chat.draft()))
+        else {
+            return;
+        };
+        let inherited_input = self
+            .controller
+            .state
+            .sessions
+            .get(&session_id)
+            .map_or_else(String::new, |session| session.draft_input.clone());
+        self.composer_drafts
+            .capture(&session_id, text, &inherited_input);
     }
 }
 
@@ -2583,7 +2624,7 @@ struct DetachedChatState<'a> {
     workspace_id: &'a str,
     session_id: &'a str,
     event_ordinal: u64,
-    draft: &'a str,
+    draft: DetachedSessionDraft,
 }
 
 fn record_chat_detach_state(
@@ -2603,7 +2644,6 @@ fn record_chat_detach_state(
     session.viewed_through_event_ordinal = session
         .viewed_through_event_ordinal
         .max(detached.event_ordinal);
-    session.draft_input = detached.draft.to_owned();
     dashboard.set_state(controller.state.clone());
     dashboard.clear_notice();
     Some(io::spawn_detached_session_state_persist(
@@ -2611,7 +2651,7 @@ fn record_chat_detach_state(
         detached.workspace_id.to_owned(),
         detached.session_id.to_owned(),
         detached.event_ordinal,
-        detached.draft.to_owned(),
+        detached.draft,
         updates.clone(),
         tracker,
     ))

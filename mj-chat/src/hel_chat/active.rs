@@ -450,6 +450,13 @@ pub struct PreparedChat {
 }
 
 impl PreparedChat {
+    /// Refresh the local composer after asynchronous preparation. A surface
+    /// may have captured newer input while this attachment was in flight.
+    pub fn with_draft(mut self, draft: String) -> Self {
+        self.draft = draft;
+        self
+    }
+
     /// Constructs the view without filesystem or database access.
     pub fn open(self) -> ActiveChat {
         ActiveChat::from_prepared(self)

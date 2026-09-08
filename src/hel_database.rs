@@ -1164,6 +1164,69 @@ fn advance_client_read_frontier_at(
     client_read_frontier_at(path, client_id, workspace_id, session_id)
 }
 
+/// A terminal's current composer and the shared value it originally inherited.
+/// The inherited value is retired on detach, never replaced by client-local text.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DetachedSessionDraft {
+    pub text: String,
+    pub inherited_input: Option<String>,
+}
+
+/// Preserve unsent input for explicit recovery and retire its unchanged legacy
+/// seed together. Empty input still retires the seed: clearing is an edit.
+pub fn save_detached_session_draft(
+    workspace_id: &str,
+    session_id: &str,
+    source: &str,
+    owner_pid: u32,
+    draft: DetachedSessionDraft,
+) -> Result<Option<String>> {
+    let workspace_id = workspace_id.to_owned();
+    let session_id = session_id.to_owned();
+    let source = source.to_owned();
+    submit_database_write("save_detached_session_draft", move |connection| {
+        save_detached_session_draft_in(
+            connection,
+            &workspace_id,
+            &session_id,
+            &source,
+            owner_pid,
+            &draft,
+        )
+    })
+}
+
+fn save_detached_session_draft_in(
+    connection: &mut Connection,
+    workspace_id: &str,
+    session_id: &str,
+    source: &str,
+    owner_pid: u32,
+    draft: &DetachedSessionDraft,
+) -> Result<Option<String>> {
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if let Some(inherited) = &draft.inherited_input {
+        transaction.execute(
+            "UPDATE sessions SET draft_input = ''
+              WHERE session_id = ?1 AND draft_input = ?2
+                AND EXISTS (SELECT 1 FROM session_contexts
+                             WHERE session_id = ?1 AND workspace_id = ?3)",
+            params![session_id, inherited, workspace_id],
+        )?;
+    }
+    let id = insert_detached_draft(
+        &transaction,
+        workspace_id,
+        Some(session_id),
+        source,
+        Some(owner_pid),
+        &draft.text,
+    )?;
+    transaction.commit()?;
+    Ok(id)
+}
+
 pub fn save_detached_draft(
     workspace_id: &str,
     session_id: Option<&str>,
@@ -1198,10 +1261,31 @@ fn save_detached_draft_at(
     if text.is_empty() {
         return Ok(None);
     }
+    let connection = open(path)?;
+    insert_detached_draft(
+        &connection,
+        workspace_id,
+        session_id,
+        source,
+        owner_pid,
+        text,
+    )
+}
+
+fn insert_detached_draft(
+    connection: &Connection,
+    workspace_id: &str,
+    session_id: Option<&str>,
+    source: &str,
+    owner_pid: Option<u32>,
+    text: &str,
+) -> Result<Option<String>> {
+    if text.is_empty() {
+        return Ok(None);
+    }
     ensure!(!source.trim().is_empty(), "draft source is empty");
     let id = new_workspace_id()?;
     let saved_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let connection = open(path)?;
     connection.execute(
         "INSERT INTO detached_drafts(
              draft_id, workspace_id, session_id, source, owner_pid, saved_at, text

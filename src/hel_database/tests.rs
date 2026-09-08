@@ -4062,6 +4062,139 @@ fn read_frontiers_are_independent_per_client_with_the_session_cursor_as_baseline
 }
 
 #[test]
+fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
+    for current in ["", "an edited unfinished thought"] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("hel.sqlite3");
+        let workspace = create_workspace_at(&database, "Drafts").unwrap();
+        let mut record = session("session-1", "project-1");
+        record.workspace_id = workspace.id.clone();
+        record.draft_input = "/model g".into();
+        save_session_to(&database, &record).unwrap();
+        set_session_draft_input_at(&database, &record.id, &record.draft_input).unwrap();
+
+        let saved = save_detached_session_draft_in(
+            &mut open(&database).unwrap(),
+            &workspace.id,
+            &record.id,
+            "tui-client-a",
+            1234,
+            &DetachedSessionDraft {
+                text: current.into(),
+                inherited_input: Some(record.draft_input.clone()),
+            },
+        )
+        .unwrap();
+
+        let reloaded = load_state_from(&database).unwrap();
+        assert!(reloaded.sessions[&record.id].draft_input.is_empty());
+        let drafts = list_detached_drafts_at(&database, &workspace.id).unwrap();
+        if current.is_empty() {
+            assert!(saved.is_none());
+            assert!(drafts.is_empty());
+        } else {
+            assert_eq!(drafts.len(), 1);
+            assert_eq!(drafts[0].text, current);
+            assert_eq!(drafts[0].source, "tui-client-a");
+            assert_eq!(drafts[0].owner_pid, Some(1234));
+            // Explicit recovery is still supported after retiring the seed.
+            recover_detached_draft_at(&database, &saved.unwrap()).unwrap();
+            assert_eq!(
+                load_state_from(&database).unwrap().sessions[&record.id].draft_input,
+                current
+            );
+        }
+    }
+}
+
+#[test]
+fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Drafts").unwrap();
+    let mut record = session("session-1", "project-1");
+    record.workspace_id = workspace.id.clone();
+    record.draft_input = "newly recovered input".into();
+    save_session_to(&database, &record).unwrap();
+    set_session_draft_input_at(&database, &record.id, &record.draft_input).unwrap();
+    let mut connection = open(&database).unwrap();
+
+    save_detached_session_draft_in(
+        &mut connection,
+        &workspace.id,
+        &record.id,
+        "tui-client-a",
+        1234,
+        &DetachedSessionDraft {
+            text: String::new(),
+            inherited_input: Some("older inherited input".into()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].draft_input,
+        record.draft_input
+    );
+
+    let result = save_detached_session_draft_in(
+        &mut connection,
+        &workspace.id,
+        &record.id,
+        "",
+        1234,
+        &DetachedSessionDraft {
+            text: "must survive the failed save".into(),
+            inherited_input: Some(record.draft_input.clone()),
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].draft_input,
+        record.draft_input
+    );
+    assert!(
+        list_detached_drafts_at(&database, &workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let owner = create_workspace_at(&database, "Owner").unwrap();
+    let previous = create_workspace_at(&database, "Previous").unwrap();
+    let mut record = session("session-1", "project-1");
+    record.workspace_id = owner.id.clone();
+    save_session_to(&database, &record).unwrap();
+    set_session_draft_input_at(&database, &record.id, "inherited input").unwrap();
+
+    for text in ["", "unsent in the previous workspace"] {
+        save_detached_session_draft_in(
+            &mut open(&database).unwrap(),
+            &previous.id,
+            &record.id,
+            "old-client",
+            1234,
+            &DetachedSessionDraft {
+                text: text.into(),
+                inherited_input: Some("inherited input".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            load_state_from(&database).unwrap().sessions[&record.id].draft_input,
+            "inherited input"
+        );
+    }
+    // Draft durability stays independent of stale workspace/read receipts.
+    let drafts = list_detached_drafts_at(&database, &previous.id).unwrap();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].text, "unsent in the previous workspace");
+}
+
+#[test]
 fn detached_drafts_keep_source_pid_and_workspace_without_overwriting_each_other() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

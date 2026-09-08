@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle};
+use hel::hel_database::DetachedSessionDraft;
 use hel::hel_state::{
     HelState, MaterializedSession, MovePreparation, ProjectSourceIdentity, SessionRecord,
     SessionState,
@@ -867,7 +868,7 @@ pub(crate) fn spawn_detached_session_state_persist(
     workspace_id: String,
     session_id: String,
     event_ordinal: u64,
-    draft: String,
+    draft: DetachedSessionDraft,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
@@ -1393,11 +1394,23 @@ impl DashboardContext {
                 }
                 match *result {
                     Ok(chat) => {
-                        let mut chat = chat.open_replacing(self.active_chat.as_ref());
                         // The old warm chat continued receiving feed updates
-                        // while this attach was in flight. Capture its latest
-                        // local form state just before replacing it.
+                        // while this attach was in flight. Capture and persist
+                        // its latest local composer just before replacing it.
+                        if let Some(ordinal) = self
+                            .active_chat
+                            .as_ref()
+                            .map(mj_chat::hel_chat::ActiveChat::latest_event_ordinal)
+                        {
+                            self.record_detach(ordinal);
+                        }
                         self.save_active_question_draft();
+                        let chat = if let Some(draft) = self.composer_drafts.get(&session_id) {
+                            chat.with_draft(draft.text.clone())
+                        } else {
+                            chat
+                        };
+                        let mut chat = chat.open_replacing(self.active_chat.as_ref());
                         self.restore_question_draft(&session_id, &mut chat);
                         self.active_chat = Some(chat);
                         // The context travelled with the attach, which is
