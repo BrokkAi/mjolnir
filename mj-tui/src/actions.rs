@@ -19,7 +19,6 @@ use crate::{DashboardAction, DashboardState, Focus};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandId {
     OpenSession,
-    NewSession,
     NewSessionWizard,
     RestartSession,
     ResumeDialog,
@@ -306,14 +305,6 @@ fn container_session(dashboard: &DashboardState) -> Availability {
     Availability::Ready
 }
 
-fn quick_new_available(dashboard: &DashboardState) -> Availability {
-    if dashboard.config.profiles.is_empty() {
-        Availability::Blocked("add an agent account in Setup (F4) first")
-    } else {
-        Availability::Ready
-    }
-}
-
 fn config_present(dashboard: &DashboardState) -> Availability {
     if dashboard.config_is_empty() {
         Availability::Blocked("configure at least one profile and target first")
@@ -381,31 +372,19 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: selected_session_ready,
     },
     CommandSpec {
-        id: CommandId::NewSession,
-        label: "New session",
-        description: "Start with a fresh task prompt and saved defaults.",
+        id: CommandId::NewSessionWizard,
+        label: "Create session",
+        description: "Choose the profile, project, target, and mounts in the full wizard.",
         scope: Scope::Sessions,
         keys: &[
             KeyHint::alt(KeyCode::Char('n'), "Alt-N"),
             KeyHint::plain(KeyCode::Char('n'), "n"),
-        ],
-        footer: footer_word!("new"),
-        footer_group: FooterGroup::Chord,
-        footer_rank: 0,
-        available: quick_new_available,
-    },
-    CommandSpec {
-        id: CommandId::NewSessionWizard,
-        label: "New session with options",
-        description: "Choose the profile, project, target, and mounts in the full wizard.",
-        scope: Scope::Sessions,
-        keys: &[
             KeyHint::plain(KeyCode::Char('N'), "N"),
             KeyHint::alt(KeyCode::Char('w'), "Alt-W"),
         ],
-        footer: footer_word!("new options"),
-        footer_group: FooterGroup::Pane,
-        footer_rank: 1,
+        footer: footer_word!("create"),
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
         available: config_present,
     },
     CommandSpec {
@@ -556,10 +535,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Open setup",
         description: "Edit all configuration in the Setup modal.",
         scope: Scope::Settings,
-        keys: &[KeyHint::plain(KeyCode::F(4), "F4")],
+        keys: &[KeyHint::plain(KeyCode::F(7), "F7")],
         footer: footer_word!("setup"),
         footer_group: FooterGroup::Function,
-        footer_rank: 2,
+        footer_rank: 4,
         available: always_ready,
     },
     CommandSpec {
@@ -636,7 +615,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Web viewer",
         description: "Show the address and code for the browser and phone viewer.",
         scope: Scope::Global,
-        keys: &[KeyHint::plain(KeyCode::F(7), "F7")],
+        keys: &[KeyHint::plain(KeyCode::F(4), "F4")],
         footer: footer_word!("web"),
         footer_group: FooterGroup::Function,
         footer_rank: 2,
@@ -730,7 +709,6 @@ const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::SelectWorkspaceNext,
     CommandId::WebViewer,
     CommandId::Refresh,
-    CommandId::NewSession,
     CommandId::NewSessionWizard,
     CommandId::OpenConfig,
     CommandId::ResumeDialog,
@@ -875,7 +853,6 @@ impl DashboardState {
         }
         match id {
             CommandId::OpenSession => self.open_selected_session(),
-            CommandId::NewSession => self.begin_quick_new(),
             CommandId::NewSessionWizard => self.begin_new(),
             CommandId::RestartSession => self
                 .selected_session()

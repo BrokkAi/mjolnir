@@ -1934,6 +1934,7 @@ fn typed_acp_observations_are_journaled() {
             protocol_version: Some(ProtocolVersion::V1),
             capabilities: Some(Box::new(AgentCapabilities::default())),
             agent_info: Some(Implementation::new("test-agent", "1")),
+            steering_supported: Some(true),
         },
     )
     .unwrap();
@@ -1964,6 +1965,18 @@ fn typed_acp_observations_are_journaled() {
             .iter()
             .any(|event| matches!(event.observation, RelayObservation::SessionUpdate { .. }))
     );
+    assert_eq!(
+        relay.lock().unwrap().operational_state().steering_supported,
+        Some(true)
+    );
+    relay.lock().unwrap().clear_acp_readiness();
+    assert_eq!(
+        relay.lock().unwrap().operational_state().steering_supported,
+        None
+    );
+    drop(relay);
+    let reopened = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    assert_eq!(reopened.operational_state().steering_supported, None);
 }
 
 #[test]

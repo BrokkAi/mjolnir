@@ -1152,9 +1152,9 @@ fn render_elicitation_at(
             "Click to answer · F6 to change pane"
         })
         .style(Style::default().fg(if dialog.error.is_some() && focused {
-            theme::ERROR
+            theme::palette().error
         } else {
-            theme::MUTED
+            theme::palette().muted
         })),
         chunks[3],
     );
@@ -1212,7 +1212,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
     let mut lines = vec![Line::from(vec![
         Span::styled(
             format!("{}/{}  ", focus + 1, dialog.display_fields.len()),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ),
         Span::styled(
             format!("{}{}", field.title, required),
@@ -1222,7 +1222,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
     if let Some(description) = &field.description {
         lines.push(Line::styled(
             description.as_str(),
-            Style::default().fg(theme::TEXT),
+            Style::default().fg(theme::palette().text),
         ));
     }
     let mut option_rows = vec![];
@@ -1239,7 +1239,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             let input_line = lines.len() as u16;
             lines.push(Line::styled(
                 format!("> {shown}"),
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::palette().accent),
             ));
             focused_row = Some(2 + usize::from(field.description.is_some()));
             text_cursor = Some((
@@ -1262,7 +1262,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                     };
                 let style = if cursor {
                     Style::default()
-                        .fg(theme::ACCENT)
+                        .fg(theme::palette().accent)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -1277,13 +1277,13 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                     if let Some(description) = &option.description {
                         lines.push(Line::styled(
                             format!("    {description}"),
-                            Style::default().fg(theme::TEXT),
+                            Style::default().fg(theme::palette().text),
                         ));
                     }
                     if let Some(preview) = &option.preview {
                         lines.push(Line::styled(
                             format!("    {preview}"),
-                            Style::default().fg(theme::MUTED),
+                            Style::default().fg(theme::palette().muted),
                         ));
                     }
                     if display.custom_option == Some(index)
@@ -1322,7 +1322,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 };
                 let style = if dialog.option_cursors[display.field] == index {
                     Style::default()
-                        .fg(theme::ACCENT)
+                        .fg(theme::palette().accent)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -1349,7 +1349,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             focused_row = Some(lines.len());
             lines.push(Line::styled(
                 if *selected { "☑ Yes" } else { "☐ No" },
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::palette().accent),
             ));
         }
         _ => {}
@@ -1437,7 +1437,7 @@ fn render_custom_answer(
     };
     let style = if focused {
         Style::default()
-            .fg(theme::ACCENT)
+            .fg(theme::palette().accent)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -1462,7 +1462,7 @@ fn render_custom_text(
     if let Some(description) = &custom.description {
         lines.push(Line::styled(
             format!("    {description}"),
-            Style::default().fg(theme::TEXT),
+            Style::default().fg(theme::palette().text),
         ));
     }
     let shown = if custom.secret {
@@ -1473,7 +1473,7 @@ fn render_custom_text(
     let input_line = lines.len() as u16;
     lines.push(Line::styled(
         format!("> {shown}"),
-        Style::default().fg(theme::ACCENT),
+        Style::default().fg(theme::palette().accent),
     ));
     *text_cursor = Some((
         input_line,

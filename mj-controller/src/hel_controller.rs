@@ -16,7 +16,7 @@ mod worker_binary;
 mod worker_restart;
 mod worktree;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,10 @@ use hel::hel_config::{
     container_size_host, data_dir, is_bare_project_target, mount_history_host,
 };
 
-use crate::hel_import::{configured_bundle_for_local, configured_bundle_for_origin};
+use crate::hel_import::{
+    RepositoryIdentity, bundle_matches, configured_bundle_for_local, configured_bundle_for_origin,
+    setup_style_id,
+};
 use crate::hel_setup::github_repository_from_origin;
 
 const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
@@ -208,37 +211,17 @@ pub fn create_quick_bundle(
 /// that persist a config should use [`create_quick_bundle`] so concurrent saves
 /// cannot clobber one another.
 pub fn create_quick_bundle_in_config(config: &mut HelConfig, source: &str) -> Result<String> {
-    let source = source.trim();
-    if source.is_empty() {
-        bail!("repository source cannot be empty");
-    }
-    let candidate = Path::new(source);
-    let (name, github, local) = if candidate.exists() {
-        let root = hel::hel_local_git::canonical_repository(candidate)?;
-        if let Some(existing) = configured_bundle_for_local(config, &root) {
-            return Ok(existing);
+    let source = interpret_repository_source(source)?;
+    let existing = match &source.kind {
+        RepositorySourceKind::Local(root) => configured_bundle_for_local(config, root),
+        RepositorySourceKind::Github(repository) => {
+            configured_bundle_for_origin(config, repository)
         }
-        let name = root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("local repository has no usable directory name")?
-            .to_owned();
-        (name, None, Some(root))
-    } else {
-        if candidate.is_absolute() || source.starts_with('.') || source.starts_with('~') {
-            bail!("local repository path {source:?} does not exist");
-        }
-        let repository = github_repository_from_origin(source).context(format!(
-            "{source:?} is not a GitHub owner/repository or URL"
-        ))?;
-        if let Some(existing) = configured_bundle_for_origin(config, &repository) {
-            return Ok(existing);
-        }
-        let name = repository.repository.clone();
-        let github = format!("{}/{}", repository.owner, repository.repository);
-        (name, Some(github), None)
     };
-    let repository_id = quick_config_id(&name);
+    if let Some(existing) = existing {
+        return Ok(existing);
+    }
+    let repository_id = setup_style_id(&source.name);
     let mut bundle_id = repository_id.clone();
     for suffix in 2_u32.. {
         if !config.bundles.contains_key(&bundle_id) {
@@ -250,32 +233,202 @@ pub fn create_quick_bundle_in_config(config: &mut HelConfig, source: &str) -> Re
         bundle_id.clone(),
         ProjectBundle {
             primary_repo: repository_id.clone(),
-            repositories: vec![ProjectRepository {
-                id: repository_id.clone(),
-                github,
-                local,
-                destination: PathBuf::from(repository_id),
-                git_ref: None,
-            }],
+            repositories: vec![source.into_project_repository(repository_id.clone())],
         },
     );
     config.validate()?;
     Ok(bundle_id)
 }
 
-fn quick_config_id(value: &str) -> String {
-    let id = value
-        .chars()
-        .filter(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-        .take(64)
-        .collect::<String>();
-    if id.is_empty() || matches!(id.as_str(), "." | "..") {
-        "repository".into()
-    } else {
-        id
+/// Create one bundle from one or more local repositories or GitHub sources.
+///
+/// All sources are interpreted and checked before the config transaction can
+/// write anything. An existing bundle is reused only when its repository set
+/// and primary repository exactly match the request; this keeps selecting one
+/// repository from a larger bundle from silently changing the wizard's choice.
+pub fn create_bundle_from_sources(
+    sources: &[String],
+) -> std::result::Result<QuickBundleCreation, QuickBundleFailure> {
+    let (config, bundle_id) = HelConfig::update(|config| {
+        create_bundle_from_sources_in_config(config, sources)
+            .map_err(|error| anyhow::Error::new(QuickBundleFailure::InvalidSource(error)))
+    })
+    .map_err(|error| {
+        error
+            .downcast::<QuickBundleFailure>()
+            .unwrap_or_else(QuickBundleFailure::Persistence)
+    })?;
+    Ok(QuickBundleCreation { config, bundle_id })
+}
+
+/// Add a bundle for all `sources` to an already-loaded config. The source
+/// interpretation is shared with the persisted [`create_bundle_from_sources`]
+/// entry point and the legacy quick-bundle helper.
+pub fn create_bundle_from_sources_in_config(
+    config: &mut HelConfig,
+    sources: &[String],
+) -> Result<String> {
+    let sources = sources
+        .iter()
+        .map(|source| interpret_repository_source(source))
+        .collect::<Result<Vec<_>>>()?;
+    if sources.is_empty() {
+        bail!("at least one repository source is required");
     }
+
+    let mut identities = BTreeSet::new();
+    for source in &sources {
+        if !identities.insert(source.identity()) {
+            bail!("duplicate repository source {:?}", source.display_name);
+        }
+    }
+
+    if let Some(existing) = exact_configured_bundle(config, &sources) {
+        return Ok(existing);
+    }
+
+    // Build and validate a candidate before replacing the caller's config, so
+    // a later validation error cannot leave an in-memory partial mutation.
+    let mut updated = config.clone();
+    let mut used_repository_ids = BTreeSet::new();
+    let mut repositories = Vec::with_capacity(sources.len());
+    for source in sources {
+        let base = setup_style_id(&source.name);
+        let repository_id = unique_id(&base, |candidate| used_repository_ids.contains(candidate));
+        used_repository_ids.insert(repository_id.clone());
+        repositories.push(source.into_project_repository(repository_id));
+    }
+    let primary_repo = repositories
+        .first()
+        .map(|repository| repository.id.clone())
+        .context("at least one repository source is required")?;
+    let bundle_id = unique_id(&primary_repo, |candidate| {
+        updated.bundles.contains_key(candidate)
+    });
+    updated.bundles.insert(
+        bundle_id.clone(),
+        ProjectBundle {
+            primary_repo,
+            repositories,
+        },
+    );
+    updated.validate()?;
+    *config = updated;
+    Ok(bundle_id)
+}
+
+#[derive(Debug, Clone)]
+enum RepositorySourceKind {
+    Github(crate::hel_setup::GithubRepository),
+    Local(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+struct InterpretedRepositorySource {
+    display_name: String,
+    name: String,
+    kind: RepositorySourceKind,
+}
+
+impl InterpretedRepositorySource {
+    fn identity(&self) -> RepositoryIdentity {
+        match &self.kind {
+            RepositorySourceKind::Github(repository) => RepositoryIdentity::Github(
+                repository.owner.to_ascii_lowercase(),
+                repository.repository.to_ascii_lowercase(),
+            ),
+            RepositorySourceKind::Local(root) => RepositoryIdentity::Local(root.clone()),
+        }
+    }
+
+    fn into_project_repository(self, id: String) -> ProjectRepository {
+        let (github, local) = match self.kind {
+            RepositorySourceKind::Github(repository) => (
+                Some(format!("{}/{}", repository.owner, repository.repository)),
+                None,
+            ),
+            RepositorySourceKind::Local(root) => (None, Some(root)),
+        };
+        ProjectRepository {
+            id: id.clone(),
+            github,
+            local,
+            destination: PathBuf::from(id),
+            git_ref: None,
+        }
+    }
+}
+
+/// Interpret a source once, including local Git canonicalization and GitHub
+/// parsing, so all creation paths use exactly the same source semantics.
+fn interpret_repository_source(source: &str) -> Result<InterpretedRepositorySource> {
+    let source = source.trim();
+    if source.is_empty() {
+        bail!("repository source cannot be empty");
+    }
+    let candidate = Path::new(source);
+    if candidate.exists() {
+        let root = hel::hel_local_git::canonical_repository(candidate)?;
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("local repository has no usable directory name")?
+            .to_owned();
+        return Ok(InterpretedRepositorySource {
+            display_name: source.to_owned(),
+            name,
+            kind: RepositorySourceKind::Local(root),
+        });
+    }
+    if candidate.is_absolute() || source.starts_with('.') || source.starts_with('~') {
+        bail!("local repository path {source:?} does not exist");
+    }
+    let repository = github_repository_from_origin(source).context(format!(
+        "{source:?} is not a GitHub owner/repository or URL"
+    ))?;
+    Ok(InterpretedRepositorySource {
+        display_name: source.to_owned(),
+        name: repository.repository.clone(),
+        kind: RepositorySourceKind::Github(repository),
+    })
+}
+
+fn exact_configured_bundle(
+    config: &HelConfig,
+    requested: &[InterpretedRepositorySource],
+) -> Option<String> {
+    let requested_identities = requested
+        .iter()
+        .map(InterpretedRepositorySource::identity)
+        .collect::<BTreeSet<_>>();
+    let primary = requested.first()?.identity();
+    config.bundles.iter().find_map(|(id, bundle)| {
+        if bundle.repositories.len() != requested.len()
+            || bundle
+                .repositories
+                .iter()
+                .any(|repository| repository.git_ref.is_some())
+        {
+            return None;
+        }
+        bundle_matches(bundle, &requested_identities, &primary).then(|| id.clone())
+    })
+}
+
+fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
+    if !is_used(base) {
+        return base.to_owned();
+    }
+    for suffix in 2_u32.. {
+        let suffix = format!("-{suffix}");
+        let prefix_len = 64usize.saturating_sub(suffix.len());
+        let prefix = base.chars().take(prefix_len).collect::<String>();
+        let candidate = format!("{prefix}{suffix}");
+        if !is_used(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("u32 repository/bundle id suffixes exhausted")
 }
 
 pub struct SessionLaunchOptions {
@@ -1196,6 +1349,155 @@ mod tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn bundle_creation_combines_sources_with_first_primary_and_stable_collisions() {
+        let mut config = HelConfig::default();
+        let sources = vec!["example/app".into(), "other/app".into()];
+
+        let bundle_id = create_bundle_from_sources_in_config(&mut config, &sources).unwrap();
+        let bundle = &config.bundles[&bundle_id];
+        assert_eq!(bundle_id, "app");
+        assert_eq!(bundle.primary_repo, "app");
+        assert_eq!(
+            bundle
+                .repositories
+                .iter()
+                .map(|repository| repository.id.as_str())
+                .collect::<Vec<_>>(),
+            ["app", "app-2"]
+        );
+        assert_eq!(
+            bundle
+                .repositories
+                .iter()
+                .map(|repository| repository.destination.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            ["app".to_owned(), "app-2".to_owned()]
+        );
+        assert_eq!(
+            bundle.repositories[0].github.as_deref(),
+            Some("example/app")
+        );
+        assert_eq!(bundle.repositories[1].github.as_deref(), Some("other/app"));
+    }
+
+    #[test]
+    fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("app");
+        let output = hel::hel_subprocess::run_capturing_stdout(
+            std::process::Command::new("git").arg("init").arg(&root),
+        )
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let mut config = HelConfig::default();
+        let sources = vec![root.to_str().unwrap().into(), "example/shared".into()];
+        let id = create_bundle_from_sources_in_config(&mut config, &sources).unwrap();
+        let bundle = &config.bundles[&id];
+        assert_eq!(
+            bundle.primary().unwrap().local,
+            Some(root.canonicalize().unwrap())
+        );
+        assert_eq!(
+            bundle.repositories[1].github.as_deref(),
+            Some("example/shared")
+        );
+        let before = config.clone();
+        let aliases = vec![
+            root.to_str().unwrap().into(),
+            nested.to_str().unwrap().into(),
+        ];
+        let error = create_bundle_from_sources_in_config(&mut config, &aliases).unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate repository source"),
+            "{error:#}"
+        );
+        assert_eq!(config, before);
+    }
+
+    #[test]
+    fn bundle_creation_rejects_duplicate_normalized_sources_atomically() {
+        let mut config = HelConfig::default();
+        let before = config.clone();
+        let sources = vec![
+            "example/app".into(),
+            "https://github.com/EXAMPLE/APP.git".into(),
+        ];
+
+        let error = create_bundle_from_sources_in_config(&mut config, &sources).unwrap_err();
+        assert!(error.to_string().contains("duplicate repository source"));
+        assert_eq!(config, before);
+    }
+
+    #[test]
+    fn bundle_creation_validates_every_source_before_mutating_config() {
+        let mut config = HelConfig::default();
+        let before = config.clone();
+        let invalid_directory = tempfile::tempdir().unwrap();
+        let sources = vec![
+            "example/app".into(),
+            invalid_directory.path().to_string_lossy().into_owned(),
+        ];
+
+        let error = create_bundle_from_sources_in_config(&mut config, &sources).unwrap_err();
+        assert!(error.to_string().contains("not a Git repository"));
+        assert_eq!(config, before);
+    }
+
+    #[test]
+    fn bundle_creation_reuses_only_an_exact_unpinned_source_set() {
+        let mut config = HelConfig::default();
+        config.bundles.insert(
+            "all".into(),
+            ProjectBundle {
+                primary_repo: "app".into(),
+                repositories: vec![
+                    ProjectRepository {
+                        id: "app".into(),
+                        github: Some("example/app".into()),
+                        local: None,
+                        destination: "app".into(),
+                        git_ref: None,
+                    },
+                    ProjectRepository {
+                        id: "shared".into(),
+                        github: Some("example/shared".into()),
+                        local: None,
+                        destination: "shared".into(),
+                        git_ref: None,
+                    },
+                ],
+            },
+        );
+
+        let one_source = vec!["example/app".into()];
+        let created = create_bundle_from_sources_in_config(&mut config, &one_source).unwrap();
+        assert_eq!(created, "app");
+        assert_eq!(config.bundles[&created].repositories.len(), 1);
+        assert_eq!(
+            create_bundle_from_sources_in_config(&mut config, &one_source).unwrap(),
+            "app"
+        );
+
+        let exact_sources = vec!["example/app".into(), "example/shared".into()];
+        assert_eq!(
+            create_bundle_from_sources_in_config(&mut config, &exact_sources).unwrap(),
+            "all"
+        );
+        assert_eq!(config.bundles.len(), 2);
+        config.bundles.get_mut("all").unwrap().repositories[0].git_ref = Some("release".into());
+        let unpinned = create_bundle_from_sources_in_config(&mut config, &exact_sources).unwrap();
+        assert_ne!(unpinned, "all");
+        assert!(
+            config.bundles[&unpinned]
+                .repositories
+                .iter()
+                .all(|repo| repo.git_ref.is_none())
+        );
     }
 
     fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {

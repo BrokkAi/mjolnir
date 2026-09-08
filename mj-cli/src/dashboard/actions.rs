@@ -16,14 +16,13 @@ use mj_controller::hel_review_settings::ReviewDiscoveryRequest;
 
 use crate::daemon;
 use crate::dashboard::io::{
-    ArchiveWriteTarget, ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate,
-    LifecycleOperationRequest, ResumeRepositoryPreflightApply, config_only_controller,
-    spawn_archive_write, spawn_cancellable_io, spawn_cancellable_io_with_token,
-    spawn_clipboard_read, spawn_config_rename, spawn_create_bundle,
-    spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
-    spawn_lifecycle_operation, spawn_review_settings_discovery, spawn_workspace_create,
-    spawn_workspace_delete, spawn_workspace_draft_recovery, spawn_workspace_management_load,
-    spawn_workspace_rename,
+    ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate, LifecycleOperationRequest,
+    ResumeRepositoryPreflightApply, config_only_controller, spawn_cancellable_io,
+    spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
+    spawn_create_bundle, spawn_dashboard_container_settings, spawn_dashboard_create_session,
+    spawn_dashboard_rename, spawn_lifecycle_operation, spawn_review_settings_discovery,
+    spawn_workspace_create, spawn_workspace_delete, spawn_workspace_draft_recovery,
+    spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -234,58 +233,6 @@ pub(crate) async fn apply_dashboard_action(
             context.acknowledge_dashboard_sessions(receipts);
         }
         DashboardAction::OpenResumeDialog => context.start_resume_discovery(),
-        DashboardAction::SetSessionArchived {
-            session_id,
-            archived,
-        } => {
-            let what = format!("session {}", short_id(&session_id));
-            let id = session_id.clone();
-            let runtime = tokio::runtime::Handle::current();
-            spawn_archive_write(
-                what,
-                ArchiveWriteTarget::Session {
-                    session_id: session_id.clone(),
-                    archived: !archived,
-                },
-                move || {
-                    runtime.block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .set_session_archived(id, archived)
-                            .await
-                    })
-                },
-                context.dashboard_io_tx.clone(),
-                context.critical_operations.clone(),
-            );
-            // The in-memory record the dashboard already updated is the one a
-            // later reload compares against, so keep the controller in step.
-            if let Some(session) = context.controller.state.sessions.get_mut(&session_id) {
-                session.archived = archived;
-            }
-        }
-        DashboardAction::SetNativeSessionHidden {
-            harness_kind,
-            native_session_id,
-            hidden,
-        } => {
-            let what = format!("native session {}", short_id(&native_session_id));
-            let runtime = tokio::runtime::Handle::current();
-            spawn_archive_write(
-                what,
-                ArchiveWriteTarget::HiddenNativeSessions,
-                move || {
-                    runtime.block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .set_native_session_hidden(harness_kind, native_session_id, hidden)
-                            .await
-                    })
-                },
-                context.dashboard_io_tx.clone(),
-                context.critical_operations.clone(),
-            );
-        }
         DashboardAction::ImportSession {
             profile_id,
             native_session_id,
@@ -523,40 +470,6 @@ pub(crate) async fn apply_dashboard_action(
         }
         action @ (DashboardAction::CreateSession { .. }
         | DashboardAction::CreateStartupSession { .. }) => start_session_launch(context, action),
-        DashboardAction::QuickNewSession {
-            generation,
-            initial_prompt,
-        } => {
-            if context.dashboard.active_workspace_id().is_none() {
-                context.dashboard.quick_new_failed(
-                    generation,
-                    "Select a workspace before creating a session.".into(),
-                );
-                return Ok(());
-            }
-            match context
-                .dashboard
-                .quick_session_action(context.launch_directory.clone())
-            {
-                Ok(DashboardAction::CreateStartupSession {
-                    profile_id,
-                    target_template_id,
-                    project_directory,
-                    ..
-                }) => start_session_launch(
-                    context,
-                    DashboardAction::CreateStartupSession {
-                        generation,
-                        profile_id,
-                        target_template_id,
-                        project_directory,
-                        initial_prompt,
-                    },
-                ),
-                Ok(_) => unreachable!("quick session resolves startup options"),
-                Err(error) => context.dashboard.quick_new_failed(generation, error),
-            }
-        }
         DashboardAction::RestartSession { session_id } => {
             let Some(session) = context.controller.state.sessions.get(&session_id).cloned() else {
                 return Ok(());
@@ -785,10 +698,10 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::ResolveAwsResourceOptions {
             target_template_ids,
         } => context.resolve_aws_resource_options(target_template_ids),
-        DashboardAction::CreateBundle { source } => {
+        DashboardAction::CreateBundle { sources } => {
             context.dashboard.set_notice("Creating bundle…");
             spawn_create_bundle(
-                source,
+                sources,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );

@@ -268,6 +268,8 @@ pub struct DurableRelay {
     worker_build: Option<String>,
     /// Current ACP process readiness; never recovered from the journal.
     acp_ready: bool,
+    /// Optional extension advertised by the current ACP process.
+    steering_supported: Option<bool>,
     snapshot: RelaySnapshot,
     /// Canonical, non-overlapping slices of the durable journal. Event bodies
     /// stay on disk; only enough metadata to locate a requested ordinal is
@@ -477,6 +479,7 @@ impl DurableRelay {
             relay_version: relay_version.into(),
             worker_build: None,
             acp_ready: false,
+            steering_supported: None,
             snapshot,
             journal_spans,
             hot_events,
@@ -579,6 +582,7 @@ impl DurableRelay {
     pub fn operational_state(&self) -> RelayOperationalState {
         let mut state = self.snapshot.operational_state();
         state.acp_ready = Some(self.acp_ready);
+        state.steering_supported = self.steering_supported;
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.current_step_started_at_ms = self.step_clock.started_at_ms();
         state.foreground_tool_started_at_ms = self
@@ -594,6 +598,12 @@ impl DurableRelay {
     /// A stopped bridge cannot become ready again until its replacement configures.
     pub fn clear_acp_readiness(&mut self) {
         self.acp_ready = false;
+        self.steering_supported = None;
+    }
+
+    /// Publish the current harness's steering support without changing the journal.
+    pub fn set_steering_supported(&mut self, supported: Option<bool>) {
+        self.steering_supported = supported;
     }
 
     fn activity_is_idle(&self) -> bool {

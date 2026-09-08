@@ -254,6 +254,7 @@ pub(super) struct ReviewerPane {
     /// Wrapped rows for `width`. This is the pane's own row cache: a
     /// selection in it is resolved here and never against the primary's.
     rows: Vec<Line<'static>>,
+    theme: theme::UiTheme,
     width: u16,
     /// First content row drawn.
     top_row: usize,
@@ -355,10 +356,11 @@ impl ReviewerPane {
     }
 
     fn ensure_rows(&mut self, width: u16) {
-        if self.width == width && !self.rows.is_empty() {
+        if self.width == width && self.theme == theme::current() && !self.rows.is_empty() {
             return;
         }
         self.width = width;
+        self.theme = theme::current();
         self.rows = self
             .entries
             .iter()
@@ -945,7 +947,7 @@ pub(super) fn render_setup(
         ])
         .split(inner);
     frame.render_widget(
-        Paragraph::new(headline).style(Style::default().fg(theme::MUTED)),
+        Paragraph::new(headline).style(Style::default().fg(theme::palette().muted)),
         chunks[0],
     );
     let (heading, rows, selected) = match setup.stage() {
@@ -984,7 +986,7 @@ pub(super) fn render_setup(
     form.begin_frame();
     if let Some(failure) = setup.failure() {
         frame.render_widget(
-            Paragraph::new(failure).style(Style::default().fg(theme::ERROR)),
+            Paragraph::new(failure).style(Style::default().fg(theme::palette().error)),
             chunks[2],
         );
         ButtonRow::render(
@@ -997,14 +999,16 @@ pub(super) fn render_setup(
             form,
         );
         frame.render_widget(
-            Paragraph::new("Enter retry · Esc cancel").style(Style::default().fg(theme::MUTED)),
+            Paragraph::new("Enter retry · Esc cancel")
+                .style(Style::default().fg(theme::palette().muted)),
             chunks[4],
         );
         form.end_frame(SetupControl::Retry);
         return inner;
     } else if setup.busy() {
         frame.render_widget(
-            Paragraph::new("Starting the reviewer…").style(Style::default().fg(theme::WARNING)),
+            Paragraph::new("Starting the reviewer…")
+                .style(Style::default().fg(theme::palette().warning)),
             chunks[2],
         );
         ButtonRow::render(
@@ -1015,7 +1019,7 @@ pub(super) fn render_setup(
         );
         frame.render_widget(
             Paragraph::new("Waiting for reviewer discovery · Esc cancel")
-                .style(Style::default().fg(theme::MUTED)),
+                .style(Style::default().fg(theme::palette().muted)),
             chunks[4],
         );
         form.end_frame(SetupControl::Cancel);
@@ -1049,7 +1053,7 @@ pub(super) fn render_setup(
         );
         frame.render_widget(
             Paragraph::new("↑/↓ choose · Tab controls · Enter confirm · Esc cancel")
-                .style(Style::default().fg(theme::MUTED)),
+                .style(Style::default().fg(theme::palette().muted)),
             chunks[4],
         );
     }
@@ -1081,7 +1085,7 @@ pub(super) fn render_reviewer_titled(
 ) -> (Rect, usize, usize) {
     let block = theme::panel(false)
         .title(title.to_owned())
-        .border_style(Style::default().fg(theme::SECONDARY));
+        .border_style(Style::default().fg(theme::palette().secondary));
     let mut inner = block.inner(area);
     frame.render_widget(block, area);
     if let Some(strip) = strip
@@ -1107,7 +1111,7 @@ pub(super) fn render_reviewer_titled(
     let rows = if visible.is_empty() {
         vec![Line::from(Span::styled(
             status.to_owned(),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ))]
     } else {
         visible
@@ -1178,7 +1182,7 @@ pub(super) fn render_split_actions(
     );
     if status_column < area.right() {
         frame.render_widget(
-            Paragraph::new(waiting).style(Style::default().fg(theme::MUTED)),
+            Paragraph::new(waiting).style(Style::default().fg(theme::palette().muted)),
             Rect::new(
                 status_column,
                 area.y,
@@ -1559,6 +1563,31 @@ mod tests {
                 .iter()
                 .any(|request| matches!(request, WorkflowRequest::PromptPrimary { .. }))
         );
+    }
+
+    #[test]
+    fn reviewer_rows_adopt_the_new_theme_without_new_events() {
+        let mut pane = pane_from_entries(vec![ChatEntry::plain(
+            1,
+            ChatRole::Agent,
+            "Review the **changed behavior**.",
+        )]);
+        theme::with_theme(theme::UiTheme::Midnight, || pane.ensure_rows(60));
+        let original = pane.rows.clone();
+        theme::with_theme(theme::UiTheme::Light, || {
+            pane.ensure_rows(60);
+            assert_ne!(pane.rows, original);
+            assert_eq!(
+                pane.rows.iter().map(row_text).collect::<Vec<_>>(),
+                original.iter().map(row_text).collect::<Vec<_>>()
+            );
+            assert!(
+                pane.rows
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .any(|span| { span.style.fg == Some(theme::palette().secondary) })
+            );
+        });
     }
 
     #[test]

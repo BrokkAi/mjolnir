@@ -26,7 +26,9 @@ from reliability_lab import Lab, ScenarioFailure
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-DIMENSIONS = ((40, 10), (72, 18), (140, 40), (200, 60))
+# The combined dashboard deliberately refuses to render below 80 columns.
+# Keep both sides of that boundary in the real-terminal evidence.
+DIMENSIONS = ((79, 18), (80, 18), (140, 40), (200, 60))
 DEFAULT_TIMEOUT = 15.0
 
 
@@ -364,27 +366,13 @@ def create_session(
     """Create a running fake-ACP session for dashboard and chat controls."""
 
     tmux.start("dashboard-create", 140, 40)
-    screen = tmux.wait_for_any(("Workspaces", "Sessions"), "workspace picker or dashboard")
-    picker_input = "initial launch"
-    if "Workspaces" not in screen:
-        tmux.send_key("F3")
-        screen = tmux.wait_for("Workspaces", "workspace picker opened from dashboard")
-        picker_input = "initial launch; F3 from the remembered workspace"
-    evidence.event(
-        "workspace-picker",
-        picker_input,
-        "Workspaces visible",
-        "Workspaces visible",
-        evidence.capture("workspace-picker", screen),
-    )
-    tmux.send_key("Enter")
     screen = tmux.wait_for_any(
         ("Sessions", "Prompt (no live session)"),
-        "dashboard after workspace selection",
+        "combined dashboard after direct startup",
     )
     evidence.event(
         "dashboard-ready",
-        "Enter",
+        "direct startup; no standalone workspace selector",
         "Sessions dashboard visible",
         "Sessions dashboard visible",
         evidence.capture("dashboard-ready", screen),
@@ -395,6 +383,27 @@ def create_session(
     status, _ = lab.request("POST", "/auth/session", {"code": code})
     if status != 204:
         raise ScenarioFailure(f"fixture viewer login returned {status}")
+
+    # F3 is an integrated manager over the combined dashboard. Closing it
+    # returns to the same surface, and the workspace tab is the first keyboard
+    # stop before Sessions. With one deterministic fixture workspace, the
+    # horizontal keys must be harmless at either edge while focus is retained.
+    tmux.send_key("F3")
+    tmux.wait_for("Workspaces · F3", "integrated workspace manager")
+    tmux.wait_for("active sessions", "workspace manager snapshot")
+    tmux.send_key("Escape")
+    tmux.wait_until(lambda: "Workspaces · F3" not in tmux.capture(), "workspace manager closed")
+    tmux.send_key("BTab")
+    tmux.send_key("Left")
+    tmux.send_key("Right")
+    tmux.send_key("Tab")
+    evidence.event(
+        "workspace-keyboard-focus",
+        "F3; Escape; Shift-Tab; Left; Right; Tab",
+        "integrated manager closes and workspace focus returns to Sessions",
+        "workspace focus remained responsive",
+        evidence.capture("workspace-keyboard-focus", tmux.capture()),
+    )
 
     snapshot = lab.snapshot()
     workspaces = snapshot.get("workspaces", [])
@@ -446,11 +455,14 @@ def create_session(
 def dashboard_dimensions(tmux: TmuxController, evidence: Evidence) -> None:
     for columns, rows in DIMENSIONS:
         tmux.resize(columns, rows)
-        screen = tmux.wait_for_any(
-            ("Sessions", "live-components", "Terminal too small"),
-            f"dashboard at {columns}x{rows}",
-            timeout=5,
-        )
+        if columns < 80:
+            screen = tmux.wait_for("Terminal too small", f"dashboard width guard at {columns} columns")
+        else:
+            screen = tmux.wait_for_any(
+                ("Sessions", "live-components"),
+                f"dashboard at {columns}x{rows}",
+                timeout=5,
+            )
         capture = evidence.capture(f"dashboard-{columns}x{rows}", screen)
         evidence.event(
             f"resize-{columns}x{rows}",
@@ -474,12 +486,7 @@ def run_workflow(
     overlay_container_target(lab)
 
     tmux.start("dashboard-components", 140, 40)
-    screen = tmux.wait_for_any(("Workspaces", "Sessions"), "workspace or remembered dashboard after reattach")
-    if "Workspaces" in screen:
-        tmux.send_key("Enter")
-        time.sleep(0.05)
-        tmux.send_key("Enter")
-    tmux.wait_for_any(("Sessions", "live-components"), "dashboard after reattach")
+    tmux.wait_for_any(("Sessions", "live-components"), "dashboard after direct reattach")
 
     dashboard_dimensions(tmux, evidence)
     tmux.resize(140, 40)
@@ -543,7 +550,11 @@ def run_workflow(
 
     for columns, rows in DIMENSIONS:
         tmux.resize(columns, rows)
-        screen = tmux.wait_for_any(("Edit container", "Terminal too small"), "resize with container form open")
+        screen = (
+            tmux.wait_for("Terminal too small", "container width guard")
+            if columns < 80
+            else tmux.wait_for("Edit container", "resize with container form open")
+        )
         evidence.event(f"container-resize-{columns}x{rows}", f"resize to {columns}x{rows}", "form or minimum-size message is rendered", "minimum-size message" if "Terminal too small" in screen else "form rendered", evidence.capture(f"container-resize-{columns}x{rows}", screen))
     tmux.resize(140, 40)
     tmux.wait_for("Edit container", "container form restored after resizing")
@@ -644,22 +655,14 @@ def run_workflow(
     lab.stop_daemon()
     _write_text(lab.config / "config.toml", bare_config)
     tmux.start("dashboard-destroy", 140, 40)
-    screen = tmux.wait_for_any(("Workspaces", "Sessions"), "dashboard after restoring bare target")
-    if "Workspaces" in screen:
-        tmux.send_key("Enter")
-        time.sleep(0.05)
-        tmux.send_key("Enter")
+    tmux.wait_for_any(("Sessions", "live-components"), "dashboard after restoring bare target")
     tmux.wait_for("live-components", "owned session after target restoration")
     from tui_components_actions import destroy_confirmation
     destroy_confirmation(lab, tmux, evidence)
     tmux.release()
 
     tmux.start("dashboard-sigterm", 140, 40)
-    screen = tmux.wait_for_any(("Workspaces", "Sessions"), "workspace or remembered dashboard for SIGTERM test")
-    if "Workspaces" in screen:
-        tmux.send_key("Enter")
-        time.sleep(0.05)
-        tmux.send_key("Enter")
+    tmux.wait_for_any(("Sessions", "live-components"), "dashboard after direct startup for SIGTERM test")
     tmux.wait_for("Sessions", "dashboard for SIGTERM test")
     pid = tmux.pane_pid()
     with contextlib.suppress(ProcessLookupError):

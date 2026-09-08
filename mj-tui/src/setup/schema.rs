@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "advanced":{}, "startup":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "show_stopped_sessions":true, "spinner":"scan", "theme":"midnight", "advanced":{}, "startup":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
         }
         "startup" => json!({"enabled":true,"prompt":true,"profile":null,"target":null}),
         "phone" => {
@@ -99,13 +99,14 @@ pub(super) fn label(key: &str) -> String {
         "spinner" => "Activity animation",
         "advanced" => "Advanced",
         "detailed_activity_clocks" => "Detailed activity clocks",
+        "theme" => "Theme",
         "phone" => "Web access",
         "review" => "Code review",
         "profiles" => "Agent accounts",
         "targets" => "Machines and runtimes",
         "bundles" => "Projects",
         "enabled" => "Enabled",
-        "prompt" => "Ask for a task when creating",
+        "prompt" => "Focus prompt after creating",
         "profile" => "Agent account",
         "target" => "Machine / runtime",
         "kind" => "Type",
@@ -158,6 +159,11 @@ pub(super) fn choice_label(value: &Value) -> String {
             value.to_string()
         };
     };
+    if let Ok(theme) =
+        serde_json::from_value::<hel::hel_config::UiTheme>(Value::String(value.into()))
+    {
+        return theme.label().into();
+    }
     match value {
         "local-bare" => "Local worktree",
         "local-podman" => "Local Podman",
@@ -210,6 +216,12 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         ],
         _ => &[],
     };
+    if path.len() == 1 && key == "theme" {
+        return hel::hel_config::UiTheme::ALL
+            .into_iter()
+            .map(|theme| serde_json::to_value(theme).expect("theme serializes"))
+            .collect();
+    }
     if key == "spinner" {
         let first = hel::hel_config::SpinnerStyle::default();
         let mut current = first;
@@ -240,6 +252,9 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
 
 pub(super) fn help(path: &[String]) -> &'static str {
     match path.last().map(String::as_str).unwrap_or("") {
+        "theme" => {
+            "Colors for the terminal dashboard and conversation. Applies immediately after saving Setup."
+        }
         "startup" => {
             "Quick New uses these defaults. Automatic chooses Codex, then usable Podman, Docker, or a local worktree."
         }

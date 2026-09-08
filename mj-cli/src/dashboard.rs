@@ -159,9 +159,7 @@ fn startup_session_choice<'a>(
     sessions
         .into_iter()
         .filter(|session| {
-            Some(session.workspace_id.as_str()) == workspace_id
-                && session.state.is_active()
-                && !session.archived
+            Some(session.workspace_id.as_str()) == workspace_id && session.state.is_active()
         })
         .max_by(|left, right| {
             activity_at_ms(&left.id)
@@ -1231,6 +1229,16 @@ impl DashboardContext {
                 .map(|(id, _)| id.clone()),
             std::time::Instant::now(),
         );
+        if !self.dashboard.modal_open() && self.dashboard.startup_sessions().next().is_none() {
+            match self
+                .dashboard
+                .begin_startup_session(self.launch_directory.clone())
+            {
+                Ok(DashboardAction::None) => self.dashboard.focus_sessions(),
+                Ok(action) => actions::start_session_launch(self, action),
+                Err(error) => self.dashboard.set_failure_notice(error),
+            }
+        }
         for (session_id, viewed_through_event_ordinal) in sessions {
             spawn_stored_session_summary(
                 session_id,
@@ -1334,7 +1342,9 @@ impl DashboardContext {
             self.dashboard.focus_sessions();
             return;
         };
-        self.dashboard.focus_prompt();
+        if self.controller.config.startup.prompt {
+            self.dashboard.focus_prompt();
+        }
         self.open_chat_session(&session_id);
     }
 
@@ -1633,7 +1643,9 @@ impl DashboardContext {
     /// Closing/Closed snapshot and refuse prompts.
     pub(crate) fn drop_warm_chat_for(&mut self, session_id: &str) {
         if self.opening_chat_session.as_deref() == Some(session_id) {
-            self.cancel_chat_open();
+            self.defer_chat_open();
+        } else {
+            self.attachment.retire(session_id);
         }
         if self
             .active_chat
@@ -1778,6 +1790,7 @@ impl DashboardContext {
             target: session_record
                 .project_target(&self.controller.config, &session_record.target_template_id),
             profile: session_record.last_profile.clone(),
+            title: session_record.display_title().to_owned(),
             harness_kind: Some(session_record.harness_kind),
         };
         let sessions = self.worker_commands_tx.clone();
@@ -2483,7 +2496,6 @@ impl DashboardContext {
                     .map(|(id, profile)| (id.clone(), profile.kind)),
             ),
         );
-        io::spawn_hidden_native_sessions_load(self.dashboard_io_tx.clone());
         let discovery_id = self.import_discovery_id;
         for (profile_id, profile) in self.controller.config.profiles.clone() {
             let updates = self.import_updates_tx.clone();
@@ -2754,29 +2766,32 @@ fn dispatch_event(
         && context
             .visible_chat()
             .is_some_and(|chat| chat.component_modal_open());
-    let to_chat = chat_modal
-        || match &event {
-            Event::Mouse(mouse) if !context.dashboard.modal_open() => {
-                let over_chat = context
-                    .dashboard
-                    .chat_region_contains(mouse.column, mouse.row);
-                if over_chat && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                    context.dashboard.focus_prompt();
+    let dashboard_pointer = !chat_modal
+        && matches!(&event, Event::Mouse(mouse) if context.dashboard.component_handles_mouse(*mouse));
+    let to_chat = !dashboard_pointer
+        && (chat_modal
+            || match &event {
+                Event::Mouse(mouse) if !context.dashboard.modal_open() => {
+                    let over_chat = context
+                        .dashboard
+                        .chat_region_contains(mouse.column, mouse.row);
+                    if over_chat && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        context.dashboard.focus_prompt();
+                    }
+                    over_chat
+                        || context
+                            .visible_chat()
+                            .is_some_and(|chat| chat.component_handles_mouse(*mouse))
+                        || (matches!(
+                            mouse.kind,
+                            MouseEventKind::Drag(MouseButton::Left)
+                                | MouseEventKind::Up(MouseButton::Left)
+                        ) && context
+                            .visible_chat()
+                            .is_some_and(|chat| chat.transcript_scrollbar_dragging()))
                 }
-                over_chat
-                    || context
-                        .visible_chat()
-                        .is_some_and(|chat| chat.component_handles_mouse(*mouse))
-                    || (matches!(
-                        mouse.kind,
-                        MouseEventKind::Drag(MouseButton::Left)
-                            | MouseEventKind::Up(MouseButton::Left)
-                    ) && context
-                        .visible_chat()
-                        .is_some_and(|chat| chat.transcript_scrollbar_dragging()))
-            }
-            _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
-        };
+                _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
+            });
     match context.visible_chat().filter(|_| to_chat) {
         Some(chat) => {
             *chat_outcome = chat.handle_event(event);
@@ -3258,7 +3273,7 @@ mod tests {
             .frame_surfaces()
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized sessions list registered");
-        assert_eq!(surface.rect.height, 16);
+        assert_eq!(surface.rect.height, 13);
 
         let start = (surface.rect.x, surface.rect.y);
         let end = (surface.rect.right() - 1, surface.rect.bottom() - 1);
@@ -3593,24 +3608,14 @@ mod tests {
     /// The point of the chord: the user does not have to leave the composer
     /// to start a session.
     #[test]
-    fn alt_n_creates_with_defaults_while_the_composer_has_focus() {
+    fn alt_n_opens_the_wizard_while_the_composer_has_focus() {
         let mut dashboard = populated_dashboard();
         dashboard.focus_prompt();
 
         let command = chord(&dashboard, alt('n')).expect("Alt-N is a global chord");
-        assert_eq!(command, CommandId::NewSession);
-        assert!(matches!(
-            dashboard.dispatch_command(command),
-            DashboardAction::None
-        ));
-        assert!(
-            dashboard.modal_open(),
-            "quick New opens a fresh task prompt"
-        );
-        dashboard.handle_paste("Task for the new session");
-        assert!(
-            matches!(dashboard.handle_key(plain_key(crossterm::event::KeyCode::Enter)), DashboardAction::QuickNewSession { initial_prompt: Some(prompt), .. } if prompt == "Task for the new session")
-        );
+        assert_eq!(command, CommandId::NewSessionWizard);
+        assert_eq!(dashboard.dispatch_command(command), DashboardAction::None);
+        assert!(dashboard.modal_open(), "New opens the creation wizard");
     }
 
     /// One key refreshes both support panes, from wherever the keyboard is —
@@ -3691,17 +3696,71 @@ mod tests {
         assert_eq!(chord(&dashboard, alt('n')), None);
     }
 
-    #[test]
-    fn f7_opens_the_web_dialog_from_the_composer() {
-        let mut dashboard = populated_dashboard();
-        dashboard.focus_prompt();
+    #[tokio::test]
+    async fn advertised_web_and_setup_shortcuts_open_their_dialogs_from_every_pane() {
+        for focus in [
+            hel_tui::Focus::Workspaces,
+            hel_tui::Focus::Prompt,
+            hel_tui::Focus::Sessions,
+            hel_tui::Focus::Targets,
+            hel_tui::Focus::Quota,
+        ] {
+            let mut dashboard = populated_dashboard();
+            focus_on(&mut dashboard, focus);
+            let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+                "session-1",
+                1,
+            );
+            let notices = Notices::default();
+            let mut chat = ActiveChat::open(
+                fixture.stopped,
+                "bundle-1",
+                None,
+                fixture.control,
+                SessionHeaderIdentity::default(),
+                String::new(),
+                notices.clone(),
+            );
+            // The fixture has no database to restore a review from; expose
+            // the hints rather than the resulting startup notice.
+            notices.clear();
+            let mut terminal = Terminal::new(TestBackend::new(240, 40)).expect("terminal");
+            terminal
+                .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
+                .expect("draw combined surface");
+            let buffer = terminal.backend().buffer();
+            let footer = (0..buffer.area.width)
+                .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
+                .collect::<String>();
+            assert!(footer.contains("F4 web"), "{focus:?}: {footer}");
+            assert!(footer.contains("F7 setup"), "{focus:?}: {footer}");
 
-        let command = chord(&dashboard, function_key(7)).expect("F7 is a global chord");
-        assert_eq!(command, CommandId::WebViewer);
-        assert!(matches!(
-            dashboard.dispatch_command(command),
-            DashboardAction::LoadWebAccess
-        ));
+            let web = chord(&dashboard, function_key(4)).expect("F4 is global");
+            assert_eq!(
+                dashboard.dispatch_command(web),
+                DashboardAction::LoadWebAccess
+            );
+            assert!(dashboard.modal_open());
+            assert_eq!(chord(&dashboard, function_key(7)), None);
+            dashboard.cancel_modal();
+
+            let setup = chord(&dashboard, function_key(7)).expect("F7 is global");
+            assert_eq!(dashboard.dispatch_command(setup), DashboardAction::None);
+            assert!(dashboard.modal_open());
+            terminal
+                .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
+                .expect("draw Setup");
+            let screen = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(screen.contains("Setup"), "{focus:?}: {screen}");
+            assert!(screen.contains("Detect machine"), "{focus:?}: {screen}");
+            assert_eq!(chord(&dashboard, function_key(4)), None);
+        }
     }
 
     #[test]
@@ -3893,6 +3952,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn startup_activity_in_another_workspace_cannot_replace_the_opened_workspace() {
+        let local = live_session("local", "2026-08-01T00:00:00Z");
+        let mut foreign = live_session("foreign", "2026-08-03T00:00:00Z");
+        foreign.workspace_id = "another-workspace".into();
+        let mut state = hel::hel_state::HelState::default();
+        state.sessions.insert(local.id.clone(), local.clone());
+        state.sessions.insert(foreign.id.clone(), foreign);
+        let mut dashboard = DashboardState::new(Default::default(), state, Default::default());
+        dashboard.set_active_workspace(Some(local.workspace_id.clone()));
+        assert_eq!(
+            startup_session_choice(
+                dashboard.active_workspace_id(),
+                dashboard.startup_sessions(),
+                |id| { Some(if id == "foreign" { 10_000 } else { 1 }) }
+            ),
+            Some(local.id)
+        );
+    }
+
     /// With no activity recorded — nothing stored yet, or every read failed —
     /// every session ranks equal on the first key, so the newest one wins.
     #[test]
@@ -3962,7 +4041,7 @@ mod tests {
         let records = [active, archived, stopped];
         assert_eq!(
             startup_session_choice(Some("b"), records.iter(), |_| Some(99)),
-            None
+            Some("archived".into())
         );
         assert_eq!(
             startup_session_choice(None, records.iter(), |_| Some(99)),

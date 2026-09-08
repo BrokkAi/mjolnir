@@ -79,8 +79,8 @@ def exercise_cached_reopen(lab, tmux, evidence):
     # another one; the second must reuse those successfully discovered choices.
     command(tmux, "review settings", "Automatic review")
     tmux.wait_for("Choices loaded")
-    tmux.send_key("Escape")
-    absent(tmux, "╭ Review settings")
+    click(tmux, "  Cancel  ")
+    absent(tmux, "╭ Setup")
     offset = len(requests(lab))
     command(tmux, "review settings", "Automatic review")
     tmux.wait_for("Choices loaded")
@@ -88,13 +88,13 @@ def exercise_cached_reopen(lab, tmux, evidence):
     expect_discoveries(lab, offset, 0)
     record(tmux, evidence, "review-reopen-cache", "close and reopen review settings", "cached choices appear without adapter starts")
     click(tmux, "  Refresh choices  ")
-    click(tmux, "  Save  ")
-    absent(tmux, "╭ Review settings")
+    click(tmux, "  Save Setup  ")
+    absent(tmux, "╭ Setup")
     record(tmux, evidence, "review-save-during-refresh", "Refresh choices then immediately Save", "Save closes the form while the background request is cancelled")
     command(tmux, "review settings", "Automatic review")
     tmux.wait_for("Choices loaded")
-    tmux.send_key("Escape")
-    absent(tmux, "╭ Review settings")
+    click(tmux, "  Cancel  ")
+    absent(tmux, "╭ Setup")
 
 
 def exercise_offline_save(lab, tmux, evidence):
@@ -105,8 +105,8 @@ def exercise_offline_save(lab, tmux, evidence):
     tmux.wait_for("connected session")
     # Existing choices remain useful even when no worker can refresh them.
     tmux.wait_for("Tiny fixture")
-    click(tmux, "  Save  ")
-    absent(tmux, "╭ Review settings")
+    click(tmux, "  Save Setup  ")
+    absent(tmux, "╭ Setup")
     expect_discoveries(lab, offset, 0)
     if lab.snapshot()["review_config"] != original:
         raise ScenarioFailure("offline Save changed the unedited review settings")

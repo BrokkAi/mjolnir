@@ -17,7 +17,7 @@ use crate::render::render;
 use crate::{DashboardAction, DashboardState, Mode, nth_key};
 
 #[test]
-fn explicit_quick_creation_uses_defaults_before_focusing_the_new_session_prompt() {
+fn startup_creation_uses_defaults_before_focusing_the_new_session_prompt() {
     let mut config = config();
     config
         .targets
@@ -27,8 +27,6 @@ fn explicit_quick_creation_uses_defaults_before_focusing_the_new_session_prompt(
     assert_eq!(
         dashboard.quick_session_action(directory.clone()).unwrap(),
         DashboardAction::CreateStartupSession {
-            generation: None,
-            initial_prompt: None,
             profile_id: "codex-1".into(),
             project_directory: directory,
             target_template_id: None,
@@ -57,7 +55,163 @@ fn explicit_quick_creation_uses_defaults_before_focusing_the_new_session_prompt(
 }
 
 #[test]
-fn explicit_quick_creation_respects_the_configured_agent_and_fallback() {
+fn startup_scopes_active_sessions_to_the_selected_workspace() {
+    let mut foreign = running_session();
+    foreign.workspace_id = "other-workspace".into();
+    let mut dashboard = dashboard_with_session(foreign.clone());
+    let directory = std::env::current_dir().unwrap().join("opened project");
+    dashboard.set_active_workspace(None);
+    assert_eq!(
+        dashboard.begin_startup_session(directory.clone()).unwrap(),
+        DashboardAction::None
+    );
+    dashboard.set_active_workspace(Some("opened-workspace".into()));
+    assert!(dashboard.ordered_sessions().is_empty());
+    assert_eq!(dashboard.selected_session_id(), None);
+    assert_eq!(dashboard.startup_sessions().count(), 0);
+    assert!(matches!(
+        dashboard.begin_startup_session(directory.clone()).unwrap(),
+        DashboardAction::CreateStartupSession { project_directory, .. }
+            if project_directory == directory
+    ));
+
+    let mut local = running_session();
+    local.id = "opened-session".into();
+    local.workspace_id = "opened-workspace".into();
+    let mut state = dashboard.state.clone();
+    state.sessions.insert(local.id.clone(), local.clone());
+    dashboard.set_state(state.clone());
+    assert_eq!(dashboard.selected_session_id(), Some(local.id.as_str()));
+    assert_eq!(
+        dashboard
+            .startup_sessions()
+            .map(|session| &session.id)
+            .collect::<Vec<_>>(),
+        vec![&local.id]
+    );
+    assert_eq!(dashboard.ordered_sessions().len(), 1);
+    assert_eq!(
+        dashboard.begin_startup_session(directory).unwrap(),
+        DashboardAction::None
+    );
+
+    dashboard.select_active_session(&foreign.id);
+    dashboard.set_state(state);
+    assert_eq!(dashboard.selected_session_id(), Some(local.id.as_str()));
+}
+
+#[test]
+fn startup_prepares_codex_for_an_empty_workspace() {
+    let mut config = config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    let directory = std::env::current_dir().unwrap().join("project with spaces");
+    assert_eq!(
+        dashboard.begin_startup_session(directory.clone()).unwrap(),
+        DashboardAction::CreateStartupSession {
+            profile_id: "codex-1".into(),
+            project_directory: directory,
+            target_template_id: None,
+        }
+    );
+    assert!(!dashboard.prompt_has_focus());
+    assert!(!dashboard.modal_open());
+}
+
+#[test]
+fn startup_respects_configured_agent_and_existing_live_sessions() {
+    let mut config = config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    config.startup.profile = Some("claude-1".into());
+    config.startup.target = Some("localhost".into());
+    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    assert!(matches!(
+        dashboard
+            .begin_startup_session(std::env::current_dir().unwrap())
+            .unwrap(),
+        DashboardAction::CreateStartupSession {
+            profile_id,
+            target_template_id: Some(target),
+            ..
+        } if profile_id == "claude-1" && target == "localhost"
+    ));
+
+    for state in [
+        SessionState::Running,
+        SessionState::Provisioning,
+        SessionState::Disconnected,
+        SessionState::Error,
+    ] {
+        let mut session = running_session();
+        session.state = state;
+        let mut with_session = dashboard_with_session(session);
+        let selected = with_session.selected_session_id().map(str::to_owned);
+        let focus = with_session.focus();
+        assert_eq!(
+            with_session
+                .begin_startup_session(std::env::current_dir().unwrap())
+                .unwrap(),
+            DashboardAction::None
+        );
+        assert_eq!(with_session.selected_session_id(), selected.as_deref());
+        assert_eq!(with_session.focus(), focus);
+    }
+}
+
+#[test]
+fn startup_reports_missing_profiles_and_ignores_stopped_history() {
+    let mut config = config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut state = HelState::default();
+    let stopped = stopped_session();
+    state.sessions.insert(stopped.id.clone(), stopped);
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
+    assert!(matches!(
+        dashboard
+            .begin_startup_session(std::env::current_dir().unwrap())
+            .unwrap(),
+        DashboardAction::CreateStartupSession { .. }
+    ));
+
+    let mut missing = DashboardState::new(
+        crate::test_support::config(),
+        HelState::default(),
+        BTreeMap::new(),
+    );
+    let directory = std::env::current_dir().unwrap();
+    missing.config.startup.profile = Some("missing".into());
+    assert!(
+        missing
+            .begin_startup_session(directory.clone())
+            .unwrap_err()
+            .contains("not configured")
+    );
+    missing.config.startup.profile = None;
+    missing.config.profiles.clear();
+    assert!(
+        missing
+            .begin_startup_session(directory)
+            .unwrap_err()
+            .contains("F7")
+    );
+
+    missing.config.startup.enabled = false;
+    assert_eq!(
+        missing
+            .begin_startup_session(std::env::current_dir().unwrap())
+            .unwrap(),
+        DashboardAction::None
+    );
+}
+
+#[test]
+fn startup_creation_respects_the_configured_agent_and_fallback() {
     let mut config = config();
     config
         .targets
@@ -92,8 +246,6 @@ fn explicit_quick_creation_ignores_deprecated_startup_enabled() {
         DashboardAction::CreateStartupSession {
             profile_id: "codex-1".into(),
             target_template_id: None,
-            generation: None,
-            initial_prompt: None,
             project_directory: std::env::current_dir().unwrap(),
         }
     );
@@ -135,7 +287,7 @@ fn explicit_quick_creation_reports_missing_agent_profiles() {
         dashboard
             .quick_session_action(directory)
             .unwrap_err()
-            .contains("F4")
+            .contains("F7")
     );
 }
 
@@ -313,12 +465,217 @@ fn new_session_can_request_a_repository_when_no_bundle_exists() {
     for character in "example/new-repo".chars() {
         dashboard.handle_key(key(KeyCode::Char(character)));
     }
+    for _ in 0..4 {
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateBundle {
-            source: "example/new-repo".into(),
+            sources: vec!["example/new-repo".into()],
         }
     );
+}
+
+fn dashboard_at_new_bundle_editor() -> DashboardState {
+    let mut config = config();
+    config.bundles.clear();
+    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    dashboard.handle_key(alt_key('w'));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        dashboard.mode,
+        Mode::New(NewWizard {
+            step: WizardStep::NewBundle,
+            ..
+        })
+    ));
+    dashboard
+}
+
+fn type_source(dashboard: &mut DashboardState, source: &str) {
+    for character in source.chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+}
+
+fn focus_create_bundle(dashboard: &mut DashboardState, tabs: usize) {
+    for _ in 0..tabs {
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+}
+
+#[test]
+fn new_bundle_editor_adds_multiple_repositories_and_removes_selected() {
+    let mut dashboard = dashboard_at_new_bundle_editor();
+    type_source(&mut dashboard, "owner/primary");
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    type_source(&mut dashboard, "owner/secondary");
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected new-bundle editor");
+    };
+    assert_eq!(
+        wizard.new_bundle_repositories,
+        vec!["owner/primary", "owner/secondary"]
+    );
+    assert!(wizard.new_bundle_source.is_empty());
+
+    // Back-tab from the source selects the list; Delete removes its selected
+    // (newest) row and leaves the primary row intact.
+    dashboard.handle_key(key(KeyCode::BackTab));
+    dashboard.handle_key(key(KeyCode::Delete));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected new-bundle editor");
+    };
+    assert_eq!(wizard.new_bundle_repositories, vec!["owner/primary"]);
+    assert_eq!(wizard.new_bundle_selected, 0);
+}
+
+#[test]
+fn new_bundle_editor_creates_from_current_source_without_add() {
+    let mut dashboard = dashboard_at_new_bundle_editor();
+    type_source(&mut dashboard, "owner/only");
+    // Source → Add → Cancel → Back → Create. Remove is disabled while the
+    // draft is empty, so the form skips it during focus navigation.
+    focus_create_bundle(&mut dashboard, 4);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["owner/only".into()]
+        }
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected pending new-bundle editor");
+    };
+    assert!(wizard.bundle_creation_in_flight);
+    assert_eq!(wizard.new_bundle_source, "owner/only");
+}
+
+#[test]
+fn new_bundle_editor_preserves_draft_after_failure_for_retry() {
+    let mut dashboard = dashboard_at_new_bundle_editor();
+    type_source(&mut dashboard, "owner/only");
+    focus_create_bundle(&mut dashboard, 4);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["owner/only".into()]
+        }
+    );
+    dashboard.fail_bundle_creation("repository not found");
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("failure should leave the editor open");
+    };
+    assert!(!wizard.bundle_creation_in_flight);
+    assert_eq!(wizard.new_bundle_source, "owner/only");
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Could not create bundle: repository not found")
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["owner/only".into()]
+        }
+    );
+}
+
+#[test]
+fn new_bundle_editor_submits_all_sources_once_and_advances_after_success() {
+    let mut dashboard = dashboard_at_new_bundle_editor();
+    type_source(&mut dashboard, "owner/primary");
+    dashboard.handle_key(key(KeyCode::Enter));
+    type_source(&mut dashboard, "owner/secondary");
+    // Add, Remove, Cancel, Back, Create.
+    focus_create_bundle(&mut dashboard, 5);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["owner/primary".into(), "owner/secondary".into()]
+        }
+    );
+    for code in [KeyCode::Enter, KeyCode::Esc, KeyCode::Backspace] {
+        assert_eq!(dashboard.handle_key(key(code)), DashboardAction::None);
+    }
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("creation must remain pending");
+    };
+    assert!(wizard.bundle_creation_in_flight);
+    let created = config();
+    let id = created.bundles.keys().next().unwrap().clone();
+    dashboard.apply_created_bundle(created, &id);
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected session review");
+    };
+    assert_eq!(wizard.step, WizardStep::Review);
+    assert!(!wizard.bundle_creation_in_flight);
+    assert_eq!(
+        nth_bundle_key(&dashboard.config, &dashboard.state, wizard.bundle),
+        id
+    );
+}
+
+#[test]
+fn new_bundle_editor_renders_separate_input_and_help_and_accepts_mouse_add() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut dashboard = dashboard_at_new_bundle_editor();
+    type_source(&mut dashboard, "owner/visible");
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    dashboard.reset_component_geometry();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let lines = buffer_lines(terminal.backend().buffer());
+    let source_row = lines
+        .iter()
+        .position(|line| line.contains("owner/visible"))
+        .unwrap();
+    let help_row = lines
+        .iter()
+        .position(|line| line.contains("Enter adds"))
+        .unwrap();
+    assert_ne!(source_row, help_row);
+    let rendered = lines.join("\n");
+    assert!(rendered.contains("New bundle"));
+    assert!(rendered.contains("Create bundle"));
+    assert!(rendered.contains("Local Git path or GitHub owner/repository"));
+    assert!(!rendered.contains("Create repository"));
+    let (row, column) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.find("Add repository")
+                .map(|column| (row as u16, column as u16))
+        })
+        .unwrap();
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        dashboard.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        dashboard.reset_component_geometry();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+    }
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected editor");
+    };
+    assert_eq!(wizard.new_bundle_repositories, ["owner/visible"]);
+    assert!(wizard.new_bundle_source.is_empty());
 }
 
 #[test]

@@ -7,7 +7,6 @@ import { Image } from 'astro:assets';
 import shotDashboard from '../../assets/screenshots/dashboard.svg';
 import shotCommandPalette from '../../assets/screenshots/command-palette.svg';
 import shotSetup from '../../assets/screenshots/setup.svg';
-import shotQuickNew from '../../assets/screenshots/quick-new.svg';
 
 The Mjolnir TUI is a single control surface for conversations and the infrastructure behind them. It stays responsive while sessions launch, resume, stop, or run work in the background.
 
@@ -15,14 +14,41 @@ The Mjolnir TUI is a single control surface for conversations and the infrastruc
   <a class="shot__zoom" href={shotDashboard.src} aria-label="Open the full-size screenshot: Mjolnir terminal dashboard">
     <Image src={shotDashboard} alt="Mjolnir terminal dashboard with a full-height Sessions sidebar beside Conversation, Prompt, Targets, and Quota" />
   </a>
-  <figcaption>Sessions stays beside the conversation, prompt, targets, and quota. Setup lets you place the sidebar on either side.</figcaption>
+  <figcaption>The Workspace switcher sits above Sessions, beside the conversation, prompt, targets, and quota. Setup lets you place the sidebar on either side.</figcaption>
 </figure>
 
-At startup, Mjolnir opens an active session in the selected workspace when one is available. Empty workspaces stay empty until you create a session. Tabs above Sessions filter the view while all workspaces remain live. Sessions excludes archived and settled stopped conversations; use Resume to return to history.
+At startup, Mjolnir opens the most recently active live session in the selected
+workspace when one is available. Empty workspaces stay empty until you choose
+**Create**. The bordered Workspace tab pane above Sessions filters the live
+session list immediately; every workspace continues running independently.
+Stopped history is available from **Resume**, including sessions that were
+previously archived by a provider. Provider archive metadata is read-only.
+
+The Workspace pane has three bordered tab rows above Sessions. Click a tab to
+switch immediately, or focus Workspaces and use the arrow keys to select a
+workspace without opening a manager. `F3` opens workspace management for
+creating, renaming, recovering, or deleting workspaces. The selected workspace
+also determines where **Create** attaches the new session.
+
+**Create** opens the full session creation wizard. **Resume** opens all stopped
+history, and **Commands** opens the command palette. Commands remains available
+while you type and while a notice replaces the footer. Each session row has a
+**⋯** button for its actions. Displayed dashboard shortcut hints are clickable,
+including global shortcuts in the composer's footer. Help supports wheel
+scrolling and a **Close** button.
+
+Open Setup (`F7`) to choose Midnight (the default), Light, or Dracula. Saving
+applies the palette to the dashboard, conversation, and dialogs and preserves it
+for future launches. Setup also edits the spinner, Advanced display options,
+and integrated review settings; see [Configuration](/configuration/).
 
 ## Focus and scrolling
 
-`Tab` moves focus through **Sessions → Prompt → Targets → Quota**. `Shift+Tab` moves in reverse. The transcript is not a tab stop, so focus changes never take the composer away merely to scroll conversation history.
+`Tab` moves focus through **Workspaces → Sessions → Prompt → Targets → Quota**.
+`Shift+Tab` moves in reverse. The transcript is not a tab stop, so focus changes
+never take the composer away merely to scroll conversation history. When
+Workspaces has focus, `↑` and `↓` select the previous or next workspace tab
+immediately; `Enter` opens its manager actions.
 
 Use `Page Up` and `Page Down` to scroll the transcript from any focused pane. A mouse wheel scrolls the surface under the pointer. Clicking a row selects it, and double-clicking a session opens it. Dragging across transcript or pane text copies that surface's selection to the available system or terminal clipboard.
 
@@ -35,9 +61,8 @@ Each list supports the same navigation keys:
 | `Home` / `End` | Select the first or last row |
 
 The Sessions pane keeps **Create** and **Resume** above the session list. They
-remain available when the list is empty or filtered: use `n` or `Alt+N` for
-Quick New, `N` or `Alt+W` for the full creation wizard, and `Alt+S` to search
-non-live history.
+remain available when the list is empty or filtered. Both Create shortcuts open
+the full creation wizard; Resume searches every non-live session.
 
 Normal session rows use four lines: the session name, one metadata line, and
 two wrapped output lines. The metadata keeps the profile, target, and useful
@@ -54,8 +79,9 @@ Pane-specific actions are deliberately small:
 | Focus | Key | Action |
 | --- | --- | --- |
 | Sessions | `Enter` | Open the selected session |
-| Sessions | `n` | New session with a fresh task prompt and saved defaults |
-| Sessions | `N` | New session with the full options wizard |
+| Workspaces | `↑` / `↓` | Select the previous or next workspace tab immediately |
+| Sessions | `n` / `N` | Open the full session creation wizard |
+| Sessions | `Alt+S` | Open the stopped-session Resume picker |
 | Sessions | `s` | Stop immediately, without confirmation |
 | Sessions | `r` | Restart with the same settings, without confirmation |
 | Sessions | `d` / `Delete` | Delete after a Yes/No choice; `y` accepts, `n` cancels |
@@ -66,10 +92,17 @@ Pane-specific actions are deliberately small:
 
 ## Pane sizes
 
-Sessions, Targets, and Quota each have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls. Click a control, or focus the pane and press `Alt+Z` to cycle through the three sizes. Sessions is 20 columns wide when minimized, uses `max(40, terminal width / 3)` columns at standard size, and uses half the terminal at maximized size. The dashboard still requires at least 80 columns, so standard and maximized are both 40 columns at the minimum width.
+The bordered Workspaces and Sessions sidebar is 20 columns wide when minimized,
+uses `max(40, terminal width / 3)` columns at standard size, and uses half the
+terminal at maximized size. The Workspaces pane keeps three tab rows above the
+Sessions list at every sidebar size. Targets and Quota each have minimized
+(`▁`), standard (`▪`), and maximized (`□`) title-bar controls. Click a control,
+or focus a support pane and press `Alt+Z` to cycle through its sizes. The
+dashboard still requires at least 80 columns, so standard and maximized are both
+40 columns at the minimum width.
 
 - A minimized Targets or Quota pane becomes a one-line summary.
-- A minimized Sessions pane narrows the sidebar and shows two lines per session.
+- A minimized sidebar narrows the workspace tabs and shows two lines per session.
 - Only one support pane can be maximized at a time.
 - Maximized Sessions widens the sidebar. Maximized Targets or Quota receives available vertical space below Prompt.
 
@@ -86,12 +119,10 @@ Function keys and `Alt` chords work no matter which dashboard pane has focus:
 | `F1` | Open help; `?` also opens it when a non-Prompt pane has focus |
 | `F2` | Open the command palette |
 | `F3` | Open the workspace manager |
-| `Ctrl+Page Up` / `Ctrl+Page Down` | Select the previous or next workspace tab outside dialogs |
-| `F4` | Open Setup |
-| `F7` | Show the web viewer address and access code |
+| `F4` | Show the web viewer address and access code |
 | `F5` | Refresh all target capacity and profile quota data |
-| `Alt+N` | Open quick New with saved defaults |
-| `Alt+W` | Open the full session creation wizard |
+| `F7` | Open Setup |
+| `Alt+N` / `Alt+W` | Open the full session creation wizard |
 | `Alt+S` | Resume any non-live session through the resume picker |
 | `Alt+A` | Mark all session activity as read |
 | `Alt+X` | Cancel the selected session's in-flight launch, resume, or stop operation |
@@ -103,7 +134,7 @@ Function keys and `Alt` chords work no matter which dashboard pane has focus:
 
 ## Command palette
 
-Press `F2` to expose both shortcut-backed and palette-only actions. Commands for the selected session come first, followed by commands for the focused pane and then global commands.
+Click **Commands** or press `F2` to expose both shortcut-backed and palette-only actions. Commands for the selected session come first, followed by commands for the focused pane and then global commands. Click a command and **Run** to execute it, or **Close** to dismiss the palette. A session row's **⋯** button opens a palette limited to that session's actions.
 
 <figure class="shot">
   <a class="shot__zoom" href={shotCommandPalette.src} aria-label="Open the full-size screenshot: Mjolnir command palette">
@@ -116,24 +147,30 @@ Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it,
 
 ## New session and Setup
 
-Press `n` in Sessions or `Alt+N` from any pane. Type the task into the fresh prompt and press Enter. Shift+Enter adds a line, pasted multiline text is preserved, and an empty prompt starts a session without sending a task. The task belongs to the newly created session and is saved before provisioning starts.
+Press **Create** or `n`, `N`, `Alt+N`, or `Alt+W` to open the full session
+creation wizard. It asks for the profile, project, target, and launch options,
+then provisions the session in the selected workspace. The new row appears
+immediately with background launch progress; when it is ready, the normal Prompt
+receives focus. No separate fast path or task-entry dialog remains.
 
-<figure class="shot">
-  <Image src={shotQuickNew} alt="A new session task prompt with multiline input and Start session and Cancel buttons" />
-  <figcaption>Enter a task and start with your saved defaults.</figcaption>
-</figure>
+Press `F7` to edit all configuration in Setup: accounts, targets and remote
+machines, projects, sidebar position, activity animation, theme, Advanced
+display options, review, and web access. Enter opens a section or edits a value.
+**Add** and **Remove** manage entries; **Detect machine** discovers installed
+accounts and usable local runtimes. Review settings are part of the same draft:
+discovery checks the selected reviewer profile's model and effort capabilities
+and filters incompatible profiles. **Save** or Ctrl+S validates and saves the
+complete draft. Errors keep your edits in place. Escape goes back, and Cancel
+discards unsaved Setup and review edits. Web listener changes take effect on its
+next start.
 
-Quick New uses the current project directory and the saved agent and target defaults. With automatic defaults, it prefers a configured Codex account, usable local Podman, then Docker, then a local worktree. Plain directories use local execution. Set another account or target in Setup, or turn off **Ask for a task when creating** to launch immediately. Use `N` or `Alt+W` for the existing wizard when you want to choose all launch options.
-
-Press `F4` to edit all configuration in Setup: accounts, targets and remote machines, projects, creation defaults, sidebar position, activity animation, the Advanced options, review, and web access. Enter opens a section or edits a value. **Add** and **Remove** manage entries; **Detect machine** discovers installed accounts and usable local runtimes. Review settings are part of the same draft: discovery checks the selected reviewer profile's model and effort capabilities and filters incompatible profiles. **Save** or Ctrl+S validates and saves the complete draft. Errors keep your edits in place. Escape goes back, and Cancel discards unsaved setup and review edits. Web listener changes take effect on its next start.
-
-Detailed activity clocks are off by default. Turn them on in **Setup →
-Advanced → Detailed activity clocks** when you want the normal session rows and
-conversation header to show the separate `T` (turn), `S` (step), and `BG`
-(background) clocks. The ordinary **Running** status covers the originating
-turn and its follow-on background work continuously, so it does not reset or
-go idle between those phases. Compact rows keep their short activity clock
-even when detailed clocks are enabled.
+Detailed activity clocks are off by default. Turn them on in **Setup → Advanced
+→ Detailed activity clocks** when you want normal session rows and the
+conversation header to show separate turn, step, and background clocks. The
+ordinary **Running** status covers the originating turn and its follow-on
+background work continuously, so it does not reset or go idle between phases.
+The configured spinner appears above the Prompt composer only while the
+selected session is actually busy; an idle or stopped session does not animate.
 
 <figure class="shot">
   <Image src={shotSetup} alt="Setup modal with all configuration sections and Save, Cancel, and Detect machine controls" />
@@ -142,7 +179,16 @@ even when detailed clocks are enabled.
 
 ## Prompt editor
 
-The Prompt pane is a multiline editor with completion, history, and transcript controls.
+The Prompt pane is a multiline editor with completion, history, and transcript
+controls. Above the composer, the controls appear in this order: **Model**,
+**Effort**, then the microphone button. The selected session's busy spinner is
+shown above the composer while work is active. It disappears when the session is
+idle, stopped, or waiting without active work.
+
+The bottom border contains **View tasks (N)**. With the cursor on the last input
+line, press `↓` to focus that control; press `Enter` to open the tasks dialog and
+`Esc` to close it. The dialog lists the session's queued and active tasks without
+changing the prompt draft.
 
 | Key | Action |
 | --- | --- |

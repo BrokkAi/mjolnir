@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph, Wrap};
 
 use crate::components::ControlKind;
+use crate::components::{render_scrollbar, scrollbar_geometry};
 use crate::hel_selection::{FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId};
 use hel::hel_config::HelConfig;
 use hel::hel_database::{HistoryScope, PromptHistoryEntry};
@@ -37,15 +38,19 @@ use super::remote::{
     ChatRemoteOperation, ChatRemoteResult, ChatRemoteSupervisor, apply_chat_remote_result,
     queue_chat_remote_operation, restore_unsent_input, restore_unsent_prompt,
 };
-use super::rendering::{display_width, truncate_to_width, voice_button_area, voice_button_line};
+use super::rendering::{
+    VOICE_BUTTON_GLYPH, display_width, truncate_line_to_width, truncate_to_width,
+    voice_button_area, voice_button_line, wrap_styled_line,
+};
 use super::second_opinion::{
     CapturedProposal, ReviewerPane, SecondOpinion, SecondOpinionIntent, render_reviewer,
     render_setup, render_split_actions, review_role_session_id, reviewer_session_id,
 };
 use super::transcript::{ToolDiffstatRequest, materialized_prefix_entries, render_transcript};
 use super::{
-    ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatRegions, ChatSessionContext, ChatState,
-    MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity, queued_prompt_preview,
+    ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatFooter, ChatRegions,
+    ChatSessionContext, ChatState, MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity,
+    queued_prompt_preview,
 };
 use crate::hel_clipboard::{ClipboardContent, ClipboardImage};
 
@@ -368,6 +373,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         );
         state.set_current_step_start(snapshot.operational.current_step_started_at_ms);
         state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
+        state.steering_supported = snapshot.operational.steering_supported;
         state.set_session_activity(crate::usage_format::SessionActivity::of(
             &snapshot.operational,
         ));
@@ -658,6 +664,7 @@ impl ActiveChat {
                 );
                 state.set_current_step_start(snapshot.operational.current_step_started_at_ms);
                 state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
+                state.steering_supported = snapshot.operational.steering_supported;
                 state.set_session_activity(crate::usage_format::SessionActivity::of(
                     &snapshot.operational,
                 ));
@@ -666,7 +673,7 @@ impl ActiveChat {
             (state, pending)
         };
         state.set_history_context(&bundle_id);
-        state.set_header_summary(header.target, header.profile);
+        state.set_header_summary(header.target, header.profile, header.title);
         state.restore_draft(draft);
         state.notices = notices;
         let (chat_io_tx, chat_io_rx) = tokio::sync::mpsc::unbounded_channel::<ChatIoUpdate>();
@@ -929,8 +936,9 @@ impl ActiveChat {
             .session
             .project_target(config, &context.session.target_template_id);
         let profile = context.session.last_profile.clone();
+        let title = context.session.display_title().to_owned();
         let harness_kind = context.session.harness_kind;
-        self.state.set_header_summary(target, profile);
+        self.state.set_header_summary(target, profile, title);
         self.state.set_harness_kind(harness_kind);
         self.state.set_review_config(config.review.clone());
         self.state.set_spinner_style(config.spinner);
@@ -1615,11 +1623,13 @@ impl ActiveChat {
                 let Some(command_id) = self.command_id("cancel") else {
                     return ChatEventOutcome::Handled;
                 };
-                self.state.set_notice("Sending cancellation request…");
+                let intent = self.state.turn_control_intent();
+                self.state.set_notice(intent.sending_notice());
                 queue_chat_remote_operation(
                     self.remote.operations(),
                     ChatRemoteOperation::Cancel {
                         command_id,
+                        intent,
                         cancel_agent: self.state.prompt_in_flight(),
                         shell_command_ids: self.state.active_user_shell_ids(),
                     },
@@ -2411,7 +2421,7 @@ impl ActiveChat {
     pub fn draw_in(
         &mut self,
         frame: &mut Frame,
-        regions: ChatRegions,
+        regions: ChatRegions<'_>,
         prompt_focused: bool,
         transcript_selected: bool,
     ) {
@@ -2422,6 +2432,11 @@ impl ActiveChat {
             prompt_focused,
             transcript_selected,
         );
+    }
+
+    /// Visible host footer commands, indexed through the supplied chords then functions.
+    pub fn footer_command_areas(&self) -> Vec<(usize, Rect)> {
+        self.state.footer_command_areas.borrow().clone()
     }
 
     /// Whether the last frame's surfaces stand alone, because a modal owned
@@ -2555,7 +2570,7 @@ pub(super) fn render_full_frame(
         ChatRegions {
             transcript: chunks[0],
             prompt: chunks[1],
-            footer: Some(chunks[2]),
+            footer: Some(test_footer(chunks[2])),
             overlay: inner,
         },
         true,
@@ -2572,10 +2587,11 @@ pub(super) fn render_full_frame(
 pub(super) fn render_in(
     frame: &mut Frame,
     chat: &mut ChatState,
-    regions: ChatRegions,
+    regions: ChatRegions<'_>,
     prompt_focused: bool,
     transcript_selected: bool,
 ) {
+    chat.footer_command_areas.borrow_mut().clear();
     chat.voice_form.begin_frame();
     if chat.component_modal_open() || chat.second_opinion_split() || chat.turn_review_split() {
         chat.voice_form.cancel_pointer();
@@ -2585,13 +2601,25 @@ pub(super) fn render_in(
     // Modals and the completion popup are centred in the whole frame, not
     // in the band the transcript happens to have been given.
     let inner = regions.overlay;
-    let transcript_area = regions.transcript;
+    let mut transcript_area = regions.transcript;
     let prompt_area = regions.prompt;
     let prompt_width = prompt_content_width(prompt_area.width);
-    // The button lives on the prompt's bottom border, so it is not part of
+    // Keep activity next to the composer without taking space from its input.
+    let activity_area = (chat.needs_animation() && transcript_area.height > 3).then(|| {
+        transcript_area.height -= 1;
+        Rect::new(
+            transcript_area.x,
+            transcript_area.bottom(),
+            transcript_area.width,
+            1,
+        )
+    });
+    // The button lives on the prompt border, so it is not part of
     // the selectable prompt interior. Clear the hitbox first because a split
     // view or modal may replace the composer for this frame.
     chat.voice_button_area = None;
+    chat.task_control_area = None;
+    chat.task_dialog_area = None;
     let split = chat.second_opinion_split() || chat.turn_review_split();
     let (primary_area, reviewer_area) = if split {
         let halves = Layout::default()
@@ -2668,10 +2696,32 @@ pub(super) fn render_in(
         chat.split_action_areas.clear();
         chat.turn_review_action_areas.clear();
         let queued = chat.queued_prompts.len();
-        let prompt_title = prompt_title(chat, queued);
+        let (prompt_title, title_width) = prompt_title_line(chat, queued);
         let mut prompt_block = theme::panel(prompt_focused)
             .padding(Padding::horizontal(1))
             .title(prompt_title);
+        chat.task_control_area = None;
+        if chat.background_task_count() > 0 {
+            let task_label = format!(" View tasks ({}) ", chat.background_task_count());
+            let task_width = u16::try_from(display_width(&task_label)).unwrap_or(u16::MAX);
+            chat.task_control_area =
+                (task_width <= prompt_area.width.saturating_sub(2)).then(|| {
+                    Rect::new(
+                        prompt_area.x.saturating_add(1),
+                        prompt_area.bottom().saturating_sub(1),
+                        task_width,
+                        1,
+                    )
+                });
+            prompt_block = prompt_block.title_bottom(Line::from(Span::styled(
+                task_label,
+                if chat.task_control_focused() {
+                    theme::selection(false)
+                } else {
+                    theme::muted()
+                },
+            )));
+        }
         if prompt_focused && prompt_area.width >= 56 {
             prompt_block = prompt_block.title_bottom(
                 Line::from(vec![
@@ -2684,7 +2734,8 @@ pub(super) fn render_in(
             );
         }
         let prompt_inner = prompt_block.inner(prompt_area);
-        chat.voice_button_area = voice_button_area(prompt_area);
+        chat.prompt_content_width = prompt_width;
+        chat.voice_button_area = voice_button_area(prompt_area, title_width);
         let mut prompt_lines = chat
             .queued_prompts
             .iter()
@@ -2703,7 +2754,7 @@ pub(super) fn render_in(
                         ),
                         usize::from(prompt_inner.width),
                     ),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::palette().muted),
                 ))
             })
             .collect::<Vec<_>>();
@@ -2732,7 +2783,7 @@ pub(super) fn render_in(
         let input_scroll = cursor_row.saturating_add(1).saturating_sub(content_height);
         frame.render_widget(
             Paragraph::new(prompt_lines)
-                .style(Style::default().fg(theme::TEXT))
+                .style(Style::default().fg(theme::palette().text))
                 .wrap(Wrap { trim: false })
                 .scroll((input_scroll as u16, 0))
                 .block(prompt_block),
@@ -2766,14 +2817,45 @@ pub(super) fn render_in(
             );
         }
     }
-    if let Some(footer_area) = regions.footer {
-        render_chat_footer(frame, footer_area, chat, prompt_focused);
+    if let Some(area) = activity_area {
+        let mut activity = if area.width >= 48 {
+            chat.activity_spinner()
+        } else {
+            Line::from(crate::spinner::compact_span(
+                chat.spinner_style,
+                crate::spinner::elapsed_ms(),
+            ))
+        };
+        activity.spans.insert(0, Span::raw("  "));
+        let status = chat
+            .turn_review()
+            .and_then(|review| review.view.activity_label())
+            .map_or_else(
+                || prompt_title(chat, chat.queued_prompts.len()),
+                |label| format!(" {label} "),
+            );
+        activity.spans.push(Span::styled(status, theme::muted()));
+        frame.render_widget(
+            Paragraph::new(truncate_line_to_width(activity, usize::from(area.width)))
+                .style(theme::base()),
+            area,
+        );
+    }
+    if let Some(footer) = regions.footer {
+        render_chat_footer(frame, footer, chat, prompt_focused);
     }
     // The popup overlays the prompt and whatever sits above it, so it
     // registers last and wins the cells it covers.
     if let Some(popup) = render_autocomplete(frame, prompt_area, chat) {
         chat.frame_surfaces
             .push(SurfaceFrame::fixed(SurfaceId::AutocompletePopup, popup));
+    }
+    // A new elicitation can arrive while the read-only task list is open.
+    // Keep the task dialog state so it can reappear afterwards, but let the
+    // question render and receive input on top of it.
+    if chat.task_dialog_open() && chat.elicitation.is_none() {
+        render_background_task_dialog(frame, inner, chat);
+        return;
     }
     if let Some(body) = super::config_picker::render_config_picker(frame, inner, chat) {
         // The selector owns the frame's interaction, so the chat behind it
@@ -2836,7 +2918,7 @@ pub(super) fn render_in(
 /// for the composer.
 pub(super) fn render_chat_footer(
     frame: &mut Frame,
-    footer_area: Rect,
+    footer: ChatFooter<'_>,
     chat: &ChatState,
     prompt_focused: bool,
 ) {
@@ -2846,29 +2928,77 @@ pub(super) fn render_chat_footer(
     // The three groups are the dashboard's: what the composer answers, the
     // chords that answer from anywhere, then the function keys. Only the
     // first group changes with what the composer is doing.
-    const CHORDS: &[&str] = &["Alt-G panes", "Alt-Q detach"];
-    const FUNCTION_KEYS: &str = "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help";
+    let footer_area = footer.area;
+    let queued_keys = format!(
+        "Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history · Shift-Enter newline · {}",
+        chat.turn_control_intent().escape_hint(),
+    );
     let composer_keys = if !prompt_focused {
         "Tab pane · PgUp/PgDn transcript"
     } else if chat.voice_active {
         "Listening… Alt-V stop · PgUp/PgDn transcript"
     } else if !chat.queued_prompts.is_empty() {
-        "Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history · Shift-Enter newline · Esc cancel"
+        &queued_keys
     } else {
         "Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Alt-T rendering · Shift-Enter newline"
     };
-    let default_footer = fit_footer(composer_keys, CHORDS, FUNCTION_KEYS, footer_area.width);
+    let groups = theme::fit_footer_items(
+        [
+            composer_keys
+                .split(theme::FOOTER_SEPARATOR)
+                .map(|text| (None, text))
+                .collect(),
+            footer
+                .chords
+                .iter()
+                .enumerate()
+                .map(|(index, text)| (Some(index), *text))
+                .collect(),
+            footer
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(index, text)| (Some(footer.chords.len() + index), *text))
+                .collect(),
+        ],
+        footer_area.width,
+        |(_, text)| *text,
+    );
+    let default_footer = theme::footer_items_text(&groups, |(_, text)| *text);
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
     let notice = chat.notices.current();
     let footer = search_footer
         .as_deref()
         .or(notice.as_deref())
         .unwrap_or(&default_footer);
+    let mut command_areas = chat.footer_command_areas.borrow_mut();
+    command_areas.clear();
+    if search_footer.is_none() && notice.is_none() {
+        let mut x = footer_area.x;
+        for group in groups.iter().filter(|group| !group.is_empty()) {
+            if x > footer_area.x {
+                x += display_width(theme::FOOTER_GROUP_SEPARATOR) as u16;
+            }
+            for (index, (command, text)) in group.iter().enumerate() {
+                if index > 0 {
+                    x += display_width(theme::FOOTER_SEPARATOR) as u16;
+                }
+                let width = display_width(text) as u16;
+                if let Some(command) = command {
+                    command_areas.push((
+                        *command,
+                        Rect::new(x, footer_area.y, width, footer_area.height),
+                    ));
+                }
+                x += width;
+            }
+        }
+    }
     // Notices keep a warm accent; navigation hints remain quiet.
     let footer_color = if search_footer.is_none() && notice.is_some() {
-        theme::WARNING
+        theme::palette().warning
     } else {
-        theme::MUTED
+        theme::palette().muted
     };
     let line = if search_footer.is_none() && notice.is_none() {
         theme::hints(footer)
@@ -2892,16 +3022,20 @@ pub(super) fn render_chat_footer(
     }
 }
 
-/// Fit the composer's hints with the dashboard's shared priority rules.
-fn fit_footer(composer_keys: &str, chords: &[&str], functions: &str, width: u16) -> String {
-    theme::fit_footer(
-        &composer_keys
-            .split(theme::FOOTER_SEPARATOR)
-            .collect::<Vec<_>>(),
-        chords,
-        &functions.split(theme::FOOTER_SEPARATOR).collect::<Vec<_>>(),
-        width,
-    )
+#[cfg(test)]
+fn test_footer(area: Rect) -> ChatFooter<'static> {
+    ChatFooter {
+        area,
+        chords: &["Alt-G panes", "Alt-Q detach"],
+        functions: &[
+            "F2 palette",
+            "F3 workspaces",
+            "F4 web",
+            "F5 refresh",
+            "F7 setup",
+            "F1 help",
+        ],
+    }
 }
 
 /// A remembered configuration value, or `None` when it stands for the
@@ -2912,31 +3046,16 @@ fn remembered_value(stored: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// What the agent left running, named for the composer title. One command is
-/// worth naming; several are worth counting, with the clock on the oldest.
-fn background_work_label(chat: &ChatState, now_seconds: u64) -> Option<String> {
-    let commands = &chat.session_activity().background_commands;
-    let oldest = commands
-        .iter()
-        .min_by_key(|command| command.started_at_ms)?;
-    let elapsed = crate::usage_format::format_clock(
-        now_seconds.saturating_sub(u64::try_from(oldest.started_at_ms / 1_000).unwrap_or_default()),
-    );
-    Some(if commands.len() == 1 {
-        format!(
-            "Background: {} ({elapsed})",
-            super::transcript::compact_terminal_command(&oldest.command)
-        )
-    } else {
-        format!("Background: {} tasks, oldest {elapsed}", commands.len())
-    })
-}
-
 fn prompt_title(chat: &ChatState, queued: usize) -> String {
     prompt_title_at(chat, queued, hel::clock::epoch_seconds())
 }
 
 fn prompt_title_at(chat: &ChatState, queued: usize, now_seconds: u64) -> String {
+    let title = prompt_title_parts(chat, queued, now_seconds).join(" · ");
+    format!(" {title} ")
+}
+
+fn prompt_title_parts(chat: &ChatState, queued: usize, _now_seconds: u64) -> Vec<String> {
     let mut parts = [chat.current_model(), chat.current_effort()]
         .into_iter()
         .flatten()
@@ -2949,11 +3068,7 @@ fn prompt_title_at(chat: &ChatState, queued: usize, now_seconds: u64) -> String 
         parts.push("Prompt — PLAN MODE".into());
     } else {
         match chat.phase {
-            // An idle session can still have work of its own running: a
-            // command the agent backgrounded outlives the turn that started
-            // it, and the composer names it rather than reading "Prompt".
-            WorkerPhase::Idle => parts
-                .push(background_work_label(chat, now_seconds).unwrap_or_else(|| "Prompt".into())),
+            WorkerPhase::Idle => parts.push("Prompt".into()),
             WorkerPhase::Running if chat.pursuing_goal() => parts.push("Pursuing goal".into()),
             WorkerPhase::Running => parts.push("Running".into()),
             WorkerPhase::Closing => parts.push("Closing".into()),
@@ -2963,10 +3078,10 @@ fn prompt_title_at(chat: &ChatState, queued: usize, now_seconds: u64) -> String 
     if queued > 0 {
         parts.push(format!("{queued} queued"));
     }
-    // Esc cancels a prompt of ours. It cannot stop a turn the harness started
-    // on its own, so the hint follows the prompt rather than the phase.
+    // Esc controls a prompt of ours. It cannot affect a turn the harness
+    // started on its own, so the hint follows the prompt rather than the phase.
     if chat.prompt_in_flight() {
-        parts.push("Esc cancels".into());
+        parts.push(chat.turn_control_intent().escape_hint().into());
     }
     // Auto-review changes what happens when this turn ends, so the composer
     // says it is armed rather than surprising the user with a pane.
@@ -2974,7 +3089,109 @@ fn prompt_title_at(chat: &ChatState, queued: usize, now_seconds: u64) -> String 
     if review.enabled && review.reviewer_profile().is_some() {
         parts.push(format!("review {}", review.tier.label()));
     }
-    format!(" {} ", parts.join(" · "))
+    parts
+}
+
+/// The prompt border keeps model and effort before the microphone chip. The
+/// remaining state labels follow it so a busy session still exposes its
+/// status without displacing the input area.
+fn prompt_title_line(chat: &ChatState, queued: usize) -> (Line<'static>, usize) {
+    let parts = prompt_title_parts(chat, queued, hel::clock::epoch_seconds());
+    let prefix_count =
+        usize::from(chat.current_model().is_some()) + usize::from(chat.current_effort().is_some());
+    let prefix = parts[..prefix_count.min(parts.len())].join(" · ");
+    let suffix = parts[prefix_count.min(parts.len())..].join(" · ");
+    let before_mic = if prefix.is_empty() {
+        " ".to_owned()
+    } else {
+        format!(" {prefix} ")
+    };
+    let mut spans = vec![
+        Span::raw(before_mic.clone()),
+        Span::raw(format!(" {VOICE_BUTTON_GLYPH} ")),
+    ];
+    if !suffix.is_empty() {
+        spans.push(Span::raw(format!("{suffix} ")));
+    }
+    (Line::from(spans), display_width(&before_mic))
+}
+
+fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat: &mut ChatState) {
+    let commands = chat.session_activity().background_commands.clone();
+    let height = u16::try_from(commands.len().saturating_add(4))
+        .unwrap_or(u16::MAX)
+        .max(1)
+        .min(area.height.max(1));
+    let width = area
+        .width
+        .saturating_sub(4)
+        .clamp(32, 96)
+        .min(area.width.max(1));
+    let popup = crate::hel_modal::centered_modal_rect_fixed(frame, width, height, area);
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let now = hel::clock::epoch_seconds();
+    let mut lines = if commands.is_empty() {
+        vec![Line::from(Span::styled(
+            "No background tasks remain.",
+            theme::muted(),
+        ))]
+    } else {
+        let content_width = usize::from(inner.width.max(1));
+        commands
+            .iter()
+            .flat_map(|command| {
+                let started =
+                    u64::try_from(command.started_at_ms.max(0) / 1_000).unwrap_or_default();
+                let elapsed = crate::usage_format::format_clock(now.saturating_sub(started));
+                let prefix = format!("{elapsed:>8}  ");
+                wrap_styled_line(
+                    Line::from(format!(
+                        "{prefix}{}",
+                        super::rendering::sanitize_terminal_text(&command.command)
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )),
+                    content_width,
+                    display_width(&prefix),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let visible = usize::from(inner.height).max(1);
+    let total_lines = lines.len();
+    let max_scroll = total_lines.saturating_sub(visible);
+    chat.task_dialog_scroll = chat.task_dialog_scroll.min(max_scroll);
+    if chat.task_dialog_scroll > 0 {
+        lines = lines.into_iter().skip(chat.task_dialog_scroll).collect();
+    }
+    lines.truncate(visible);
+    let block = theme::panel(true)
+        .title(" Background tasks ")
+        .title_bottom(Line::from(Span::styled(" Esc close ", theme::muted())).right_aligned());
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme::base().fg(theme::palette().text))
+            .wrap(Wrap { trim: false })
+            .block(block),
+        popup,
+    );
+    if let Some(geometry) = scrollbar_geometry(
+        Rect::new(inner.right(), inner.y, 1, inner.height),
+        total_lines,
+        chat.task_dialog_scroll,
+        visible,
+    ) {
+        render_scrollbar(frame, geometry);
+    }
+    chat.task_dialog_area = Some(inner);
+    chat.frame_surfaces_exclusive = true;
+    chat.frame_surfaces.clear();
+    chat.frame_surfaces
+        .push(SurfaceFrame::fixed(SurfaceId::ModalBody, inner));
 }
 
 /// The composer keeps one cell of space between its text and each border.
@@ -3084,7 +3301,7 @@ mod tests {
         let columns = dimension("MJ_CHAT_CAPTURE_COLUMNS", 110);
         let rows = dimension("MJ_CHAT_CAPTURE_ROWS", 40);
         let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_header_summary("local / mjolnir", "Claude · Sonnet");
+        chat.set_header_summary("local / mjolnir", "Claude · Sonnet", "");
         chat.mark_prompt_submitted("Make the terminal feel beautifully crafted.");
         chat.turn_started_at_epoch_seconds = Some(hel::clock::epoch_seconds().saturating_sub(42));
         chat.set_current_step_start(Some(hel::clock::epoch_millis().saturating_sub(7_000)));
@@ -3208,6 +3425,7 @@ mod tests {
                     acp_ready: None,
                     agent_capabilities: None,
                     agent_info: None,
+                    steering_supported: None,
                     config_options: Vec::new(),
                     modes: None,
                     available_commands: Vec::new(),
@@ -3278,6 +3496,7 @@ mod tests {
                 fields: Vec::new(),
             },
         ));
+        chat.task_dialog_open = true;
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
 
         terminal
@@ -3300,6 +3519,7 @@ mod tests {
 
         let popup_top = row_of("Overlaid dialog");
         row_of("Visible dialog message");
+        assert!(!lines.iter().any(|line| line.contains("Background tasks")));
         // The question occupies the conversation bands, so the underlying
         // transcript cannot be selected or read through it.
         assert!(
@@ -3307,7 +3527,10 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("UNDERLYING CHAT SENTINEL"))
         );
-        assert!(row_of("Tab pane") > popup_top);
+        // The footer remains outside the question even when width fitting
+        // drops composer hints to make room for the host's function keys.
+        assert_eq!(row_of("F1 help"), lines.len() - 1);
+        assert!(row_of("F1 help") > popup_top);
     }
 
     #[test]
@@ -3979,6 +4202,7 @@ mod tests {
             SessionHeaderIdentity {
                 target: "localhost".into(),
                 profile: "codex-1".into(),
+                title: "Original session title".into(),
                 harness_kind: Some(HarnessKind::Codex),
             },
             "keep this draft".into(),
@@ -3998,6 +4222,8 @@ mod tests {
         moved.target_template_id = "podman".into();
         moved.last_profile = "claude-2".into();
         moved.harness_kind = HarnessKind::Claude;
+        moved.acp_session_title = Some("Harness session title".into());
+        moved.session_title_override = Some("Renamed session".into());
         chat.refresh_context(&reloaded, Some(&moved));
 
         assert_eq!(chat.draft(), "keep this draft");
@@ -4020,10 +4246,12 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            rendered.contains("podman  Idle  claude-2"),
+            rendered.contains("podman  Idle  claude-2  Renamed session"),
             "the refreshed target/profile must be visible in the conversation header: {rendered:?}"
         );
         assert!(!rendered.contains("localhost  Idle  codex-1"));
+        assert!(!rendered.contains("Original session title"));
+        assert!(!rendered.contains("Harness session title"));
     }
 
     #[tokio::test]
@@ -4185,7 +4413,10 @@ mod tests {
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
         assert!(footer_text.contains("Background import finished"));
-        assert_eq!(buffer[(buffer.area.x, footer_row)].fg, theme::WARNING);
+        assert_eq!(
+            buffer[(buffer.area.x, footer_row)].fg,
+            theme::palette().warning
+        );
 
         shared.clear();
         terminal
@@ -4196,7 +4427,10 @@ mod tests {
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
         assert!(footer_text.contains("Tab pane"), "{footer_text:?}");
-        assert_eq!(buffer[(buffer.area.x, footer_row)].fg, theme::TEXT);
+        assert_eq!(
+            buffer[(buffer.area.x, footer_row)].fg,
+            theme::palette().text
+        );
     }
 
     /// The composer's own row is where a user typing in it learns the keys,
@@ -4222,7 +4456,7 @@ mod tests {
             "Ctrl-R history",
             "Alt-T rendering",
             "│ Alt-G panes · Alt-Q detach │",
-            "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help",
+            "F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help",
         ] {
             assert!(footer.contains(hint), "{footer:?} omits {hint}");
         }
@@ -4240,7 +4474,7 @@ mod tests {
         for hint in [
             "Ctrl-R history",
             "│ Alt-G panes · Alt-Q detach │",
-            "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help",
+            "F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help",
         ] {
             assert!(footer.contains(hint), "{footer:?} omits {hint}");
         }
@@ -4254,7 +4488,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let area = frame.area();
-                    render_chat_footer(frame, area, &chat, true);
+                    render_chat_footer(frame, test_footer(area), &chat, true);
                 })
                 .expect("draw narrow footer");
             let text = terminal
@@ -4351,8 +4585,117 @@ mod tests {
         assert!(prompt_title(&chat, 0).contains("Esc cancels"));
     }
 
-    /// While the agent is idle, the composer names what it left running
-    /// instead of reading "Prompt": one command by name, several by count.
+    #[tokio::test]
+    async fn escape_names_steering_through_submission_and_acceptance() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use hel::hel_state::{MaterializedQueuedPrompt, QueuedCommandKind};
+        use hel::hel_worker::{ActiveRelayPrompt, RelayCommand};
+
+        for (supported, queue_kind, hint, sending, requested) in [
+            (
+                Some(true),
+                Some(QueuedCommandKind::Prompt),
+                "Esc steers next",
+                "Sending steering request…",
+                "Steering requested",
+            ),
+            (
+                Some(false),
+                Some(QueuedCommandKind::Prompt),
+                "Esc cancels",
+                "Sending cancellation request…",
+                "Cancellation requested",
+            ),
+            (
+                None,
+                Some(QueuedCommandKind::Prompt),
+                "Esc applies next",
+                "Requesting queued prompt…",
+                "Queued prompt requested",
+            ),
+            (
+                Some(true),
+                Some(QueuedCommandKind::SetConfig {
+                    key: "model".into(),
+                    value: "next-model".into(),
+                }),
+                "Esc cancels",
+                "Sending cancellation request…",
+                "Cancellation requested",
+            ),
+            (
+                Some(true),
+                None,
+                "Esc cancels",
+                "Sending cancellation request…",
+                "Cancellation requested",
+            ),
+        ] {
+            let mut fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+                "steering-session",
+                12,
+            );
+            let mut chat = ActiveChat::open(
+                fixture.stopped,
+                "bundle-1",
+                None,
+                fixture.control,
+                SessionHeaderIdentity::default(),
+                String::new(),
+                Notices::default(),
+            );
+            let mut materialized = MaterializedSession::empty("steering-session");
+            if let Some(kind) = queue_kind {
+                materialized.queued_prompts.push(MaterializedQueuedPrompt {
+                    command_id: "queued-correction".into(),
+                    kind,
+                    content: vec![serde_json::json!({"type": "text", "text": "change direction"})],
+                    queued_at_ms: 0,
+                });
+            }
+            let mut view = managed_view(materialized);
+            let operational = &mut view.snapshot.as_mut().unwrap().operational;
+            operational.steering_supported = supported;
+            operational.active_prompt = Some(ActiveRelayPrompt {
+                command_id: "running-prompt".into(),
+                created_at_ms: 0,
+                started_at_ms: 0,
+            });
+            apply_session_view(&mut chat.state, Ok(view));
+            assert!(prompt_title(&chat.state, 1).contains(hint));
+
+            chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            assert_eq!(chat.state.notice().as_deref(), Some(sending));
+
+            let result = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let result = chat
+                        .remote
+                        .recv()
+                        .await
+                        .expect("remote worker remains open");
+                    if matches!(result, ChatRemoteResult::Cancel { .. }) {
+                        break result;
+                    }
+                }
+            })
+            .await
+            .expect("turn control request completes");
+            assert!(matches!(
+                fixture.submitted.recv().await,
+                Some(RelayCommand::Cancel)
+            ));
+
+            // A newer view may already have consumed the queue. The reply
+            // must still describe the request that was actually submitted.
+            chat.state.queued_prompts.clear();
+            apply_chat_remote_result(&mut chat.state, result);
+            assert_eq!(chat.state.notice().as_deref(), Some(requested));
+        }
+    }
+
+    /// Background commands are exposed through the embedded task control;
+    /// the composer title stays focused on the prompt and its state.
     #[test]
     fn composer_title_names_the_work_the_agent_left_running() {
         let now_seconds = 10_000;
@@ -4373,11 +4716,8 @@ mod tests {
             }],
             active_user_shells: Vec::new(),
         });
-        assert!(
-            prompt_title_at(&chat, 0, now_seconds).contains("Background: cargo test (43m36s)"),
-            "{}",
-            prompt_title_at(&chat, 0, now_seconds)
-        );
+        assert!(prompt_title_at(&chat, 0, now_seconds).contains("Prompt"));
+        assert!(!prompt_title_at(&chat, 0, now_seconds).contains("Background"));
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
             activity_turn_started_at_ms: None,
@@ -4398,11 +4738,8 @@ mod tests {
             ],
             active_user_shells: Vec::new(),
         });
-        assert!(
-            prompt_title_at(&chat, 0, now_seconds).contains("Background: 2 tasks, oldest 43m36s"),
-            "{}",
-            prompt_title_at(&chat, 0, now_seconds)
-        );
+        let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+        assert!(screen.contains("View tasks (2)"), "{screen}");
 
         // A running turn is named as a turn, whatever it left behind.
         chat.phase = WorkerPhase::Running;
@@ -4498,7 +4835,7 @@ mod tests {
             let column = u16::try_from(title_start + offset).unwrap();
             assert_eq!(
                 buffer[(column, 0)].fg,
-                theme::TEXT,
+                theme::palette().text,
                 "the title draws bright white: {}",
                 cells.concat()
             );
@@ -4509,7 +4846,7 @@ mod tests {
             .expect("the rule follows the title");
         assert_eq!(
             buffer[(u16::try_from(rule).unwrap(), 0)].fg,
-            theme::BORDER,
+            theme::palette().border,
             "the rule stays chrome"
         );
     }
@@ -4569,6 +4906,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn activity_stays_above_the_prompt_without_moving_the_input() {
+        for width in [32, 48, 80] {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.set_input("my follow-up".into());
+            let idle = drawn_transcript(&mut chat, width, 24);
+            let input = chat
+                .frame_surfaces()
+                .surface(SurfaceId::PromptInput)
+                .unwrap()
+                .rect;
+
+            chat.mark_prompt_submitted("continue");
+            let running = drawn_transcript(&mut chat, width, 24);
+            let activity_row = usize::from(input.y - 2);
+            let activity = &running[activity_row];
+            let status = activity.find("Running").expect("running status by prompt");
+            assert_eq!(
+                display_width(&activity[..status]),
+                2 + if width >= 48 {
+                    crate::spinner::SPINNER_WIDTH
+                } else {
+                    1
+                } + 1,
+                "the spinner leads the status at the left: {activity}"
+            );
+            assert_eq!(running[0], idle[0], "activity leaves the header alone");
+            assert_eq!(
+                &running[activity_row + 2..],
+                &idle[activity_row + 2..],
+                "the prompt draft and footer keep their positions"
+            );
+            assert!(
+                chat.frame_surfaces()
+                    .surface(SurfaceId::Transcript)
+                    .unwrap()
+                    .rect
+                    .bottom()
+                    <= activity_row as u16,
+                "activity is outside the selectable transcript"
+            );
+
+            chat.phase = WorkerPhase::Idle;
+            chat.prompt_in_flight = false;
+            chat.turn_started_at_epoch_seconds = None;
+            assert_eq!(drawn_transcript(&mut chat, width, 24), idle);
+        }
+    }
+
     /// The cursor belongs to whatever owns the keyboard, and the host decides
     /// that, so the composer only shows one when it is told it has focus.
     #[test]
@@ -4580,7 +4966,7 @@ mod tests {
         let regions = ChatRegions {
             transcript: Rect::new(0, 0, 80, 16),
             prompt: Rect::new(0, 16, 80, 6),
-            footer: Some(Rect::new(0, 22, 80, 1)),
+            footer: Some(test_footer(Rect::new(0, 22, 80, 1))),
             overlay: Rect::new(0, 0, 80, 24),
         };
 

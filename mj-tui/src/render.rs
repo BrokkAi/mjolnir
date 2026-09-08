@@ -116,14 +116,28 @@ pub(crate) fn render_onboarding_surface(frame: &mut Frame, dashboard: &mut Dashb
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(8),
             Constraint::Length(5),
             Constraint::Length(8),
             Constraint::Length(1),
         ])
         .split(area);
-    render_dashboard_title(frame, layout[0], &dashboard.workspace_name);
+    render_dashboard_title(
+        frame,
+        Rect::new(layout[0].x, layout[0].y, layout[0].width, 1),
+        &dashboard.workspace_name,
+    );
+    crate::surface_controls::render_onboarding_actions(
+        frame,
+        Rect::new(
+            layout[0].x,
+            layout[0].y.saturating_add(1),
+            layout[0].width,
+            layout[0].height.saturating_sub(1),
+        ),
+        dashboard,
+    );
 
     render_onboarding(frame, layout[1], dashboard);
     render_capacity(frame, layout[2], dashboard, None);
@@ -170,9 +184,6 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
             crate::palette::render_palette(frame, area, dashboard, palette, &mut surfaces)
         }
         Mode::Setup(dialog) => crate::setup::render_setup(frame, area, dialog, &mut surfaces),
-        Mode::QuickNew(dialog) => {
-            crate::quick_new::render_quick_new(frame, area, dialog, &mut surfaces)
-        }
         Mode::Dashboard => {}
     }
     dashboard.frame_surfaces = surfaces;
@@ -263,7 +274,6 @@ fn render_onboarding(frame: &mut Frame, area: Rect, dashboard: &DashboardState) 
 pub(crate) struct SessionRowsRendered {
     pub(crate) session_row_areas: Vec<(usize, Rect)>,
     pub(crate) project_heading_areas: Vec<(String, Rect)>,
-    pub(crate) session_control_areas: Vec<(crate::SessionControl, Rect)>,
 }
 
 const PANE_SIZE_CONTROLS_WIDTH: u16 = 11;
@@ -292,15 +302,15 @@ pub(crate) fn pane_size_controls(active: PaneSize, maximize_enabled: bool) -> Li
         }
         let style = if size == PaneSize::Maximized && !maximize_enabled {
             Style::default()
-                .fg(theme::BORDER)
+                .fg(theme::palette().border)
                 .remove_modifier(Modifier::BOLD)
         } else if size == active {
             Style::default()
-                .fg(theme::ACCENT)
-                .bg(theme::SURFACE_RAISED)
+                .fg(theme::palette().accent)
+                .bg(theme::palette().surface_raised)
                 .add_modifier(Modifier::BOLD)
         } else {
-            theme::muted().bg(theme::SURFACE)
+            theme::muted().bg(theme::palette().surface)
         };
         spans.push(Span::styled(format!(" {glyph} "), style));
     }
@@ -432,7 +442,7 @@ fn drawn_session_rows_with_options(
                     Line::styled(
                         format!("{hotkey}{label}"),
                         Style::default()
-                            .fg(theme::SECONDARY)
+                            .fg(theme::palette().secondary)
                             .add_modifier(Modifier::BOLD),
                     ),
                 ));
@@ -444,6 +454,12 @@ fn drawn_session_rows_with_options(
                 let detail = dashboard.session_details.get(&session.id);
                 let review = dashboard.session_review(&session.id);
                 let unreachable = dashboard.unreachable_sessions.contains(&session.id);
+                let facts = SessionRowFacts {
+                    detail,
+                    unreachable,
+                    state: session.state,
+                    now_epoch_seconds,
+                };
                 let primary_busy = !unreachable
                     && session.state == SessionState::Running
                     && detail.is_some_and(|detail| {
@@ -466,7 +482,18 @@ fn drawn_session_rows_with_options(
                 // the caret marks it in both forms.
                 let selected = options.show_selection
                     && dashboard.selected_session_id.as_deref() == Some(session.id.as_str());
-                let prefix = if selected { "› " } else { "  " };
+                let symbol = dashboard
+                    .transition_kind(&session.id)
+                    .map(|transition| match transition {
+                        SessionTransitionKind::Starting => "↑",
+                        SessionTransitionKind::Resuming => "↻",
+                        SessionTransitionKind::Moving => "⇄",
+                        SessionTransitionKind::Stopping => "↓",
+                        SessionTransitionKind::Destroying => "⊗",
+                    })
+                    .or_else(|| dashboard.transition_failure_kind(&session.id).map(|_| "×"))
+                    .unwrap_or_else(|| facts.status_symbol(review, operation));
+                let prefix = format!("{}{symbol} ", if selected { "› " } else { "  " });
                 let (heading_key, heading_line) = match pending_heading.take() {
                     Some((key, line)) => (Some(key), Some(line)),
                     None => (None, None),
@@ -476,7 +503,7 @@ fn drawn_session_rows_with_options(
                 let spacing = u16::from(expanded && !options.summary_only);
                 if let Some(transition) = dashboard.transition_kind(&session.id) {
                     lines.push(session_transition_line(
-                        prefix,
+                        &prefix,
                         session,
                         transition,
                         operation,
@@ -496,7 +523,7 @@ fn drawn_session_rows_with_options(
                 }
                 if let Some(transition) = dashboard.transition_failure_kind(&session.id) {
                     lines.push(session_transition_line(
-                        prefix,
+                        &prefix,
                         session,
                         transition,
                         None,
@@ -526,14 +553,14 @@ fn drawn_session_rows_with_options(
                         &target,
                         permission,
                         width,
-                        selected,
+                        &prefix,
                         spinner,
                         dashboard.config.advanced.detailed_activity_clocks,
                     );
                 } else {
                     compact_session_lines(
                         &mut lines,
-                        prefix,
+                        &prefix,
                         session,
                         detail,
                         review,
@@ -548,7 +575,7 @@ fn drawn_session_rows_with_options(
                 }
                 if selected {
                     for line in lines.iter_mut().skip(usize::from(heading_key.is_some())) {
-                        line.style = line.style.bg(theme::SURFACE_RAISED);
+                        line.style = line.style.bg(theme::palette().surface_raised);
                     }
                 }
                 rows.push(DrawnSessionRow {
@@ -583,19 +610,22 @@ fn expanded_session_lines(
     target: &str,
     permission: Option<Span<'static>>,
     width: u16,
-    selected: bool,
+    prefix: &str,
     spinner: Option<&'static str>,
     detailed_activity_clocks: bool,
 ) {
-    let prefix = if selected { "› " } else { "  " };
     let style = Style::default().fg(session_band_color(detail, unreachable, session.state));
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
+    // The ellipsis action occupies the last three cells of the first line.
+    // Keep the activity and output lines at the full content width so a
+    // running clock and queued count remain readable in a compact pane.
+    let title_width = width.saturating_sub(3);
     lines.push(Line::styled(
         format!(
             "{prefix}{}",
             truncate_display_text(
                 &name,
-                usize::from(width).saturating_sub(Line::raw(prefix).width())
+                usize::from(title_width).saturating_sub(Line::raw(prefix).width())
             )
         ),
         style,
@@ -642,7 +672,7 @@ fn expanded_session_lines(
         spans.append(&mut line.spans);
         let mut line = Line::from(spans);
         if muted {
-            line.style = Style::default().fg(theme::MUTED);
+            line.style = Style::default().fg(theme::palette().muted);
         }
         lines.push(line);
     }
@@ -842,11 +872,16 @@ fn compact_session_lines(
     };
     let style = facts.style();
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
-    let available = usize::from(width);
+    // The ellipsis action occupies the last three cells of the first line;
+    // retain the full width for the status line below it.
+    let title_width = width.saturating_sub(3);
     lines.push(Line::styled(
         format!(
             "{prefix}{}",
-            truncate_display_text(&name, available.saturating_sub(Line::raw(prefix).width()))
+            truncate_display_text(
+                &name,
+                usize::from(title_width).saturating_sub(Line::raw(prefix).width()),
+            )
         ),
         style,
     ));
@@ -876,6 +911,65 @@ struct SessionRowFacts<'a> {
 }
 
 impl SessionRowFacts<'_> {
+    /// One status symbol is used in expanded, compact, and minimized rows so
+    /// lifecycle and attention state remains visible at every width.
+    fn status_symbol(
+        &self,
+        review: Option<&RuntimeReviewView>,
+        operation: Option<&SessionOperationDisplay>,
+    ) -> &'static str {
+        use hel::hel_review::driver::TurnReviewPhase;
+        use hel::hel_review::verdict::ReviewVerdict;
+
+        if operation.is_some() {
+            return "◐";
+        }
+        match self.state {
+            SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
+                return "×";
+            }
+            SessionState::Stopped => return "■",
+            SessionState::Provisioning => return "↑",
+            SessionState::Checkpointing => return "▣",
+            SessionState::Closing => return "↓",
+            SessionState::Destroying => return "⊗",
+            SessionState::Disconnected => return "?",
+            SessionState::Running => {}
+        }
+        if self.unreachable {
+            return "?";
+        }
+        if self.needs_input() {
+            return "!";
+        }
+        if let Some(review) = review.filter(|review| review.activity_label().is_some()) {
+            if review.is_working() {
+                return "◐";
+            }
+            return match &review.phase {
+                TurnReviewPhase::Verdict(ReviewVerdict::Clean) => "✓",
+                TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
+                | TurnReviewPhase::Forwarding { error: Some(_), .. } => "×",
+                _ => "!",
+            };
+        }
+        let Some(detail) = self.detail else {
+            return "·";
+        };
+        if !detail.activity.is_idle(detail.current_turn_started_at) {
+            "◐"
+        } else if detail.materialized_applied_event_ordinal.is_none()
+            && detail.activity.execution.is_none()
+            && detail.activity.idle_since_ms.is_none()
+        {
+            "·"
+        } else if detail.has_unread() {
+            "✓"
+        } else {
+            "○"
+        }
+    }
+
     fn style(&self) -> Style {
         Style::default().fg(session_band_color(
             self.detail,
@@ -906,7 +1000,6 @@ impl SessionRowFacts<'_> {
 /// The user prompt is a fallback for the compact summary, never an agent
 /// excerpt with a misleading prefix.
 fn current_agent_excerpt(detail: &SessionDetail) -> Option<&str> {
-    let _ = detail.last_user_message.as_ref()?;
     if detail.last_agent_message_follows_last_user {
         detail
             .last_agent_message
@@ -962,7 +1055,6 @@ pub(crate) fn sessions_content_height(dashboard: &DashboardState, width: u16) ->
         .iter()
         .map(|row| row.content_height().saturating_add(row.spacing))
         .fold(0, u16::saturating_add)
-        .saturating_add(1)
 }
 
 pub(crate) fn minimized_sessions_content_height(dashboard: &DashboardState, width: u16) -> u16 {
@@ -990,7 +1082,7 @@ fn sessions_title(workspace_name: &str, width: u16) -> Line<'static> {
         Span::raw(prefix),
         Span::styled(
             crate::widgets::truncate_text(workspace_name, workspace_room),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ),
         Span::raw(" "),
     ])
@@ -1012,7 +1104,7 @@ fn sessions_title_with_pending(
     let suffix = Span::styled(
         format!(" · Needs input: {pending_count}"),
         Style::default()
-            .fg(theme::WARNING)
+            .fg(theme::palette().session_attention)
             .add_modifier(Modifier::BOLD),
     );
     if base.width().saturating_add(suffix.width()) <= budget {
@@ -1023,7 +1115,7 @@ fn sessions_title_with_pending(
     let compact = Line::styled(
         format!(" Sessions [{pending_count}]"),
         Style::default()
-            .fg(theme::WARNING)
+            .fg(theme::palette().session_attention)
             .add_modifier(Modifier::BOLD),
     );
     if compact.width() <= budget {
@@ -1032,7 +1124,7 @@ fn sessions_title_with_pending(
     let tiny = Line::styled(
         format!(" Q{pending_count}"),
         Style::default()
-            .fg(theme::WARNING)
+            .fg(theme::palette().session_attention)
             .add_modifier(Modifier::BOLD),
     );
     if tiny.width() <= budget {
@@ -1068,13 +1160,11 @@ pub(crate) fn render_sessions(
         horizontal: 1,
         vertical: 1,
     });
-    let controls_area = Rect::new(content.x, content.y, content.width, content.height.min(1));
-    let rows_area = Rect::new(
-        content.x,
-        content.y.saturating_add(1),
-        content.width,
-        content.height.saturating_sub(1),
-    );
+    // Keep three cells at the right edge clear for the session ellipsis
+    // control on each session's title line. The activity and output lines
+    // use the full content width; a narrow sidebar must not hide their clock
+    // or queued count behind the action button.
+    let rows_area = content;
     let width = content.width;
     let drawn = if dashboard.sessions_minimized() {
         drawn_session_rows_with_options(dashboard, width, SessionRowsRenderOptions::MINIMIZED)
@@ -1093,8 +1183,6 @@ pub(crate) fn render_sessions(
         ),
         area,
     );
-    let mut session_control_areas = Vec::new();
-    render_session_controls(frame, controls_area, &mut session_control_areas);
     let table = Table::new(
         drawn.iter().map(|row| {
             Row::new([Cell::from(Text::from(row.lines.clone()))])
@@ -1164,42 +1252,6 @@ pub(crate) fn render_sessions(
     SessionRowsRendered {
         session_row_areas,
         project_heading_areas,
-        session_control_areas,
-    }
-}
-
-fn render_session_controls(
-    frame: &mut Frame,
-    area: Rect,
-    hitboxes: &mut Vec<(crate::SessionControl, Rect)>,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let create_width = (area.width.saturating_sub(1) / 2).max(1);
-    let resume_width = area.width.saturating_sub(create_width.saturating_add(1));
-    let create_area = Rect::new(area.x, area.y, create_width, area.height);
-    let resume_area = Rect::new(
-        area.x.saturating_add(create_width.saturating_add(1)),
-        area.y,
-        resume_width,
-        area.height,
-    );
-    let button = |frame: &mut Frame, area: Rect, label: &str| {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::raw(format!(" {label} "))))
-                .alignment(Alignment::Center)
-                .style(theme::muted().bg(theme::SURFACE_RAISED)),
-            area,
-        );
-    };
-    button(frame, create_area, "Create");
-    if resume_area.width > 0 {
-        button(frame, resume_area, "Resume");
-    }
-    hitboxes.push((crate::SessionControl::Create, create_area));
-    if resume_area.width > 0 {
-        hitboxes.push((crate::SessionControl::Resume, resume_area));
     }
 }
 
@@ -1261,12 +1313,12 @@ fn session_transition_line(
         failure.map_or_else(String::new, |error| format!(" · failed: {error}"))
     );
     Line::styled(
-        crate::widgets::truncate_text(&line, usize::from(width)),
+        crate::widgets::truncate_text(&line, usize::from(width.saturating_sub(3))),
         Style::default()
             .fg(if failure.is_some() {
-                theme::SESSION_ERROR
+                theme::palette().session_error
             } else {
-                theme::SESSION_ACTIVITY
+                theme::palette().session_activity
             })
             .add_modifier(Modifier::BOLD),
     )
@@ -1308,13 +1360,13 @@ fn permission_badge(mode: Option<PermissionMode>) -> Option<Span<'static>> {
         PermissionMode::Guardian => Span::styled(
             "[G]",
             Style::default()
-                .fg(theme::SUCCESS)
+                .fg(theme::palette().success)
                 .add_modifier(Modifier::BOLD),
         ),
         PermissionMode::Yolo => Span::styled(
             "[Y]",
             Style::default()
-                .fg(theme::ERROR)
+                .fg(theme::palette().error)
                 .add_modifier(Modifier::BOLD),
         ),
     })
@@ -1422,21 +1474,21 @@ fn session_band_color(
     state: SessionState,
 ) -> Color {
     if unreachable || state == SessionState::Error {
-        return theme::SESSION_ERROR;
+        return theme::palette().session_error;
     }
     let Some(detail) = detail else {
-        return theme::SESSION_ACTIVITY;
+        return theme::palette().session_activity;
     };
     if !detail.pending_elicitations.is_empty() {
-        return theme::SESSION_ATTENTION;
+        return theme::palette().session_attention;
     }
     if state == SessionState::Running && detail.activity.is_idle(detail.current_turn_started_at) {
-        return theme::SESSION_IDLE;
+        return theme::palette().session_idle;
     }
     if detail.has_unread() {
-        return theme::SESSION_ATTENTION;
+        return theme::palette().session_attention;
     }
-    theme::SESSION_ACTIVITY
+    theme::palette().session_activity
 }
 
 fn checkpoint_age(now_epoch_seconds: u64, checkpointed_at: &str) -> String {
@@ -1552,7 +1604,7 @@ fn capacity_table_rows(
             if let Some(staleness) = capacity_staleness(detail, now_epoch_seconds) {
                 in_use.push(Span::styled(
                     format!("  · {staleness}"),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::palette().muted),
                 ));
             }
             CapacityTableRow {
@@ -1674,9 +1726,9 @@ pub(crate) fn render_capacity(
 /// is the inverse — a busy host has little left.
 fn headroom_color(headroom_percent: u8) -> Color {
     match headroom_percent {
-        0..=20 => theme::ERROR,
-        21..=50 => theme::WARNING,
-        _ => theme::SUCCESS,
+        0..=20 => theme::palette().error,
+        21..=50 => theme::palette().warning,
+        _ => theme::palette().success,
     }
 }
 
@@ -1890,7 +1942,9 @@ const QUOTA_CHART_RIGHT_BORDER: &str = "▏";
 const QUOTA_BAR_CELLS: usize = 10;
 
 fn quota_chart_border_style() -> Style {
-    Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
+    Style::default()
+        .fg(theme::palette().muted)
+        .bg(theme::palette().background)
 }
 
 fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
@@ -1907,20 +1961,20 @@ fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
         .saturating_sub(full_cells)
         .saturating_sub(usize::from(partial_eighths > 0));
     let color = match remaining {
-        0..=20 => theme::ERROR,
-        21..=50 => theme::WARNING,
-        _ => theme::SUCCESS,
+        0..=20 => theme::palette().error,
+        21..=50 => theme::palette().warning,
+        _ => theme::palette().success,
     };
     let bar_style = Style::default()
         .fg(color)
-        .bg(theme::BACKGROUND)
+        .bg(theme::palette().background)
         .add_modifier(Modifier::BOLD);
     Line::from(vec![
         Span::styled("█".repeat(full_cells), bar_style),
         Span::styled(partial.to_string(), bar_style),
         Span::styled(
             EMPTY_QUOTA_CELL.repeat(empty_cells),
-            Style::default().bg(theme::BACKGROUND),
+            Style::default().bg(theme::palette().background),
         ),
         // This replaces the separator before the percentage, keeping the
         // line's width unchanged while closing the chart on its right edge.
@@ -1938,7 +1992,7 @@ fn api_quota_bar() -> Line<'static> {
     let label_cells = label.chars().count().min(QUOTA_BAR_CELLS);
     let left = (QUOTA_BAR_CELLS - label_cells) / 2;
     let right = QUOTA_BAR_CELLS - label_cells - left;
-    let field = Style::default().bg(theme::BACKGROUND);
+    let field = Style::default().bg(theme::palette().background);
     Line::from(vec![
         Span::styled(EMPTY_QUOTA_CELL.repeat(left), field),
         Span::styled(label, field.add_modifier(Modifier::BOLD)),
@@ -2284,7 +2338,7 @@ pub(crate) fn render_quotas(
     let status = crate::widgets::truncate_text(&format!("({refresh_status}) "), status_budget);
     let title = Line::from(vec![
         Span::raw(label),
-        Span::styled(status, Style::default().fg(theme::MUTED)),
+        Span::styled(status, Style::default().fg(theme::palette().muted)),
     ]);
     let quotas_focused = dashboard.focus == Focus::Quota;
     let content_widths = quota_table_column_widths(&rows);
@@ -2343,6 +2397,27 @@ pub(crate) fn render_quotas(
     );
 }
 
+/// Registry commands shared by pane and composer footers, retaining their identities.
+pub(crate) fn footer_commands(
+    dashboard: &DashboardState,
+    group: crate::actions::FooterGroup,
+) -> Vec<(crate::CommandId, String)> {
+    let mut hints = crate::actions::available(dashboard, None)
+        .into_iter()
+        .filter_map(|id| {
+            let spec = crate::actions::spec(id);
+            if spec.footer_group != group {
+                return None;
+            }
+            let word = (spec.footer)(dashboard)?;
+            let hint = spec.keys.first()?;
+            Some((spec.footer_rank, id, format!("{} {word}", hint.label)))
+        })
+        .collect::<Vec<_>>();
+    hints.sort_by_key(|(rank, _, _)| *rank);
+    hints.into_iter().map(|(_, id, text)| (id, text)).collect()
+}
+
 /// The hotkey hints for whatever applies right now.
 ///
 /// Built from the action registry ([`crate::actions`]) rather than written out
@@ -2366,34 +2441,13 @@ pub(crate) fn render_quotas(
 /// what it is doing (a queued prompt, dictation, a history search); this text
 /// is only drawn when a pane has the keyboard.
 pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> String {
-    let mut hints = crate::actions::available(dashboard, None)
-        .into_iter()
-        .filter_map(|id| {
-            let spec = crate::actions::spec(id);
-            let word = (spec.footer)(dashboard)?;
-            let hint = spec.keys.first()?;
-            Some((
-                spec.footer_group,
-                spec.footer_rank,
-                format!("{} {word}", hint.label),
-            ))
-        })
-        .collect::<Vec<_>>();
-    // Stable, so commands sharing a rank keep the table's order.
-    hints.sort_by_key(|(group, rank, _)| (*group, *rank));
-
-    let group_of = |wanted: crate::actions::FooterGroup| {
-        hints
-            .iter()
-            .filter(|(group, _, _)| *group == wanted)
-            .map(|(_, _, text)| text.as_str())
-            .collect::<Vec<_>>()
-    };
-    let pane = group_of(crate::actions::FooterGroup::Pane);
-    let chords = group_of(crate::actions::FooterGroup::Chord);
-    let functions = group_of(crate::actions::FooterGroup::Function);
-
-    theme::fit_footer(&pane, &chords, &functions, width)
+    let groups = [
+        footer_commands(dashboard, crate::actions::FooterGroup::Pane),
+        footer_commands(dashboard, crate::actions::FooterGroup::Chord),
+        footer_commands(dashboard, crate::actions::FooterGroup::Function),
+    ];
+    let groups = theme::fit_footer_items(groups, width, |(_, text)| text.as_str());
+    theme::footer_items_text(&groups, |(_, text)| text.as_str())
 }
 
 /// Draws the shared footer row.
@@ -2403,17 +2457,53 @@ pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> St
 /// costs one line whichever surface drew it.
 pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
     let notice = dashboard.notices.current();
+    let groups = [
+        footer_commands(dashboard, crate::actions::FooterGroup::Pane),
+        footer_commands(dashboard, crate::actions::FooterGroup::Chord),
+        footer_commands(dashboard, crate::actions::FooterGroup::Function),
+    ];
+    let groups = theme::fit_footer_items(groups, area.width, |(_, text)| text.as_str());
     let line = match notice.as_deref() {
-        Some(notice) => Line::styled(notice.to_owned(), Style::default().fg(theme::WARNING)),
-        None => {
-            let text = combined_footer_text(dashboard, area.width);
-            theme::hints(&text)
-        }
+        Some(notice) => Line::styled(
+            notice.to_owned(),
+            Style::default().fg(theme::palette().warning),
+        ),
+        None => theme::hints(&combined_footer_text(dashboard, area.width)),
     };
     frame.render_widget(
-        Paragraph::new(line).style(theme::muted().bg(theme::SURFACE)),
+        Paragraph::new(line).style(theme::muted().bg(theme::palette().surface)),
         area,
     );
+    // The dashboard has no active composer to register these controls for us.
+    // Register the same fitted segments that were drawn so a footer click
+    // dispatches the command represented by that exact hint.
+    if notice.is_none() {
+        let mut x = area.x;
+        for group in groups.iter().filter(|group| !group.is_empty()) {
+            if x > area.x {
+                x = x.saturating_add(Line::raw(theme::FOOTER_GROUP_SEPARATOR).width() as u16);
+            }
+            for (index, (id, text)) in group.iter().enumerate() {
+                if index > 0 {
+                    x = x.saturating_add(Line::raw(theme::FOOTER_SEPARATOR).width() as u16);
+                }
+                let width = Line::raw(text.as_str()).width() as u16;
+                crate::surface_controls::render_footer_command(
+                    frame,
+                    Rect::new(
+                        x,
+                        area.y,
+                        width.min(area.right().saturating_sub(x)),
+                        area.height,
+                    ),
+                    dashboard,
+                    *id,
+                    text,
+                );
+                x = x.saturating_add(width);
+            }
+        }
+    }
 }
 
 fn refresh_age(now: u64, refreshed: u64) -> String {
@@ -2536,6 +2626,11 @@ mod tests {
             .session_details
             .get_mut("session-1")
             .unwrap()
+            .current_turn_started_at = Some(now_seconds().saturating_sub(10));
+        dashboard
+            .session_details
+            .get_mut("session-1")
+            .unwrap()
             .queued_prompts
             .push(hel::hel_worker::QueuedPrompt {
                 id: "queued-1".into(),
@@ -2553,8 +2648,8 @@ mod tests {
         assert!(!rendered.contains("[1] hel"));
         assert!(!rendered.contains("Turn clock"));
         assert!(!rendered.contains("Session name"));
-        assert!(rendered.contains("po…"), "{rendered}");
-        assert!(rendered.contains("cod…"), "{rendered}");
+        assert!(rendered.contains("podman"), "{rendered}");
+        assert!(rendered.contains("codex-1"), "{rendered}");
         assert!(rendered.contains("[Q 1]"));
         assert!(rendered.contains("Sessions"));
         assert!(!rendered.contains("Turn=time"));
@@ -2766,7 +2861,7 @@ mod tests {
         let user_column = cell_column(user_line, "Checking the workspace");
         assert_ne!(
             buffer[(buffer.area.x + user_column, buffer.area.y + user_row as u16)].fg,
-            theme::MUTED
+            theme::palette().muted
         );
     }
 
@@ -2805,7 +2900,6 @@ mod tests {
                 let rendered = drawn(&mut dashboard, width, 40).join("\n");
                 let sessions = dashboard.pane_areas.expect("dashboard panes")[0];
                 assert_eq!(sessions.width, expected_sidebar);
-                assert_eq!(dashboard.session_control_areas.len(), 2);
                 assert!(rendered.contains("Create"), "{rendered}");
                 assert!(rendered.contains("Resume"), "{rendered}");
                 assert!(rendered.contains("Q"), "{rendered}");
@@ -2831,36 +2925,6 @@ mod tests {
                 .iter()
                 .all(|(_, area)| area.height == 2)
         );
-    }
-
-    #[test]
-    fn sessions_create_and_resume_buttons_dispatch_from_the_minimized_pane() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
-        for control in [crate::SessionControl::Create, crate::SessionControl::Resume] {
-            drawn(&mut dashboard, 80, 30);
-            let area = dashboard
-                .session_control_areas
-                .iter()
-                .find(|(candidate, _)| *candidate == control)
-                .unwrap()
-                .1;
-            let action = dashboard.handle_mouse(mouse_at_row(
-                MouseEventKind::Down(MouseButton::Left),
-                area,
-                0,
-            ));
-            match control {
-                crate::SessionControl::Create => {
-                    assert_eq!(action, DashboardAction::None);
-                    assert!(matches!(dashboard.mode, Mode::QuickNew(_)));
-                    dashboard.cancel_modal();
-                }
-                crate::SessionControl::Resume => {
-                    assert_eq!(action, DashboardAction::OpenResumeDialog)
-                }
-            }
-        }
     }
 
     #[test]
@@ -2917,16 +2981,16 @@ mod tests {
                 let cell = &buffer[(area.x + 1, area.y)];
                 assert_eq!(cell.symbol(), glyph.to_string());
                 if *size == PaneSize::Maximized && !dashboard.pane_maximize_enabled(pane) {
-                    assert_eq!(cell.bg, theme::SURFACE);
-                    assert_eq!(cell.fg, theme::BORDER);
+                    assert_eq!(cell.bg, theme::palette().surface);
+                    assert_eq!(cell.fg, theme::palette().border);
                     assert!(!cell.modifier.contains(Modifier::BOLD));
                 } else if *size == PaneSize::Standard {
-                    assert_eq!(cell.bg, theme::SURFACE_RAISED);
-                    assert_eq!(cell.fg, theme::ACCENT);
+                    assert_eq!(cell.bg, theme::palette().surface_raised);
+                    assert_eq!(cell.fg, theme::palette().accent);
                     assert!(cell.modifier.contains(Modifier::BOLD));
                 } else {
-                    assert_eq!(cell.bg, theme::SURFACE);
-                    assert_eq!(cell.fg, theme::MUTED);
+                    assert_eq!(cell.bg, theme::palette().surface);
+                    assert_eq!(cell.fg, theme::palette().muted);
                 }
             }
         }
@@ -3024,7 +3088,7 @@ mod tests {
 
     #[test]
     fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
-        for (height, expected_sessions_height) in [(32, 30), (44, 42)] {
+        for (height, expected_sessions_height) in [(32, 27), (44, 39)] {
             let mut dashboard = minimized_sessions_dashboard(3, 2);
             dashboard
                 .restore_pane_sizes(crate::PaneSizes::default())
@@ -3123,11 +3187,12 @@ mod tests {
             (first_y..first_y + 4).all(|y| {
                 (dashboard.pane_areas.expect("pane areas")[0].x + 1
                     ..dashboard.pane_areas.expect("pane areas")[0].right() - 1)
-                    .all(|x| buffer[(x, y)].bg != theme::MUTED)
+                    .all(|x| buffer[(x, y)].bg != theme::palette().muted)
             }),
             "selection must not paint a background"
         );
-        assert!(lines[first_y as usize].contains("› First session"));
+        assert!(lines[first_y as usize].contains("› "));
+        assert!(lines[first_y as usize].contains("First session"));
         assert_eq!(
             second_y,
             first_y + 5,
@@ -3220,7 +3285,7 @@ mod tests {
         let lines = buffer_lines(buffer);
         let first_y = lines
             .iter()
-            .position(|line| line.contains("› ACP pretty name"))
+            .position(|line| line.contains("› ") && line.contains("ACP pretty name"))
             .expect("first session row") as u16;
         let second_heading_y = lines
             .iter()
@@ -3343,6 +3408,13 @@ mod tests {
             "session-beta-second",
             vec![agent_message(1, "second tail")],
         ));
+        for id in ["session-beta-first", "session-beta-second"] {
+            dashboard
+                .session_details
+                .get_mut(id)
+                .unwrap()
+                .current_turn_started_at = Some(now_seconds().saturating_sub(10));
+        }
         dashboard.focus_sessions();
         let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
         // Collapse the beta project so its sessions draw their compact form,
@@ -3357,9 +3429,17 @@ mod tests {
         assert_eq!(
             rendered
                 .lines()
-                .filter(|line| line.contains("podma…"))
+                .filter(|line| line.contains("podman [1]"))
                 .count(),
-            2,
+            1,
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.contains("podman [2]"))
+                .count(),
+            1,
             "{rendered}"
         );
         assert!(!rendered.contains("first tail"), "{rendered}");
@@ -3374,7 +3454,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&normal), false, SessionState::Running),
-            theme::SESSION_ACTIVITY
+            theme::palette().session_activity
         );
 
         let unread = SessionDetail {
@@ -3384,7 +3464,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&unread), false, SessionState::Running),
-            theme::SESSION_ATTENTION
+            theme::palette().session_attention
         );
 
         let unread_idle = SessionDetail {
@@ -3393,13 +3473,13 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&unread_idle), false, SessionState::Running),
-            theme::SESSION_IDLE
+            theme::palette().session_idle
         );
 
         let read_idle = SessionDetail::default();
         assert_eq!(
             session_band_color(Some(&read_idle), false, SessionState::Running),
-            theme::SESSION_IDLE
+            theme::palette().session_idle
         );
 
         let foreground = SessionDetail {
@@ -3411,7 +3491,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&foreground), false, SessionState::Running),
-            theme::SESSION_ACTIVITY,
+            theme::palette().session_activity,
             "foreground work is not idle"
         );
 
@@ -3428,7 +3508,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&unread_background), false, SessionState::Running),
-            theme::SESSION_ATTENTION,
+            theme::palette().session_attention,
             "background work does not use the blue idle-unread band"
         );
         let read_background = SessionDetail {
@@ -3437,7 +3517,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&read_background), false, SessionState::Running),
-            theme::SESSION_ACTIVITY,
+            theme::palette().session_activity,
             "background work is not idle after it has been read"
         );
 
@@ -3447,7 +3527,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&restarted_idle), false, SessionState::Running),
-            theme::SESSION_IDLE
+            theme::palette().session_idle
         );
 
         let restarted_running = SessionDetail {
@@ -3457,7 +3537,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&restarted_running), false, SessionState::Running),
-            theme::SESSION_ATTENTION
+            theme::palette().session_attention
         );
 
         let needs_input = SessionDetail {
@@ -3480,34 +3560,34 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&needs_input), false, SessionState::Running),
-            theme::SESSION_ATTENTION,
+            theme::palette().session_attention,
             "pending input overrides the idle blue"
         );
 
         assert_eq!(
             session_band_color(Some(&read_idle), false, SessionState::Provisioning),
-            theme::SESSION_ACTIVITY,
+            theme::palette().session_activity,
             "provisioning is a lifecycle state, not a live idle session"
         );
         assert_eq!(
             session_band_color(Some(&read_idle), false, SessionState::Error),
-            theme::SESSION_ERROR,
+            theme::palette().session_error,
             "error overrides idle"
         );
         assert_eq!(
             session_band_color(None, false, SessionState::Running),
-            theme::SESSION_ACTIVITY,
+            theme::palette().session_activity,
             "unknown detail stays at the default"
         );
 
         // An unreachable target is red, overriding every other state.
         assert_eq!(
             session_band_color(Some(&unread), true, SessionState::Running),
-            theme::SESSION_ERROR
+            theme::palette().session_error
         );
         assert_eq!(
             session_band_color(None, true, SessionState::Running),
-            theme::SESSION_ERROR
+            theme::palette().session_error
         );
     }
 
@@ -3566,14 +3646,17 @@ mod tests {
                 .expect("session row");
             buffer[(cell_column(&lines[row], "podman"), row as u16)].fg
         };
-        assert_eq!(row_color(&mut dashboard), theme::SESSION_ATTENTION);
+        assert_eq!(
+            row_color(&mut dashboard),
+            theme::palette().session_attention
+        );
         assert_eq!(
             dashboard.handle_key(alt_key('a')),
             DashboardAction::MarkAllRead {
                 receipts: vec![("session-1".into(), 4)]
             }
         );
-        assert_eq!(row_color(&mut dashboard), theme::SESSION_ACTIVITY);
+        assert_eq!(row_color(&mut dashboard), theme::palette().session_activity);
         assert_eq!(
             dashboard.session_details["session-1"].current_turn_started_at,
             Some(1)
@@ -3690,15 +3773,16 @@ mod tests {
                 .collect::<String>()
         };
 
-        // The workspace name rides at the right of the Sessions title rather
-        // than taking a full row of its own, so the transcript keeps that row.
+        // The workspace pane and action row precede Sessions, while the
+        // transcript keeps the same upper band height.
+        let sessions = dashboard.pane_areas.expect("pane geometry")[0];
         assert!(
-            line(buffer.area.y + 1).contains("Sessions"),
+            line(sessions.y).contains("Sessions"),
             "{:?}",
-            line(buffer.area.y + 1)
+            line(sessions.y)
         );
         assert_eq!(dashboard.workspace_name, "personal");
-        assert!(!line(buffer.area.y + 1).contains("ACP sessions"));
+        assert!(!line(sessions.y).contains("ACP sessions"));
         // The footer is one row: a notice replaces the hints while one is
         // showing, so the row costs one line whichever surface drew it.
         assert!(
@@ -3714,7 +3798,7 @@ mod tests {
         let hotkeys = (buffer.area.x..buffer.area.right())
             .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
             .collect::<String>();
-        assert!(hotkeys.contains("Alt-N new"), "{hotkeys:?}");
+        assert!(hotkeys.contains("Alt-N create"), "{hotkeys:?}");
         assert!(hotkeys.contains("Alt-A read"), "{hotkeys:?}");
         assert!(!hotkeys.contains("[S]ort"));
     }
@@ -3809,8 +3893,8 @@ mod tests {
         dashboard.focus_sessions();
         assert_eq!(
             combined_footer_text(&dashboard, 200),
-            "Enter open · s stop · Del delete │ Alt-N new · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
-             · Alt-Q detach │ F2 palette · F3 workspaces · F4 setup · F7 web · F5 refresh · F1 help"
+            "Enter open · s stop · Del delete · Tab pane │ Alt-N create · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
+             · Alt-Q detach │ F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help"
         );
 
         // The cancel chord takes its fixed place before detach, and only while
@@ -3838,7 +3922,7 @@ mod tests {
         dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
         dashboard.focus_sessions();
         const FUNCTION_KEYS: &str =
-            "F2 palette · F3 workspaces · F4 setup · F7 web · F5 refresh · F1 help";
+            "F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help";
 
         let full = combined_footer_text(&dashboard, 200);
         assert!(
@@ -3849,7 +3933,7 @@ mod tests {
         // Narrow enough to lose the pane group, wide enough to keep chords.
         let squeezed = combined_footer_text(&dashboard, 90);
         assert!(!squeezed.contains("Enter open"), "{squeezed}");
-        assert!(squeezed.contains("Alt-N new"), "{squeezed}");
+        assert!(squeezed.contains("Alt-N create"), "{squeezed}");
         assert!(squeezed.ends_with(FUNCTION_KEYS), "{squeezed}");
 
         assert_eq!(combined_footer_text(&dashboard, 32), "F2 palette · F1 help");
@@ -4023,7 +4107,7 @@ mod tests {
                 let [sessions, targets, quota] = dashboard.pane_areas.unwrap();
                 let transcript = dashboard.chat_transcript_area.unwrap();
                 let prompt = dashboard.chat_prompt_area.unwrap();
-                assert_eq!(sessions.y, 1);
+                assert_eq!(sessions.y, 4);
                 assert!(sessions.height > 0);
                 assert!(sessions.width > 0 && transcript.width > 0);
                 for pane in [transcript, prompt, targets, quota] {
@@ -4374,7 +4458,7 @@ mod tests {
     ) -> Vec<String> {
         let lines = drawn(dashboard, width, height);
         let pane = dashboard.pane_areas.unwrap()[0];
-        lines[1..usize::from(pane.bottom() - 1)]
+        lines[usize::from(pane.y + 1)..usize::from(pane.bottom() - 1)]
             .iter()
             .map(|line| {
                 line.chars()
@@ -4392,7 +4476,7 @@ mod tests {
         let mut dashboard = minimized_sessions_dashboard(3, 2);
         let rendered = drawn(&mut dashboard, 120, 44).join("\n");
         assert!(!dashboard.session_row_areas.is_empty());
-        assert!(rendered.contains("ACP pretty name"), "{rendered}");
+        assert!(rendered.contains("ACP pretty"), "{rendered}");
         assert!(!rendered.contains("You:"), "{rendered}");
         assert!(!rendered.contains("Agent:"), "{rendered}");
     }
@@ -4402,7 +4486,7 @@ mod tests {
     fn minimized_sessions_bound_the_viewport_to_preserve_the_conversation() {
         let mut dashboard = minimized_sessions_dashboard(3, 3);
         let lines = drawn(&mut dashboard, 120, 20);
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 18);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 15);
         assert!(
             dashboard
                 .session_row_areas
@@ -4421,7 +4505,7 @@ mod tests {
             !lines.iter().any(|line| line.contains("more")),
             "no marker expected when all sessions fit: {lines:?}"
         );
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 42);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 39);
     }
 
     /// The minimized row keeps the session name and its actionable status.
@@ -4429,7 +4513,7 @@ mod tests {
     fn minimized_sessions_identify_the_session_by_name() {
         let mut dashboard = minimized_sessions_dashboard(1, 1);
         let rendered = drawn(&mut dashboard, 120, 44).join("\n");
-        assert!(rendered.contains("ACP pretty name"), "{rendered}");
+        assert!(rendered.contains("ACP pretty"), "{rendered}");
         assert!(rendered.contains("Idle"), "{rendered}");
     }
 
@@ -4446,20 +4530,20 @@ mod tests {
             let lines = buffer_lines(buffer);
             let row = lines
                 .iter()
-                .position(|line| line.contains("ACP pretty name"))
+                .position(|line| line.contains("ACP pretty"))
                 .expect("a session row");
-            buffer[(cell_column(&lines[row], "ACP pretty name"), row as u16)].fg
+            buffer[(cell_column(&lines[row], "ACP pretty"), row as u16)].fg
         };
 
         let healthy = minimized_sessions_dashboard(1, 1);
-        assert_eq!(colour_of(healthy), theme::SESSION_IDLE);
+        assert_eq!(colour_of(healthy), theme::palette().session_idle);
 
         let mut busy = minimized_sessions_dashboard(1, 1);
         busy.session_details
             .get_mut("session-00")
             .expect("the session detail")
             .current_turn_started_at = Some(1);
-        assert_eq!(colour_of(busy), theme::SESSION_ACTIVITY);
+        assert_eq!(colour_of(busy), theme::palette().session_activity);
 
         let mut failed = minimized_sessions_dashboard(1, 1);
         {
@@ -4470,7 +4554,7 @@ mod tests {
                 .expect("the session");
             session.state = SessionState::Error;
         }
-        assert_eq!(colour_of(failed), theme::SESSION_ERROR);
+        assert_eq!(colour_of(failed), theme::palette().session_error);
     }
 
     /// A narrow minimized pane truncates the summary without bringing back
@@ -4487,7 +4571,7 @@ mod tests {
 
         let rows = minimized_content_rows(&mut dashboard, 80, 22);
         assert!(
-            rows.iter().any(|line| line.contains("ACP pretty name")),
+            rows.iter().any(|line| line.contains("ACP pretty")),
             "the narrow summary keeps the session name: {rows:?}"
         );
         assert!(!rows.iter().any(|line| line.contains("You:")), "{rows:?}");
@@ -4561,12 +4645,18 @@ mod tests {
         dashboard.apply_quota(weekly_quota("claude-1", 63));
 
         let lines = drawn(&mut dashboard, 120, 20);
+        let pane = dashboard.pane_areas.expect("short minimized pane")[0];
 
         assert!(
-            lines[1].contains('╭') && lines[1].contains("Sessi"),
+            lines[usize::from(pane.y)].contains('╭')
+                && lines[usize::from(pane.y)].contains("Sessi"),
             "the minimized list keeps its title and border: {lines:?}"
         );
-        assert!(lines[1].contains('▁') && lines[1].contains('▪') && lines[1].contains('□'));
+        assert!(
+            lines[usize::from(pane.y)].contains('▁')
+                && lines[usize::from(pane.y)].contains('▪')
+                && lines[usize::from(pane.y)].contains('□')
+        );
         for visible in ["Targets", "Quota"] {
             assert!(
                 lines.iter().any(|line| line.contains(visible)),
@@ -4579,7 +4669,7 @@ mod tests {
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized selection surface");
         assert_eq!(selection.rect, pane.inner(Margin::new(1, 1)));
-        assert_eq!(selection.rect.height, 14);
+        assert_eq!(selection.rect.height, 11);
     }
 
     #[test]
@@ -4587,17 +4677,25 @@ mod tests {
         let mut dashboard = minimized_sessions_dashboard(3, 2);
 
         let tall = drawn(&mut dashboard, 120, 44);
-        assert!(tall[1].contains('╭') && tall[1].contains("Sessi"));
-        assert_eq!(dashboard.pane_areas.expect("tall panes")[0].height, 42);
+        let tall_pane = dashboard.pane_areas.expect("tall panes")[0];
+        assert!(
+            tall[usize::from(tall_pane.y)].contains('╭')
+                && tall[usize::from(tall_pane.y)].contains("Sessi")
+        );
+        assert_eq!(dashboard.pane_areas.expect("tall panes")[0].height, 39);
 
         let short = drawn(&mut dashboard, 120, 20);
-        assert!(short[1].contains('╭') && short[1].contains("Sessi"));
-        assert_eq!(dashboard.pane_areas.expect("short panes")[0].height, 18);
+        let short_pane = dashboard.pane_areas.expect("short panes")[0];
+        assert!(
+            short[usize::from(short_pane.y)].contains('╭')
+                && short[usize::from(short_pane.y)].contains("Sessi")
+        );
+        assert_eq!(dashboard.pane_areas.expect("short panes")[0].height, 15);
 
         drawn(&mut dashboard, 120, 44);
         assert_eq!(
             dashboard.pane_areas.expect("tall panes again")[0].height,
-            42
+            39
         );
     }
 
@@ -4656,8 +4754,9 @@ mod tests {
 
         let lines = drawn(&mut dashboard, 80, 38);
 
+        let pane = dashboard.pane_areas.expect("pane geometry")[0];
         assert!(
-            lines[0].contains('╭') && dashboard.pane_areas.unwrap()[0].width > 0,
+            lines[usize::from(pane.y)].contains('╭') && pane.width > 0,
             "the portrait list keeps its bordered Sessions title: {lines:?}"
         );
         let panes = dashboard.pane_areas.expect("pane geometry");
@@ -4869,10 +4968,10 @@ mod tests {
                 buffer[(column, row as u16)].fg
             };
 
-            assert_eq!(row_colour(&mut failed), theme::ERROR, "{size:?}");
+            assert_eq!(row_colour(&mut failed), theme::palette().error, "{size:?}");
             assert_ne!(
                 row_colour(&mut healthy),
-                theme::ERROR,
+                theme::palette().error,
                 "{size:?}: only a session that needs attention is red"
             );
         }
@@ -4933,14 +5032,14 @@ mod tests {
         };
         // A quiet host has headroom left, a busy one does not; a quota reads
         // the same scale on the headroom it reports.
-        assert_eq!(colour_of(targets_row, "3%"), theme::SUCCESS);
-        assert_eq!(colour_of(targets_row, "95%"), theme::ERROR);
-        assert_eq!(colour_of(quota_row, "63%"), theme::SUCCESS);
-        assert_eq!(colour_of(quota_row, "10%"), theme::ERROR);
+        assert_eq!(colour_of(targets_row, "3%"), theme::palette().success);
+        assert_eq!(colour_of(targets_row, "95%"), theme::palette().error);
+        assert_eq!(colour_of(quota_row, "63%"), theme::palette().success);
+        assert_eq!(colour_of(quota_row, "10%"), theme::palette().error);
         // The label and the names are ordinary text; only the values carry a
         // colour.
-        assert_eq!(colour_of(targets_row, "Targets"), theme::TEXT);
-        assert_eq!(colour_of(targets_row, "morannon"), theme::TEXT);
+        assert_eq!(colour_of(targets_row, "Targets"), theme::palette().text);
+        assert_eq!(colour_of(targets_row, "morannon"), theme::palette().text);
     }
 
     /// A usage-priced profile has no window to summarise, so it is left out of
@@ -5023,8 +5122,8 @@ mod tests {
             buffer[(column, row as u16)].fg
         };
 
-        assert_eq!(colour_of("96%/5%"), theme::ERROR);
-        assert_eq!(colour_of("8%/90%"), theme::ERROR);
+        assert_eq!(colour_of("96%/5%"), theme::palette().error);
+        assert_eq!(colour_of("8%/90%"), theme::palette().error);
     }
 
     /// A minimized pane is one row by definition, so more hosts than fit have
@@ -5099,7 +5198,7 @@ mod tests {
             assert!(
                 (pane.x + 1..pane.right() - 1)
                     .filter(|x| summary_text_cell(&buffer[(*x, status_y)]))
-                    .all(|x| buffer[(x, status_y)].fg == theme::SESSION_IDLE),
+                    .all(|x| buffer[(x, status_y)].fg == theme::palette().session_idle),
                 "{collapsed}: {status}"
             );
         }
@@ -5255,8 +5354,11 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("morannon-podman [G]"), "{rendered}");
-        assert!(badge_has_color("[Y]", theme::ERROR), "{rendered}");
-        assert!(badge_has_color("[G]", theme::SUCCESS), "{rendered}");
+        assert!(badge_has_color("[Y]", theme::palette().error), "{rendered}");
+        assert!(
+            badge_has_color("[G]", theme::palette().success),
+            "{rendered}"
+        );
     }
 
     fn now_epoch_seconds() -> u64 {
@@ -5664,7 +5766,7 @@ mod tests {
             let pane_index = if focus == Focus::Quota { 2 } else { 1 };
             let area = dashboard.pane_areas.expect("pane areas")[pane_index];
             let border = &terminal.backend().buffer()[(area.x, area.y)];
-            assert_eq!(border.fg, theme::ACCENT);
+            assert_eq!(border.fg, theme::palette().accent);
             assert!(border.modifier.contains(Modifier::BOLD));
         }
     }
@@ -5907,14 +6009,14 @@ mod tests {
                 .collect::<String>(),
             "███████▎  ▏ 73%"
         );
-        assert_eq!(bar.spans[0].style.fg, Some(theme::SUCCESS));
+        assert_eq!(bar.spans[0].style.fg, Some(theme::palette().success));
         assert_eq!(bar.spans[2].style.fg, None);
         assert!(
             bar.spans[..4]
                 .iter()
-                .all(|span| span.style.bg == Some(theme::BACKGROUND))
+                .all(|span| span.style.bg == Some(theme::palette().background))
         );
-        assert_eq!(bar.spans[3].style.fg, Some(theme::MUTED));
+        assert_eq!(bar.spans[3].style.fg, Some(theme::palette().muted));
         let before = cell_before_quota_chart("Codex".into(), 7, true);
         assert_eq!(before.to_string(), "Codex   ▕");
         assert_eq!(before.spans[2].style, quota_chart_border_style());
@@ -5929,9 +6031,9 @@ mod tests {
         assert!(
             api.spans
                 .iter()
-                .all(|span| span.style.bg == Some(theme::BACKGROUND))
+                .all(|span| span.style.bg == Some(theme::palette().background))
         );
-        assert_eq!(api.spans[3].style.fg, Some(theme::MUTED));
+        assert_eq!(api.spans[3].style.fg, Some(theme::palette().muted));
     }
 
     #[test]

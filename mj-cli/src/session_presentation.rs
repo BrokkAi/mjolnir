@@ -178,6 +178,7 @@ mod tests {
             acp_ready: None,
             agent_capabilities: None,
             agent_info: None,
+            steering_supported: None,
             config_options: Vec::new(),
             modes: None,
             available_commands: Vec::new(),
@@ -279,7 +280,7 @@ mod tests {
             "stale activity must not hide the connection failure"
         );
         assert!(
-            colors.contains(&mj_chat::theme::ERROR),
+            colors.contains(&mj_chat::theme::palette().error),
             "disconnected row was not marked red"
         );
         view.connected = true;

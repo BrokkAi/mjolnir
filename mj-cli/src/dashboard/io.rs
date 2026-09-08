@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle};
+use hel::hel_config::{HelConfig, ProjectBundle};
 use hel::hel_database::DetachedSessionDraft;
 use hel::hel_state::{
     HelState, MaterializedSession, MovePreparation, ProjectSourceIdentity, SessionRecord,
@@ -200,52 +200,6 @@ pub(crate) enum DashboardIoUpdate {
     /// failure needs reporting: the notice for a successful copy is already
     /// on screen.
     ClipboardWritten(std::result::Result<(), String>),
-    /// The set of native sessions the resume dialog hides, read from Hel's
-    /// database.
-    HiddenNativeSessions {
-        result: std::result::Result<BTreeSet<(HarnessKind, String)>, String>,
-    },
-    /// A hide or reveal that has already been applied optimistically. Only a
-    /// failure needs handling; `target` says what to put back so no row can
-    /// stay out of step with what is stored.
-    ArchiveWrite {
-        what: String,
-        target: ArchiveWriteTarget,
-        result: std::result::Result<(), String>,
-    },
-}
-
-/// Which hidden-row store an archive write was aimed at, and what the record
-/// held before the optimistic update overwrote it.
-pub(crate) enum ArchiveWriteTarget {
-    /// A Hel session record. Its archived flag lives in two in-memory copies —
-    /// the controller's state and the dashboard's — and both are restored.
-    Session { session_id: String, archived: bool },
-    /// The hidden native session set, which is re-read from the database
-    /// rather than reconstructed.
-    HiddenNativeSessions,
-}
-
-/// Puts back what an archive write did not manage to store. Returns whether
-/// the hidden native set still has to be re-read from the database.
-pub(crate) fn revert_archive_write(
-    target: &ArchiveWriteTarget,
-    state: &mut HelState,
-    dashboard: &mut hel_tui::DashboardState,
-) -> bool {
-    match target {
-        ArchiveWriteTarget::Session {
-            session_id,
-            archived,
-        } => {
-            if let Some(session) = state.sessions.get_mut(session_id) {
-                session.archived = *archived;
-            }
-            dashboard.set_session_archived(session_id, *archived);
-            false
-        }
-        ArchiveWriteTarget::HiddenNativeSessions => true,
-    }
 }
 
 pub(crate) struct ActiveLifecycleOperation {
@@ -261,7 +215,6 @@ pub(crate) struct WorkspaceManagementResult {
 }
 
 pub(crate) struct RegisteredDashboardSession {
-    generation: Option<u64>,
     session: SessionRecord,
     remembered_container_size: Option<(String, hel::hel_state::HostContainerSize)>,
     cancelled: Arc<AtomicBool>,
@@ -274,7 +227,6 @@ pub(crate) enum DashboardCreateSessionUpdate {
     },
     Registered(Box<RegisteredDashboardSession>),
     Failed {
-        generation: Option<u64>,
         error: String,
     },
 }
@@ -667,22 +619,8 @@ where
     (cancelled, worker)
 }
 
-/// Reads the hidden-session set out of Hel's own database. Called when the
-/// resume dialog opens and again whenever a hide or reveal fails to commit.
-pub(crate) fn spawn_hidden_native_sessions_load(
-    updates: UnboundedSender<DashboardIoUpdate>,
-) -> JoinHandle<()> {
-    spawn_io(
-        "load hidden native sessions",
-        updates,
-        hel::hel_database::hidden_native_sessions,
-        |result| DashboardIoUpdate::HiddenNativeSessions { result },
-    )
-}
-
-/// Discovers advertised reviewer choices from one connected worker in
-/// a supervised asynchronous task. A fresh generation is included in the
-/// reply; the TUI drops replies for edits that happened after this request.
+/// Discovers advertised reviewer choices in a supervised task. The TUI
+/// drops replies whose generation no longer matches the current draft.
 pub(crate) fn spawn_review_settings_discovery(
     control: SessionManagerControl,
     request: mj_controller::hel_review_settings::ReviewDiscoveryRequest,
@@ -927,26 +865,7 @@ pub(crate) fn spawn_project_source_resolution(
     })
 }
 
-/// Persists one archive or unarchive. The dashboard already moved the row, so
-/// only the failure path matters here: `target` carries what to restore.
-pub(crate) fn spawn_archive_write(
-    what: String,
-    target: ArchiveWriteTarget,
-    write: impl FnOnce() -> Result<()> + Send + 'static,
-    updates: UnboundedSender<DashboardIoUpdate>,
-    tracker: CriticalOperationTracker,
-) -> JoinHandle<()> {
-    spawn_critical_io(tracker, what.clone(), updates, write, move |result| {
-        DashboardIoUpdate::ArchiveWrite {
-            what,
-            target,
-            result,
-        }
-    })
-}
-
-/// A controller that answers target questions from configuration alone, for
-/// the completions and validations the launch dialog asks for.
+/// A controller that answers target questions from configuration alone.
 pub(crate) fn config_only_controller(config: HelConfig) -> Controller {
     Controller {
         config,
@@ -1293,7 +1212,7 @@ pub(crate) fn spawn_clipboard_write(
 }
 
 pub(crate) fn spawn_create_bundle(
-    source: String,
+    sources: Vec<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) {
@@ -1304,7 +1223,7 @@ pub(crate) fn spawn_create_bundle(
         move || {
             // Load fresh so a concurrent background save (e.g. an import
             // apply) is not clobbered by a stale UI-time config snapshot.
-            let created = mj_controller::hel_controller::create_quick_bundle(&source)?;
+            let created = mj_controller::hel_controller::create_bundle_from_sources(&sources)?;
             Ok(CreatedBundleUpdate {
                 config: created.config,
                 bundle_id: created.bundle_id,
@@ -1426,14 +1345,6 @@ pub(crate) fn spawn_dashboard_create_session(
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = tracker.begin_cancellable("creating session", cancelled.clone());
     tokio::task::spawn_blocking(move || {
-        let generation = match &action {
-            DashboardAction::CreateStartupSession { generation, .. } => *generation,
-            _ => None,
-        };
-        let initial_prompt = match &action {
-            DashboardAction::CreateStartupSession { initial_prompt, .. } => initial_prompt.clone(),
-            _ => None,
-        };
         let prepared = match action {
             DashboardAction::CreateStartupSession {
                 profile_id,
@@ -1460,7 +1371,6 @@ pub(crate) fn spawn_dashboard_create_session(
             Err(error) => {
                 if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
                     DashboardCreateSessionUpdate::Failed {
-                        generation,
                         error: format!("{error:#}"),
                     },
                 ))) {
@@ -1523,7 +1433,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
-                        initial_prompt: initial_prompt.clone(),
+                        initial_prompt: None,
                         workspace_id,
                         profile_id,
                         bundle_id,
@@ -1538,7 +1448,6 @@ pub(crate) fn spawn_dashboard_create_session(
                     .await
             })?;
             Ok(Some(RegisteredDashboardSession {
-                generation,
                 session: registered.session,
                 remembered_container_size: registered.remembered_container_size,
                 cancelled: cancelled.clone(),
@@ -1549,7 +1458,6 @@ pub(crate) fn spawn_dashboard_create_session(
             Err(error) => {
                 if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
                     DashboardCreateSessionUpdate::Failed {
-                        generation,
                         error: format!("{error:#}"),
                     },
                 ))) {
@@ -1570,33 +1478,6 @@ pub(crate) fn spawn_dashboard_create_session(
             .block_on(async {
                 let mut daemon = daemon::connect_or_start().await?;
                 daemon.wait_create_session(session_id.clone()).await?;
-                if let Some(prompt) = initial_prompt {
-                    let result = async {
-                        daemon
-                            .submit_session_command(
-                                session_id.clone(),
-                                mj_controller::hel_session_manager::new_command_id(
-                                    "initial-prompt",
-                                )?,
-                                hel::hel_worker::RelayCommand::Prompt {
-                                    prompt: vec![
-                                        agent_client_protocol::schema::v1::ContentBlock::from(
-                                            prompt.as_str(),
-                                        ),
-                                    ],
-                                },
-                                Some(prompt),
-                            )
-                            .await
-                            .map(|_| ())
-                    }
-                    .await;
-                    if let Err(error) = result {
-                        return Ok(LifecycleSuccess::CreatedWithPromptFailure(format!(
-                            "{error:#}"
-                        )));
-                    }
-                }
                 Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
             })
             .map_err(|error| format!("{error:#}"));
@@ -1759,32 +1640,6 @@ impl DashboardContext {
                     (operation, Ok(outcome)) => {
                         unreachable!("persistence operation {operation:?} returned {outcome:?}")
                     }
-                }
-            }
-            DashboardIoUpdate::HiddenNativeSessions { result } => match result {
-                Ok(hidden) => self.dashboard.set_hidden_native_sessions(hidden),
-                Err(error) => self
-                    .dashboard
-                    .set_notice(format!("Could not read archived sessions: {error}")),
-            },
-            DashboardIoUpdate::ArchiveWrite {
-                what,
-                target,
-                result,
-            } => {
-                if let Err(error) = result {
-                    self.dashboard
-                        .set_notice(format!("Could not archive {what}: {error}"));
-                    // The optimistic update no longer matches storage, so the
-                    // row it moved goes back where storage still has it.
-                    if revert_archive_write(
-                        &target,
-                        &mut self.controller.state,
-                        &mut self.dashboard,
-                    ) {
-                        spawn_hidden_native_sessions_load(self.dashboard_io_tx.clone());
-                    }
-                    self.dirty = true;
                 }
             }
             DashboardIoUpdate::MaterializedSessionProjection { session_id, result } => {
@@ -2076,8 +1931,7 @@ impl DashboardContext {
                     }
                 }
                 Err(error) => {
-                    self.dashboard
-                        .set_notice(format!("Could not create bundle: {error}"));
+                    self.dashboard.fail_bundle_creation(&error);
                 }
             },
             DashboardIoUpdate::ImportedSessionApplied { result } => match *result {
@@ -2274,7 +2128,6 @@ impl DashboardContext {
                 .show_dirty_local_confirmation(action, repositories),
             DashboardCreateSessionUpdate::Registered(registered) => {
                 let registered = *registered;
-                self.dashboard.finish_quick_new(registered.generation);
                 let session_id = registered.session.id.clone();
                 if let Some((host, size)) = registered.remembered_container_size {
                     self.controller.state.remember_container_size(&host, size);
@@ -2284,6 +2137,7 @@ impl DashboardContext {
                     .sessions
                     .insert(session_id.clone(), registered.session);
                 self.dashboard.set_state(self.controller.state.clone());
+                self.dashboard.select_active_session(&session_id);
                 self.resolve_project_sources();
                 self.dashboard.begin_session_operation(
                     session_id.clone(),
@@ -2300,9 +2154,9 @@ impl DashboardContext {
                     },
                 );
             }
-            DashboardCreateSessionUpdate::Failed { generation, error } => {
+            DashboardCreateSessionUpdate::Failed { error } => {
                 self.dashboard
-                    .quick_new_failed(generation, format!("Could not create session: {error}"));
+                    .set_failure_notice(format!("Could not create session: {error}"));
             }
         }
     }
@@ -2331,19 +2185,10 @@ impl DashboardContext {
         match update.result {
             Ok(LifecycleSuccess::Created) => {
                 if focus_session {
-                    self.dashboard.select_active_session(&session_id);
-                    self.dashboard.focus_prompt();
+                    self.dashboard.finish_new_session(&session_id);
                 }
                 self.dashboard
                     .set_notice(format!("Session {} is ready", short_id(&session_id)));
-                self.request_quota_refresh();
-            }
-            Ok(LifecycleSuccess::CreatedWithPromptFailure(error)) => {
-                if focus_session {
-                    self.dashboard.select_active_session(&session_id);
-                    self.dashboard.focus_prompt();
-                }
-                self.dashboard.set_failure_notice(format!("Session is ready, but its initial task could not be completed: {error}. Check the transcript before retrying the saved draft."));
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Resumed {
@@ -2461,7 +2306,7 @@ impl DashboardContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hel::hel_config::ProjectRepository;
+    use hel::hel_config::{HarnessKind, ProjectRepository};
     use mj_controller::hel_controller::create_quick_bundle_in_config as create_quick_bundle;
 
     #[test]
@@ -2472,6 +2317,7 @@ mod tests {
         original.save_to(&path).unwrap();
         let mut edited = original.clone();
         edited.sessions_side = hel::hel_config::SessionsSide::Right;
+        edited.theme = hel::hel_config::UiTheme::Light;
         HelConfig::update_to(&path, |current| {
             current.startup.prompt = false;
             Ok(())
@@ -2485,6 +2331,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved.sessions_side, hel::hel_config::SessionsSide::Right);
+        assert_eq!(saved.theme, hel::hel_config::UiTheme::Light);
         assert!(!saved.startup.prompt);
         assert_eq!(HelConfig::load_from(&path).unwrap(), saved);
 
@@ -2643,105 +2490,6 @@ mod tests {
             "app-2"
         );
         assert_eq!(config.bundles.len(), 2);
-    }
-
-    fn archivable_session(id: &str) -> SessionRecord {
-        SessionRecord {
-            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-            archived: false,
-            container_cpus: None,
-            container_memory: None,
-            id: id.into(),
-            title: "Raise the dead".into(),
-            harness_kind: HarnessKind::Codex,
-            last_profile: "codex-1".into(),
-            bundle_id: "hel".into(),
-            project_directory: None,
-            managed_worktree: None,
-            target_template_id: "podman".into(),
-            resource_allocation: None,
-            additional_mounts: Vec::new(),
-            state: SessionState::Stopped,
-            target: None,
-            native_session_id: None,
-            acp_session_title: None,
-            session_title_override: Some("Raise the dead".into()),
-            created_at: "2026-08-14T00:00:00Z".into(),
-            updated_at: "2026-08-14T00:00:00Z".into(),
-            viewed_through_event_ordinal: 0,
-            draft_input: String::new(),
-            last_error: None,
-            last_checkpoint_error: None,
-            checkpoint: None,
-        }
-    }
-
-    /// An archive write that never reached the database must not leave the
-    /// dashboard and the controller holding a row the database still shows.
-    /// Both in-memory copies go back, and the row returns to the dialog.
-    #[test]
-    fn a_failed_session_archive_write_puts_both_copies_of_the_record_back() {
-        let mut state = HelState::default();
-        state
-            .sessions
-            .insert("session-1".into(), archivable_session("session-1"));
-        let mut dashboard =
-            hel_tui::DashboardState::new(HelConfig::default(), state.clone(), BTreeMap::new());
-        dashboard.show_resume_dialog(1, Vec::new());
-
-        // What pressing `a` applies before the write is even scheduled.
-        dashboard.set_session_archived("session-1", true);
-        state
-            .sessions
-            .get_mut("session-1")
-            .expect("the session")
-            .archived = true;
-
-        let reload_hidden_native = revert_archive_write(
-            &ArchiveWriteTarget::Session {
-                session_id: "session-1".into(),
-                archived: false,
-            },
-            &mut state,
-            &mut dashboard,
-        );
-
-        assert!(
-            !reload_hidden_native,
-            "a hel record is restored from what the write knew, not from the native set"
-        );
-        assert!(!state.sessions["session-1"].archived);
-        // Emptying the list moved focus to Cancel. Return to the restored row
-        // before archiving it; discovery must not steal focus from a button.
-        dashboard.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::BackTab,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        // Archiving the row asks for the same write the failed one attempted.
-        assert_eq!(
-            dashboard.handle_key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('a'),
-                crossterm::event::KeyModifiers::NONE,
-            )),
-            DashboardAction::SetSessionArchived {
-                session_id: "session-1".into(),
-                archived: true,
-            }
-        );
-    }
-
-    /// The native hidden set has no per-row memory to restore, so a failed
-    /// hide is repaired by re-reading what the database holds.
-    #[test]
-    fn a_failed_native_hide_write_asks_for_the_stored_set() {
-        let mut state = HelState::default();
-        let mut dashboard =
-            hel_tui::DashboardState::new(HelConfig::default(), state.clone(), BTreeMap::new());
-        assert!(revert_archive_write(
-            &ArchiveWriteTarget::HiddenNativeSessions,
-            &mut state,
-            &mut dashboard,
-        ));
     }
 
     const LIFECYCLE_RELOAD_CHILD: &str = "MJ_TEST_LIFECYCLE_RELOAD_CHILD";

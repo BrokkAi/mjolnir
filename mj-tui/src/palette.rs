@@ -14,7 +14,7 @@
 use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use mj_chat::components::{ChoiceList, ControlKind, Form, Interaction, TextField};
+use mj_chat::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -52,33 +52,39 @@ pub(crate) struct CommandPalette {
     /// Index into `entries` of the highlighted row.
     pub(crate) selected: usize,
     pub(crate) form: RefCell<Form<PaletteControl>>,
+    session_only: bool,
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaletteControl {
     Query,
     Commands,
+    Run,
+    Close,
 }
 
 impl CommandPalette {
     fn prepare(&self) {
         let mut form = self.form.borrow_mut();
-        form.begin_frame();
-        form.register(
-            PaletteControl::Query,
-            ControlKind::TextField,
-            Rect::default(),
-            true,
-        );
-        form.register(
+        form.begin_update();
+        form.declare_with_enabled(PaletteControl::Query, ControlKind::TextField, true);
+        form.declare_with_enabled(
             PaletteControl::Commands,
             ControlKind::ChoiceList {
                 len: self.entries.len(),
                 selected: self.selected,
             },
-            Rect::default(),
             !self.entries.is_empty(),
         );
+        form.declare_with_enabled(
+            PaletteControl::Run,
+            ControlKind::Button,
+            self.entries
+                .get(self.selected)
+                .is_some_and(|entry| entry.availability == Availability::Ready),
+        );
+        form.declare_with_enabled(PaletteControl::Close, ControlKind::Button, true);
         form.end_frame(PaletteControl::Query);
     }
 }
@@ -104,6 +110,7 @@ fn heading_for(dashboard: &DashboardState, scope: Scope) -> String {
 /// Sessions pane's group rather than none at all.
 fn pane_scope(focus: Focus) -> Scope {
     match focus {
+        Focus::Workspaces => Scope::Global,
         Focus::Targets => Scope::Targets,
         Focus::Quota => Scope::Quota,
         Focus::Sessions | Focus::Prompt => Scope::Sessions,
@@ -184,22 +191,44 @@ impl DashboardState {
             entries,
             selected: 0,
             form: RefCell::new(Form::default()),
+            session_only: false,
+            session_id: self.selected_session_id.clone(),
         };
         palette.prepare();
         self.mode = Mode::Palette(palette);
     }
 
-    /// Recomputes the list after the query changed, keeping the highlight
-    /// inside it.
+    pub(crate) fn begin_session_palette(&mut self) {
+        self.begin_palette();
+        if let Mode::Palette(palette) = &mut self.mode {
+            palette.session_only = true;
+            palette
+                .entries
+                .retain(|entry| spec(entry.id).scope == Scope::Session);
+            palette.prepare();
+        }
+    }
+
+    /// Refreshes query matches and availability, retaining the selected command.
     pub(crate) fn rebuild_palette_entries(&mut self) {
         let Mode::Palette(palette) = &self.mode else {
             return;
         };
-        let entries = palette_entries(self, palette.query.value());
+        let mut entries = palette_entries(self, palette.query.value());
+        if palette.session_only {
+            entries.retain(|entry| spec(entry.id).scope == Scope::Session);
+        }
         let Mode::Palette(palette) = &mut self.mode else {
             return;
         };
-        palette.selected = palette.selected.min(entries.len().saturating_sub(1));
+        if palette.entries == entries {
+            return;
+        }
+        let selected_id = palette.entries.get(palette.selected).map(|entry| entry.id);
+        palette.selected = selected_id
+            .and_then(|id| entries.iter().position(|entry| entry.id == id))
+            .unwrap_or(0);
+        palette.form.get_mut().cancel_pointer();
         palette.entries = entries;
         palette.prepare();
     }
@@ -237,13 +266,17 @@ impl DashboardState {
             palette.form.get_mut().handle(&event).action
         };
         match interaction {
-            Some(Interaction::Cancel) => self.cancel_modal(),
+            Some(Interaction::Cancel | Interaction::Activate(PaletteControl::Close)) => {
+                self.cancel_modal()
+            }
             Some(Interaction::Edit(PaletteControl::Query, edit)) => {
                 TextField::apply(&mut palette.query, edit);
                 self.rebuild_palette_entries();
             }
             Some(Interaction::Select(PaletteControl::Commands, index)) => palette.selected = index,
-            Some(Interaction::Activate(PaletteControl::Query | PaletteControl::Commands)) => {
+            Some(Interaction::Activate(
+                PaletteControl::Query | PaletteControl::Commands | PaletteControl::Run,
+            )) => {
                 let Some(entry) = palette.entries.get(palette.selected).cloned() else {
                     return DashboardAction::None;
                 };
@@ -254,8 +287,19 @@ impl DashboardState {
                     ));
                     return DashboardAction::None;
                 }
+                if spec(entry.id).scope == Scope::Session {
+                    let Some(id) = palette
+                        .session_id
+                        .clone()
+                        .filter(|id| self.state.sessions.contains_key(id))
+                    else {
+                        self.set_notice("This session is no longer available.");
+                        return DashboardAction::None;
+                    };
+                    self.selected_session_id = Some(id);
+                }
                 self.mode = Mode::Dashboard;
-                return self.dispatch_command(entry.id);
+                return self.run_available_command(entry.id);
             }
             _ => {}
         }
@@ -307,7 +351,7 @@ pub(crate) fn render_palette(
     let lines = palette_lines(dashboard, palette);
     // The popup grows with the complete list. The shared modal helper clamps
     // it to the usable terminal bounds when the list cannot fit.
-    let popup_height = u16::try_from(lines.len().saturating_add(4).max(5)).unwrap_or(u16::MAX);
+    let popup_height = u16::try_from(lines.len().saturating_add(5).max(6)).unwrap_or(u16::MAX);
     let popup = centered_modal(frame, surfaces, 72, popup_height, area);
     let outer = theme::modal()
         .title(" ✦ Commands ")
@@ -329,6 +373,7 @@ pub(crate) fn render_palette(
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(inner);
@@ -410,10 +455,10 @@ pub(crate) fn render_palette(
                     theme::muted()
                 } else if selected {
                     Style::default()
-                        .fg(theme::TEXT)
+                        .fg(theme::palette().text)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme::TEXT)
+                    Style::default().fg(theme::palette().text)
                 };
                 let padding = label_width.saturating_sub(Line::raw(text.as_str()).width()) + 2;
                 Line::from(vec![
@@ -423,9 +468,9 @@ pub(crate) fn render_palette(
                     Span::styled(
                         keys,
                         Style::default().fg(if ready {
-                            theme::SECONDARY
+                            theme::palette().secondary
                         } else {
-                            theme::MUTED
+                            theme::palette().muted
                         }),
                     ),
                 ])
@@ -461,6 +506,22 @@ pub(crate) fn render_palette(
         items.len(),
         form.list_offset(PaletteControl::Commands),
         usize::from(list_area.height).max(1),
+    );
+    ButtonRow::render(
+        frame,
+        rows[3],
+        &[
+            (
+                PaletteControl::Run,
+                "Run",
+                palette
+                    .entries
+                    .get(palette.selected)
+                    .is_some_and(|entry| entry.availability == Availability::Ready),
+            ),
+            (PaletteControl::Close, "Close", true),
+        ],
+        &mut form,
     );
     form.end_frame(PaletteControl::Query);
 
@@ -501,6 +562,27 @@ mod tests {
         lines.iter().position(|line| line.contains(needle))
     }
 
+    #[test]
+    fn open_palette_enables_rename_when_session_creation_finishes() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            crate::SessionOperationKind::Launching,
+            None,
+        );
+        dashboard.begin_session_palette();
+        for character in "rename".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        drawn(&mut dashboard, 120, 30);
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(matches!(dashboard.mode, Mode::Palette(_)));
+        dashboard.finish_session_operation("session-1");
+        drawn(&mut dashboard, 120, 30);
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(matches!(dashboard.mode, Mode::Rename(_)));
+    }
+
     /// The palette's whole point: the commands for the session you are looking
     /// at come first, under a heading saying which session that is.
     #[test]
@@ -516,7 +598,13 @@ mod tests {
         let settings = row_of(&lines, "Settings").expect("the settings heading");
         let review = row_of(&lines, "Review settings").expect("Review settings");
         let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");
-        let workspaces = row_of(&lines, "Workspaces").expect("Workspaces");
+        let workspaces = lines
+            .iter()
+            .enumerate()
+            .skip(anywhere + 1)
+            .find(|(_, line)| line.contains("Workspaces"))
+            .map(|(row, _)| row)
+            .expect("Workspaces command");
         assert!(heading < rename, "{lines:#?}");
         assert!(rename < settings, "{lines:#?}");
         assert!(settings < review && review < anywhere, "{lines:#?}");

@@ -31,25 +31,28 @@ Mjolnir appends `config.toml` to it.
 Every current file starts with the required schema version:
 
 ```toml
-version = 4
+version = 6
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `4`. |
-| `sessions_side` | string | no | `"left"` | Place the Sessions sidebar on the left or right. |
-| `spinner` | string | no | `"scan"` | Terminal activity animation style. |
+| `version` | integer | yes | none | Configuration schema version; use `6`. |
+| `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
+| `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is not shown in Setup. |
+| `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
+| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, or `dracula`. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Detailed activity-clock display options. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
-| `startup` | table | no | explicit Quick New defaults | Defaults used when you create a session without opening the full wizard. |
+| `startup` | table | no | empty | Deprecated compatibility table; its fields are accepted but ignored. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
 | `targets` | table of named tables | no | empty | Named places where sessions run. |
 
-A missing or empty file is treated as an empty version 2 configuration. Unknown
+A missing or empty file is treated as an empty version 6 configuration. Older
+versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
 understands, Mjolnir salvages the sections it can read but treats the file as
@@ -58,36 +61,6 @@ read-only. `mj doctor` reports that state; update Mjolnir before changing it.
 Profile, bundle, repository, and target IDs all use the same rule: 1–64 ASCII
 letters, digits, `.`, `-`, or `_`. The IDs `.` and `..` are not allowed. IDs are
 the TOML table names, for example `work` in `[profiles.work]`.
-
-## Quick New defaults `[startup]`
-
-The `[startup]` table supplies defaults for an explicit Quick New action. An
-empty workspace does not create or open a session automatically. The legacy
-`enabled` field remains accepted for older configuration files but is ignored.
-
-```toml
-[startup]
-# profile = "my-codex"
-# target = "my-podman"
-# `enabled` is accepted for compatibility and ignored.
-```
-
-| Field | TOML type | Default | Behavior |
-| --- | --- | --- | --- |
-| `enabled` | boolean | `true` | Retained for compatibility; ignored. |
-| `profile` | string | first configured Codex profile, otherwise first profile by ID | Must name a configured profile. |
-| `target` | string | usable Podman, then Docker, then local directory | Must name a configured target; an explicit selection never silently switches targets. |
-
-When `target` is unset, Quick New checks the current project and prefers a
-usable local Podman runtime, then Docker, then a local worktree on Unix. It
-adds the selected local target or bundle to the configuration as needed. A
-configured `target` is used directly and is never replaced by an automatic
-fallback.
-
-On Linux and macOS, a completely unconfigured installation receives a local
-Codex profile and `localhost` target during dashboard startup. The dashboard
-remains session-empty until you use Quick New or the full creation wizard; use
-`mj setup` when you want guided discovery of other profiles and targets.
 
 ## Advanced display options `[advanced]`
 
@@ -106,6 +79,12 @@ detailed_activity_clocks = false
 The terminal Setup screen edits this setting under **Advanced**. The normal
 `Running` status continues across the originating turn and its background work;
 the setting only controls how much timing detail is shown.
+
+The deprecated `[startup]` table and its `enabled`, `prompt`, `profile`, and
+`target` fields remain accepted when reading older configuration files. They are
+not used for session creation or automatic startup, and new configuration files
+do not write the table. Use the **Create** wizard to choose a profile, project,
+target, and launch options for every new session.
 
 ## Web viewer `[phone]`
 
@@ -475,7 +454,7 @@ This example contains the sections most installations need. Add other target
 kinds from the examples above rather than mixing fields between variants.
 
 ```toml
-version = 2
+version = 6
 
 [phone]
 enabled = true

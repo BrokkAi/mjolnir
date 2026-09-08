@@ -23,6 +23,7 @@ mod turn_review;
 #[cfg(test)]
 mod test_support;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -138,16 +139,25 @@ pub fn review_status_line(review: &hel::hel_config::ReviewConfig, open: bool) ->
 /// Where a host surface has told the chat to draw itself.
 ///
 /// `transcript` and `prompt` are the *outer* rectangles including each block's
-/// border. `footer` is `Some` only when the host wants the chat to own the
+/// border. While busy, the transcript's last row holds activity above the
+/// prompt. `footer` is `Some` only when the host wants the chat to own the
 /// footer row, which it does while the composer has focus. `overlay` is the
 /// whole frame: modals and the autocomplete popup are centred and clamped
 /// inside it rather than inside the bands above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChatRegions {
+pub struct ChatRegions<'a> {
     pub transcript: Rect,
     pub prompt: Rect,
-    pub footer: Option<Rect>,
+    pub footer: Option<ChatFooter<'a>>,
     pub overlay: Rect,
+}
+
+/// The footer area and global hints supplied by the host's command registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatFooter<'a> {
+    pub area: Rect,
+    pub chords: &'a [&'a str],
+    pub functions: &'a [&'a str],
 }
 
 /// The local form state saved while the dashboard attaches another session.
@@ -275,6 +285,50 @@ struct QueuedPrompt {
     attachments_unsupported: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnControlIntent {
+    Cancel,
+    Steer,
+    /// A queued prompt can still be applied when an older worker does not
+    /// report whether it will steer or cancel and start the next turn.
+    ApplyQueued,
+}
+
+impl TurnControlIntent {
+    fn escape_hint(self) -> &'static str {
+        match self {
+            Self::Cancel => "Esc cancels",
+            Self::Steer => "Esc steers next",
+            Self::ApplyQueued => "Esc applies next",
+        }
+    }
+
+    fn sending_notice(self) -> &'static str {
+        match self {
+            Self::Cancel => "Sending cancellation request…",
+            Self::Steer => "Sending steering request…",
+            Self::ApplyQueued => "Requesting queued prompt…",
+        }
+    }
+
+    fn requested_notice(self) -> &'static str {
+        match self {
+            Self::Cancel => "Cancellation requested",
+            Self::Steer => "Steering requested",
+            Self::ApplyQueued => "Queued prompt requested",
+        }
+    }
+
+    fn failure_notice(self, error: &str) -> String {
+        let action = match self {
+            Self::Cancel => "Cancellation",
+            Self::Steer => "Steering request",
+            Self::ApplyQueued => "Queued prompt request",
+        };
+        format!("{action} failed: {error}")
+    }
+}
+
 /// A submit the relay refused. The relay never saw it, so it is never
 /// journaled; the chat keeps the record beside the projected entries and
 /// draws it at the end of the transcript. The notice that reports the same
@@ -371,6 +425,8 @@ pub struct SessionHeaderIdentity {
     pub target: String,
     /// Profile column from the session list's live-session summary.
     pub profile: String,
+    /// Display title from the session list, including any user override.
+    pub title: String,
     /// Harness the session runs, so the chat can answer harness-specific
     /// questions (like whether Codex exposes plan mode) without a recovery
     /// context, which the daemon now owns.
@@ -509,13 +565,21 @@ pub struct ChatState {
     /// the host reports a successful probe.
     voice_available: bool,
     voice_active: bool,
-    /// The last frame's microphone button, which sits on the prompt's bottom
+    /// The last frame's microphone button, which sits on the prompt's top
     /// border rather than inside its selectable text surface.
     voice_button_area: Option<Rect>,
     voice_form: Form<VoiceControl>,
+    /// The embedded background-task control and its read-only dialog.
+    task_control_focused: bool,
+    task_dialog_open: bool,
+    task_dialog_scroll: usize,
+    task_control_area: Option<Rect>,
+    task_dialog_area: Option<Rect>,
+    prompt_content_width: usize,
     /// Session-list identity snapshotted when the chat opened.
     header_target: String,
     header_profile: String,
+    header_title: String,
     spinner_style: hel::hel_config::SpinnerStyle,
     turn_started_at_epoch_seconds: Option<u64>,
     detailed_activity_clocks: bool,
@@ -524,6 +588,7 @@ pub struct ChatState {
     /// turn the harness started on its own, which the relay refuses to cancel,
     /// so cancellation and the composer's cancel hint key on this instead.
     prompt_in_flight: bool,
+    steering_supported: Option<bool>,
     /// What the session is doing beyond `phase`: the turn the harness started
     /// on its own, and the commands the agent left running.
     session_activity: crate::usage_format::SessionActivity,
@@ -532,6 +597,8 @@ pub struct ChatState {
     /// Selectable surfaces, rebuilt by every frame in render order so the
     /// selection engine can hit-test the screen the user is looking at.
     pub(super) frame_surfaces: FrameSurfaces,
+    /// Visible host shortcuts, indexed through chords followed by function keys.
+    footer_command_areas: RefCell<Vec<(usize, Rect)>>,
     /// Whether the last frame's surfaces replace everything behind them. The
     /// host uses this only for chat-local modals that truly own the frame;
     /// questions stay in the session content area and remain mergeable with
@@ -623,8 +690,15 @@ impl ChatState {
             voice_active: false,
             voice_button_area: None,
             voice_form: voice_form(),
+            task_control_focused: false,
+            task_dialog_open: false,
+            task_dialog_scroll: 0,
+            task_control_area: None,
+            task_dialog_area: None,
+            prompt_content_width: 1,
             header_target: String::new(),
             header_profile: String::new(),
+            header_title: String::new(),
             spinner_style: hel::hel_config::SpinnerStyle::default(),
             turn_started_at_epoch_seconds: None,
             detailed_activity_clocks: false,
@@ -634,8 +708,10 @@ impl ChatState {
                 prompt_in_flight: snapshot.active_prompt.is_some(),
                 ..crate::usage_format::SessionActivity::default()
             },
+            steering_supported: None,
             current_step_started_at_ms: None,
             frame_surfaces: FrameSurfaces::new(),
+            footer_command_areas: RefCell::new(Vec::new()),
             frame_surfaces_exclusive: false,
             transcript_selection: None,
             transcript_selection_invalid: false,
@@ -1138,9 +1214,15 @@ impl ChatState {
     }
 
     /// Installs the stable session-list columns used by the conversation title.
-    pub fn set_header_summary(&mut self, target: impl Into<String>, profile: impl Into<String>) {
+    pub fn set_header_summary(
+        &mut self,
+        target: impl Into<String>,
+        profile: impl Into<String>,
+        title: impl Into<String>,
+    ) {
         self.header_target = target.into();
         self.header_profile = profile.into();
+        self.header_title = title.into();
     }
 
     /// Records whether the session has a prompt of ours in flight, which is
@@ -1155,15 +1237,76 @@ impl ChatState {
         self.prompt_in_flight
     }
 
+    fn turn_control_intent(&self) -> TurnControlIntent {
+        if self.prompt_in_flight
+            && self
+                .queued_prompts
+                .front()
+                .is_some_and(|queued| queued.kind.is_prompt())
+        {
+            match self.steering_supported {
+                Some(true) => TurnControlIntent::Steer,
+                Some(false) => TurnControlIntent::Cancel,
+                None => TurnControlIntent::ApplyQueued,
+            }
+        } else {
+            TurnControlIntent::Cancel
+        }
+    }
+
     /// Records what the session is doing beyond its phase, so the pane title
     /// and the composer can name background work.
     pub(super) fn set_session_activity(&mut self, activity: crate::usage_format::SessionActivity) {
         self.session_activity = activity;
+        if self.background_task_count() == 0 {
+            self.task_control_focused = false;
+        }
     }
 
     #[must_use]
     pub(super) fn session_activity(&self) -> &crate::usage_format::SessionActivity {
         &self.session_activity
+    }
+
+    #[must_use]
+    pub(super) fn background_task_count(&self) -> usize {
+        self.session_activity.background_commands.len()
+    }
+
+    #[must_use]
+    pub(super) fn task_control_focused(&self) -> bool {
+        self.task_control_focused
+    }
+
+    #[must_use]
+    pub(super) fn task_dialog_open(&self) -> bool {
+        self.task_dialog_open
+    }
+
+    fn close_task_dialog(&mut self) {
+        self.task_dialog_open = false;
+        self.task_dialog_scroll = 0;
+        self.task_dialog_area = None;
+    }
+
+    fn focus_task_control(&mut self) {
+        if self.background_task_count() > 0 {
+            self.task_control_focused = true;
+        }
+    }
+
+    fn open_task_dialog(&mut self) {
+        if self.background_task_count() > 0 {
+            self.task_dialog_open = true;
+            self.task_control_focused = false;
+            self.task_dialog_scroll = 0;
+        }
+    }
+
+    fn cursor_is_on_last_prompt_line(&self) -> bool {
+        let width = self.prompt_content_width.max(1);
+        let (_, row) = input::input_cursor_visual_position(&self.input, self.input_cursor, width);
+        row.saturating_add(1) >= input::input_visual_rows(&self.input, width)
     }
 
     fn set_current_step_start(&mut self, timestamp_ms: Option<i64>) {
@@ -2062,6 +2205,41 @@ impl ChatState {
             return ChatAction::None;
         }
 
+        if self.task_dialog_open {
+            match code {
+                KeyCode::Esc => self.close_task_dialog(),
+                KeyCode::Up => self.task_dialog_scroll = self.task_dialog_scroll.saturating_sub(1),
+                KeyCode::Down => {
+                    self.task_dialog_scroll = self.task_dialog_scroll.saturating_add(1);
+                }
+                KeyCode::PageUp => {
+                    self.task_dialog_scroll = self.task_dialog_scroll.saturating_sub(5)
+                }
+                KeyCode::PageDown => {
+                    self.task_dialog_scroll = self.task_dialog_scroll.saturating_add(5);
+                }
+                _ => {}
+            }
+            return ChatAction::None;
+        }
+
+        if self.task_control_focused {
+            match code {
+                KeyCode::Esc | KeyCode::Up => self.task_control_focused = false,
+                KeyCode::Enter => {
+                    self.open_task_dialog();
+                    return ChatAction::None;
+                }
+                KeyCode::Down => return ChatAction::None,
+                _ => {
+                    self.task_control_focused = false;
+                }
+            }
+            if code == KeyCode::Esc || code == KeyCode::Up {
+                return ChatAction::None;
+            }
+        }
+
         // The value selector owns the keyboard while it is up; it is checked
         // after the elicitation dialog because the dialog draws on top of it.
         if self.config_picker_active() {
@@ -2275,6 +2453,8 @@ impl ChatState {
             KeyCode::Down => {
                 if self.history_index.is_some() {
                     self.move_history(1);
+                } else if self.background_task_count() > 0 && self.cursor_is_on_last_prompt_line() {
+                    self.focus_task_control();
                 } else {
                     self.move_vertical(1);
                 }
@@ -2381,6 +2561,15 @@ impl ChatState {
     /// text selection or the host surface. Captured presses remain owned even
     /// after the pointer leaves the control's hitbox.
     pub fn component_handles_mouse(&self, mouse: MouseEvent) -> bool {
+        if self.task_dialog_open {
+            return true;
+        }
+        if self
+            .task_control_area
+            .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
+        {
+            return true;
+        }
         if self.voice_form.captures_pointer()
             || self
                 .voice_button_area
@@ -2404,6 +2593,7 @@ impl ChatState {
     pub fn component_modal_open(&self) -> bool {
         self.elicitation.is_some()
             || self.config_picker.is_some()
+            || self.task_dialog_open
             || matches!(self.second_opinion, Some(SecondOpinion::Setup { .. }))
     }
 
@@ -2424,6 +2614,8 @@ impl ChatState {
     pub fn reset_component_geometry(&mut self) {
         self.voice_form.reset_geometry();
         self.voice_button_area = None;
+        self.task_control_area = None;
+        self.task_dialog_area = None;
         self.reset_config_picker_geometry();
         if let Some(dialog) = self.elicitation.as_ref() {
             dialog.reset_component_geometry();
@@ -2450,6 +2642,9 @@ impl ChatState {
     /// scrollback repaints whole TUI frames and is unusably slow on long
     /// sessions.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> ChatAction {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.notices.dismiss(std::time::Instant::now());
+        }
         // The topmost form receives the gesture before selection, scrollbars,
         // or a review pane. This also lets reviewer elicitations stay above
         // their split while a stale scrollbar is being redrawn.
@@ -2467,6 +2662,33 @@ impl ChatState {
                 }
                 return ChatAction::RespondElicitation { request, response };
             }
+            return ChatAction::None;
+        }
+        if self.task_dialog_open {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.task_dialog_scroll = self.task_dialog_scroll.saturating_sub(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.task_dialog_scroll = self.task_dialog_scroll.saturating_add(3);
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if self.task_dialog_area.is_some_and(|area| {
+                        area.contains(Position::new(mouse.column, mouse.row))
+                    }) =>
+                {
+                    // The list is read-only; clicking it keeps the dialog open.
+                }
+                _ => {}
+            }
+            return ChatAction::None;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self
+                .task_control_area
+                .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
+        {
+            self.open_task_dialog();
             return ChatAction::None;
         }
         if self.config_picker_active() {
@@ -2964,9 +3186,9 @@ impl Notices {
 /// Active work and ready sessions share the terminal's semantic palette.
 pub fn turn_band_color(turn_in_flight: bool) -> Color {
     if turn_in_flight {
-        crate::theme::ACCENT
+        crate::theme::palette().accent
     } else {
-        crate::theme::SUCCESS
+        crate::theme::palette().success
     }
 }
 
@@ -2994,6 +3216,7 @@ mod tests {
     };
     use crate::hel_selection::SurfaceId;
     use base64::Engine;
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use hel::hel_review::driver::TurnReviewPhase;
     use hel::hel_review::lanes::ReviewTier;
     use hel::hel_worker::ActivePrompt;
@@ -3379,16 +3602,16 @@ mod tests {
     #[test]
     fn microphone_button_hitbox_uses_ratatui_display_width() {
         let prompt = Rect::new(4, 2, 30, 5);
-        let button = voice_button_area(prompt).expect("button fits");
-        assert_eq!(button.y, prompt.bottom() - 1);
-        assert_eq!(button.x, prompt.x + 2);
+        let button = voice_button_area(prompt, 8).expect("button fits");
+        assert_eq!(button.y, prompt.y);
+        assert_eq!(button.x, prompt.x + 1 + 8);
         assert_eq!(button.width, 3);
-        assert!(voice_button_area(Rect::new(0, 0, 5, 3)).is_none());
-        assert!(voice_button_area(Rect::new(0, 0, 6, 3)).is_some());
+        assert!(voice_button_area(Rect::new(0, 0, 5, 3), 8).is_none());
+        assert!(voice_button_area(Rect::new(0, 0, 13, 3), 8).is_some());
     }
 
     #[test]
-    fn regular_prompt_draws_microphone_on_its_bottom_border() {
+    fn regular_prompt_draws_microphone_after_the_title_on_its_top_border() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_voice_available(true);
 
@@ -3399,7 +3622,7 @@ mod tests {
         );
         let button = chat.voice_button_area.expect("button hitbox");
         let border = &rows[usize::from(button.y)];
-        let mic_offset = border.find("🎙︎").expect("microphone on bottom border");
+        let mic_offset = border.find("🎙︎").expect("microphone on top border");
         assert_eq!(
             rendering::display_width(&border[..mic_offset]),
             usize::from(button.x + 1)
@@ -3410,8 +3633,94 @@ mod tests {
                 .surface(SurfaceId::PromptInput)
                 .unwrap()
                 .rect
-                .bottom()
+                .y
+                .saturating_sub(1)
         );
+    }
+
+    #[test]
+    fn background_tasks_use_the_prompt_border_and_open_a_read_only_dialog() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("keep this draft".into());
+        chat.set_session_activity(crate::usage_format::SessionActivity {
+            background_commands: vec![hel::hel_worker::BackgroundCommand {
+                started_at_ms: hel::clock::epoch_millis() - 61_000,
+                command: "cargo test --workspace".into(),
+            }],
+            ..crate::usage_format::SessionActivity::default()
+        });
+
+        let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+        assert!(screen.contains("View tasks (1)"), "{screen}");
+        assert!(!screen.contains("oldest"), "{screen}");
+        assert!(!screen.contains("Background:"), "{screen}");
+
+        let task_area = chat.task_control_area.expect("task control hitbox");
+        let cursor_before = chat.input_cursor;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: task_area.x,
+            row: task_area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(chat.component_handles_mouse(click));
+        assert_eq!(chat.handle_mouse(click), ChatAction::None);
+        assert!(chat.task_dialog_open());
+        assert_eq!(chat.input_cursor, cursor_before);
+        assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
+        assert!(!chat.task_dialog_open());
+
+        assert_eq!(chat.handle_key(key(KeyCode::Down)), ChatAction::None);
+        assert!(chat.task_control_focused());
+        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+        assert!(chat.task_dialog_open());
+        assert_eq!(chat.input, "keep this draft");
+
+        let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+        assert!(screen.contains("Background tasks"), "{screen}");
+        assert!(screen.contains("cargo test --workspace"), "{screen}");
+        assert!(screen.contains("Esc close"), "{screen}");
+
+        assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
+        assert!(!chat.task_dialog_open());
+        assert_eq!(chat.input, "keep this draft");
+
+        // The dialog remains drawable on a cramped terminal, and wrapping a
+        // long command contributes rows to scrolling rather than disappearing
+        // after one entry.
+        chat.open_task_dialog();
+        chat.session_activity.background_commands[0].command =
+            "cargo test --all-targets --all-features --workspace".into();
+        for height in [1, 4, 8] {
+            let screen = drawn_transcript(&mut chat, 24, height).join("\n");
+            if height >= 4 {
+                assert!(
+                    screen.contains("Background tasks"),
+                    "height={height}: {screen}"
+                );
+            }
+        }
+        for _ in 0..20 {
+            chat.handle_key(key(KeyCode::Down));
+        }
+        assert!(chat.task_dialog_scroll > 0);
+        let tail = drawn_transcript(&mut chat, 24, 8).join("\n");
+        assert!(tail.contains("ace"), "{tail}");
+
+        chat.session_activity.background_commands[0].command = format!(
+            "cargo test {}FINAL_ARGUMENT",
+            "--feature example ".repeat(40)
+        );
+        drawn_transcript(&mut chat, 80, 12);
+        for _ in 0..100 {
+            chat.handle_key(key(KeyCode::Down));
+        }
+        let tail = drawn_transcript(&mut chat, 80, 12).join("\n");
+        assert!(tail.contains("FINAL_ARGUMENT"), "{tail}");
+
+        chat.set_session_activity(crate::usage_format::SessionActivity::default());
+        let empty = drawn_transcript(&mut chat, 80, 12).join("\n");
+        assert!(empty.contains("No background tasks remain."), "{empty}");
     }
 
     #[test]

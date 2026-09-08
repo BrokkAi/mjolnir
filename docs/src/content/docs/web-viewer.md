@@ -24,7 +24,7 @@ On a workstation, the dashboard arranges sessions in columns and conversations
 use a wider reading area with the composer kept in view. On phones, sessions
 remain in a single column with touch controls.
 
-**New** and **Resume** stay above the Sessions list, including when a workspace
+**Create** and **Resume** stay above the Sessions list, including when a workspace
 has no live sessions or the list is filtered. Opening a conversation does not
 move those controls away from the list.
 
@@ -35,8 +35,8 @@ The viewer can:
 - open a live conversation, send prompts, and run the slash commands the
   session actually supports;
 - queue prompts while an agent is busy and cancel agent or shell work;
-- stop a session, resume it from its checkpoint, and browse hidden or archived
-  resume candidates;
+- stop a session, resume it from its checkpoint, and browse all stopped resume
+  candidates, including records previously archived by a provider;
 - prepare and confirm a move to another compatible target or profile while
   keeping the same logical session; and
 - refresh target capacity and profile quota; and
@@ -79,7 +79,7 @@ state.
 
 ## Recover a port conflict
 
-Press **F7** in the terminal to open **Web viewer**. If its port is occupied,
+Press **F4** in the terminal to open **Web viewer**. If its port is occupied,
 the dialog shows the address and offers **Use another port**, **Retry**, and
 **Inspect port**. Startup status updates automatically while the dialog is open.
 

@@ -55,7 +55,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 15;
+pub(crate) const PROTOCOL_VERSION: u32 = 16;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -346,15 +346,6 @@ enum DaemonAction {
         through: u64,
         owner_pid: u32,
         draft: hel::hel_database::DetachedSessionDraft,
-    },
-    SetSessionArchived {
-        session_id: String,
-        archived: bool,
-    },
-    SetNativeSessionHidden {
-        harness: hel::hel_config::HarnessKind,
-        native_session_id: String,
-        hidden: bool,
     },
     SaveActiveReview {
         session_id: String,
@@ -2932,42 +2923,6 @@ impl DaemonClient {
         }
     }
 
-    pub(crate) async fn set_session_archived(
-        &mut self,
-        session_id: String,
-        archived: bool,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SetSessionArchived {
-                session_id,
-                archived,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected session-archive reply {reply:?}"),
-        }
-    }
-
-    pub(crate) async fn set_native_session_hidden(
-        &mut self,
-        harness: hel::hel_config::HarnessKind,
-        native_session_id: String,
-        hidden: bool,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::SetNativeSessionHidden {
-                harness,
-                native_session_id,
-                hidden,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected native-session visibility reply {reply:?}"),
-        }
-    }
-
     pub(crate) async fn save_active_review(
         &mut self,
         session_id: String,
@@ -4600,25 +4555,6 @@ async fn handle_action(
             .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::SetSessionArchived {
-            session_id,
-            archived,
-        } => {
-            blocking(move || hel::hel_database::set_session_archived(&session_id, archived))
-                .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::SetNativeSessionHidden {
-            harness,
-            native_session_id,
-            hidden,
-        } => {
-            blocking(move || {
-                hel::hel_database::set_native_session_hidden(harness, &native_session_id, hidden)
-            })
-            .await?;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::SaveActiveReview { session_id, review } => {
             blocking(move || hel::hel_database::save_active_review(&session_id, &review)).await?;
             Ok(DaemonReply::Done)
@@ -6155,6 +6091,15 @@ mod tests {
                 responses: [
                     r#"{"protocol_version":15,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.2.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
                     r#"{"protocol_version":15,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+                ],
+            },
+            ProtocolTranscript {
+                protocol_version: 16,
+                daemon_build: "2.4.0",
+                expected_requests: requests(16),
+                responses: [
+                    r#"{"protocol_version":16,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.4.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                    r#"{"protocol_version":16,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
                 ],
             },
         ]

@@ -6,7 +6,7 @@
 //! to switch to, so nothing is ever hidden behind a navigation step.
 
 use hel::hel_state::SessionTransitionKind;
-use mj_chat::hel_chat::{ActiveChat, ChatRegions};
+use mj_chat::hel_chat::{ActiveChat, ChatFooter, ChatRegions};
 use mj_chat::hel_selection::{SurfaceFrame, SurfaceId};
 use mj_chat::{spinner, theme};
 use ratatui::Frame;
@@ -29,6 +29,11 @@ use crate::{DashboardState, Focus, Mode, PaneSize, SupportPane};
 
 /// Rows the footer always keeps.
 const FOOTER_HEIGHT: u16 = 1;
+/// The bordered workspace list above Sessions. Its inner row is intentionally
+/// short; the border gives it a stable click and focus target.
+const WORKSPACE_PANE_HEIGHT: u16 = 3;
+/// Create and Resume share one row immediately below the workspace list.
+const SIDEBAR_ACTIONS_HEIGHT: u16 = 1;
 /// The fewest rows the transcript is worth drawing in.
 const TRANSCRIPT_MINIMUM: u16 = 3;
 /// A bordered composer with one row of text.
@@ -297,18 +302,31 @@ fn support_panes_fit(area_width: u16, dashboard: &DashboardState) -> bool {
 pub fn render_combined(
     frame: &mut Frame,
     dashboard: &mut DashboardState,
+    chat: Option<&mut ActiveChat>,
+    transcript_selected: bool,
+) {
+    theme::with_theme(dashboard.config.theme, || {
+        render_combined_themed(frame, dashboard, chat, transcript_selected);
+    });
+}
+
+fn render_combined_themed(
+    frame: &mut Frame,
+    dashboard: &mut DashboardState,
     mut chat: Option<&mut ActiveChat>,
     transcript_selected: bool,
 ) {
+    dashboard.rebuild_palette_entries();
     dashboard.reset_component_geometry();
+    dashboard.begin_surface_frame();
     if let Some(chat) = chat.as_deref_mut() {
         chat.reset_component_geometry();
     }
     dashboard.pane_areas = None;
     dashboard.clear_workspace_tab_areas();
+    dashboard.workspace_pane_area = None;
     dashboard.session_row_areas.clear();
     dashboard.project_heading_areas.clear();
-    dashboard.session_control_areas.clear();
     dashboard.pane_size_control_areas.clear();
     dashboard.frame_surfaces.clear();
     dashboard.chat_transcript_area = None;
@@ -321,6 +339,7 @@ pub fn render_combined(
             area,
             TerminalSizeRequirement::Width(MINIMUM_TERMINAL_WIDTH),
         );
+        dashboard.end_surface_frame();
         return;
     }
     dashboard.resume_sessions_area =
@@ -342,6 +361,38 @@ pub fn render_combined(
         area.y,
         area.width.saturating_sub(sidebar_width),
         area.height,
+    );
+    let sidebar_area = Rect::new(
+        if sidebar_right {
+            content_area.right()
+        } else {
+            area.x
+        },
+        area.y,
+        sidebar_width,
+        area.height.saturating_sub(FOOTER_HEIGHT),
+    );
+    let workspace_area = Rect::new(
+        sidebar_area.x,
+        sidebar_area.y,
+        sidebar_area.width,
+        WORKSPACE_PANE_HEIGHT.min(sidebar_area.height),
+    );
+    let actions_area = Rect::new(
+        sidebar_area.x,
+        workspace_area.bottom(),
+        sidebar_area.width,
+        sidebar_area
+            .height
+            .saturating_sub(workspace_area.height)
+            .min(SIDEBAR_ACTIONS_HEIGHT),
+    );
+    let sidebar_top = workspace_area.height.saturating_add(actions_area.height);
+    let sessions_area = Rect::new(
+        sidebar_area.x,
+        sidebar_area.y.saturating_add(sidebar_top),
+        sidebar_area.width,
+        sidebar_area.height.saturating_sub(sidebar_top),
     );
     let selected_transition = dashboard.selected_session().and_then(|session| {
         dashboard
@@ -384,7 +435,7 @@ pub fn render_combined(
                     minimized_sessions_content_height(dashboard, sidebar_width.saturating_sub(2))
                         .into(),
                 )
-                .saturating_add(3),
+                .saturating_add(2),
                 full: sessions_content_height(dashboard, sidebar_width.saturating_sub(2))
                     .saturating_add(2),
                 standard_cap: area.height / 3,
@@ -443,24 +494,23 @@ pub fn render_combined(
                 area,
                 TerminalSizeRequirement::Height(required_frame_height),
             );
+            dashboard.end_surface_frame();
             return;
         }
     };
 
     let upper_content_height = heights.transcript.saturating_add(heights.prompt);
     let sessions_height = if supports_adjacent {
-        area.height.saturating_sub(FOOTER_HEIGHT).saturating_sub(1)
+        area.height
+            .saturating_sub(FOOTER_HEIGHT)
+            .saturating_sub(sidebar_top)
     } else {
-        upper_content_height.saturating_sub(1)
+        upper_content_height.saturating_sub(sidebar_top)
     };
     let sessions_area = Rect::new(
-        if sidebar_right {
-            content_area.right()
-        } else {
-            area.x
-        },
-        area.y.saturating_add(1),
-        sidebar_width,
+        sessions_area.x,
+        sessions_area.y,
+        sessions_area.width,
         sessions_height,
     );
     let upper_bands = Layout::default()
@@ -498,11 +548,8 @@ pub fn render_combined(
         ])
         .split(support_area);
     let (targets_area, quota_area) = (support_bands[0], support_bands[1]);
-    render_workspace_tabs(
-        frame,
-        Rect::new(sessions_area.x, area.y, sessions_area.width, 1),
-        dashboard,
-    );
+    render_workspace_tabs(frame, workspace_area, dashboard);
+    crate::surface_controls::render_sidebar_actions(frame, actions_area, dashboard);
     let footer_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     dashboard.pane_areas = Some([sessions_area, targets_area, quota_area]);
     for (pane, pane_area) in [
@@ -518,72 +565,14 @@ pub fn render_combined(
     let rendered = render_sessions(frame, sessions_area, dashboard);
     dashboard.session_row_areas = rendered.session_row_areas;
     dashboard.project_heading_areas = rendered.project_heading_areas;
-    dashboard.session_control_areas = rendered.session_control_areas;
+    crate::surface_controls::render_session_actions(frame, dashboard);
     let sessions_content = bordered_content(sessions_area);
     dashboard.frame_surfaces.push(SurfaceFrame::fixed(
         SurfaceId::DashboardPane(0),
         sessions_content,
     ));
 
-    dashboard.chat_transcript_area = Some(transcript_area);
-    dashboard.chat_prompt_area = Some(prompt_area);
-    let prompt_focused = dashboard.prompt_has_focus();
-    let chat_drew_footer = if let Some((session_id, transition, failed)) = selected_transition {
-        render_transition_surface(
-            frame,
-            transcript_area,
-            prompt_area,
-            dashboard,
-            &session_id,
-            transition,
-            failed,
-        );
-        false
-    } else {
-        match chat {
-            Some(chat) => {
-                chat.draw_in(
-                    frame,
-                    ChatRegions {
-                        transcript: transcript_area,
-                        prompt: prompt_area,
-                        footer: prompt_focused.then_some(footer_area),
-                        overlay: area,
-                    },
-                    prompt_focused,
-                    transcript_selected,
-                );
-                // A chat-local modal may own the frame's interaction. Questions
-                // deliberately leave this flag clear so the navigator and other
-                // dashboard panes remain selectable beside the question area.
-                if chat.frame_surfaces_exclusive() {
-                    dashboard.frame_surfaces.replace_with(chat.frame_surfaces());
-                } else {
-                    dashboard.frame_surfaces.append(chat.frame_surfaces());
-                }
-                prompt_focused
-            }
-            None => {
-                let reason = if dashboard.opening_session().is_some() {
-                    EmptyConversation::Opening
-                } else if dashboard.ordered_sessions().is_empty() {
-                    EmptyConversation::NoLiveSession
-                } else {
-                    EmptyConversation::NoConversationOpen
-                };
-                render_empty_conversation(
-                    frame,
-                    transcript_area,
-                    prompt_area,
-                    prompt_focused,
-                    reason,
-                    dashboard.config.spinner,
-                );
-                false
-            }
-        }
-    };
-
+    // Draw support panes before chat: chat modals can cover the whole screen.
     // Targets and Quota choose their representations independently.
     if sizes[1].1 == PaneSize::Minimized {
         let focused = dashboard.focus() == Focus::Targets;
@@ -642,9 +631,101 @@ pub fn render_combined(
         quota_content,
     ));
 
+    dashboard.chat_transcript_area = Some(transcript_area);
+    dashboard.chat_prompt_area = Some(prompt_area);
+    let prompt_focused = dashboard.prompt_has_focus();
+    let chat_drew_footer = if let Some((session_id, transition, failed)) = selected_transition {
+        render_transition_surface(
+            frame,
+            transcript_area,
+            prompt_area,
+            dashboard,
+            &session_id,
+            transition,
+            failed,
+        );
+        false
+    } else {
+        match chat {
+            Some(chat) => {
+                let chords =
+                    crate::render::footer_commands(dashboard, crate::actions::FooterGroup::Chord);
+                let functions = crate::render::footer_commands(
+                    dashboard,
+                    crate::actions::FooterGroup::Function,
+                );
+                let commands = chords.iter().chain(&functions).cloned().collect::<Vec<_>>();
+                let chords = chords
+                    .iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect::<Vec<_>>();
+                let functions = functions
+                    .iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect::<Vec<_>>();
+                chat.draw_in(
+                    frame,
+                    ChatRegions {
+                        transcript: transcript_area,
+                        prompt: prompt_area,
+                        footer: prompt_focused.then_some(ChatFooter {
+                            area: footer_area,
+                            chords: &chords,
+                            functions: &functions,
+                        }),
+                        overlay: area,
+                    },
+                    prompt_focused,
+                    transcript_selected,
+                );
+                if prompt_focused {
+                    for (index, command_area) in chat.footer_command_areas() {
+                        if let Some((id, text)) = commands.get(index) {
+                            crate::surface_controls::render_footer_command(
+                                frame,
+                                command_area,
+                                dashboard,
+                                *id,
+                                text,
+                            );
+                        }
+                    }
+                }
+                // A chat-local modal may own the frame's interaction. Questions
+                // deliberately leave this flag clear so the navigator and other
+                // dashboard panes remain selectable beside the question area.
+                if chat.frame_surfaces_exclusive() {
+                    dashboard.frame_surfaces.replace_with(chat.frame_surfaces());
+                } else {
+                    dashboard.frame_surfaces.append(chat.frame_surfaces());
+                }
+                prompt_focused
+            }
+            None => {
+                let reason = if dashboard.opening_session().is_some() {
+                    EmptyConversation::Opening
+                } else if dashboard.ordered_sessions().is_empty() {
+                    EmptyConversation::NoLiveSession
+                } else {
+                    EmptyConversation::NoConversationOpen
+                };
+                render_empty_conversation(
+                    frame,
+                    transcript_area,
+                    prompt_area,
+                    prompt_focused,
+                    reason,
+                    dashboard.config.spinner,
+                );
+                false
+            }
+        }
+    };
+
     if !chat_drew_footer {
         render_footer(frame, footer_area, dashboard);
     }
+    dashboard.end_surface_frame();
     render_modal(frame, area, dashboard);
 }
 
@@ -989,7 +1070,7 @@ mod tests {
                     assert_eq!(targets.x, quota.x);
                     assert_eq!(targets.width, quota.width);
                     assert_eq!(targets.bottom(), quota.y);
-                    assert_eq!(sessions.y, 1, "tabs occupy only the sidebar's first row");
+                    assert_eq!(sessions.y, 4, "workspace pane and actions occupy four rows");
                     if width < threshold {
                         assert_eq!(targets.width, width);
                         assert_eq!(targets.y, sessions.bottom());

@@ -176,19 +176,17 @@ to build your own.
 ## Quickstart
 
 1. Run `mj` from your project directory. If no workspace exists, Mjolnir
-   creates one using the directory name. An empty workspace automatically
-   starts a session and focuses the prompt. Existing workspace selection and
-   live-session startup keep their current behavior.
+   creates one using the directory name and leaves it ready for an explicit
+   session. Existing workspace selection and live-session startup keep their
+   current behavior.
 2. On Linux and macOS, a fresh configuration starts with your Codex home
-   (`CODEX_HOME`, or `~/.codex`). Automatic target selection prefers usable
-   Podman, then Docker, then a local directory session. Container sessions use
-   the current repository, including its uncommitted changes; plain directories
-   use the local target. Runtime checks and session launch run in the background.
-3. Type your first prompt when launch finishes. Use `[startup]` in `config.toml`
-   to set `profile = "your-profile"`, `target = "your-target"`, or
-   `enabled = false`. Explicit targets are honored even when unavailable, so
-   their launch errors remain visible. Use `mj setup` for guided configuration
-   of additional execution environments, and `Alt+N` for a custom session.
+   (`CODEX_HOME`, or `~/.codex`). Use **Create** to choose the profile, project,
+   and target in the full wizard. Runtime checks and session launch run in the
+   background.
+3. Type your first prompt when launch finishes. Explicit targets are honored
+   even when unavailable, so their launch errors remain visible. Use `mj setup`
+   for guided configuration of additional execution environments, and **Create**
+   or `Alt+N` for another full wizard session.
 4. If launch reports a prerequisite failure, run `mj doctor` and use
    `mj login --profile <id>` when authentication is needed. Detach with `Alt+Q`;
    running sessions continue. Reattach with `mj` or use the daemon-owned web
@@ -196,37 +194,53 @@ to build your own.
 
 ## The terminal surface
 
-Mjolnir's TUI is one screen. From top to bottom: **Sessions**, the **transcript**
-of the conversation you are in, the **Prompt** composer, **Targets**, **Quota**,
-and a footer that names the keys that apply right now. Nothing is behind a
-navigation step, so you can read an agent's output while seeing what your other
+Mjolnir's TUI is one screen. The **Workspace** switcher and **Sessions** list
+sit in a sidebar beside the **transcript**, **Prompt** composer, **Targets**,
+and **Quota**, with a footer that names the keys that apply right now. Nothing
+is behind a navigation step, so you can read an agent's output while seeing what your other
 agents are doing and how loaded your machines are.
 
-Mjolnir opens on the session whose agent spoke most recently, with the cursor in
-Prompt. The Sessions sidebar shows every session across all workspaces, including
-stopped sessions. Select one and press Enter to switch to its conversation.
+Mjolnir opens on the most recently active live session in the selected workspace,
+with the cursor in Prompt. Empty workspaces remain ready for an explicit
+creation. The bordered Workspaces pane has three tab rows above Sessions; its
+tabs filter live sessions immediately while all workspaces continue running
+independently. Stopped history is available through **Resume**, including
+sessions formerly archived by a provider; provider archive metadata is read-only.
 
-In Sessions, `n` opens a fresh task prompt. Enter starts a session using your
-saved defaults: Codex when configured, a usable local Podman or Docker runtime,
-then a local worktree when neither runtime is available. `N` opens the full
-creation wizard. `s` stops and `r` restarts the selected session without
-confirmation. `d` deletes it after a Yes/No choice; no identifier typing is required.
+Use the workspace tabs to choose where a new session belongs. Focus Workspaces
+and use the arrow keys to select a tab immediately, or press `F3` for workspace
+management. **Create** and **Resume** stay at the top of Sessions. **Create**
+opens the full session wizard; **Commands** opens the command palette. Each
+session's **⋯** button opens its actions. The workspace manager provides
+clickable Open, New, Rename, Recover, Delete, and Back controls, and displayed
+dashboard shortcut hints are clickable too.
 
-`F4` opens Setup for accounts, targets, projects, new-session defaults, sidebar
-placement, display, review, and web access. Choose Left or Right for the sidebar,
-and disable the task prompt if you prefer immediate creation.
+In Sessions, `n`, `N`, `Alt+N`, or `Alt+W` opens the full creation wizard.
+`s` stops and `r` restarts the selected session without confirmation. `d` deletes
+it after a Yes/No choice; no identifier typing is required.
 
-`Tab` moves the keyboard through the layout — Sessions, Prompt, Targets, Quota —
-and `Shift+Tab` reverses it. Every pane remains in that ring at every size. The
+`F7` opens Setup for accounts, targets, projects, sidebar placement, display,
+review, and web access. Choose Left or Right for the sidebar, and choose **Theme**
+for Midnight (the default), Light, or Dracula. Spinner, Advanced display, and
+Review settings are part of the same draft. Press `Enter` to apply a choice to
+your draft, then `Ctrl+S` to save and update the terminal colors immediately.
+The preference is kept across restarts.
+
+`Tab` moves the keyboard through the layout — Workspaces, Sessions, Prompt,
+Targets, Quota — and `Shift+Tab` reverses it. Every pane remains in that ring at
+every size. When Workspaces is focused, the arrow keys select a workspace tab
+immediately. The
 transcript is not a Tab stop: read it with the mouse wheel or
 `PageUp`/`PageDown` from wherever you are. Moving focus never resizes a pane.
 
-Sessions, Targets, and Quota each have `▁`, `▪`, and `□` controls in their
-title bars for minimized, standard, and maximized size. Minimized Targets and
-Quota become one summary row each; minimized Sessions narrows the full-height
-sidebar and shows one line per session. Maximizing Sessions widens the sidebar.
-A maximized Targets or Quota pane gets available vertical space below Prompt. Only one pane can be maximized
-at a time.
+The Workspaces and Sessions sidebar is 20 columns wide when minimized, uses
+`max(40, terminal width / 3)` columns at standard size, and uses half the
+terminal at maximized size. Its three bordered workspace-tab rows remain above
+Sessions. Targets and Quota each have `▁`, `▪`, and `□` controls in their title
+bars for minimized, standard, and maximized size. Minimized Targets and Quota
+become one summary row each; a minimized sidebar narrows the workspace tabs and
+shows one line per session. A maximized Targets or Quota pane gets available
+vertical space below Prompt. Only one pane can be maximized at a time.
 
 `Alt+Z` cycles the focused support pane through its three sizes without moving
 focus. `Alt+G` is the layout shortcut: from all-standard it minimizes Sessions,
@@ -234,10 +248,10 @@ Targets, and Quota to leave more room for the conversation; from any customized
 layout it restores all three panes to standard. Tab leaves every chosen size alone.
 
 A few keys answer from everywhere, including while you are typing in Prompt:
-`F2` opens the command palette, `F3` the workspace picker, `F4` Setup,
-`F7` the web viewer, `F5` refreshes Targets and Quota, `Alt+N` opens quick New,
-`Alt+W` opens the full creation wizard,
-`Alt+S` resumes one, `Alt+A` marks everything read, `Alt+X` cancels whatever
+`F2` opens the command palette, `F3` the workspace manager, `F4` the web viewer,
+`F5` refreshes Targets and Quota, `F7` opens Setup, `Alt+N` and `Alt+W` open the
+full creation wizard,
+`Alt+S` opens the Resume picker, `Alt+A` marks everything read, `Alt+X` cancels whatever
 the selected session is in the middle of, `Alt+Z` sizes the focused support
 pane, `Alt+G` toggles the pane preset, and
 `Alt+Q` detaches this terminal client — the daemon and the sessions it runs
@@ -255,7 +269,12 @@ reason.
 In Prompt, `Ctrl+R` searches your prompt history, as in a shell, and `Alt+T`
 switches the transcript between rendered and raw. Inside the search, `Alt+R`
 cycles which history it reads. Every other `Ctrl` key in Prompt is a text
-editing key, as in a shell.
+editing key, as in a shell. Above the composer, controls appear in the order
+**Model**, **Effort**, then the microphone. The configured spinner appears above
+the composer only while the selected session is actually busy. At the bottom
+border, **View tasks (N)** can be focused by pressing `Down` on the last input
+line; `Enter` opens its dialog and `Esc` closes it. The dialog shows queued and
+active tasks without changing the prompt draft.
 
 `Alt` chords need Option to act as Meta in macOS terminals (iTerm2:
 Preferences, Profiles, Keys, "Left Option key: Esc+"; Terminal.app: "Use Option
@@ -300,7 +319,7 @@ directory elsewhere). First launch writes minimal local defaults; `mj setup`
 offers guided discovery, and further settings can be edited in TOML. A minimal example:
 
 ```toml
-version = 2
+version = 6
 
 [profiles.codex-1]
 kind = "codex"

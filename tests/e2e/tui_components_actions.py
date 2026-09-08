@@ -42,37 +42,35 @@ def palette_viewport(tmux, evidence):
         return "\n".join(line[left:right + 1] for line in rows[top:bottom + 1])
 
     tmux.resize(140, 60)
+    # Palette groups follow the focused pane; use Sessions for this viewport probe.
+    click(tmux, "Sessions")
     tmux.send_key("F2")
-    screen = tmux.wait_for("Review settings…")
+    tmux.wait_for("Review settings…")
+    screen = popup_text()
     if not screen.index("Settings") < screen.index("Review settings…") < screen.index("Anywhere"):
-        raise ScenarioFailure("review settings is not in its own Settings section")
+        raise ScenarioFailure(f"review settings is not in its own Settings section:\n{screen}")
     tmux.wait_for("Detach from this terminal")
-    if "▲" in popup_text():
+    if "▐" in popup_text():
         raise ScenarioFailure("roomy palette unnecessarily shows a scrollbar")
     record(tmux, evidence, "palette-roomy", "F2 at 140x60", "Settings and the final commands fit together")
     tmux.resize(100, 18)
     tmux.wait_for("Commands")
-    tmux.wait_until(lambda: "▲" in popup_text(), "overflow palette scrollbar")
+    tmux.wait_until(lambda: "▐" in popup_text(), "overflow palette scrollbar")
     # Tab moves from the query to the shared list; End must reveal its tail.
     tmux.send_key("Tab")
     tmux.send_key("End")
     tmux.wait_for("Detach from this terminal")
-    def thumb_at_end():
-        rows = popup_text().splitlines()
-        bottom = next(index for index, line in enumerate(rows) if "▼" in line)
-        column = rows[bottom].index("▼")
-        return rows[bottom - 1][column] == "█"
-    tmux.wait_until(thumb_at_end, "scrollbar thumb at the bottom after End")
+    tmux.wait_until(lambda: "› Help" in popup_text(), "the final Help command selected after End")
     record(tmux, evidence, "palette-scroll-end", "resize 100x18; Tab, End", "the final command rows remain reachable")
     tmux.send_key("BTab")
     tmux.send_text("review settings")
     tmux.wait_for("Review settings…")
-    tmux.wait_until(lambda: "▲" not in popup_text(), "filtered palette fits without scrollbar")
+    tmux.wait_until(lambda: "▐" not in popup_text(), "filtered palette fits without scrollbar")
     record(tmux, evidence, "palette-filter-small", "Shift-Tab; type review settings", "filtered settings entry fits in the short palette")
     tmux.send_key("Enter")
     tmux.wait_for("Automatic review")
-    tmux.send_key("Escape")
-    absent(tmux, "Automatic review")
+    click(tmux, "  Cancel  ")
+    absent(tmux, "╭ Setup")
     tmux.resize(140, 40)
 
 
@@ -83,16 +81,16 @@ def save_review_settings(lab, tmux, evidence):
     # of target discovery. Validate persistence and disappearance separately.
     click(tmux, "Quick")
     tmux.wait_for("One general reviewer; a validator checks any findings.")
-    click(tmux, "  Save  ")
-    absent(tmux, "╭ Review settings")
+    click(tmux, "  Save Setup  ")
+    absent(tmux, "╭ Setup")
     lab.wait_snapshot(lambda value: value["review_config"]["tier"].lower() == "quick", "review tier persisted")
     record(tmux, evidence, "review-save-dismissed", "choose Quick and click Save", "settings close and persisted tier changes")
     command(tmux, "review settings", "Automatic review")
     click(tmux, "Extended" if original["tier"].lower() == "extended" else "Quick")
     if original["tier"].lower() == "extended":
         tmux.wait_for("A supervisor selects specialist reviewers for deeper coverage.")
-    click(tmux, "  Save  ")
-    absent(tmux, "╭ Review settings")
+    click(tmux, "  Save Setup  ")
+    absent(tmux, "╭ Setup")
     lab.wait_snapshot(lambda value: value["review_config"] == original, "original review settings restored")
 
 
@@ -142,16 +140,24 @@ def save_container_settings(lab, tmux, evidence):
 
 
 def stop_and_resume(lab, tmux, evidence, session_id):
-    command(tmux, "stop session", "Stop session?")
-    click(tmux, "  Cancel  ")
-    absent(tmux, "Stop session?")
+    tmux.send_key("F2")
+    tmux.wait_for("Commands")
+    tmux.send_text("stop session")
+    tmux.wait_for(" 1 commands ")
+    tmux.wait_for("Stop session")
+    click(tmux, "  Close  ")
+    absent(tmux, " Commands ")
     if not any(row["id"] == session_id and row["state"] == "running" for row in lab.snapshot()["sessions"]):
-        raise ScenarioFailure("Cancel stopped the session")
-    command(tmux, "stop session", "Stop session?")
-    click(tmux, "  Stop  ")
-    absent(tmux, "Stop session?")
+        raise ScenarioFailure("Closing the palette stopped the session")
+    tmux.send_key("F2")
+    tmux.wait_for("Commands")
+    tmux.send_text("stop session")
+    tmux.wait_for(" 1 commands ")
+    tmux.wait_for("Stop session")
+    click(tmux, "  Run  ")
+    absent(tmux, " Commands ")
     lab.wait_snapshot(lambda value: any(row["id"] == session_id and row["state"] == "stopped" for row in value["sessions"]), "session stopped with recovery copy")
-    record(tmux, evidence, "stop-confirm-dismissed", "Cancel then reopen and Stop", "Cancel retains the session; Stop closes confirmation and stops it")
+    record(tmux, evidence, "stop-command-dismissed", "Close palette then reopen and Run Stop", "Close retains the session; Run stops it and closes the palette")
     from tui_review_discovery import exercise_offline_save
     exercise_offline_save(lab, tmux, evidence)
     tmux.send_key("M-s")
@@ -180,25 +186,23 @@ def destroy_confirmation(lab, tmux, evidence):
     if len(sessions) != 1:
         raise ScenarioFailure("destructive fixture probe requires exactly one owned session")
     session_id = sessions[0]["id"]
-    command(tmux, "force destroy session", "FORCE DESTROY")
-    click(tmux, "  Cancel  ")
-    absent(tmux, "FORCE DESTROY")
+    command(tmux, "delete session", "Delete session?")
+    tmux.wait_for(session_id)
+    click(tmux, "  No  ")
+    absent(tmux, "Delete session?")
     if not any(row["id"] == session_id for row in lab.snapshot()["sessions"]):
-        raise ScenarioFailure("Cancel destroyed the fixture session")
-    command(tmux, "force destroy session", "FORCE DESTROY")
+        raise ScenarioFailure("No deleted the fixture session")
+    command(tmux, "delete session", "Delete session?")
     tmux.send_key("Enter")
-    tmux.wait_for("FORCE DESTROY")
-    wrong = "00000000" if session_id[:8] != "00000000" else "11111111"
-    tmux.send_text(wrong)
-    tmux.send_key("Enter")
-    tmux.wait_for("FORCE DESTROY")
-    tmux.send_key("C-u")
-    tmux.send_text(session_id[:8])
-    tmux.wait_for(session_id[:8])
-    click(tmux, "  Force destroy  ")
-    absent(tmux, "FORCE DESTROY")
-    lab.wait_snapshot(lambda value: not any(row["id"] == session_id for row in value["sessions"]), "typed destroy removes only the owned fixture session")
-    record(tmux, evidence, "typed-destroy-dismissed", "Cancel; reopen; invalid confirmation; correct short ID; Force destroy", "invalid confirmation retains the dialog; valid confirmation closes it and removes the fixture session")
+    absent(tmux, "Delete session?")
+    if not any(row["id"] == session_id for row in lab.snapshot()["sessions"]):
+        raise ScenarioFailure("The default confirmation deleted the fixture session")
+    command(tmux, "delete session", "Delete session?")
+    tmux.wait_for(session_id)
+    click(tmux, "  Yes  ")
+    absent(tmux, "Delete session?")
+    lab.wait_snapshot(lambda value: not any(row["id"] == session_id for row in value["sessions"]), "confirmed deletion removes only the owned fixture session")
+    record(tmux, evidence, "delete-confirmation-dismissed", "No; default Enter; reopen and Yes", "No and default Enter retain the session; Yes closes the dialog and removes the fixture session")
 
 
 def create_through_dialog(lab, tmux, evidence):

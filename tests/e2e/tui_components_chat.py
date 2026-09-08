@@ -15,8 +15,8 @@ def run_chat_controls(lab, tmux, evidence, session_id):
 
     def focus_prompt():
         screen = tmux.wait_for("Prompt")
-        _, y = locate_text(screen, "Prompt", last=True)
-        tmux.mouse_click(6, y + 1)
+        x, y = locate_text(screen, "Prompt", last=True)
+        tmux.mouse_click(x + 2, y + 1)
         time.sleep(0.1)
 
     def click_text(label):

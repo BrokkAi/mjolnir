@@ -472,9 +472,9 @@ impl DashboardState {
     }
 }
 
-/// Handles clicks on the tab strip before row and pane hitboxes.
+/// Handles clicks on the workspace pane before row and pane hitboxes.
 pub(crate) fn workspace_tab_click(
-    dashboard: &DashboardState,
+    dashboard: &mut DashboardState,
     column: u16,
     row: u16,
 ) -> Option<DashboardAction> {
@@ -484,25 +484,45 @@ pub(crate) fn workspace_tab_click(
         .find(|(_, area)| {
             column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
         })
-        .map(|(workspace_id, _)| workspace_id.clone())?;
+        .map(|(workspace_id, _)| workspace_id.clone());
+    if let Some(area) = dashboard.workspace_pane_area
+        && column >= area.x
+        && column < area.right()
+        && row >= area.y
+        && row < area.bottom()
+    {
+        dashboard.focus = crate::Focus::Workspaces;
+    }
+    let workspace_id = workspace_id?;
     (dashboard.active_workspace_id() != Some(workspace_id.as_str()))
         .then_some(DashboardAction::SelectWorkspace { workspace_id })
 }
 
-/// Draws the tab strip and records its hitboxes for the next mouse event.
+/// Draws the bordered workspace list and records its hitboxes for the next
+/// mouse event. The selected tab is kept visible when the list is wider than
+/// the pane, and every visible label retains one cell of padding on either
+/// side.
 pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &mut DashboardState) {
     dashboard.clear_workspace_tab_areas();
+    dashboard.workspace_pane_area = (area.height > 0 && area.width > 0).then_some(area);
     if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let focused = dashboard.focus() == crate::Focus::Workspaces;
+    let block = theme::panel(focused).title(" Workspaces ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
         return;
     }
     let ids = dashboard.workspace_ids();
     let labels = ids
         .iter()
-        .map(|id| format!(" {} ", dashboard.workspace_display_name(id)))
+        .map(|id| dashboard.workspace_display_name(id).to_owned())
         .collect::<Vec<_>>();
     let widths = labels
         .iter()
-        .map(|label| Line::raw(label.as_str()).width())
+        .map(|label| Line::raw(format!(" {label} ")).width())
         .collect::<Vec<_>>();
     let selected = ids
         .iter()
@@ -510,19 +530,19 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         .unwrap_or(0);
     let mut first = 0;
     let mut selected_width = widths.iter().take(selected + 1).sum::<usize>();
-    while first < selected && selected_width > usize::from(area.width) {
+    while first < selected && selected_width > usize::from(inner.width) {
         selected_width = selected_width.saturating_sub(widths[first]);
         first += 1;
     }
-    let mut x = area.x;
+    let mut x = inner.x;
     for (index, id) in ids.iter().enumerate().skip(first) {
-        let width = widths[index].min(usize::from(area.right().saturating_sub(x))) as u16;
+        let width = widths[index].min(usize::from(inner.right().saturating_sub(x))) as u16;
         if width == 0 {
             break;
         }
-        let tab_area = Rect::new(x, area.y, width, 1);
+        let tab_area = Rect::new(x, inner.y, width, 1);
         dashboard.register_workspace_tab_area(id.clone(), tab_area);
-        let label = crate::widgets::truncate_text(&labels[index], usize::from(width));
+        let label = workspace_label(&labels[index], width);
         let style = if index == selected {
             theme::selection(true)
         } else {
@@ -531,6 +551,33 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         frame.render_widget(Paragraph::new(label).style(style), tab_area);
         x = x.saturating_add(width);
     }
+}
+
+fn workspace_label(name: &str, width: u16) -> String {
+    if width <= 2 {
+        return " ".repeat(usize::from(width));
+    }
+    let content_width = usize::from(width.saturating_sub(2));
+    let full = Line::raw(name).width();
+    let content = if full <= content_width {
+        name.to_owned()
+    } else if content_width == 0 {
+        String::new()
+    } else if content_width == 1 {
+        "…".to_owned()
+    } else {
+        let mut clipped = String::new();
+        for character in name.chars() {
+            let candidate = format!("{clipped}{character}…");
+            if Line::raw(candidate.as_str()).width() > content_width {
+                break;
+            }
+            clipped.push(character);
+        }
+        clipped.push('…');
+        clipped
+    };
+    format!(" {content} ")
 }
 
 /// The standard Form modal renderer used by the parent combined renderer.
@@ -571,9 +618,9 @@ pub(crate) fn render_workspace_manager(
     };
     frame.render_widget(
         Paragraph::new(message).style(Style::default().fg(if dialog.error.is_some() {
-            theme::ERROR
+            theme::palette().error
         } else {
-            theme::MUTED
+            theme::palette().muted
         })),
         rows[0],
     );
@@ -714,7 +761,7 @@ pub(crate) fn render_workspace_manager(
     );
     let busy = dialog.busy.map(|mutation| format!("Working: {mutation:?}"));
     frame.render_widget(
-        Paragraph::new(busy.unwrap_or_default()).style(Style::default().fg(theme::MUTED)),
+        Paragraph::new(busy.unwrap_or_default()).style(Style::default().fg(theme::palette().muted)),
         rows[6],
     );
     form.end_frame(WorkspaceControl::List);
@@ -779,24 +826,36 @@ mod tests {
             ("c".into(), "Last workspace".into()),
         ]));
         dashboard.set_active_workspace(Some("b".into()));
-        let mut terminal = Terminal::new(TestBackend::new(16, 2)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(24, 3)).unwrap();
         terminal
-            .draw(|frame| render_workspace_tabs(frame, Rect::new(0, 0, 16, 1), &mut dashboard))
+            .draw(|frame| render_workspace_tabs(frame, Rect::new(0, 0, 24, 3), &mut dashboard))
             .unwrap();
         assert_eq!(
             dashboard.workspace_tab_areas[0],
-            ("b".into(), Rect::new(0, 0, 6, 1))
+            ("b".into(), Rect::new(1, 1, 6, 1))
         );
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(1, 1)].symbol(), " ");
+        assert_eq!(buffer[(2, 1)].symbol(), "界");
+        assert_eq!(buffer[(4, 1)].symbol(), "界");
+        assert_eq!(buffer[(6, 1)].symbol(), " ");
+        assert_eq!(buffer[(1, 1)].bg, buffer[(6, 1)].bg);
         assert!(
-            matches!(workspace_tab_click(&dashboard, 6, 0), Some(DashboardAction::SelectWorkspace { workspace_id }) if workspace_id == "c")
+            matches!(workspace_tab_click(&mut dashboard, 8, 1), Some(DashboardAction::SelectWorkspace { workspace_id }) if workspace_id == "c")
         );
+        assert_eq!(dashboard.focus(), crate::Focus::Workspaces);
         dashboard.set_active_workspace(Some("c".into()));
         terminal
-            .draw(|frame| render_workspace_tabs(frame, Rect::new(0, 0, 16, 1), &mut dashboard))
+            .draw(|frame| render_workspace_tabs(frame, Rect::new(0, 0, 24, 3), &mut dashboard))
             .unwrap();
-        assert_eq!(dashboard.workspace_tab_areas[0].0, "c");
-        let text = (0..16)
-            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+        assert!(
+            dashboard
+                .workspace_tab_areas
+                .iter()
+                .any(|(id, _)| id == "c")
+        );
+        let text = (0..24)
+            .map(|x| terminal.backend().buffer()[(x, 1)].symbol())
             .collect::<String>();
         assert!(text.contains("Last workspace"), "{text}");
     }

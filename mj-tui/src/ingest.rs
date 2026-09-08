@@ -345,7 +345,7 @@ impl PreparedMaterializedSessionDetail {
             .filter(|(activity_index, _)| {
                 last_user_message
                     .as_ref()
-                    .is_some_and(|(user_index, _)| activity_index > user_index)
+                    .is_none_or(|(user_index, _)| activity_index > user_index)
             })
             .map(|(_, text)| Arc::clone(text));
         let mut cached_tool_diffstats = previous.tool_diffstats;
@@ -501,8 +501,8 @@ impl DashboardState {
         }
         self.invalidate_review_settings_choices_for_config(&config);
         self.config = config;
-        // Closing the modal drops the resume dialog, and with it its rows.
-        self.cancel_modal();
+        // A background refresh must not dismiss a newer interaction. Forms
+        // retain their drafts; command availability reads the current config.
         self.clamp_selections();
     }
 
@@ -986,7 +986,10 @@ impl DashboardState {
             .or_default();
         if detail
             .materialized_applied_event_ordinal
-            .is_some_and(|current| prepared.applied_event_ordinal < current)
+            .is_some_and(|current| {
+                prepared.applied_event_ordinal < current
+                    || (prepared.applied_event_ordinal == current && detail.transcript.is_some())
+            })
         {
             return false;
         }
@@ -1155,6 +1158,21 @@ mod tests {
         // The query still selects the same command after the background reply.
         dashboard.handle_key(key(KeyCode::Enter));
         assert!(matches!(dashboard.mode, crate::Mode::EditContainer(_)));
+    }
+
+    #[test]
+    fn changed_config_preserves_a_new_palette_and_its_query() {
+        use crossterm::event::KeyCode;
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut saved_config = dashboard.config.clone();
+        saved_config.startup.enabled = !saved_config.startup.enabled;
+        dashboard.handle_key(key(KeyCode::F(2)));
+        dashboard.handle_paste("rename");
+        dashboard.set_config(saved_config.clone());
+        assert_eq!(dashboard.config, saved_config);
+        assert!(matches!(dashboard.mode, crate::Mode::Palette(_)));
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(matches!(dashboard.mode, crate::Mode::Rename(_)));
     }
 
     #[test]
@@ -1604,6 +1622,34 @@ mod tests {
     }
 
     #[test]
+    fn late_startup_summary_does_not_erase_live_tool_preview_at_the_same_frontier() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let snapshot = materialized_session_for("session-1", vec![thought(2, "Checking files")]);
+        dashboard.apply_materialized_session(&snapshot);
+        let summary = MaterializedSessionSummary {
+            session_id: "session-1".into(),
+            applied_event_ordinal: snapshot.applied_event_ordinal,
+            last_activity_at_ms: snapshot.last_activity_at_ms,
+            execution: snapshot.execution,
+            session_title: None,
+            last_agent_message: None,
+            last_user_message: None,
+            last_agent_message_follows_last_user: false,
+            agent_message_latest_content_ordinals: vec![],
+            session_restart_event_ordinals: vec![],
+        };
+        assert!(!dashboard.apply_prepared_materialized_session_summary(
+            PreparedMaterializedSessionSummary::from_materialized(summary, 0),
+        ));
+        assert_eq!(
+            dashboard.session_details["session-1"]
+                .latest_agent_activity_after_last_user
+                .as_deref(),
+            Some("Checking files")
+        );
+    }
+
+    #[test]
     fn stored_summary_elides_hidden_context_from_the_name_and_user_preview() {
         let mut session = stopped_session();
         session.acp_session_title = None;
@@ -1833,6 +1879,26 @@ mod tests {
                 .last_agent_message
                 .as_deref(),
             Some("The container lacked uv, so validation used Python 3 directly.")
+        );
+    }
+
+    #[test]
+    fn transcript_without_user_entries_keeps_agent_activity_for_the_sidebar() {
+        let mut dashboard = dashboard_with_session(running_session());
+        apply_materialized_transcript(&mut dashboard, vec![thought(2, "Checking the workspace")]);
+        let detail = &dashboard.session_details["session-1"];
+        assert!(detail.last_user_message.is_none());
+        assert_eq!(
+            detail.latest_agent_activity_after_last_user.as_deref(),
+            Some("Checking the workspace")
+        );
+        apply_materialized_transcript(&mut dashboard, vec![agent_message(3, "The checks passed")]);
+        let detail = &dashboard.session_details["session-1"];
+        assert!(detail.last_user_message.is_none());
+        assert!(detail.last_agent_message_follows_last_user);
+        assert_eq!(
+            detail.last_agent_message.as_deref(),
+            Some("The checks passed")
         );
     }
 

@@ -437,12 +437,12 @@ pub(crate) fn render_import_progress(
                 "No progress for {}s; the filesystem may be stalled.",
                 stalled_for.as_secs()
             ),
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         )
     } else {
         Line::styled(
             "The dashboard remains responsive while the import runs.",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         )
     };
     let paragraph = Paragraph::new(vec![
@@ -512,10 +512,9 @@ pub(crate) fn render_import_bundle_confirmation(
             "These Git roots have local changes; Mjolnir will archive tracked changes:",
         ));
         lines.extend(
-            confirmation
-                .dirty_git_roots
-                .iter()
-                .map(|root| Line::styled(root.clone(), Style::default().fg(theme::WARNING))),
+            confirmation.dirty_git_roots.iter().map(|root| {
+                Line::styled(root.clone(), Style::default().fg(theme::palette().warning))
+            }),
         );
     }
     if !confirmation.omitted_non_git_dirs.is_empty() {
@@ -525,11 +524,12 @@ pub(crate) fn render_import_bundle_confirmation(
         lines.push(Line::raw(
             "These edited directories are outside Git and cannot be included:",
         ));
-        lines.extend(
-            confirmation.omitted_non_git_dirs.iter().map(|directory| {
-                Line::styled(directory.clone(), Style::default().fg(theme::WARNING))
-            }),
-        );
+        lines.extend(confirmation.omitted_non_git_dirs.iter().map(|directory| {
+            Line::styled(
+                directory.clone(),
+                Style::default().fg(theme::palette().warning),
+            )
+        }));
     }
     if !confirmation.scratch_git_roots.is_empty() {
         if !lines.is_empty() {
@@ -539,10 +539,9 @@ pub(crate) fn render_import_bundle_confirmation(
             "These scratch repositories are under temporary directories and stay out of the workspace:",
         ));
         lines.extend(
-            confirmation
-                .scratch_git_roots
-                .iter()
-                .map(|root| Line::styled(root.clone(), Style::default().fg(theme::WARNING))),
+            confirmation.scratch_git_roots.iter().map(|root| {
+                Line::styled(root.clone(), Style::default().fg(theme::palette().warning))
+            }),
         );
     }
     lines.push(Line::raw(""));
@@ -712,7 +711,7 @@ pub(crate) fn render_target_actions(
     let list_rows = if rows.is_empty() {
         vec![Line::styled(
             "No targets configured.",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         )]
     } else {
         rows
@@ -745,7 +744,7 @@ pub(crate) fn render_target_actions(
                 ),
                 Span::styled(
                     format!(" Testing {target_id}…"),
-                    Style::default().fg(theme::ACCENT),
+                    Style::default().fg(theme::palette().accent),
                 ),
                 Span::styled(" Alt-X cancels test", theme::muted()),
             ])),
@@ -758,9 +757,9 @@ pub(crate) fn render_target_actions(
                 Err(error) => format!("{target_id}: {error}"),
             })
             .style(Style::default().fg(if result.is_ok() {
-                theme::SUCCESS
+                theme::palette().success
             } else {
-                theme::WARNING
+                theme::palette().warning
             })),
             Rect::new(inner.x, status_y, inner.width, 1),
         );
@@ -768,7 +767,7 @@ pub(crate) fn render_target_actions(
     let hint = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1);
     frame.render_widget(
         Paragraph::new("Up/Down selects target · Tab selects action · Esc closes")
-            .style(Style::default().fg(theme::MUTED)),
+            .style(Style::default().fg(theme::palette().muted)),
         hint,
     );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
@@ -840,7 +839,7 @@ pub(crate) fn render_web_dialog(
         inner_width = 60;
         lines.push(Line::styled(
             "Stop this Mjolnir server?",
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ));
         lines.push(Line::raw(format!("{} · PID {}", process.name, process.pid)));
         lines.push(Line::raw(process.executable.display().to_string()));
@@ -849,15 +848,16 @@ pub(crate) fn render_web_dialog(
     } else if dialog.loading {
         lines.push(Line::styled(
             "Starting web viewer…",
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ));
     } else if let Some(message) = &dialog.message {
         inner_width = 60;
-        lines.extend(
-            message
-                .lines()
-                .map(|line| Line::styled(line.to_owned(), Style::default().fg(theme::WARNING))),
-        );
+        lines.extend(message.lines().map(|line| {
+            Line::styled(
+                line.to_owned(),
+                Style::default().fg(theme::palette().warning),
+            )
+        }));
         if let Some(address) = dialog.failed_address {
             lines.push(Line::raw(format!("Address: {address}")));
             lines.push(Line::raw(""));
@@ -871,7 +871,7 @@ pub(crate) fn render_web_dialog(
         if dialog.inspecting {
             lines.push(Line::styled(
                 "Inspecting listener…",
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::palette().accent),
             ));
         }
         if let Some(message) = &dialog.inspection_message {
@@ -905,7 +905,7 @@ pub(crate) fn render_web_dialog(
             lines.push(
                 Line::styled(
                     "Terminal is too small for a scannable QR code.",
-                    Style::default().fg(theme::WARNING),
+                    Style::default().fg(theme::palette().warning),
                 )
                 .centered(),
             );
@@ -915,20 +915,20 @@ pub(crate) fn render_web_dialog(
             // The QR encodes this URL; the text is the fallback for hand entry,
             // so it wraps within the box instead of widening it.
             lines.push(Line::from(vec![
-                Span::styled("Web: ", Style::default().fg(theme::MUTED)),
-                Span::styled(url.clone(), Style::default().fg(theme::ACCENT)),
+                Span::styled("Web: ", Style::default().fg(theme::palette().muted)),
+                Span::styled(url.clone(), Style::default().fg(theme::palette().accent)),
             ]));
         }
         if let Some(code) = &dialog.viewer_code {
             lines.push(Line::from(vec![
-                Span::styled("Viewer code: ", Style::default().fg(theme::MUTED)),
-                Span::styled(code.clone(), Style::default().fg(theme::ACCENT)),
+                Span::styled("Viewer code: ", Style::default().fg(theme::palette().muted)),
+                Span::styled(code.clone(), Style::default().fg(theme::palette().accent)),
             ]));
         }
         if let Some(reason) = &dialog.fallback_reason {
             lines.push(Line::styled(
                 format!("Local fallback: {reason}"),
-                Style::default().fg(theme::WARNING),
+                Style::default().fg(theme::palette().warning),
             ));
         }
     }
@@ -1029,7 +1029,7 @@ pub(crate) fn render_repository_origin(
     if let Some(error) = &dialog.error {
         lines.push(Line::styled(
             error.clone(),
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ));
     }
     let body_paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
@@ -1065,7 +1065,7 @@ pub(crate) fn render_repository_origin(
     let hint_y = inner.bottom().saturating_sub(3);
     frame.render_widget(
         Paragraph::new("Type or paste into Source · Tab moves · Enter checks")
-            .style(Style::default().fg(theme::MUTED)),
+            .style(Style::default().fg(theme::palette().muted)),
         Rect::new(inner.x, hint_y, inner.width, 1),
     );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
@@ -1102,7 +1102,10 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 Line::raw(""),
             ];
             lines.extend(repositories.iter().map(|repository| {
-                Line::styled(repository.clone(), Style::default().fg(theme::WARNING))
+                Line::styled(
+                    repository.clone(),
+                    Style::default().fg(theme::palette().warning),
+                )
             }));
             lines.extend([
                 Line::raw(""),
@@ -1130,7 +1133,7 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 Line::raw(""),
                 Line::styled(
                     format!("Stop failed: {error}"),
-                    Style::default().fg(theme::WARNING),
+                    Style::default().fg(theme::palette().warning),
                 ),
             ],
         ),
@@ -1143,7 +1146,7 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
             match error {
                 Some(error) => lines.push(Line::styled(
                     format!("Failed: {error}"),
-                    Style::default().fg(theme::WARNING),
+                    Style::default().fg(theme::palette().warning),
                 )),
                 None => lines.push(Line::raw("This session failed without a recorded error.")),
             }
@@ -1186,13 +1189,13 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                             .as_deref()
                             .unwrap_or("current target")
                     ),
-                    Style::default().fg(theme::WARNING),
+                    Style::default().fg(theme::palette().warning),
                 ),
             ];
             if let Some(error) = &operation.error {
                 lines.push(Line::styled(
                     format!("Error: {error}"),
-                    Style::default().fg(theme::WARNING),
+                    Style::default().fg(theme::palette().warning),
                 ));
             }
             lines.push(Line::raw(""));
@@ -1255,10 +1258,10 @@ pub(crate) fn render_confirmation(
     let popup = centered_modal(frame, surfaces, 72, height, area);
     frame.render_widget(
         theme::modal()
-            .border_style(Style::default().fg(theme::ERROR))
+            .border_style(Style::default().fg(theme::palette().error))
             .title_style(
                 Style::default()
-                    .fg(theme::ERROR)
+                    .fg(theme::palette().error)
                     .add_modifier(Modifier::BOLD),
             )
             .title(title),
@@ -2317,8 +2320,10 @@ mod tests {
                 version: hel::hel_config::CONFIG_VERSION,
                 sessions_side: Default::default(),
                 advanced: Default::default(),
+                show_stopped_sessions: true,
                 newer_config_version: None,
                 spinner: Default::default(),
+                theme: Default::default(),
                 phone: Default::default(),
                 review: Default::default(),
                 startup: Default::default(),
@@ -2720,19 +2725,22 @@ mod tests {
         // footer buttons.
         assert_eq!(
             button_styles(&mut dashboard),
-            (theme::SURFACE_RAISED, theme::SURFACE_RAISED)
+            (
+                theme::palette().surface_raised,
+                theme::palette().surface_raised
+            )
         );
 
         dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(
             button_styles(&mut dashboard),
-            (theme::ACCENT, theme::SURFACE_RAISED)
+            (theme::palette().accent, theme::palette().surface_raised)
         );
 
         dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(
             button_styles(&mut dashboard),
-            (theme::SURFACE_RAISED, theme::ACCENT)
+            (theme::palette().surface_raised, theme::palette().accent)
         );
     }
 
@@ -2752,8 +2760,8 @@ mod tests {
             .expect("button row");
         let y = buffer.area.y + row as u16;
         let cancel_x = buffer.area.x + cell_column(&lines[row], "Cancel");
-        assert_eq!(buffer[(cancel_x, y)].bg, theme::ACCENT);
-        assert_eq!(buffer[(cancel_x - 1, y)].bg, theme::ACCENT);
+        assert_eq!(buffer[(cancel_x, y)].bg, theme::palette().accent);
+        assert_eq!(buffer[(cancel_x - 1, y)].bg, theme::palette().accent);
         assert!(!lines.iter().any(|line| line.contains("Esc cancels this")));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
@@ -3169,8 +3177,14 @@ mod tests {
         let button_y = buffer.area.y + button_row as u16;
         let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
         let check_x = buffer.area.x + cell_column(&lines[button_row], "Check origin");
-        assert_eq!(buffer[(cancel_x, button_y)].bg, theme::SURFACE_RAISED);
-        assert_eq!(buffer[(check_x, button_y)].bg, theme::SURFACE_RAISED);
+        assert_eq!(
+            buffer[(cancel_x, button_y)].bg,
+            theme::palette().surface_raised
+        );
+        assert_eq!(
+            buffer[(check_x, button_y)].bg,
+            theme::palette().surface_raised
+        );
 
         dashboard.handle_key(key(KeyCode::Tab));
         terminal
@@ -3184,7 +3198,7 @@ mod tests {
             .expect("button row");
         let button_y = buffer.area.y + button_row as u16;
         let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
-        assert_eq!(buffer[(cancel_x, button_y)].bg, theme::ACCENT);
+        assert_eq!(buffer[(cancel_x, button_y)].bg, theme::palette().accent);
         assert!(
             !buffer[(field_x, source_y)]
                 .modifier

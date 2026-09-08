@@ -84,9 +84,9 @@ pub fn render_scrollbar(frame: &mut Frame, geometry: ScrollbarGeometry) {
         frame.buffer_mut()[(geometry.track.x, row)]
             .set_symbol(if is_thumb { THUMB_SYMBOL } else { TRACK_SYMBOL })
             .set_style(Style::default().fg(if is_thumb {
-                theme::ACCENT
+                theme::palette().accent
             } else {
-                theme::BORDER
+                theme::palette().border
             }));
     }
 }

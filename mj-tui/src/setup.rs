@@ -123,6 +123,7 @@ impl SetupDialog {
                 .keys()
                 .filter(|key| {
                     key.as_str() != "version"
+                        && !(self.path.is_empty() && key.as_str() == "show_stopped_sessions")
                         && !(self.path.len() == 1
                             && self.path[0] == "startup"
                             && key.as_str() == "enabled")
@@ -924,6 +925,92 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Enter));
     }
 
+    fn choose_light_theme(dashboard: &mut DashboardState) {
+        dashboard.handle_key(key(KeyCode::F(7)));
+        choose(dashboard, "theme");
+        dashboard.handle_key(key(KeyCode::Down));
+        dashboard.handle_key(key(KeyCode::Enter));
+    }
+
+    fn assert_rendered_theme(dashboard: &mut DashboardState, selected: theme::UiTheme) {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, dashboard))
+            .unwrap();
+        let colors = theme::palette_for(selected);
+        let buffer = terminal.backend().buffer();
+        let surface = if dashboard.modal_open() {
+            colors.surface_raised
+        } else {
+            colors.surface
+        };
+        assert!(
+            buffer.content.iter().any(|cell| {
+                cell.bg == surface && cell.fg == colors.text && cell.symbol() != " "
+            })
+        );
+        assert!(buffer.content.iter().any(|cell| cell.fg == colors.accent));
+    }
+
+    #[test]
+    fn theme_selection_applies_after_save_and_is_restored_when_setup_reopens() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        choose_light_theme(&mut dashboard);
+        assert_eq!(dashboard.config.theme, theme::UiTheme::Midnight);
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
+        let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        ));
+        let DashboardAction::SaveSetup {
+            generation,
+            updated,
+            ..
+        } = action
+        else {
+            panic!("{action:?}");
+        };
+        let saved: HelConfig = serde_json::from_str(&updated).unwrap();
+        assert_eq!(saved.theme, theme::UiTheme::Light);
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
+        dashboard.setup_saved(generation, Ok(saved));
+        assert!(!dashboard.modal_open());
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Light);
+
+        dashboard.begin_setup();
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Light);
+        choose(&mut dashboard, "theme");
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        let editor = dialog.editor.as_ref().unwrap();
+        assert_eq!(editor.choices[editor.selected], "light");
+    }
+
+    #[test]
+    fn cancelling_or_failing_to_save_a_theme_keeps_the_active_colors() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let original = dashboard.config.clone();
+        choose_light_theme(&mut dashboard);
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(!dashboard.modal_open());
+        assert_eq!(dashboard.config, original);
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
+
+        choose_light_theme(&mut dashboard);
+        let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        ));
+        let DashboardAction::SaveSetup { generation, .. } = action else {
+            panic!("{action:?}");
+        };
+        dashboard.setup_saved(generation, Err("disk full".into()));
+        assert_eq!(dashboard.config, original);
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.draft["theme"], "light");
+        assert!(dialog.notice.as_ref().unwrap().contains("disk full"));
+    }
+
     #[test]
     fn results_from_a_closed_setup_do_not_change_the_new_draft() {
         let mut dashboard = dashboard_with_session(stopped_session());
@@ -948,7 +1035,7 @@ mod tests {
     #[test]
     fn setup_is_available_with_existing_config_and_edits_quick_creation_defaults() {
         let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.handle_key(key(KeyCode::F(4)));
+        dashboard.handle_key(key(KeyCode::F(7)));
         choose(&mut dashboard, "startup");
         choose(&mut dashboard, "prompt");
         choose(&mut dashboard, "profile");
@@ -993,6 +1080,21 @@ mod tests {
         let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
         assert!(!dialog.keys().iter().any(|key| key == "enabled"));
         assert_eq!(dialog.draft["startup"]["enabled"], false);
+    }
+
+    #[test]
+    fn deprecated_stopped_session_visibility_is_preserved_but_hidden_from_setup() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.config.show_stopped_sessions = false;
+        dashboard.begin_setup();
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(
+            !dialog
+                .keys()
+                .iter()
+                .any(|key| key == "show_stopped_sessions")
+        );
+        assert_eq!(dialog.draft["show_stopped_sessions"], false);
     }
 
     #[test]
@@ -1064,7 +1166,7 @@ mod tests {
                 .draw(|frame| crate::render::render(frame, &mut dashboard))
                 .unwrap();
             let text = buffer_lines(terminal.backend().buffer()).join("\n");
-            for label in ["Ask for a task", "Save (Ctrl-S)", "Cancel"] {
+            for label in ["Focus prompt", "Save (Ctrl-S)", "Cancel"] {
                 assert!(text.contains(label), "{text}");
             }
             dashboard.handle_key(key(KeyCode::Esc));

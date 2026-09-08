@@ -239,7 +239,7 @@ profiles independently, so a slow provider does not delay the others. Press
 | Kimi Code | Usage windows returned by the configured Kimi service. |
 | Grok Build | The harness's ACP billing extension. |
 | DeepSeek Harness | `API`, because it is usage-priced rather than a subscription window. |
-| Muse Code | `Quota unavailable`; no quota API is integrated. |
+| Muse Code | Native subscription usage windows and reset times, when reported. |
 
 An unavailable reading is displayed as an error for that profile; it does not
 make the profile disappear. Quota is advisory rather than an admission-control

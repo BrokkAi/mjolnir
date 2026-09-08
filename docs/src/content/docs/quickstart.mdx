@@ -21,15 +21,12 @@ name, then leaves the dashboard ready for an explicit session. On Linux and
 macOS, an unconfigured installation prepares a local Codex profile and
 `localhost` target; it does not start a session.
 
-Press `Alt+N` for Quick New with saved defaults, or `N` for the full creation
-wizard. Quick New uses the configured Codex profile when available, then the
-first configured profile, and uses the saved target default. You can change
-these defaults with `[startup] profile` and `target` in
-[configuration](/configuration/#quick-new-defaults-startup).
-
-Launch progress and failures appear on the dashboard. Once Quick New opens,
-type a prompt and press `Enter`. Windows retains guided setup for its supported
-targets. Use `mj setup` when you want guided discovery of other environments.
+Press **Create**, `Alt+N`, or `N` to open the full creation wizard. Choose the
+profile, project, target, resources, and attached directories before launch.
+Launch progress and failures appear on the dashboard. When the new session is
+ready, type a prompt and press `Enter`. Windows retains guided setup for its
+supported targets. Use `mj setup` when you want guided discovery of other
+environments.
 
 The dashboard keeps its session list, Conversation and Prompt regions, target
 capacity, and profile quota visible together.
@@ -73,7 +70,8 @@ The login command is profile-aware: it runs the correct harness authentication f
 
 ## 3. Create a custom session (optional)
 
-For another agent, project, or target, press `Alt+W` from anywhere on the dashboard. The new-session wizard walks through:
+For another agent, project, or target, press **Create** or `Alt+W` from anywhere
+on the dashboard. The full new-session wizard walks through:
 
 1. A harness profile.
 2. A target on which the session will run, including its resource size when that target is resizable.
@@ -99,13 +97,12 @@ Useful controls for the first run:
 
 | Key | Action |
 | --- | --- |
-| `Tab` / `Shift+Tab` | Move through Sessions, Prompt, Targets, and Quota |
+| `Tab` / `Shift+Tab` | Move through Workspaces, Sessions, Prompt, Targets, and Quota |
 | `Page Up` / `Page Down` | Scroll the transcript from any focus |
 | `F1` | Open contextual help |
 | `F2` | Open the searchable command palette |
-| `Alt+N` | Create another session with a fresh task prompt and saved defaults |
-| `Alt+W` | Open the full creation wizard |
-| `F4` | Edit configuration in Setup |
+| `Alt+N` / `Alt+W` | Open the full creation wizard |
+| `F7` | Edit configuration in Setup |
 | `Alt+Q` | Detach this terminal |
 
 The [terminal surface guide](/terminal-surface/) covers pane sizing, the full composer keymap, the command palette, and `!` shell commands.
@@ -120,7 +117,7 @@ Reconnect with:
 mj
 ```
 
-Mjolnir reopens the session whose agent spoke most recently and places the cursor in its Prompt pane. To reach the same sessions from a browser, print the viewer address and access code with:
+Mjolnir reopens the session in your opened workspace whose agent spoke most recently and places the cursor in its Prompt pane. Other workspaces' sessions remain live and are available by selecting their workspace tab. To reach the same sessions from a browser, print the viewer address and access code with:
 
 ```sh
 mj daemon status

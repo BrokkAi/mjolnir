@@ -62,7 +62,7 @@ def wait_marker_or_exit(marker: pathlib.Path, browser: subprocess.Popen[bytes]) 
 # partially redrawn frame can show two panes bordered alike for one frame,
 # whereas the footer is one line that is always rewritten whole.
 PANE_RING = ("Sessions", "Prompt", "Targets", "Quota")
-SESSIONS_FOCUSED = "Enter open \u00b7 Tab pane \u2502 Alt-N new \u00b7 Alt-S resume \u00b7 Alt-A read"
+SESSIONS_FOCUSED = "Enter open \u00b7 Tab pane \u2502 Alt-N quick new \u00b7 Alt-S resume \u00b7 Alt-A read"
 
 
 def focus_sessions(client) -> None:

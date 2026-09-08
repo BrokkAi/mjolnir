@@ -40,6 +40,14 @@ impl SessionAttachment {
         }
     }
 
+    /// Retiring a warm chat permits one fresh attachment without disturbing
+    /// an attachment already underway for another selected session.
+    pub(super) fn retire(&mut self, session: &str) {
+        if self.selection.as_deref() == Some(session) {
+            self.defer();
+        }
+    }
+
     pub(super) fn accepts(&self, generation: u64, selection: Option<&str>) -> bool {
         // Input may have changed the row before the event loop starts its new
         // attachment. A queued completion must already respect that choice.
@@ -104,6 +112,17 @@ mod tests {
         assert!(!attachment.accepts(generation, Some("moving")));
         assert!(attachment.select("moving"));
         assert!(!attachment.select("moving"));
+    }
+
+    #[test]
+    fn retiring_a_warm_chat_rearms_only_its_own_selection() {
+        let mut attachment = SessionAttachment::default();
+        assert!(attachment.select("created"));
+        attachment.retire("another-workspace");
+        assert!(!attachment.select("created"));
+        attachment.retire("created");
+        assert!(attachment.select("created"));
+        assert!(!attachment.select("created"));
     }
 
     #[tokio::test]

@@ -993,9 +993,8 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_memory: Option<String>,
     pub state: SessionState,
-    /// Hidden from the resume dialog until "show archived" is on. Archiving is
-    /// a display choice only; it never touches the checkpoint or the record's
-    /// lifecycle state.
+    /// Legacy visibility preference, retained for record compatibility.
+    /// Current surfaces do not hide sessions based on this flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1780,8 +1779,10 @@ mod tests {
             advanced: Default::default(),
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
+            show_stopped_sessions: true,
             newer_config_version: None,
             spinner: Default::default(),
+            theme: Default::default(),
             phone: Default::default(),
             review: Default::default(),
             startup: Default::default(),

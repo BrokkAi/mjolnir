@@ -10,7 +10,6 @@ impl DashboardState {
             self.mode,
             Mode::EditContainer(_)
                 | Mode::Setup(_)
-                | Mode::QuickNew(_)
                 | Mode::Palette(_)
                 | Mode::ResumeDialog(_)
                 | Mode::Rename(_)
@@ -30,12 +29,24 @@ impl DashboardState {
     /// Whether a form owns this pointer event, ahead of selectable body text.
     pub fn component_handles_mouse(&self, mouse: MouseEvent) -> bool {
         match &self.mode {
+            Mode::Dashboard => {
+                let form = self.surface_form.borrow();
+                form.captures_pointer()
+                    || form.contains(mouse.column, mouse.row)
+                    || self
+                        .workspace_pane_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
+            }
+            Mode::Help(overlay) => {
+                let form = overlay.form.borrow();
+                form.captures_pointer()
+                    || overlay
+                        .area
+                        .get()
+                        .contains((mouse.column, mouse.row).into())
+            }
             Mode::EditContainer(editor) => {
                 let form = editor.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::QuickNew(dialog) => {
-                let form = dialog.form.borrow();
                 form.captures_pointer() || form.contains(mouse.column, mouse.row)
             }
             Mode::Setup(dialog) => dialog.handles_mouse(mouse.column, mouse.row),
@@ -91,15 +102,15 @@ impl DashboardState {
                 let form = wizard.form.borrow();
                 form.captures_pointer() || form.contains(mouse.column, mouse.row)
             }
-            _ => false,
         }
     }
 
     pub(crate) fn cancel_component_pointer(&mut self) {
+        self.surface_form.get_mut().cancel_pointer();
         match &mut self.mode {
+            Mode::Help(overlay) => overlay.form.get_mut().cancel_pointer(),
             Mode::EditContainer(editor) => editor.form.get_mut().cancel_pointer(),
             Mode::Setup(dialog) => dialog.cancel_pointer(),
-            Mode::QuickNew(dialog) => dialog.form.get_mut().cancel_pointer(),
             Mode::Palette(palette) => palette.form.get_mut().cancel_pointer(),
             Mode::ResumeDialog(dialog) => dialog.form.get_mut().cancel_pointer(),
             Mode::Rename(dialog) => dialog.form.get_mut().cancel_pointer(),
@@ -118,10 +129,14 @@ impl DashboardState {
     }
 
     pub(crate) fn reset_component_geometry(&mut self) {
+        self.surface_form.get_mut().reset_geometry();
         match &mut self.mode {
+            Mode::Help(overlay) => {
+                overlay.form.get_mut().reset_geometry();
+                overlay.area.set(Default::default());
+            }
             Mode::EditContainer(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::Setup(dialog) => dialog.reset_geometry(),
-            Mode::QuickNew(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::Palette(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::ResumeDialog(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::Rename(dialog) => dialog.form.get_mut().reset_geometry(),
@@ -152,7 +167,6 @@ impl DashboardState {
         match std::mem::replace(&mut self.mode, Mode::Dashboard) {
             Mode::EditContainer(editor) => self.handle_container_edit_event(event, editor),
             Mode::Setup(dialog) => self.handle_setup_event(event, dialog),
-            Mode::QuickNew(dialog) => self.handle_quick_new_event(event, dialog),
             Mode::Rename(dialog) => self.handle_rename_event(event, dialog),
             Mode::ConfigId(dialog) => self.handle_config_id_event(event, dialog),
             Mode::RepositoryOrigin(dialog) => self.handle_repository_origin_event(event, dialog),

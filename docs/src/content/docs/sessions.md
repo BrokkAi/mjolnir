@@ -5,9 +5,33 @@ description: Create, queue, detach, checkpoint, stop, resume, import, and recove
 
 A Mjolnir session is a durable conversation plus the target on which its coding harness runs. The dashboard may come and go: the target-side worker owns the durable prompt queue and event journal, while the per-user daemon owns connection, lifecycle, and checkpoint orchestration plus a local projection of that state.
 
+## Session status symbols
+
+Each terminal session row starts with a fixed status symbol. Symbols stay visible in collapsed projects, minimized session lists, narrow sidebars, and workspace previews.
+
+| Symbol | Status |
+| --- | --- |
+| `◐` | Working, including reviews and background commands |
+| `!` | Waiting for your input or a review decision |
+| `✓` | Idle with unread activity, or a completed clean review |
+| `○` | Idle with no unread activity |
+| `·` | Activity not yet available |
+| `?` | Disconnected or unreachable |
+| `×` | Failed or lost |
+| `↑` | Starting |
+| `↻` | Resuming |
+| `⇄` | Moving |
+| `▣` | Checkpointing |
+| `↓` | Stopping |
+| `■` | Stopped |
+| `⊗` | Destroying |
+
+Active work and requests for input take precedence over unread activity. Reading a completed session changes its check mark to the idle circle.
+
 ## Create a session
 
-Press `Alt+N` anywhere in the terminal dashboard. The wizard resolves four things:
+Press **Create**, `n`, `N`, `Alt+N`, or `Alt+W` anywhere in the terminal
+dashboard. The full wizard resolves four things:
 
 1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, DeepSeek Harness, or Muse Code and the credentials to use.
 2. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing Git directory for a bare target.
@@ -85,7 +109,9 @@ If checkpoint creation or verification fails, normal Stop refuses teardown. The 
 
 ## Resume on a fresh target
 
-Press `Alt+S` to search every non-live Mjolnir session. The resume wizard lets you:
+Press **Resume** or `Alt+S` to search every non-live Mjolnir session, including
+records that were previously archived by a provider. Provider archive metadata
+is shown read-only. The resume wizard lets you:
 
 - keep the original profile or choose another harness profile;
 - choose a compatible target and adjust its resources;

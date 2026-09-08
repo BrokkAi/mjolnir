@@ -264,6 +264,7 @@ image = "ubuntu:24.04"
         let home = storage.path().join("codex");
         fs::create_dir_all(&home).unwrap();
         config.profiles.get_mut("codex").unwrap().home = home;
+        config.startup.enabled = false;
         config.targets.clear();
         config.targets.insert(
             "localhost".into(),
@@ -374,7 +375,7 @@ image = "ubuntu:24.04"
 }
 
 #[test]
-fn first_launch_waits_for_explicit_new_before_creating_a_session() {
+fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
     let DashboardPty {
         _storage: storage,
         mut master,
@@ -389,8 +390,8 @@ fn first_launch_waits_for_explicit_new_before_creating_a_session() {
         READY_MARKER,
         Instant::now() + TIMEOUT,
     );
-    // Allow ordinary background ticks to settle. Legacy enabled=true must
-    // still leave a workspace empty until the user explicitly starts work.
+    // With automatic startup disabled, ordinary background ticks must leave
+    // the workspace empty until the user explicitly starts work.
     thread::sleep(Duration::from_millis(1100));
     drain(&mut master, &mut output);
     assert!(
@@ -399,14 +400,43 @@ fn first_launch_waits_for_explicit_new_before_creating_a_session() {
             .sessions
             .is_empty()
     );
-    master.write_all(b"\x1bn").expect("open Quick New");
+    master.write_all(b"\x1bn").expect("open New session wizard");
     wait_for_output(
         &mut master,
         &mut output,
-        b"New session",
+        b"New session \xc2\xb7 1/4 profile",
         Instant::now() + TIMEOUT,
     );
-    master.write_all(b"\r").expect("explicitly create session");
+    // Explicit New always enters the full wizard. The first two steps already
+    // have deterministic fixture defaults, while the project step requires
+    // the real temporary checkout path. Later titles arrive as terminal diff
+    // updates, so wait for each changed title suffix rather than a full redraw.
+    master.write_all(b"\r").expect("choose fixture profile");
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"target \xe2\x94\x80",
+        Instant::now() + TIMEOUT,
+    );
+    master.write_all(b"\r").expect("choose fixture target");
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"local project",
+        Instant::now() + TIMEOUT,
+    );
+    let project = storage.path().canonicalize().unwrap();
+    master
+        .write_all(project.to_string_lossy().as_bytes())
+        .expect("enter fixture project");
+    master.write_all(b"\r").expect("validate fixture project");
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"review \xe2\x94\x80",
+        Instant::now() + TIMEOUT,
+    );
+    master.write_all(b"\r").expect("create wizard session");
     let deadline = Instant::now() + TIMEOUT;
     let session = loop {
         drain(&mut master, &mut output);
@@ -440,7 +470,68 @@ fn first_launch_waits_for_explicit_new_before_creating_a_session() {
     );
     let rendered = String::from_utf8_lossy(&output);
     assert!(!rendered.contains("Welcome to Mjolnir setup"));
-    assert!(!rendered.contains("Workspaces"));
+    // Startup opens the combined dashboard directly; no standalone workspace
+    // selector or Open/New picker is interposed before the wizard.
+    assert!(!rendered.contains("Open workspace"));
+
+    // New remains explicit and uses the same full wizard while the first
+    // launch is pending. This second invocation is intentionally driven by
+    // the same explicit shortcut.
+    output.clear();
+    master.write_all(b"\x1bn").unwrap();
+    let deadline = Instant::now() + TIMEOUT;
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"New session \xc2\xb7 1/4 profile",
+        Instant::now() + TIMEOUT,
+    );
+    master.write_all(b"\r").unwrap();
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"target \xe2\x94\x80",
+        Instant::now() + TIMEOUT,
+    );
+    master.write_all(b"\r").unwrap();
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"local project",
+        Instant::now() + TIMEOUT,
+    );
+    master
+        .write_all(project.to_string_lossy().as_bytes())
+        .unwrap();
+    master.write_all(b"\r").unwrap();
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"review \xe2\x94\x80",
+        Instant::now() + TIMEOUT,
+    );
+    master.write_all(b"\r").unwrap();
+    let created = loop {
+        drain(&mut master, &mut output);
+        let state = hel::hel_database::load_state_from(&database).unwrap();
+        if let Some(created) = state.sessions.values().find(|other| other.id != session.id) {
+            assert_eq!(state.sessions.len(), 2);
+            break created.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "one New key did not create a session: {}",
+            String::from_utf8_lossy(&output)
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(created.workspace_id, session.workspace_id);
+    assert_eq!(created.project_directory, session.project_directory);
+    assert_eq!(created.last_profile, "codex");
+    assert_eq!(created.target_template_id, "localhost");
+    assert!(created.draft_input.is_empty());
+    assert!(!String::from_utf8_lossy(&output).contains("What would you like to do?"));
+
     // This fake profile cannot launch a real agent. Quitting during its
     // background launch must still release the terminal promptly.
     master.write_all(QUIT_KEY).unwrap();
@@ -611,7 +702,6 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
     wait_for_output(
         &mut master,
         &mut output,
-        // Wait for the manager snapshot after its loading message.
         b"active sessions",
         Instant::now() + TIMEOUT,
     );
@@ -664,10 +754,11 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
         mut child,
     } = spawn_dashboard_pty_fixture(false, true);
     let mut output = Vec::new();
+    // The quit hint can be split by cursor movements during a differential redraw.
     wait_for_output(
         &mut master,
         &mut output,
-        b"Alt-Q quits.",
+        b"quits.",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\x1b").expect("cancel opening");
@@ -683,13 +774,13 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
     // A background tick must not restart the cancelled request.
     thread::sleep(Duration::from_millis(1100));
     drain(&mut master, &mut output);
-    assert!(!String::from_utf8_lossy(&output).contains("Alt-Q quits."));
+    assert!(!String::from_utf8_lossy(&output).contains("quits."));
     output.clear();
     master.write_all(b"\r").expect("retry opening");
     wait_for_output(
         &mut master,
         &mut output,
-        b"Alt-Q quits.",
+        b"quits.",
         Instant::now() + TIMEOUT,
     );
     let quit_started = Instant::now();

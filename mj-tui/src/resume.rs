@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use mj_chat::components::{
-    ButtonRow, Checkbox, ChoiceList, ControlKind, Form, Interaction, TabStrip, TextField,
+    ButtonRow, ChoiceList, ControlKind, Form, Interaction, TabStrip, TextField,
 };
 use mj_chat::theme;
 use ratatui::Frame;
@@ -43,7 +43,6 @@ pub(crate) const LOCAL_ORIGIN: &str = "local";
 pub(crate) enum ResumeFocus {
     Tabs,
     Search,
-    Archived,
     Sessions,
     Cancel,
     Open,
@@ -132,9 +131,8 @@ pub(crate) struct ResumeRow {
     pub(crate) details: String,
     pub(crate) last_activity_ms: i64,
     pub(crate) status: ResumeRowStatus,
-    /// Hidden by Hel, either by the record's flag or the native hidden set.
-    pub(crate) archived: bool,
-    /// Hidden by the harness itself. Hel cannot clear this.
+    /// Reported by the native harness. This metadata is informational only;
+    /// it does not affect visibility or dispatch a provider write.
     pub(crate) natively_archived: bool,
     pub(crate) unavailable_reason: Option<String>,
     /// A retained failed/cancelled Move for this record, when recovery is
@@ -148,11 +146,6 @@ impl ResumeRow {
             ResumeRowKey::Hel(session_id) => Some(session_id),
             ResumeRowKey::Native(..) => None,
         }
-    }
-
-    /// Whether the row is hidden from the default view for any reason.
-    pub(crate) fn is_hidden(&self) -> bool {
-        self.archived || self.natively_archived
     }
 }
 
@@ -171,7 +164,6 @@ pub(crate) struct ResumeDialog {
     pub(crate) row_index: usize,
     pub(crate) search: TextInput,
     pub(crate) form: RefCell<Form<ResumeFocus>>,
-    pub(crate) show_archived: bool,
     pub(crate) opened_at: Instant,
 }
 
@@ -196,7 +188,6 @@ impl ResumeDialog {
             true,
         );
         form.declare_with_enabled(Search, ControlKind::TextField, true);
-        form.declare_with_enabled(Archived, ControlKind::Checkbox, true);
         form.declare_with_enabled(
             Sessions,
             ControlKind::ChoiceList {
@@ -312,8 +303,8 @@ fn relative_time(value: i64, unit: &str) -> String {
 }
 
 /// Merge Hel's non-live records with the scanned native sessions into one list,
-/// newest first. Rows are returned unfiltered; the dialog applies the archived
-/// toggle and search on top.
+/// newest first. Rows are returned unfiltered; the dialog applies the tab and
+/// search on top.
 ///
 /// Dedupe rule: a Hel record whose `native_session_id` matches a scanned native
 /// session of the same harness replaces that native row entirely.
@@ -321,7 +312,6 @@ pub(crate) fn merged_resume_rows(
     config: &HelConfig,
     state: &HelState,
     profiles: &[ImportProfileOption],
-    hidden_native: &BTreeSet<(HarnessKind, String)>,
 ) -> Vec<ResumeRow> {
     let mut adopted = BTreeSet::new();
     let mut rows = Vec::new();
@@ -356,7 +346,6 @@ pub(crate) fn merged_resume_rows(
             details,
             last_activity_ms,
             status,
-            archived: session.archived,
             natively_archived: false,
             unavailable_reason: None,
             move_recovery: None,
@@ -376,7 +365,6 @@ pub(crate) fn merged_resume_rows(
                 details: native.details.clone(),
                 last_activity_ms: native.last_activity_ms,
                 status: ResumeRowStatus::Importable,
-                archived: hidden_native.contains(&key),
                 natively_archived: native.natively_archived,
                 unavailable_reason: native.unavailable_reason.clone(),
                 move_recovery: None,
@@ -395,17 +383,16 @@ pub(crate) fn merged_resume_rows(
 }
 
 /// The rows one dialog tab shows: the merged sources split by ownership, with
-/// checkpoint sizes appended, the archived toggle applied, and search applied.
+/// checkpoint sizes appended and search applied.
 fn build_resume_rows(
     config: &HelConfig,
     state: &HelState,
     dialog: &ResumeDialog,
-    hidden_native: &BTreeSet<(HarnessKind, String)>,
     checkpoint_archive_sizes: &BTreeMap<String, Option<u64>>,
     now: &chrono::DateTime<chrono::Local>,
 ) -> Vec<ResumeRow> {
     let needle = dialog.search.to_lowercase();
-    merged_resume_rows(config, state, &dialog.profiles, hidden_native)
+    merged_resume_rows(config, state, &dialog.profiles)
         .into_iter()
         .filter(|row| dialog.tab.includes(row))
         .map(|mut row| {
@@ -422,7 +409,6 @@ fn build_resume_rows(
             }
             row
         })
-        .filter(|row| dialog.show_archived || !row.is_hidden())
         .filter(|row| {
             let activity = format_last_active(now, row.last_activity_ms).to_lowercase();
             needle.is_empty()
@@ -437,10 +423,10 @@ fn build_resume_rows(
 
 impl DashboardState {
     /// Rebuilds the open dialog's rows from what they are derived from: the
-    /// Hel records, the scanned native sessions, the hidden set, the
-    /// checkpoint sizes, the search, the archived toggle, and the clock the
-    /// activity labels read. Every mutation of those inputs calls this, and
-    /// the dashboard's one-second clock calls it again so searches keep moving.
+    /// Hel records, the scanned native sessions, the checkpoint sizes, the
+    /// search, and the clock the activity labels read. Every mutation of those
+    /// inputs calls this, and the dashboard's one-second clock calls it again
+    /// so searches keep moving.
     /// Moving the selection only reads the rows.
     pub fn rebuild_resume_rows(&mut self) {
         let Mode::ResumeDialog(dialog) = &self.mode else {
@@ -451,7 +437,6 @@ impl DashboardState {
             &self.config,
             &self.state,
             dialog,
-            &self.hidden_native_sessions,
             &self.checkpoint_archive_sizes,
             &chrono::Local::now(),
         );
@@ -477,7 +462,7 @@ impl DashboardState {
                 .cloned();
         }
         dialog.prepare(&self.resume_rows);
-        // Background state and archive updates can remove the selected row.
+        // Background state updates can remove the selected row.
         // Repair the key and index together so the form never points outside
         // the freshly rebuilt list.
         self.resync_resume_selection();
@@ -535,7 +520,6 @@ impl DashboardState {
             row_index: 0,
             search: TextInput::new(),
             form: RefCell::new(Form::default()),
-            show_archived: false,
             opened_at: Instant::now(),
         });
         self.rebuild_resume_rows();
@@ -563,39 +547,6 @@ impl DashboardState {
         }
         self.rebuild_resume_rows();
         self.resync_resume_selection();
-    }
-
-    /// Replaces the hidden set loaded from Hel's database.
-    pub fn set_hidden_native_sessions(&mut self, hidden: BTreeSet<(HarnessKind, String)>) {
-        self.hidden_native_sessions = hidden;
-        self.rebuild_resume_rows();
-    }
-
-    /// Applies a hide/reveal locally so the row moves immediately; the caller
-    /// persists it in the background and reports a failure as a notice.
-    pub fn set_native_session_hidden(
-        &mut self,
-        harness: HarnessKind,
-        native_session_id: String,
-        hidden: bool,
-    ) {
-        if hidden {
-            self.hidden_native_sessions
-                .insert((harness, native_session_id));
-        } else {
-            self.hidden_native_sessions
-                .remove(&(harness, native_session_id));
-        }
-        self.rebuild_resume_rows();
-    }
-
-    /// Applies an archive/unarchive of a Hel record locally, for the same
-    /// reason as [`DashboardState::set_native_session_hidden`].
-    pub fn set_session_archived(&mut self, session_id: &str, archived: bool) {
-        if let Some(session) = self.state.sessions.get_mut(session_id) {
-            session.archived = archived;
-        }
-        self.rebuild_resume_rows();
     }
 
     /// Keeps `row_index` pointed at the selected row after the list changed.
@@ -672,16 +623,13 @@ impl DashboardState {
                         dialog.form.get_mut().focus(Search);
                         return DashboardAction::None;
                     }
-                    KeyCode::Char('a') if focused == Sessions => {
-                        let row = self.selected_resume_row();
-                        return self.toggle_selected_resume_archive(row);
-                    }
                     KeyCode::Char('d') | KeyCode::Delete if focused == Sessions => {
                         let Some(row) = self.selected_resume_row() else {
                             return DashboardAction::None;
                         };
                         let Some(session_id) = row.session_id().map(ToOwned::to_owned) else {
-                            self.notices.set("Mjolnir never destroys a harness's own session. Press a to archive this row.");
+                            self.notices
+                                .set("Mjolnir never destroys a harness's own session.");
                             return DashboardAction::None;
                         };
                         self.cancel_component_pointer();
@@ -696,15 +644,6 @@ impl DashboardState {
                                 reopen: Some(Box::new(dialog)),
                             }));
                         self.rebuild_resume_rows();
-                        return DashboardAction::None;
-                    }
-                    KeyCode::Char('s') => {
-                        dialog.show_archived = !dialog.show_archived;
-                        self.rebuild_resume_rows();
-                        self.resync_resume_selection();
-                        if let Mode::ResumeDialog(dialog) = &mut self.mode {
-                            dialog.form.get_mut().focus(Sessions);
-                        }
                         return DashboardAction::None;
                     }
                     // Keep list navigation shortcuts; arrows in fields belong to editing.
@@ -745,11 +684,6 @@ impl DashboardState {
                 ResumeTab::Import
             }),
             Some(Interaction::Select(Sessions, index)) => self.select_resume_row(index),
-            Some(Interaction::Toggle(Archived)) => {
-                dialog.show_archived = !dialog.show_archived;
-                self.rebuild_resume_rows();
-                self.resync_resume_selection();
-            }
             Some(Interaction::Activate(Search | Tabs)) => dialog.form.get_mut().focus(Sessions),
             Some(Interaction::Activate(Sessions | Open)) => {
                 let row = self.selected_resume_row();
@@ -758,40 +692,6 @@ impl DashboardState {
             _ => {}
         }
         DashboardAction::None
-    }
-
-    fn toggle_selected_resume_archive(&mut self, row: Option<ResumeRow>) -> DashboardAction {
-        let Some(row) = row else {
-            return DashboardAction::None;
-        };
-        if row.natively_archived {
-            self.notices.set(
-                "This session is archived in its own harness; Mjolnir never writes that back.",
-            );
-            return DashboardAction::None;
-        }
-        let archived = !row.archived;
-        match &row.key {
-            ResumeRowKey::Hel(session_id) => {
-                let session_id = session_id.clone();
-                self.set_session_archived(&session_id, archived);
-                self.resync_resume_selection();
-                DashboardAction::SetSessionArchived {
-                    session_id,
-                    archived,
-                }
-            }
-            ResumeRowKey::Native(harness, native_session_id) => {
-                let (harness, native_session_id) = (*harness, native_session_id.clone());
-                self.set_native_session_hidden(harness, native_session_id.clone(), archived);
-                self.resync_resume_selection();
-                DashboardAction::SetNativeSessionHidden {
-                    harness_kind: harness,
-                    native_session_id,
-                    hidden: archived,
-                }
-            }
-        }
     }
 
     fn activate_selected_resume_row(&mut self, row: Option<ResumeRow>) -> DashboardAction {
@@ -875,7 +775,7 @@ pub(crate) fn resume_sessions_pane(area: Rect) -> Rect {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Min(5),
             Constraint::Length(4),
         ])
@@ -943,21 +843,6 @@ pub(crate) fn render_resume_dialog(
         &mut form,
         ResumeFocus::Search,
     );
-    Checkbox::render(
-        frame,
-        Rect::new(
-            rows[1].x,
-            rows[1].y.saturating_add(1),
-            rows[1].width,
-            u16::from(rows[1].height > 1),
-        ),
-        "Show archived rows",
-        dialog.show_archived,
-        true,
-        &mut form,
-        ResumeFocus::Archived,
-    );
-
     let list_rows = dashboard.resume_rows();
     let sessions_focused = form.is_focused(ResumeFocus::Sessions);
     let block = theme::panel(sessions_focused || search_focused).title(match dialog.tab {
@@ -1027,7 +912,7 @@ pub(crate) fn render_resume_dialog(
     if let Some(detail) = selected {
         footer.push(Line::styled(
             truncate_text(&detail.details, usize::from(rows[3].width)),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ));
     }
     let errors = dialog.errors();
@@ -1039,19 +924,15 @@ pub(crate) fn render_resume_dialog(
                 &format!("Scan failed for {error}"),
                 usize::from(rows[3].width),
             ),
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ));
     }
     footer.push(Line::styled(
         match dialog.tab {
-            ResumeTab::Hel => {
-                "Enter resumes · a archives · d destroys · s shows archived · ←/→ tabs · / searches · Tab moves"
-            }
-            ResumeTab::Import => {
-                "Enter imports · a archives · s shows archived · ←/→ tabs · / searches · Tab moves"
-            }
+            ResumeTab::Hel => "Enter resumes · d destroys · ←/→ tabs · / searches · Tab moves",
+            ResumeTab::Import => "Enter imports · ←/→ tabs · / searches · Tab moves",
         },
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::palette().muted),
     ));
     let note_area = Rect::new(
         rows[3].x,
@@ -1110,7 +991,7 @@ pub(crate) fn render_resume_dialog(
 
 fn resume_header_line(layout: &RowLayout) -> Line<'static> {
     let style = Style::default()
-        .fg(theme::MUTED)
+        .fg(theme::palette().muted)
         .add_modifier(Modifier::BOLD);
     Line::from(vec![
         Span::styled(padded_cell("PROFILE", layout.profile), style),
@@ -1139,12 +1020,12 @@ where
     let title_style = if row.status.is_recoverable() {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::WARNING)
+        Style::default().fg(theme::palette().warning)
     };
     let origin = match row.status.warning() {
         Some(warning) => Span::styled(
             format!("{:<width$}", warning, width = layout.origin),
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ),
         None => Span::styled(
             format!(
@@ -1152,15 +1033,10 @@ where
                 truncate_text(&row.origin, layout.origin),
                 width = layout.origin
             ),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::palette().accent),
         ),
     };
     let mut marks = String::new();
-    if row.natively_archived {
-        marks.push_str("  [archived in harness]");
-    } else if row.archived {
-        marks.push_str("  [archived]");
-    }
     if row.unavailable_reason.is_some() {
         marks.push_str("  [unavailable]");
     }
@@ -1174,7 +1050,7 @@ where
     Line::from(vec![
         Span::styled(
             padded_cell(&row.profile_id, layout.profile),
-            Style::default().fg(theme::SECONDARY),
+            Style::default().fg(theme::palette().secondary),
         ),
         Span::raw("  "),
         origin,
@@ -1184,11 +1060,11 @@ where
                 &format_last_active(now, row.last_activity_ms),
                 layout.activity,
             ),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ),
         Span::raw("  "),
         Span::styled(truncate_text(&row.title, layout.title), title_style),
-        Span::styled(marks, Style::default().fg(theme::MUTED)),
+        Span::styled(marks, Style::default().fg(theme::palette().muted)),
     ])
 }
 
@@ -1420,7 +1296,6 @@ mod tests {
                 native("native-1", "Same conversation", 10),
                 native("native-2", "A different conversation", 5),
             ])],
-            &BTreeSet::new(),
         );
 
         assert_eq!(merged.len(), 2, "{:?}", titles(&merged));
@@ -1525,7 +1400,6 @@ mod tests {
                 native("native-1", "Running under Hel right now", 10),
                 native("native-2", "Idle native session", 5),
             ])],
-            &BTreeSet::new(),
         );
         assert_eq!(titles(&merged), ["Idle native session"]);
     }
@@ -1538,7 +1412,7 @@ mod tests {
         session.target_template_id = "retired-target".into();
         let mut config = config();
         config.targets.clear();
-        let merged = merged_resume_rows(&config, &state_with(vec![session]), &[], &BTreeSet::new());
+        let merged = merged_resume_rows(&config, &state_with(vec![session]), &[]);
         assert_eq!(merged[0].origin, "retired-target");
     }
 
@@ -1567,7 +1441,6 @@ mod tests {
                 native("native-mid", "Native March", march),
                 native("native-new", "Native July", july),
             ])],
-            &BTreeSet::new(),
         );
 
         assert_eq!(
@@ -1582,132 +1455,51 @@ mod tests {
         assert_eq!(merged[3].last_activity_ms, january);
     }
 
-    /// Archiving hides rows from the default view in each source tab, and the
-    /// shared toggle brings them back.
+    /// A record archived by an older Mjolnir version remains part of stopped
+    /// history. Archive state is retained in storage for compatibility, but
+    /// it no longer separates rows in the resume dialog.
     #[test]
-    fn the_archived_toggle_covers_the_record_flag_and_the_native_hidden_set() {
-        let mut hidden_record = stopped_session();
-        hidden_record.id = "hidden-record".into();
-        hidden_record.native_session_id = None;
-        hidden_record.acp_session_title = Some("Hidden record".into());
-        hidden_record.archived = true;
-        let mut visible_record = stopped_session();
-        visible_record.id = "visible-record".into();
-        visible_record.native_session_id = None;
-        visible_record.acp_session_title = Some("Visible record".into());
+    fn previously_archived_history_remains_visible() {
+        let mut archived_record = stopped_session();
+        archived_record.id = "archived-record".into();
+        archived_record.native_session_id = None;
+        archived_record.acp_session_title = Some("Archived record".into());
+        archived_record.archived = true;
+        let mut current_record = stopped_session();
+        current_record.id = "current-record".into();
+        current_record.native_session_id = None;
+        current_record.acp_session_title = Some("Current record".into());
 
         let mut dashboard = DashboardState::new(
             config(),
-            state_with(vec![hidden_record, visible_record]),
+            state_with(vec![archived_record, current_record]),
             BTreeMap::new(),
         );
-        dashboard.set_hidden_native_sessions(BTreeSet::from([(
-            HarnessKind::Codex,
-            "native-hidden".to_owned(),
-        )]));
-        dashboard.show_resume_dialog(
-            1,
-            vec![codex_profile(vec![
-                native("native-hidden", "Hidden native", 1),
-                native("native-shown", "Shown native", 2),
-            ])],
-        );
+        dashboard.show_resume_dialog(1, Vec::new());
 
-        assert_eq!(titles(&rows(&dashboard)), ["Visible record"]);
-
-        dashboard.handle_key(key(KeyCode::Char('s')));
         assert_eq!(
             titles(&rows(&dashboard)),
-            ["Hidden record", "Visible record"]
+            ["Archived record", "Current record"]
         );
-
-        switch_to_import(&mut dashboard);
-        assert_eq!(titles(&rows(&dashboard)), ["Shown native", "Hidden native"]);
-
-        dashboard.handle_key(key(KeyCode::Char('s')));
-        assert_eq!(titles(&rows(&dashboard)), ["Shown native"]);
     }
 
-    /// Codex's own archived threads are mirrored one way: hidden by default,
-    /// listed under the toggle, and never unarchivable from Hel.
+    /// Native archive metadata is retained on the row for display consumers,
+    /// while the resume dialog always lists the row and never writes back to
+    /// the provider.
     #[test]
-    fn natively_archived_rows_are_shown_only_under_the_toggle_and_never_unarchived() {
+    fn native_archive_metadata_is_informational() {
         let mut natively_archived = native("native-codex", "Archived in Codex", 1);
         natively_archived.natively_archived = true;
         let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
         dashboard.show_resume_dialog(1, vec![codex_profile(vec![natively_archived])]);
         switch_to_import(&mut dashboard);
-
-        assert!(rows(&dashboard).is_empty());
-        dashboard.handle_key(key(KeyCode::Char('s')));
         assert_eq!(titles(&rows(&dashboard)), ["Archived in Codex"]);
-
+        assert!(rows(&dashboard)[0].natively_archived);
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('a'))),
             DashboardAction::None
         );
-        assert!(
-            dashboard
-                .notices
-                .current()
-                .unwrap_or_default()
-                .contains("archived in its own harness")
-        );
-        assert!(rows(&dashboard)[0].natively_archived);
-    }
-
-    /// Archiving reports the persistence the caller must do, and hides the row
-    /// straight away rather than waiting for that write.
-    #[test]
-    fn archiving_a_row_hides_it_immediately_and_reports_the_write_to_persist() {
-        let mut dashboard = DashboardState::new(
-            config(),
-            state_with(vec![stopped_session()]),
-            BTreeMap::new(),
-        );
-        dashboard.show_resume_dialog(
-            1,
-            vec![codex_profile(vec![native(
-                "native-2",
-                "Native",
-                NEWER_THAN_THE_CHECKPOINT,
-            )])],
-        );
-        assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
-
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('a'))),
-            DashboardAction::SetSessionArchived {
-                session_id: "session-1".into(),
-                archived: true,
-            }
-        );
-        assert!(rows(&dashboard).is_empty());
-
-        switch_to_import(&mut dashboard);
-        assert_eq!(titles(&rows(&dashboard)), ["Native"]);
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('a'))),
-            DashboardAction::SetNativeSessionHidden {
-                harness_kind: HarnessKind::Codex,
-                native_session_id: "native-2".into(),
-                hidden: true,
-            }
-        );
-        assert!(rows(&dashboard).is_empty());
-
-        // The shared toggle reveals the current tab, and archiving again
-        // reverses the native hidden-set write.
-        dashboard.handle_key(key(KeyCode::Char('s')));
-        assert_eq!(titles(&rows(&dashboard)), ["Native"]);
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('a'))),
-            DashboardAction::SetNativeSessionHidden {
-                harness_kind: HarnessKind::Codex,
-                native_session_id: "native-2".into(),
-                hidden: false,
-            }
-        );
+        assert_eq!(titles(&rows(&dashboard)), ["Archived in Codex"]);
     }
 
     /// A lost or force-destroyed session cannot be resumed; deleting its
@@ -1991,7 +1783,7 @@ mod tests {
     }
 
     #[test]
-    fn background_hiding_repairs_selection_when_the_selected_row_disappears() {
+    fn provider_archive_metadata_does_not_move_the_selected_row() {
         let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
         dashboard.show_resume_dialog(
             1,
@@ -2014,28 +1806,33 @@ mod tests {
             ))
         );
 
-        dashboard.set_hidden_native_sessions(BTreeSet::from([(
-            HarnessKind::Codex,
-            "native-old".to_owned(),
-        )]));
+        let mut old = native("native-old", "Older", 1);
+        old.natively_archived = true;
+        dashboard.apply_resume_profile(
+            1,
+            codex_profile(vec![
+                native("native-new", "Newer", NEWER_THAN_THE_CHECKPOINT),
+                old,
+            ]),
+        );
 
         let Mode::ResumeDialog(dialog) = &dashboard.mode else {
             panic!("expected the resume dialog");
         };
-        assert_eq!(dialog.row_index, 0);
+        assert_eq!(dialog.row_index, 1);
         assert_eq!(
             dialog.selected,
             Some(ResumeRowKey::Native(
                 HarnessKind::Codex,
-                "native-new".into()
+                "native-old".into()
             ))
         );
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::ImportSession {
                 profile_id: "codex-1".into(),
-                native_session_id: "native-new".into(),
-                display_title: "Newer".into(),
+                native_session_id: "native-old".into(),
+                display_title: "Older".into(),
             }
         );
         assert!(matches!(dashboard.mode, Mode::Dashboard));
@@ -2120,9 +1917,8 @@ mod tests {
     }
 
     /// The rows are derived state, rebuilt where their inputs change. A state
-    /// reload, a checkpoint size that arrives from the background, and a
-    /// hidden set read out of the database all reach the open dialog straight
-    /// away.
+    /// reload and a checkpoint size that arrives from the background reach the
+    /// open dialog straight away.
     #[test]
     fn the_row_list_follows_state_reloads_and_background_updates_while_the_dialog_is_open() {
         let mut dashboard = DashboardState::new(
@@ -2164,15 +1960,7 @@ mod tests {
 
         switch_to_import(&mut dashboard);
         assert_eq!(titles(&rows(&dashboard)), ["Native"]);
-        dashboard.set_hidden_native_sessions(BTreeSet::from([(
-            HarnessKind::Codex,
-            "native-2".to_owned(),
-        )]));
-        assert!(
-            !titles(&rows(&dashboard)).contains(&"Native"),
-            "{:?}",
-            titles(&rows(&dashboard))
-        );
+        assert_eq!(titles(&rows(&dashboard)), ["Native"]);
     }
 
     /// Walking the list moves the selection over rows that stay put: an arrow
@@ -2317,7 +2105,6 @@ mod tests {
                 &dashboard.config,
                 &dashboard.state,
                 &dialog,
-                &dashboard.hidden_native_sessions,
                 &dashboard.checkpoint_archive_sizes,
                 &chrono::Local::now(),
             )
@@ -2357,15 +2144,7 @@ mod tests {
             .draw(|frame| crate::render::render(frame, &mut dashboard))
             .expect("draw the resume dialog");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        for hint in [
-            "Mjolnir",
-            "Import",
-            "a archives",
-            "d destroys",
-            "s shows archived",
-            "←/→ tabs",
-            "/ searches",
-        ] {
+        for hint in ["Mjolnir", "Import", "d destroys", "←/→ tabs", "/ searches"] {
             assert!(rendered.contains(hint), "{rendered}");
         }
 
@@ -2376,5 +2155,6 @@ mod tests {
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("Enter imports"), "{rendered}");
         assert!(!rendered.contains("d destroys"), "{rendered}");
+        assert!(!rendered.contains("archives"), "{rendered}");
     }
 }

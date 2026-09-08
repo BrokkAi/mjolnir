@@ -377,6 +377,9 @@ pub struct RelayOperationalState {
     pub acp_ready: Option<bool>,
     pub agent_capabilities: Option<Box<AgentCapabilities>>,
     pub agent_info: Option<Implementation>,
+    /// Older workers do not report the optional ACP steering extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering_supported: Option<bool>,
     pub config_options: Vec<SessionConfigOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<SessionModeState>,
@@ -799,6 +802,8 @@ impl RelaySnapshot {
             acp_ready: None,
             agent_capabilities: self.agent_capabilities.clone(),
             agent_info: self.agent_info.clone(),
+            // Steering support belongs to the connected harness, like readiness.
+            steering_supported: None,
             config_options: self.config_options.clone(),
             modes: self.modes.clone(),
             available_commands: self.available_commands.clone(),

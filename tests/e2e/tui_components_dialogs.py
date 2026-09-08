@@ -16,7 +16,7 @@ circular import.
 
 The review-settings probe uses a configured review profile and asynchronous
 discovery state. Import covers tab selection, search, and cancellation.
-Submission, persistence, Stop/Resume, and typed destroy are exercised by
+Submission, persistence, Stop/Resume, and deletion confirmation are exercised by
 the companion tui_components_actions module against the same owned fixture.
 """
 
@@ -236,7 +236,7 @@ def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
     import time
     from tui_components_tmux import locate_text
     before = lab.snapshot()["review_config"]
-    _open_palette_command(tmux, "review settings", "Review settings")
+    _open_palette_command(tmux, "review settings", "Review settings…")
     _wait(tmux, "Automatic review")
     _record(evidence, tmux, "review-settings-open", "open review settings", "review form visible")
     tmux.send_key("Space")
@@ -247,10 +247,10 @@ def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
     tmux.mouse_click(x + 2, y)
     time.sleep(0.15)
     screen = _capture(tmux)
-    x, y = locate_text(screen, "  Save  ")
+    x, y = locate_text(screen, "  Save Setup  ")
     tmux.mouse_click(x + 3, y)
     time.sleep(0.3)
-    _wait(tmux, "Review settings")
+    _wait(tmux, "Setup › Code review")
     if lab.snapshot()["review_config"] != before:
         raise AssertionError("disabled Save persisted an invalid review draft")
     _record(evidence, tmux, "review-disabled-save", "enable without a reviewer; click disabled Save", "invalid draft stays open and persisted settings are unchanged")
@@ -264,8 +264,9 @@ def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
     _record(evidence, tmux, "review-async-help", "select fake profile; open and close Help during discovery", "choices arrive and the review draft is restored")
     from tui_review_discovery import exercise_choices
     exercise_choices(lab, tmux, evidence)
-    tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Review settings" not in _capture(tmux), "review cancellation")
+    x, y = locate_text(_capture(tmux), "  Cancel  ", last=True)
+    tmux.mouse_click(x + 3, y)
+    tmux.wait_until(lambda: "╭ Setup" not in _capture(tmux), "review cancellation")
     if lab.snapshot()["review_config"] != before:
         raise AssertionError("cancelling review settings persisted the draft")
     from tui_review_discovery import exercise_cached_reopen
