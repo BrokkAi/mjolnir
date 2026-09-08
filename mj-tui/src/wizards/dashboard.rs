@@ -4,12 +4,7 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
     let mut form = wizard.form.borrow_mut();
     let previous = form.focused();
     form.begin_update();
-    let initial = wizard_control(
-        wizard.step,
-        wizard.focus,
-        wizard.review_focus,
-        &wizard.mounts,
-    );
+    let initial = new_wizard_control(wizard);
     match wizard.step {
         WizardStep::Profile => {
             form.declare_with_enabled(
@@ -58,8 +53,41 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
             declare_wizard_buttons(&mut form, true, true);
         }
         WizardStep::NewBundle => {
+            form.declare_with_enabled(
+                WizardControl::NewBundleRepositories,
+                ControlKind::ChoiceList {
+                    len: wizard.new_bundle_repositories.len(),
+                    selected: wizard.new_bundle_selected,
+                },
+                !wizard.bundle_creation_in_flight && !wizard.new_bundle_repositories.is_empty(),
+            );
             form.declare_with_enabled(WizardControl::NewBundleSource, ControlKind::TextField, true);
-            declare_wizard_buttons(&mut form, true, true);
+            form.declare_with_enabled(
+                WizardControl::Add,
+                ControlKind::Button,
+                !wizard.bundle_creation_in_flight && !wizard.new_bundle_source.trim().is_empty(),
+            );
+            form.declare_with_enabled(
+                WizardControl::NewBundleRemove,
+                ControlKind::Button,
+                !wizard.bundle_creation_in_flight && !wizard.new_bundle_repositories.is_empty(),
+            );
+            form.declare_with_enabled(
+                WizardControl::Cancel,
+                ControlKind::Button,
+                !wizard.bundle_creation_in_flight,
+            );
+            form.declare_with_enabled(
+                WizardControl::Back,
+                ControlKind::Button,
+                !wizard.bundle_creation_in_flight,
+            );
+            form.declare_with_enabled(
+                WizardControl::Next,
+                ControlKind::Button,
+                !wizard.bundle_creation_in_flight
+                    && !wizard.new_bundle_sources_for_submit().is_empty(),
+            );
         }
         WizardStep::Mounts => declare_mount_controls(&mut form, &wizard.mounts),
         WizardStep::Review => {
@@ -202,29 +230,50 @@ fn sync_new_legacy_focus(wizard: &mut NewWizard) {
         Some(
             WizardControl::ProfileList | WizardControl::BundleList | WizardControl::TargetList,
         )
-        | Some(WizardControl::ProjectDirectory | WizardControl::NewBundleSource) => {
+        | Some(WizardControl::ProjectDirectory) => {
+            wizard.focus = WizardFocus::Content;
+        }
+        Some(WizardControl::NewBundleRepositories) => {
+            wizard.new_bundle_focus = NewBundleFocus::Repositories;
+            wizard.focus = WizardFocus::Content;
+        }
+        Some(WizardControl::NewBundleSource) => {
+            wizard.new_bundle_focus = NewBundleFocus::Source;
             wizard.focus = WizardFocus::Content;
         }
         Some(WizardControl::Cancel) => match wizard.step {
             WizardStep::Mounts => wizard.mounts.focus = MountFocus::Cancel,
             WizardStep::Review => wizard.review_focus = ReviewFocus::Cancel,
+            WizardStep::NewBundle => wizard.new_bundle_focus = NewBundleFocus::Cancel,
             _ => wizard.focus = WizardFocus::Cancel,
         },
         Some(WizardControl::Back) => match wizard.step {
             WizardStep::Mounts => wizard.mounts.focus = MountFocus::Back,
             WizardStep::Review => wizard.review_focus = ReviewFocus::Back,
+            WizardStep::NewBundle => wizard.new_bundle_focus = NewBundleFocus::Back,
             _ => wizard.focus = WizardFocus::Back,
         },
-        Some(WizardControl::Next) => wizard.focus = WizardFocus::Next,
+        Some(WizardControl::Next) => {
+            if wizard.step == WizardStep::NewBundle {
+                wizard.new_bundle_focus = NewBundleFocus::Create;
+            } else {
+                wizard.focus = WizardFocus::Next;
+            }
+        }
         Some(WizardControl::MountSource) => wizard.mounts.focus = MountFocus::Source,
         Some(WizardControl::MountDestination) => wizard.mounts.focus = MountFocus::Destination,
         Some(WizardControl::MountReadOnly) => wizard.mounts.focus = MountFocus::ReadOnly,
         Some(WizardControl::Add) => {
-            if wizard.step == WizardStep::Mounts {
+            if wizard.step == WizardStep::NewBundle {
+                wizard.new_bundle_focus = NewBundleFocus::Add;
+            } else if wizard.step == WizardStep::Mounts {
                 wizard.mounts.focus = MountFocus::Add;
             } else {
                 wizard.review_focus = ReviewFocus::Add;
             }
+        }
+        Some(WizardControl::NewBundleRemove) => {
+            wizard.new_bundle_focus = NewBundleFocus::Remove;
         }
         Some(WizardControl::ReviewAttachments) => wizard.review_focus = ReviewFocus::Attachments,
         Some(WizardControl::Submit) => wizard.review_focus = ReviewFocus::Submit,
@@ -265,6 +314,7 @@ fn sync_resume_legacy_focus(wizard: &mut ResumeWizard) {
         Some(WizardControl::Submit) => wizard.review_focus = ReviewFocus::Submit,
         Some(WizardControl::DiscardQueue) | None => {}
         Some(WizardControl::ProjectDirectory | WizardControl::NewBundleSource) => {}
+        Some(WizardControl::NewBundleRepositories | WizardControl::NewBundleRemove) => {}
     }
 }
 
@@ -275,6 +325,10 @@ impl DashboardState {
         event: Event,
         mut wizard: NewWizard,
     ) -> DashboardAction {
+        if wizard.bundle_creation_in_flight {
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
         declare_new_controls(self, &wizard);
         if let Event::Key(key) = &event
             && key.kind == crossterm::event::KeyEventKind::Release
@@ -319,10 +373,16 @@ impl DashboardState {
         sync_new_legacy_focus(&mut wizard);
         // Shared fields already received editing input. Do not let the old
         // step handler edit a field while a footer button owns focus.
-        if matches!(
-            wizard.step,
-            WizardStep::ProjectDirectory | WizardStep::NewBundle
-        ) {
+        if wizard.step == WizardStep::NewBundle {
+            if matches!(&event, Event::Key(key) if key.code == KeyCode::Delete)
+                && wizard.new_bundle_focus == NewBundleFocus::Repositories
+            {
+                wizard.remove_selected_new_bundle_repository();
+            }
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
+        if wizard.step == WizardStep::ProjectDirectory {
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         }
@@ -423,6 +483,11 @@ impl DashboardState {
                 match id {
                     WizardControl::ProfileList => wizard.profile = selected,
                     WizardControl::BundleList => wizard.bundle = selected,
+                    WizardControl::NewBundleRepositories => {
+                        wizard.new_bundle_selected =
+                            selected.min(wizard.new_bundle_repositories.len().saturating_sub(1));
+                        wizard.new_bundle_focus = NewBundleFocus::Repositories;
+                    }
                     WizardControl::TargetList => {
                         wizard.target = selected;
                         let action = self.prepare_new_target(&mut wizard);
@@ -565,8 +630,12 @@ impl DashboardState {
                 return changed;
             }
             if id == WizardControl::NewBundleSource {
+                if wizard.bundle_creation_in_flight {
+                    return false;
+                }
                 if key.code == KeyCode::Backspace && wizard.new_bundle_source.is_empty() {
                     wizard.step = WizardStep::Bundle;
+                    wizard.new_bundle_focus = NewBundleFocus::Source;
                     wizard.focus = WizardFocus::Content;
                     return true;
                 }
@@ -734,6 +803,9 @@ impl DashboardState {
         mut wizard: NewWizard,
         id: WizardControl,
     ) -> DashboardAction {
+        if wizard.step == WizardStep::NewBundle {
+            return self.activate_new_bundle_control(wizard, id);
+        }
         match id {
             WizardControl::Cancel => {
                 self.cancel_modal();
@@ -795,11 +867,94 @@ impl DashboardState {
                 wizard.focus = WizardFocus::Content;
             }
             WizardControl::DiscardQueue => {}
+            WizardControl::NewBundleRepositories | WizardControl::NewBundleRemove => {}
         }
         // The delegated handler owns the draft from here. In particular, a
         // successful submit may intentionally leave the modal closed; do not
         // restore a stale clone after it returns.
         self.handle_new_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), wizard)
+    }
+
+    fn activate_new_bundle_control(
+        &mut self,
+        mut wizard: NewWizard,
+        id: WizardControl,
+    ) -> DashboardAction {
+        if wizard.bundle_creation_in_flight {
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
+        match id {
+            WizardControl::Cancel => {
+                self.cancel_modal();
+                DashboardAction::None
+            }
+            WizardControl::Back => {
+                wizard.step = WizardStep::Bundle;
+                wizard.focus = WizardFocus::Content;
+                self.mode = Mode::New(wizard);
+                DashboardAction::None
+            }
+            WizardControl::NewBundleRepositories => {
+                wizard.new_bundle_focus = NewBundleFocus::Repositories;
+                self.mode = Mode::New(wizard);
+                DashboardAction::None
+            }
+            WizardControl::NewBundleSource => {
+                wizard.new_bundle_focus = NewBundleFocus::Source;
+                self.add_or_report_new_bundle_repository(wizard)
+            }
+            WizardControl::Add => {
+                wizard.new_bundle_focus = NewBundleFocus::Add;
+                self.add_or_report_new_bundle_repository(wizard)
+            }
+            WizardControl::NewBundleRemove => {
+                wizard.new_bundle_focus = NewBundleFocus::Remove;
+                wizard.remove_selected_new_bundle_repository();
+                self.mode = Mode::New(wizard);
+                DashboardAction::None
+            }
+            WizardControl::Next => {
+                wizard.new_bundle_focus = NewBundleFocus::Create;
+                self.submit_new_bundle(wizard)
+            }
+            WizardControl::ProfileList
+            | WizardControl::BundleList
+            | WizardControl::TargetList
+            | WizardControl::ProjectDirectory
+            | WizardControl::MountSource
+            | WizardControl::MountDestination
+            | WizardControl::MountReadOnly
+            | WizardControl::ReviewAttachments
+            | WizardControl::DiscardQueue
+            | WizardControl::Submit => {
+                self.mode = Mode::New(wizard);
+                DashboardAction::None
+            }
+        }
+    }
+
+    fn add_or_report_new_bundle_repository(&mut self, mut wizard: NewWizard) -> DashboardAction {
+        if wizard.add_new_bundle_repository() {
+            self.mode = Mode::New(wizard);
+        } else {
+            self.notices.set("Repository source cannot be empty.");
+            self.mode = Mode::New(wizard);
+        }
+        DashboardAction::None
+    }
+
+    fn submit_new_bundle(&mut self, mut wizard: NewWizard) -> DashboardAction {
+        let sources = wizard.new_bundle_sources_for_submit();
+        if sources.is_empty() {
+            self.notices.set("Repository source cannot be empty.");
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
+        wizard.bundle_creation_in_flight = true;
+        self.notices.set("Creating bundle…");
+        self.mode = Mode::New(wizard);
+        DashboardAction::CreateBundle { sources }
     }
 
     fn activate_resume_control(
@@ -858,7 +1013,10 @@ impl DashboardState {
             }
             WizardControl::DiscardQueue => {}
             WizardControl::BundleList => wizard.focus = WizardFocus::Content,
-            WizardControl::ProjectDirectory | WizardControl::NewBundleSource => {}
+            WizardControl::ProjectDirectory
+            | WizardControl::NewBundleRepositories
+            | WizardControl::NewBundleSource
+            | WizardControl::NewBundleRemove => {}
         }
         // The delegated handler owns the draft from here. A successful
         // resume's preflight keeps the modal pending, while cancellation or
@@ -874,6 +1032,10 @@ impl DashboardState {
         mut wizard: NewWizard,
     ) -> DashboardAction {
         let code = key.code;
+        if wizard.bundle_creation_in_flight {
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
         if code == KeyCode::Esc {
             self.cancel_modal();
             return DashboardAction::None;
@@ -994,34 +1156,6 @@ impl DashboardState {
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         }
-        if wizard.step == WizardStep::NewBundle {
-            return match code {
-                KeyCode::Backspace if wizard.new_bundle_source.is_empty() => {
-                    wizard.step = WizardStep::Bundle;
-                    self.mode = Mode::New(wizard);
-                    DashboardAction::None
-                }
-                _ if !matches!(code, KeyCode::Enter | KeyCode::Esc) => {
-                    wizard.new_bundle_source.handle_key(key);
-                    self.mode = Mode::New(wizard);
-                    DashboardAction::None
-                }
-                KeyCode::Enter if wizard.new_bundle_source.trim().is_empty() => {
-                    self.notices.set("Repository source cannot be empty.");
-                    self.mode = Mode::New(wizard);
-                    DashboardAction::None
-                }
-                KeyCode::Enter => {
-                    let source = wizard.new_bundle_source.trim().to_owned();
-                    self.mode = Mode::New(wizard);
-                    DashboardAction::CreateBundle { source }
-                }
-                _ => {
-                    self.mode = Mode::New(wizard);
-                    DashboardAction::None
-                }
-            };
-        }
         if wizard.step == WizardStep::Target
             && matches!(
                 code,
@@ -1107,7 +1241,7 @@ impl DashboardState {
                 if wizard.bundle == self.config.bundles.len() {
                     wizard.step = WizardStep::NewBundle;
                     wizard.focus = WizardFocus::Content;
-                    wizard.new_bundle_source.clear();
+                    wizard.new_bundle_focus = NewBundleFocus::Source;
                     self.mode = Mode::New(wizard);
                     return DashboardAction::None;
                 }
@@ -1476,22 +1610,41 @@ impl DashboardState {
     }
 
     pub fn apply_created_bundle(&mut self, config: HelConfig, bundle_id: &str) -> DashboardAction {
+        self.config = config;
         let Mode::New(mut wizard) = self.mode.clone() else {
             return DashboardAction::None;
         };
-        self.config = config;
+        if !wizard.bundle_creation_in_flight {
+            return DashboardAction::None;
+        }
+        wizard.bundle_creation_in_flight = false;
         let Some(index) = bundle_ids_by_recent_creation(&self.config, &self.state)
             .iter()
             .position(|id| *id == bundle_id)
         else {
             self.notices
                 .set(format!("Created bundle {bundle_id:?} was not found."));
+            self.mode = Mode::New(wizard);
             return DashboardAction::None;
         };
         wizard.bundle = index;
         wizard.step = WizardStep::Review;
+        self.notices.set(format!("Created bundle {bundle_id}."));
         self.mode = Mode::New(wizard);
         DashboardAction::None
+    }
+
+    /// Reopens the new-bundle editor after its asynchronous create failed.
+    /// The draft remains untouched so the user can correct and retry it.
+    pub fn fail_bundle_creation(&mut self, error: &str) {
+        if let Mode::New(mut wizard) = self.mode.clone()
+            && wizard.bundle_creation_in_flight
+        {
+            wizard.bundle_creation_in_flight = false;
+            self.mode = Mode::New(wizard);
+        }
+        self.notices
+            .set(format!("Could not create bundle: {error}"));
     }
 
     pub fn apply_aws_resource_options(
@@ -2548,7 +2701,11 @@ impl DashboardState {
             target,
             mounts: MountWizard::new(Vec::new()),
             review_focus: ReviewFocus::Submit,
+            new_bundle_focus: NewBundleFocus::Source,
+            new_bundle_selected: 0,
+            new_bundle_repositories: Vec::new(),
             new_bundle_source: mj_chat::hel_text_input::TextInput::new(),
+            bundle_creation_in_flight: false,
             project_directory: mj_chat::hel_text_input::TextInput::new(),
             project_directory_error: None,
             project_history: Vec::new(),

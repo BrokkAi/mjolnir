@@ -712,10 +712,10 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::ResolveAwsResourceOptions {
             target_template_ids,
         } => context.resolve_aws_resource_options(target_template_ids),
-        DashboardAction::CreateBundle { source } => {
+        DashboardAction::CreateBundle { sources } => {
             context.dashboard.set_notice("Creating bundle…");
             spawn_create_bundle(
-                source,
+                sources,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );

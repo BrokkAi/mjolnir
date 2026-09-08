@@ -1061,7 +1061,7 @@ pub(crate) fn spawn_clipboard_write(
 }
 
 pub(crate) fn spawn_create_bundle(
-    source: String,
+    sources: Vec<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) {
@@ -1072,7 +1072,7 @@ pub(crate) fn spawn_create_bundle(
         move || {
             // Load fresh so a concurrent background save (e.g. an import
             // apply) is not clobbered by a stale UI-time config snapshot.
-            let created = mj_controller::hel_controller::create_quick_bundle(&source)?;
+            let created = mj_controller::hel_controller::create_bundle_from_sources(&sources)?;
             Ok(CreatedBundleUpdate {
                 config: created.config,
                 bundle_id: created.bundle_id,
@@ -1791,8 +1791,7 @@ impl DashboardContext {
                     }
                 }
                 Err(error) => {
-                    self.dashboard
-                        .set_notice(format!("Could not create bundle: {error}"));
+                    self.dashboard.fail_bundle_creation(&error);
                 }
             },
             DashboardIoUpdate::ImportedSessionApplied { result } => match *result {

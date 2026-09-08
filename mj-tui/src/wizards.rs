@@ -61,7 +61,9 @@ pub(crate) enum WizardControl {
     BundleList,
     TargetList,
     ProjectDirectory,
+    NewBundleRepositories,
     NewBundleSource,
+    NewBundleRemove,
     MountSource,
     MountDestination,
     MountReadOnly,
@@ -83,7 +85,11 @@ pub(crate) struct NewWizard {
     pub(crate) target: usize,
     pub(crate) mounts: MountWizard,
     review_focus: ReviewFocus,
+    pub(crate) new_bundle_focus: NewBundleFocus,
+    pub(crate) new_bundle_selected: usize,
+    pub(crate) new_bundle_repositories: Vec<String>,
     pub(crate) new_bundle_source: TextInput,
+    pub(crate) bundle_creation_in_flight: bool,
     pub(crate) project_directory: TextInput,
     pub(crate) project_directory_error: Option<String>,
     project_history: Vec<std::path::PathBuf>,
@@ -103,7 +109,11 @@ impl PartialEq for NewWizard {
             && self.target == other.target
             && self.mounts == other.mounts
             && self.review_focus == other.review_focus
+            && self.new_bundle_focus == other.new_bundle_focus
+            && self.new_bundle_selected == other.new_bundle_selected
+            && self.new_bundle_repositories == other.new_bundle_repositories
             && self.new_bundle_source == other.new_bundle_source
+            && self.bundle_creation_in_flight == other.bundle_creation_in_flight
             && self.project_directory == other.project_directory
             && self.project_directory_error == other.project_directory_error
             && self.project_history == other.project_history
@@ -115,6 +125,17 @@ impl PartialEq for NewWizard {
 }
 
 impl Eq for NewWizard {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NewBundleFocus {
+    Repositories,
+    Source,
+    Add,
+    Remove,
+    Cancel,
+    Back,
+    Create,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MountFocus {
@@ -230,7 +251,9 @@ impl NewWizard {
         if let Some(id) = self.form.borrow().focused() {
             return match self.step {
                 WizardStep::ProjectDirectory => id == WizardControl::ProjectDirectory,
-                WizardStep::NewBundle => id == WizardControl::NewBundleSource,
+                WizardStep::NewBundle => {
+                    id == WizardControl::NewBundleSource && !self.bundle_creation_in_flight
+                }
                 WizardStep::Mounts => matches!(
                     id,
                     WizardControl::MountSource | WizardControl::MountDestination
@@ -238,14 +261,15 @@ impl NewWizard {
                 _ => false,
             };
         }
-        matches!(
-            self.step,
-            WizardStep::ProjectDirectory | WizardStep::NewBundle
-        ) || self.step == WizardStep::Mounts
-            && matches!(
-                self.mounts.focus,
-                MountFocus::Source | MountFocus::Destination
-            )
+        self.step == WizardStep::ProjectDirectory
+            || self.step == WizardStep::NewBundle
+                && self.new_bundle_focus == NewBundleFocus::Source
+                && !self.bundle_creation_in_flight
+            || self.step == WizardStep::Mounts
+                && matches!(
+                    self.mounts.focus,
+                    MountFocus::Source | MountFocus::Destination
+                )
     }
 }
 
@@ -595,6 +619,46 @@ impl NewWizard {
             WizardStep::NewBundle => unreachable!("bundle input has no picker index"),
         }
     }
+
+    fn add_new_bundle_repository(&mut self) -> bool {
+        let source = self.new_bundle_source.trim();
+        if source.is_empty() {
+            return false;
+        }
+        self.new_bundle_repositories.push(source.to_owned());
+        self.new_bundle_selected = self.new_bundle_repositories.len() - 1;
+        self.new_bundle_source.clear();
+        self.new_bundle_focus = NewBundleFocus::Source;
+        true
+    }
+
+    fn remove_selected_new_bundle_repository(&mut self) -> bool {
+        if self.new_bundle_repositories.is_empty() {
+            return false;
+        }
+        self.new_bundle_repositories.remove(
+            self.new_bundle_selected
+                .min(self.new_bundle_repositories.len() - 1),
+        );
+        self.new_bundle_selected = self
+            .new_bundle_selected
+            .min(self.new_bundle_repositories.len().saturating_sub(1));
+        self.new_bundle_focus = if self.new_bundle_repositories.is_empty() {
+            NewBundleFocus::Source
+        } else {
+            NewBundleFocus::Repositories
+        };
+        true
+    }
+
+    fn new_bundle_sources_for_submit(&self) -> Vec<String> {
+        let mut sources = self.new_bundle_repositories.clone();
+        let current = self.new_bundle_source.trim();
+        if !current.is_empty() {
+            sources.push(current.to_owned());
+        }
+        sources
+    }
 }
 
 impl ResumeWizard {
@@ -773,6 +837,26 @@ fn wizard_control(
     }
 }
 
+fn new_wizard_control(wizard: &NewWizard) -> WizardControl {
+    if wizard.step == WizardStep::NewBundle {
+        return match wizard.new_bundle_focus {
+            NewBundleFocus::Repositories => WizardControl::NewBundleRepositories,
+            NewBundleFocus::Source => WizardControl::NewBundleSource,
+            NewBundleFocus::Add => WizardControl::Add,
+            NewBundleFocus::Remove => WizardControl::NewBundleRemove,
+            NewBundleFocus::Cancel => WizardControl::Cancel,
+            NewBundleFocus::Back => WizardControl::Back,
+            NewBundleFocus::Create => WizardControl::Next,
+        };
+    }
+    wizard_control(
+        wizard.step,
+        wizard.focus,
+        wizard.review_focus,
+        &wizard.mounts,
+    )
+}
+
 pub(crate) fn render_new_wizard(
     frame: &mut Frame,
     area: Rect,
@@ -781,12 +865,7 @@ pub(crate) fn render_new_wizard(
     surfaces: &mut FrameSurfaces,
 ) {
     let mut form = wizard.form.borrow_mut();
-    let initial = wizard_control(
-        wizard.step,
-        wizard.focus,
-        wizard.review_focus,
-        &wizard.mounts,
-    );
+    let initial = new_wizard_control(wizard);
     begin_form_frame(&mut form, initial);
     if wizard.step == WizardStep::Review {
         let target_id = nth_key(&dashboard.config.targets, wizard.target);
@@ -954,39 +1033,122 @@ pub(crate) fn render_new_wizard(
         return;
     }
     if wizard.step == WizardStep::NewBundle {
-        let popup = centered_modal(frame, surfaces, 76, 9, area);
+        let popup_height = u16::try_from(wizard.new_bundle_repositories.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(8)
+            .clamp(10, 24);
+        let popup = centered_modal(frame, surfaces, 76, popup_height, area);
         let content = popup.inner(ratatui::layout::Margin {
             horizontal: 1,
             vertical: 1,
         });
-        frame.render_widget(theme::modal().title(" New repository bundle "), popup);
+        frame.render_widget(theme::modal().title(" New bundle "), popup);
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::raw("Local Git path or GitHub owner/repository:"),
-                Line::raw(""),
-                Line::styled(
-                    "Tab moves focus · Enter activates · Esc cancels",
+            Paragraph::new("Repositories (first is primary):"),
+            Rect::new(content.x, content.y, content.width, 1.min(content.height)),
+        );
+        let list_y = content.y.saturating_add(1);
+        let list_height = if wizard.new_bundle_repositories.is_empty() {
+            1.min(content.height.saturating_sub(5))
+        } else {
+            u16::try_from(wizard.new_bundle_repositories.len())
+                .unwrap_or(u16::MAX)
+                .min(content.height.saturating_sub(6))
+        };
+        let list_area = Rect::new(content.x, list_y, content.width, list_height);
+        if wizard.new_bundle_repositories.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    "No repositories added yet.",
                     Style::default().fg(theme::MUTED),
-                ),
-            ]),
+                )),
+                list_area,
+            );
+        } else {
+            let rows = wizard
+                .new_bundle_repositories
+                .iter()
+                .enumerate()
+                .map(|(index, source)| {
+                    if index == 0 {
+                        Line::raw(format!("primary  {source}"))
+                    } else {
+                        Line::raw(format!("         {source}"))
+                    }
+                })
+                .collect::<Vec<_>>();
+            ChoiceList::render(
+                frame,
+                list_area,
+                &rows,
+                wizard.new_bundle_selected,
+                &mut form,
+                WizardControl::NewBundleRepositories,
+            );
+            if wizard.bundle_creation_in_flight {
+                form.declare_with_enabled(
+                    WizardControl::NewBundleRepositories,
+                    ControlKind::ChoiceList {
+                        len: wizard.new_bundle_repositories.len(),
+                        selected: wizard.new_bundle_selected,
+                    },
+                    false,
+                );
+            }
+        }
+        let source_label_y = list_y.saturating_add(list_height);
+        frame.render_widget(
+            Paragraph::new("Local Git path or GitHub owner/repository:"),
             Rect::new(
                 content.x,
-                content.y,
+                source_label_y,
                 content.width,
-                content.height.saturating_sub(2),
+                1.min(content.height),
             ),
         );
         TextField::render(
             frame,
             Rect::new(
                 content.x,
-                content.y.saturating_add(2),
+                source_label_y.saturating_add(1),
                 content.width,
                 1.min(content.height),
             ),
             &wizard.new_bundle_source,
             &mut form,
             WizardControl::NewBundleSource,
+        );
+        let help_y = content.bottom().saturating_sub(3);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                if wizard.bundle_creation_in_flight {
+                    "Creating bundle…"
+                } else {
+                    "Enter adds · Delete removes · Tab moves focus · Esc cancels"
+                },
+                Style::default().fg(theme::MUTED),
+            )),
+            Rect::new(content.x, help_y, content.width, 1.min(content.height)),
+        );
+        let action_enabled =
+            !wizard.bundle_creation_in_flight && !wizard.new_bundle_source.trim().is_empty();
+        ButtonRow::render(
+            frame,
+            Rect::new(
+                content.x,
+                content.bottom().saturating_sub(2),
+                content.width,
+                1.min(content.height),
+            ),
+            &[
+                (WizardControl::Add, "Add repository", action_enabled),
+                (
+                    WizardControl::NewBundleRemove,
+                    "Remove selected repository",
+                    !wizard.bundle_creation_in_flight && !wizard.new_bundle_repositories.is_empty(),
+                ),
+            ],
+            &mut form,
         );
         ButtonRow::render(
             frame,
@@ -997,9 +1159,26 @@ pub(crate) fn render_new_wizard(
                 1.min(content.height),
             ),
             &[
-                (WizardControl::Cancel, "Cancel", true),
-                (WizardControl::Back, "Back", true),
-                (WizardControl::Next, "Create repository", true),
+                (
+                    WizardControl::Cancel,
+                    "Cancel",
+                    !wizard.bundle_creation_in_flight,
+                ),
+                (
+                    WizardControl::Back,
+                    "Back",
+                    !wizard.bundle_creation_in_flight,
+                ),
+                (
+                    WizardControl::Next,
+                    if wizard.bundle_creation_in_flight {
+                        "Creating…"
+                    } else {
+                        "Create bundle"
+                    },
+                    !wizard.bundle_creation_in_flight
+                        && !wizard.new_bundle_sources_for_submit().is_empty(),
+                ),
             ],
             &mut form,
         );
@@ -1025,7 +1204,7 @@ pub(crate) fn render_new_wizard(
                     let bundle = &dashboard.config.bundles[id];
                     format!("{id}  {} repositories", bundle.repositories.len())
                 })
-                .chain(["New repository…".to_owned()])
+                .chain(["New bundle…".to_owned()])
                 .collect(),
             wizard.bundle,
         ),

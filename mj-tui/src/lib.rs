@@ -251,7 +251,7 @@ pub enum DashboardAction {
         target_template_ids: Vec<String>,
     },
     CreateBundle {
-        source: String,
+        sources: Vec<String>,
     },
     Close {
         session_id: String,
