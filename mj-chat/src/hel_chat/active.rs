@@ -661,7 +661,7 @@ impl ActiveChat {
             (state, pending)
         };
         state.set_history_context(&bundle_id);
-        state.set_header_summary(header.target, header.profile);
+        state.set_header_summary(header.target, header.profile, header.title);
         state.restore_draft(draft);
         state.notices = notices;
         let (chat_io_tx, chat_io_rx) = tokio::sync::mpsc::unbounded_channel::<ChatIoUpdate>();
@@ -924,8 +924,9 @@ impl ActiveChat {
             .session
             .project_target(config, &context.session.target_template_id);
         let profile = context.session.last_profile.clone();
+        let title = context.session.display_title().to_owned();
         let harness_kind = context.session.harness_kind;
-        self.state.set_header_summary(target, profile);
+        self.state.set_header_summary(target, profile, title);
         self.state.set_harness_kind(harness_kind);
         self.state.set_review_config(config.review.clone());
         self.state.set_spinner_style(config.spinner);
@@ -3061,7 +3062,7 @@ mod tests {
         let columns = dimension("MJ_CHAT_CAPTURE_COLUMNS", 110);
         let rows = dimension("MJ_CHAT_CAPTURE_ROWS", 40);
         let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_header_summary("local / mjolnir", "Claude · Sonnet");
+        chat.set_header_summary("local / mjolnir", "Claude · Sonnet", "");
         chat.mark_prompt_submitted("Make the terminal feel beautifully crafted.");
         chat.turn_started_at_epoch_seconds = Some(hel::clock::epoch_seconds().saturating_sub(42));
         chat.set_current_step_start(Some(hel::clock::epoch_millis().saturating_sub(7_000)));
@@ -3955,6 +3956,7 @@ mod tests {
             SessionHeaderIdentity {
                 target: "localhost".into(),
                 profile: "codex-1".into(),
+                title: "Original session title".into(),
                 harness_kind: Some(HarnessKind::Codex),
             },
             "keep this draft".into(),
@@ -3974,6 +3976,8 @@ mod tests {
         moved.target_template_id = "podman".into();
         moved.last_profile = "claude-2".into();
         moved.harness_kind = HarnessKind::Claude;
+        moved.acp_session_title = Some("Harness session title".into());
+        moved.session_title_override = Some("Renamed session".into());
         chat.refresh_context(&reloaded, Some(&moved));
 
         assert_eq!(chat.draft(), "keep this draft");
@@ -3996,10 +4000,12 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            rendered.contains("podman  [idle]  claude-2"),
-            "the refreshed target/profile must be visible in the conversation header: {rendered:?}"
+            rendered.contains("podman  [idle]  claude-2  Renamed session"),
+            "the refreshed session identity must be visible in the conversation header: {rendered:?}"
         );
         assert!(!rendered.contains("localhost  [idle]  codex-1"));
+        assert!(!rendered.contains("Original session title"));
+        assert!(!rendered.contains("Harness session title"));
     }
 
     #[tokio::test]

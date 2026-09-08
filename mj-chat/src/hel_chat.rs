@@ -371,6 +371,8 @@ pub struct SessionHeaderIdentity {
     pub target: String,
     /// Profile column from the session list's live-session summary.
     pub profile: String,
+    /// Display title from the session list, including any user override.
+    pub title: String,
     /// Harness the session runs, so the chat can answer harness-specific
     /// questions (like whether Codex exposes plan mode) without a recovery
     /// context, which the daemon now owns.
@@ -516,6 +518,7 @@ pub struct ChatState {
     /// Session-list identity snapshotted when the chat opened.
     header_target: String,
     header_profile: String,
+    header_title: String,
     spinner_style: hel::hel_config::SpinnerStyle,
     turn_started_at_epoch_seconds: Option<u64>,
     /// Whether a prompt of ours is in flight. `phase` also goes Running for a
@@ -623,6 +626,7 @@ impl ChatState {
             voice_form: voice_form(),
             header_target: String::new(),
             header_profile: String::new(),
+            header_title: String::new(),
             spinner_style: hel::hel_config::SpinnerStyle::default(),
             turn_started_at_epoch_seconds: None,
             prompt_in_flight: snapshot.active_prompt.is_some(),
@@ -1131,9 +1135,15 @@ impl ChatState {
     }
 
     /// Installs the stable session-list columns used by the conversation title.
-    pub fn set_header_summary(&mut self, target: impl Into<String>, profile: impl Into<String>) {
+    pub fn set_header_summary(
+        &mut self,
+        target: impl Into<String>,
+        profile: impl Into<String>,
+        title: impl Into<String>,
+    ) {
         self.header_target = target.into();
         self.header_profile = profile.into();
+        self.header_title = title.into();
     }
 
     /// Records whether the session has a prompt of ours in flight, which is

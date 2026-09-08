@@ -294,21 +294,21 @@ fn captured_mouse_wheel_scrolls_history_and_returns_to_following() {
 }
 
 #[test]
-fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
+fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_header_summary("precision-3260/bifrost-fuzz", "kimi");
+    chat.set_header_summary("precision-3260/bifrost-fuzz", "kimi", "Fix the build");
     chat.turn_started_at_epoch_seconds = Some(7_847);
     chat.set_current_step_start(Some(20_000_000));
 
     assert_eq!(
-        transcript_title(&chat, 20_000),
-        " precision-3260/bifrost-fuzz  Turn 3h22m  Step 0s  kimi "
+        transcript_title(&chat, 20_000).to_string(),
+        " precision-3260/bifrost-fuzz  Turn 3h22m  Step 0s  kimi  Fix the build "
     );
 
     chat.render_mode = TranscriptRenderMode::Raw;
     assert_eq!(
-        transcript_title(&chat, 20_000),
-        " precision-3260/bifrost-fuzz  Turn 3h22m  Step 0s  kimi · raw source "
+        transcript_title(&chat, 20_000).to_string(),
+        " precision-3260/bifrost-fuzz  Turn 3h22m  Step 0s  kimi  Fix the build · raw source "
     );
 
     // An idle session that left a command running names it in the same place
@@ -327,8 +327,8 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
         active_user_shells: Vec::new(),
     });
     assert_eq!(
-        transcript_title(&chat, 20_000),
-        " precision-3260/bifrost-fuzz    BG 43m36s  kimi "
+        transcript_title(&chat, 20_000).to_string(),
+        " precision-3260/bifrost-fuzz    BG 43m36s  kimi  Fix the build "
     );
 
     let previous_activity = chat.session_activity().clone();
@@ -337,8 +337,8 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
         ..previous_activity
     });
     assert_eq!(
-        transcript_title(&chat, 20_000),
-        " precision-3260/bifrost-fuzz  Step 12s  kimi "
+        transcript_title(&chat, 20_000).to_string(),
+        " precision-3260/bifrost-fuzz  Step 12s  kimi  Fix the build "
     );
 }
 
@@ -348,8 +348,8 @@ fn conversation_title_shows_review_activity_then_restores_primary_activity() {
     use mj_controller::hel_review_host::RuntimeReviewView;
 
     let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_header_summary("podman", "codex3");
-    let idle = transcript_title(&chat, 20_000);
+    chat.set_header_summary("podman", "codex3", "Review the build");
+    let idle = transcript_title(&chat, 20_000).to_string();
     assert!(idle.contains("[idle]"));
     let mut view = RuntimeReviewView {
         session_id: "session".to_owned(),
@@ -361,8 +361,8 @@ fn conversation_title_shows_review_activity_then_restores_primary_activity() {
     };
     chat.set_turn_review(Some(view.clone()));
     assert_eq!(
-        transcript_title(&chat, 20_000),
-        " podman  [Reviewing]  codex3 "
+        transcript_title(&chat, 20_000).to_string(),
+        " podman  [Reviewing]  codex3  Review the build "
     );
     view.phase = TurnReviewPhase::Running {
         roles: vec![RoleStatus {
@@ -372,9 +372,40 @@ fn conversation_title_shows_review_activity_then_restores_primary_activity() {
         }],
     };
     chat.set_turn_review(Some(view));
-    assert!(transcript_title(&chat, 20_000).contains("[Validating]"));
+    assert!(
+        transcript_title(&chat, 20_000)
+            .to_string()
+            .contains("[Validating]")
+    );
     chat.set_turn_review(None);
-    assert_eq!(transcript_title(&chat, 20_000), idle);
+    assert_eq!(transcript_title(&chat, 20_000).to_string(), idle);
+}
+
+#[test]
+fn conversation_header_renders_the_session_title_in_a_distinct_color() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_header_summary("podman", "codex", "update the title");
+    let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            render_transcript(frame, frame.area(), &mut chat, false);
+        })
+        .expect("render conversation");
+    let buffer = terminal.backend().buffer();
+    let header = (0..80).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+    assert!(
+        header.contains("podman  [idle]  codex  update the title"),
+        "{header}"
+    );
+    let title_start = header[..header.find("update the title").unwrap()]
+        .chars()
+        .count() as u16;
+    assert_eq!(buffer[(2, 0)].fg, theme::TEXT);
+    for x in title_start..title_start + "update the title".len() as u16 {
+        assert_eq!(buffer[(x, 0)].fg, theme::SECONDARY);
+    }
 }
 
 #[test]
@@ -382,7 +413,7 @@ fn long_conversation_titles_leave_a_gap_before_full_and_compact_activity() {
     use ratatui::{Terminal, backend::TestBackend};
 
     let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_header_summary("界".repeat(80), "profile");
+    chat.set_header_summary("podman", "profile", "界".repeat(80));
     chat.mark_prompt_submitted("continue");
     for width in [32, 48, 80] {
         let mut terminal = Terminal::new(TestBackend::new(width, 10)).expect("terminal");
