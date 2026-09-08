@@ -14,10 +14,12 @@ The Mjolnir TUI is a single control surface for conversations and the infrastruc
   <a class="shot__zoom" href={shotDashboard.src} aria-label="Open the full-size screenshot: Mjolnir terminal dashboard">
     <Image src={shotDashboard} alt="Mjolnir terminal dashboard with a full-height Sessions sidebar beside Conversation, Prompt, Targets, and Quota" />
   </a>
-  <figcaption>Sessions stays beside the conversation, prompt, targets, and quota. Setup lets you place the sidebar on either side.</figcaption>
+  <figcaption>The Workspace switcher sits above Sessions, beside the conversation, prompt, targets, and quota. Setup lets you place the sidebar on either side.</figcaption>
 </figure>
 
 At startup, Mjolnir opens the session in your opened workspace whose agent spoke most recently and puts the cursor in Prompt. An empty workspace creates a session in the directory where you launched Mjolnir. Sessions shows every workspace and includes stopped sessions; opening a row switches to that conversation without changing its workspace ownership or where New creates sessions.
+
+The **Workspace** switcher above Sessions shows the workspace you opened. Click it, or press `F3`, to open the workspace picker and choose where new sessions will belong. The switcher stays above the list on either side and at every sidebar size.
 
 Click **Show stopped** at the bottom of the Sessions panel, or press `h` while Sessions has focus, to hide or show stopped sessions. The preference is saved and also appears in Setup. Stopped sessions remain available through Resume when hidden from the panel.
 

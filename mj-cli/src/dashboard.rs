@@ -3165,7 +3165,7 @@ mod tests {
             .frame_surfaces()
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized sessions list registered");
-        assert_eq!(surface.rect.height, 17);
+        assert_eq!(surface.rect.height, 14);
 
         let start = (surface.rect.x, surface.rect.y);
         let end = (surface.rect.right() - 1, surface.rect.bottom() - 1);

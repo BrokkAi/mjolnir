@@ -192,15 +192,18 @@ to build your own.
 
 ## The terminal surface
 
-Mjolnir's TUI is one screen. From top to bottom: **Sessions**, the **transcript**
-of the conversation you are in, the **Prompt** composer, **Targets**, **Quota**,
-and a footer that names the keys that apply right now. Nothing is behind a
-navigation step, so you can read an agent's output while seeing what your other
+Mjolnir's TUI is one screen. The **Workspace** switcher and **Sessions** list
+sit in a sidebar beside the **transcript**, **Prompt** composer, **Targets**,
+and **Quota**, with a footer that names the keys that apply right now. Nothing
+is behind a navigation step, so you can read an agent's output while seeing what your other
 agents are doing and how loaded your machines are.
 
 Mjolnir opens on the session in your opened workspace whose agent spoke most
 recently, with the cursor in Prompt. The Sessions sidebar shows every session across all workspaces, including
 stopped sessions. Select one and press Enter to switch to its conversation.
+Click the **Workspace** switcher above Sessions, or press `F3`, to choose the
+workspace where new sessions will be created. It shows the workspace you opened,
+even when you view a session from another workspace.
 Click **Show stopped** at the bottom of Sessions, or press `h` in that panel,
 to hide or show stopped sessions. The choice is remembered.
 

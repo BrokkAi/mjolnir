@@ -2989,6 +2989,74 @@ mod tests {
     }
 
     #[test]
+    fn workspace_switcher_opens_the_picker_above_sessions_at_every_sidebar_size() {
+        for side in [
+            hel::hel_config::SessionsSide::Left,
+            hel::hel_config::SessionsSide::Right,
+        ] {
+            for size in [PaneSize::Minimized, PaneSize::Standard, PaneSize::Maximized] {
+                for (width, height) in [(140, 32), (32, 16)] {
+                    let mut dashboard = dashboard_with_session(running_session());
+                    dashboard.set_workspace("opened-workspace".into(), "personal".into());
+                    dashboard.selected_session_id = Some("session-1".into());
+                    dashboard.config.sessions_side = side;
+                    dashboard.set_pane_size(SupportPane::Sessions, size);
+                    dashboard.focus_prompt();
+                    let lines = drawn(&mut dashboard, width, height);
+                    let switcher = dashboard
+                        .workspace_switcher_area
+                        .expect("workspace switcher");
+                    let sessions = dashboard.pane_areas.unwrap()[0];
+                    assert_eq!(switcher.bottom(), sessions.y);
+                    assert_eq!((switcher.x, switcher.width), (sessions.x, sessions.width));
+                    let title: String = lines[usize::from(switcher.y)]
+                        .chars()
+                        .skip(usize::from(switcher.x))
+                        .take(usize::from(switcher.width))
+                        .collect();
+                    assert!(
+                        title.contains("Workspace") && title.contains("F3"),
+                        "{title}"
+                    );
+                    assert!(lines[usize::from(switcher.y + 1)].contains("personal"));
+                    assert!(lines[usize::from(switcher.y + 1)].contains('▾'));
+                    assert_eq!(
+                        dashboard.handle_mouse(mouse_at_row(
+                            MouseEventKind::Down(MouseButton::Left),
+                            switcher,
+                            1,
+                        )),
+                        DashboardAction::OpenWorkspacePicker,
+                    );
+                    assert_eq!(dashboard.focus(), Focus::Prompt);
+                    assert_eq!(dashboard.selected_session_id.as_deref(), Some("session-1"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_switcher_does_not_activate_behind_a_modal_or_after_a_small_resize() {
+        let mut dashboard = dashboard_with_session(running_session());
+        drawn(&mut dashboard, 120, 32);
+        let switcher = dashboard.workspace_switcher_area.unwrap();
+        let click = || mouse_at_row(MouseEventKind::Down(MouseButton::Left), switcher, 1);
+        dashboard.handle_key(key(KeyCode::F(4)));
+        drawn(&mut dashboard, 120, 32);
+        assert_ne!(
+            dashboard.handle_mouse(click()),
+            DashboardAction::OpenWorkspacePicker
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
+        drawn(&mut dashboard, 20, 10);
+        assert!(dashboard.workspace_switcher_area.is_none());
+        assert_ne!(
+            dashboard.handle_mouse(click()),
+            DashboardAction::OpenWorkspacePicker
+        );
+    }
+
+    #[test]
     fn stopped_session_checkbox_is_visible_and_clickable_on_either_sidebar() {
         use crossterm::event::{KeyModifiers, MouseEvent};
         for side in [
@@ -3072,7 +3140,7 @@ mod tests {
 
     #[test]
     fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
-        for (height, expected_sessions_height) in [(32, 31), (44, 43)] {
+        for (height, expected_sessions_height) in [(32, 28), (44, 40)] {
             let mut dashboard = minimized_sessions_dashboard(3, 2);
             dashboard
                 .restore_pane_sizes(crate::PaneSizes::default())
@@ -3819,15 +3887,6 @@ mod tests {
                 .collect::<String>()
         };
 
-        // The workspace name rides at the right of the Sessions title rather
-        // than taking a full row of its own, so the transcript keeps that row.
-        assert!(
-            line(buffer.area.y).contains("Sessions"),
-            "{:?}",
-            line(buffer.area.y)
-        );
-        assert_eq!(dashboard.workspace_name, "personal");
-        assert!(!line(buffer.area.y).contains("ACP sessions"));
         // The footer is one row: a notice replaces the hints while one is
         // showing, so the row costs one line whichever surface drew it.
         assert!(
@@ -4128,7 +4187,7 @@ mod tests {
     /// The band order is the whole point of the surface: everything is on one
     /// screen, in one arrangement, at every size it draws at.
     #[test]
-    fn the_session_sidebar_spans_all_other_panes_on_either_side() {
+    fn the_workspace_and_session_sidebar_spans_all_other_panes_on_either_side() {
         for side in [
             hel::hel_config::SessionsSide::Left,
             hel::hel_config::SessionsSide::Right,
@@ -4140,8 +4199,10 @@ mod tests {
                 let [sessions, targets, quota] = dashboard.pane_areas.unwrap();
                 let transcript = dashboard.chat_transcript_area.unwrap();
                 let prompt = dashboard.chat_prompt_area.unwrap();
-                assert_eq!(sessions.y, 0);
-                assert_eq!(sessions.height, height - 1);
+                let workspace = dashboard.workspace_switcher_area.unwrap();
+                assert_eq!(workspace.y, 0);
+                assert_eq!(workspace.bottom(), sessions.y);
+                assert_eq!(sessions.bottom(), height - 1);
                 assert!(sessions.width > 0 && transcript.width > 0);
                 for pane in [transcript, prompt, targets, quota] {
                     assert!(pane.height > 0);
@@ -4159,10 +4220,7 @@ mod tests {
         }
     }
 
-    /// Collapsing the support panes hands their freed rows to the transcript,
-    /// and the transcript also absorbs whatever the Sessions pane gives up (or
-    /// gives back) as it moves to its fixed mode-2 third — nothing appears or
-    /// vanishes, so the gesture is measurable rather than merely visible.
+    /// Collapsing Targets and Quota hands their freed rows to the transcript.
     #[test]
     fn minimizing_the_support_panes_gives_their_rows_to_the_transcript() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -4185,16 +4243,14 @@ mod tests {
         minimize_all_panes(&mut dashboard);
         let after = drawn(&mut dashboard, 140, 44);
 
-        // Every row the tables and the Sessions pane give up lands in the
-        // transcript; the composer and footer are untouched.
+        // Every row the tables give up lands in the transcript; the sidebar,
+        // composer, and footer keep their heights.
         let tables_freed = (band(&before, "Targets", "Quota") - band(&after, "Targets", "Quota"))
             + (band(&before, "Quota", "Alt-Q detach") - band(&after, "Quota", "Alt-Q detach"));
-        let sessions_freed =
-            band(&before, "Sessions", "Conversation") - band(&after, "Sessions", "Conversation");
         let transcript_gain =
             band(&after, "Conversation", "Prompt") - band(&before, "Conversation", "Prompt");
         assert!(tables_freed > 0, "the tables gave up nothing");
-        assert_eq!(transcript_gain, tables_freed + sessions_freed);
+        assert_eq!(transcript_gain, tables_freed);
         // Each minimized pane really is one row.
         assert_eq!(band(&after, "Targets", "Quota"), 1);
         assert_eq!(band(&after, "Quota", "Alt-Q detach"), 1);
@@ -4652,7 +4708,7 @@ mod tests {
     ) -> Vec<String> {
         let lines = drawn(dashboard, width, height);
         let pane = dashboard.pane_areas.unwrap()[0];
-        lines[1..usize::from(pane.bottom() - 1)]
+        lines[usize::from(pane.y + 1)..usize::from(pane.bottom() - 1)]
             .iter()
             .map(|line| {
                 line.chars()
@@ -4680,7 +4736,7 @@ mod tests {
     fn minimized_sessions_bound_the_viewport_to_preserve_the_conversation() {
         let mut dashboard = minimized_sessions_dashboard(3, 3);
         let lines = drawn(&mut dashboard, 120, 20);
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 19);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 16);
         assert!(
             dashboard
                 .session_row_areas
@@ -4699,7 +4755,7 @@ mod tests {
             !lines.iter().any(|line| line.contains("more")),
             "no marker expected when all sessions fit: {lines:?}"
         );
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 43);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 40);
     }
 
     /// The minimized row is the same top line as the expanded session.
@@ -4839,9 +4895,11 @@ mod tests {
         dashboard.apply_quota(weekly_quota("claude-1", 63));
 
         let lines = drawn(&mut dashboard, 120, 20);
+        let pane = dashboard.pane_areas.expect("pane geometry")[0];
 
         assert!(
-            lines[0].contains('╭') && lines[0].contains("Sessions"),
+            lines[usize::from(pane.y)].contains('╭')
+                && lines[usize::from(pane.y)].contains("Sessions"),
             "the minimized list keeps its title and border: {lines:?}"
         );
         for visible in ["Targets", "Quota"] {
@@ -4850,13 +4908,12 @@ mod tests {
                 "{visible} should remain visible: {lines:?}"
             );
         }
-        let pane = dashboard.pane_areas.expect("pane geometry")[0];
         let selection = dashboard
             .frame_surfaces()
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized selection surface");
         assert_eq!(selection.rect, pane.inner(Margin::new(1, 1)));
-        assert_eq!(selection.rect.height, 17);
+        assert_eq!(selection.rect.height, 14);
     }
 
     #[test]
@@ -4864,17 +4921,19 @@ mod tests {
         let mut dashboard = minimized_sessions_dashboard(3, 2);
 
         let tall = drawn(&mut dashboard, 120, 44);
-        assert!(tall[0].contains('╭') && tall[0].contains("Sessions"));
-        assert_eq!(dashboard.pane_areas.expect("tall panes")[0].height, 43);
+        let pane = dashboard.pane_areas.expect("tall panes")[0];
+        assert!(tall[usize::from(pane.y)].contains("Sessions"));
+        assert_eq!(pane.height, 40);
 
         let short = drawn(&mut dashboard, 120, 20);
-        assert!(short[0].contains('╭') && short[0].contains("Sessions"));
-        assert_eq!(dashboard.pane_areas.expect("short panes")[0].height, 19);
+        let pane = dashboard.pane_areas.expect("short panes")[0];
+        assert!(short[usize::from(pane.y)].contains("Sessions"));
+        assert_eq!(pane.height, 16);
 
         drawn(&mut dashboard, 120, 44);
         assert_eq!(
             dashboard.pane_areas.expect("tall panes again")[0].height,
-            43
+            40
         );
     }
 
@@ -4937,7 +4996,7 @@ mod tests {
             lines[0].contains('╭') && dashboard.pane_areas.unwrap()[0].width > 0,
             "the portrait list keeps its bordered Sessions title: {lines:?}"
         );
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 37);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 34);
         for visible in ["Tar", "Quo"] {
             assert!(
                 lines.iter().any(|line| line.contains(visible)),

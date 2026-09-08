@@ -596,6 +596,7 @@ pub struct DashboardState {
     /// Click targets for the three size controls in each support-pane title.
     pub(crate) pane_size_control_areas: Vec<(SupportPane, PaneSize, Rect)>,
     pub(crate) stopped_sessions_toggle_area: Option<Rect>,
+    pub(crate) workspace_switcher_area: Option<Rect>,
     /// Whether the current frame gives each pane a larger allocation when its
     /// size changes from Standard to the exclusive Maximized state.
     pane_maximize_enabled: [bool; DASHBOARD_PANE_COUNT],
@@ -670,6 +671,7 @@ impl DashboardState {
             project_heading_areas: Vec::new(),
             pane_size_control_areas: Vec::new(),
             stopped_sessions_toggle_area: None,
+            workspace_switcher_area: None,
             pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
             collapsed_project_keys: BTreeSet::new(),
             last_row_click: None,
@@ -1071,6 +1073,12 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if self
+                .workspace_switcher_area
+                .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
+            {
+                return self.dispatch_command(CommandId::Workspaces);
+            }
             if self
                 .stopped_sessions_toggle_area
                 .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
