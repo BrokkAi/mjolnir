@@ -29,6 +29,11 @@ const login = document.querySelector('#login'),
   workspaceStrip = document.querySelector('#workspaces'),
   sessions = document.querySelector('#sessions'),
   resumable = document.querySelector('#resumable'),
+  resumeListView = document.querySelector('#resume-list-view'),
+  resumeDetailView = document.querySelector('#resume-detail-view'),
+  resumeDetail = document.querySelector('#resume-detail'),
+  resumeSearch = document.querySelector('#resume-search'),
+  resumeDetailBack = document.querySelector('#resume-detail-back'),
   targetsPanel = document.querySelector('#targets'),
   quotaPanel = document.querySelector('#quota'),
   logout = document.querySelector('#logout'),
@@ -45,7 +50,6 @@ const login = document.querySelector('#login'),
   moveNextButton = document.querySelector('#move-next'),
   moveError = document.querySelector('#move-error'),
   actionError = document.querySelector('#action-error'),
-  resumeError = document.querySelector('#resume-error'),
   feed = document.querySelector('#conversation-feed'),
   feedScroll = document.querySelector('#conversation-scroll'),
   conversationTransition = document.querySelector('#conversation-transition'),
@@ -87,6 +91,7 @@ const PAGES = {
 const entryNodes = new Map();
 let snapshot,
   route = { name: 'dashboard' },
+  resumeRouteVisit = 0,
   currentSession,
   moveDraft,
   cursor = 0,
@@ -166,6 +171,7 @@ function announce(message) {
 const ID = '[A-Za-z0-9_-]+';
 const ROUTE_PATTERNS = [
   [new RegExp(`^#workspace/(${ID})/new$`), ([id]) => ({ name: 'new', workspaceId: id })],
+  [new RegExp(`^#workspace/(${ID})/resume/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'resume', workspaceId, sessionId })],
   [new RegExp(`^#workspace/(${ID})/resume$`), ([id]) => ({ name: 'resume', workspaceId: id })],
   [new RegExp(`^#workspace/(${ID})/move/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'move', workspaceId, sessionId })],
   [new RegExp(`^#workspace/(${ID})$`), ([id]) => ({ name: 'dashboard', workspaceId: id })],
@@ -187,7 +193,9 @@ function routeHash(next) {
     case 'new':
       return `#workspace/${next.workspaceId}/new`;
     case 'resume':
-      return `#workspace/${next.workspaceId}/resume`;
+      return next.sessionId
+        ? `#workspace/${next.workspaceId}/resume/${next.sessionId}`
+        : `#workspace/${next.workspaceId}/resume`;
     case 'move':
       return `#workspace/${next.workspaceId}/move/${next.sessionId}`;
     case 'conversation':
@@ -229,7 +237,14 @@ function selectedWorkspaceId() {
 
 function applyRoute() {
   cancelSessionPress();
+  const previousRoute = route;
   route = parseRoute(location.hash);
+  if (routeHash(previousRoute) !== routeHash(route)) {
+    resumeRouteVisit += 1;
+    if (previousRoute.name === 'resume' && !previousRoute.sessionId && snapshot) {
+      resumeListState(previousRoute.workspaceId).scrollTop = window.scrollY;
+    }
+  }
   if (!snapshot) return;
 
   // The dashboard names its workspace in the URL, so a reload, a Back press
@@ -295,6 +310,20 @@ function applyRoute() {
   // rather than wherever it happened to be.
   PAGES[name].setAttribute('tabindex', '-1');
   PAGES[name].focus({ preventScroll: true });
+  if (name === 'resume') {
+    const visit = resumeRouteVisit;
+    requestAnimationFrame(() => {
+      if (route.name !== 'resume' || resumeRouteVisit !== visit) return;
+      if (route.sessionId) {
+        window.scrollTo(0, 0);
+      } else {
+        const state = resumeListState(route.workspaceId);
+        const row = [...resumable.children].find(child => child.dataset?.sessionId === state.focusSessionId);
+        row?.focus({ preventScroll: true });
+        window.scrollTo(0, state.scrollTop);
+      }
+    });
+  }
   announce(shellTitle.textContent);
 }
 
@@ -347,62 +376,6 @@ function renderLaunchFailures() {
     card.append(dismiss);
     return card;
   });
-  if (route.name === 'dashboard') {
-    const moveFailures = (snapshot.sessions || []).filter(session =>
-      session.workspace_id === selectedWorkspaceId() &&
-      session.move_recovery?.checkpoint_retained &&
-      ['failed', 'cancelled'].includes(session.move_recovery.phase),
-    );
-    failureCards.push(...moveFailures.map(session => {
-      const recovery = session.move_recovery;
-      const card = el('article', 'card move-recovery');
-      const phase = recovery.phase === 'cancelled' ? 'cancelled' : 'failed';
-      card.append(el('p', '', `Move of “${session.title || session.id}” was ${phase}. The verified checkpoint is retained.`));
-      if (recovery.destination_ready && recovery.queue_admission_started) {
-        card.append(el('p', 'dim', 'The destination is retained. Retry uses the same destination and queue choice so already accepted work is not replayed elsewhere.'));
-      } else {
-        card.append(el('p', 'dim', 'Retry the move with the recorded destination, or resume with the source settings.'));
-      }
-      const row = el('div', 'row');
-      if (recovery.checkpoint_retained) {
-        const retry = button('Retry move', 'secondary', { action: 'move', id: session.id });
-        retry.onclick = () => navigate({
-          name: 'move',
-          workspaceId: session.workspace_id || selectedWorkspaceId(),
-          sessionId: session.id,
-        });
-        row.append(retry);
-      }
-      const queuePinned = recovery.queue_admission_started && !recovery.queue_admission_finished;
-      if (recovery.checkpoint_retained && !queuePinned && session.capabilities?.resume) {
-        const resume = button('Resume with previous settings', 'secondary', { action: 'resume', id: session.id });
-        resume.dataset.profile = recovery.source_profile_id;
-        resume.dataset.target = recovery.source_target_template_id;
-        resume.onclick = () => navigate({
-          name: 'resume',
-          workspaceId: session.workspace_id || selectedWorkspaceId(),
-        });
-        row.append(resume);
-      }
-      card.append(row);
-      return card;
-    }));
-    const failedSessions = (snapshot.sessions || []).filter(session =>
-      session.workspace_id === selectedWorkspaceId() &&
-      session.has_error &&
-      !session.capabilities?.open &&
-      session.operation?.kind !== 'move' &&
-      !session.move_recovery?.checkpoint_retained,
-    );
-    failureCards.push(...failedSessions.map(session => {
-      const card = el('div', 'card');
-      card.append(el('p', '', `Session “${session.title || session.id}” needs recovery. Its verified checkpoint is retained when available.`));
-      const resume = button('Open resume', 'secondary');
-      resume.onclick = () => navigate({ name: 'resume', workspaceId: session.workspace_id || selectedWorkspaceId() });
-      card.append(resume);
-      return card;
-    }));
-  }
   document.querySelector('#launch-failures').replaceChildren(...failureCards);
 }
 
@@ -1493,106 +1466,344 @@ async function commitNew() {
   }
 }
 
-/// Sessions that are not live and that Mjolnir owns, which is what "resume" means.
-///
-/// A session that cannot resume anywhere is still listed, with one plain
-/// sentence saying why and where to finish it. Hiding it would leave a person
-/// looking for a session they know exists.
-const resumableCards = new Map();
-function renderResumable() {
-  const list = (snapshot.sessions || []).filter(session => session.capabilities?.resume);
-  for (const id of resumableCards.keys()) if (!list.some(session => session.id === id)) resumableCards.delete(id);
-  if (!list.length) {
-    resumable.replaceChildren(el('p', 'dim', 'No sessions to resume.'));
-    return;
-  }
-  const cards = list.map(session => {
-    const signature = JSON.stringify([session, snapshot.profiles.map(p => [p.id, p.harness_kind])]);
-    let cached = resumableCards.get(session.id);
-    if (!cached || cached.signature !== signature) {
-      cached = { signature, card: resumableCard(session) };
-      resumableCards.set(session.id, cached);
-    }
-    const resume = cached.card.querySelector('button[data-action="resume"]');
-    if (resume) resume.disabled = pendingActions.has(`resume:${session.id}`);
-    return cached.card;
-  });
-  if (cards.length !== resumable.children.length || cards.some((card, index) => resumable.children[index] !== card))
-    resumable.replaceChildren(...cards);
+/// Resume is a workspace-scoped list. Retained move recoveries remain
+/// discoverable even when the normal resume capability is temporarily false.
+function isResumeSession(session) {
+  const recovery = session?.move_recovery;
+  const retainedMove = recovery?.checkpoint_retained
+    && ['failed', 'cancelled'].includes(recovery.phase);
+  return Boolean(session?.capabilities?.resume || retainedMove);
 }
 
-function resumableCard(session) {
-  const card = el('article', 'card session');
-  const recovery = session.move_recovery;
-  const sourceProfile = recovery?.source_profile_id || session.profile_id;
-  const sourceTarget = recovery?.source_target_template_id || session.target_id;
-  card.dataset.sessionId = session.id;
-  card.append(el('h3', '', session.title));
-  card.append(el('p', 'dim', `${sessionLifecycleLabel(session)} · ${sourceProfile}`));
-  if (session.has_error) {
-    card.append(el('p', '', 'The previous operation failed. The verified checkpoint remains available; resume with the source settings or retry the move from the dashboard recovery card.'));
+function resumeActivityMs(session) {
+  return epochMs(session.updated_at)
+    ?? epochMs(session.last_activity_at_ms)
+    ?? epochMs(session.created_at)
+    ?? 0;
+}
+
+function resumeSessions(workspaceId = selectedWorkspaceId()) {
+  return (snapshot?.sessions || [])
+    .filter(session => session.workspace_id === workspaceId && isResumeSession(session))
+    .sort((left, right) =>
+      resumeActivityMs(right) - resumeActivityMs(left) || left.id.localeCompare(right.id));
+}
+
+const resumeDrafts = new Map();
+const resumeListStates = new Map();
+const resumeRows = new Map();
+const resumeCards = new Map();
+
+function resumeListState(workspaceId) {
+  let state = resumeListStates.get(workspaceId);
+  if (!state) {
+    state = { query: '', scrollTop: 0, focusSessionId: null };
+    resumeListStates.set(workspaceId, state);
   }
-  if (recovery) {
-    card.append(el('p', 'dim', `Previous Move source: ${sourceProfile} / ${sourceTarget}. The recovery controls use these settings and do not promise to revive the old process.`));
-    if (recovery.queue_admission_started && !recovery.queue_admission_finished) {
-      card.append(el('p', 'dim', 'Queued work already began on the destination; retry Move there before considering any other recovery.'));
-      return card;
-    }
+  return state;
+}
+
+function resumeDraft(session) {
+  const key = `${session.workspace_id}\u001f${session.id}`;
+  let draft = resumeDrafts.get(key);
+  if (!draft) {
+    const recovery = session.move_recovery;
+    draft = {
+      profileId: recovery?.source_profile_id || session.profile_id || '',
+      targetId: recovery?.source_target_template_id || session.target_id || '',
+      queue: 'start',
+      initialized: false,
+      error: '',
+    };
+    resumeDrafts.set(key, draft);
   }
+  return draft;
+}
 
-  if (!session.compatible_resume_targets?.length) {
-    card.append(
-      el(
-        'p',
-        '',
-        'This session cannot resume on any target configured here. Finish it in the terminal, where the repair and import options live.',
-      ),
-    );
-    return card;
-  }
+function resumeSearchText(session) {
+  return [
+    session.title,
+    session.project_label,
+    session.display_location,
+    session.target_id,
+    session.profile_id,
+  ].filter(Boolean).join(' ').toLocaleLowerCase();
+}
 
-  const profilePicker = pickerField('Profile', `resume-profile-${session.id}`, snapshot.profiles, sourceProfile, () => {});
-  profilePicker.dataset.role = 'resume-profile';
-  card.append(profilePicker);
-
-  const targetPicker = pickerField(
-    'Target', `resume-target-${session.id}`,
-    session.compatible_resume_targets.map(id => ({ id })),
-    session.compatible_resume_targets.includes(sourceTarget) ? sourceTarget : session.compatible_resume_targets[0],
-    () => {},
-  );
-  targetPicker.dataset.role = 'resume-target';
-  card.append(targetPicker);
-
-  const queued = (session.queued_prompts || []).length;
-  if (queued) {
-    const picker = pickerField(
-      `${queued} queued prompt${queued === 1 ? '' : 's'}`, `resume-queue-${session.id}`,
-      [
-        { id: 'start', label: 'Run them after resuming' },
-        { id: 'discard', label: 'Discard them' },
-      ],
-      'start',
-      () => {},
-    );
-    picker.dataset.role = 'resume-queue';
-    card.append(picker);
-  }
-
-  const row = el('div', 'row');
-  const resume = action('Resume', '', {
-    action: 'resume',
-    id: session.id,
-    profile: sourceProfile,
-    target: sourceTarget,
+function resumeRecencyLabel(session) {
+  const millis = resumeActivityMs(session);
+  if (!millis) return 'Unknown';
+  const age = Math.max(0, serverClockMs() - millis);
+  if (age < 60_000) return 'Just now';
+  if (age < 3_600_000) return `${Math.floor(age / 60_000)}m ago`;
+  if (age < 86_400_000) return `${Math.floor(age / 3_600_000)}h ago`;
+  if (age < 604_800_000) return `${Math.floor(age / 86_400_000)}d ago`;
+  return new Date(millis).toLocaleDateString([], {
+    month: 'short', day: 'numeric',
+    ...(new Date(millis).getFullYear() !== new Date(serverClockMs()).getFullYear() ? { year: 'numeric' } : {}),
   });
-  // Keep the recorded source settings with this authenticated action. They
-  // are user-selected mounts/resource sizing, not diagnostics; the server
-  // still validates them before handing them to the daemon.
-  resume._resumeRecovery = recovery;
-  row.append(resume);
-  card.append(row);
+}
+
+function resumeRow(session) {
+  const row = button('', 'resume-session-row session', { resumeSession: session.id });
+  row.type = 'button';
+  row.dataset.sessionId = session.id;
+  row.append(
+    el('span', 'resume-session-title', session.title || session.id),
+    el('span', 'resume-session-meta', [
+      session.display_location || session.project_label || session.target_id || '',
+      session.profile_id || '',
+    ].filter(Boolean).join(' · ')),
+    el('span', 'resume-session-recent', resumeRecencyLabel(session)),
+  );
+  row.setAttribute('aria-label', `Resume ${session.title || session.id}`);
+  row.onclick = () => {
+    const state = resumeListState(session.workspace_id);
+    state.focusSessionId = session.id;
+    navigate({ name: 'resume', workspaceId: session.workspace_id, sessionId: session.id });
+  };
+  return row;
+}
+
+function renderResumable() {
+  const workspaceId = route.workspaceId || selectedWorkspaceId();
+  const state = resumeListState(workspaceId);
+  const listMode = !route.sessionId;
+  resumeListView?.classList.toggle('hidden', !listMode);
+  resumeDetailView?.classList.toggle('hidden', listMode);
+  if (!listMode) {
+    renderResumeDetail();
+    return;
+  }
+  if (resumeSearch && document.activeElement !== resumeSearch) resumeSearch.value = state.query;
+  const query = state.query.trim().toLocaleLowerCase();
+  const list = resumeSessions(workspaceId).filter(session => !query || resumeSearchText(session).includes(query));
+  for (const id of resumeRows.keys()) {
+    if (!list.some(session => session.id === id)) resumeRows.delete(id);
+  }
+  if (!list.length) {
+    resumable.replaceChildren(el('p', 'dim', query ? 'No matching sessions.' : 'No sessions to resume.'));
+  } else {
+    const rows = list.map(session => {
+      let row = resumeRows.get(session.id);
+      if (!row) {
+        row = resumeRow(session);
+        resumeRows.set(session.id, row);
+      }
+      row.querySelector('.resume-session-title').textContent = session.title || session.id;
+      row.setAttribute('aria-label', `Resume ${session.title || session.id}`);
+      row.querySelector('.resume-session-meta').textContent = [
+        session.display_location || session.project_label || session.target_id || '',
+        session.profile_id || '',
+      ].filter(Boolean).join(' · ');
+      row.querySelector('.resume-session-recent').textContent = resumeRecencyLabel(session);
+      return row;
+    });
+    reconcileChildren(resumable, rows);
+  }
+
+}
+
+function resumeChoiceField(label, id, items, value, onChange) {
+  const field = el('label', 'field resume-choice');
+  field.id = id;
+  field.append(el('span', '', label));
+  if (items.length === 1 && items[0].id === value) {
+    field.append(el('span', 'field-value', items[0].label ?? items[0].id));
+    return field;
+  }
+  if (!items.length) {
+    field.append(el('span', 'field-value dim', `No ${label.toLowerCase()}s configured.`));
+    return field;
+  }
+  const select = document.createElement('select');
+  select.setAttribute('aria-label', label);
+  const empty = el('option', '', `Choose ${label.toLowerCase()}`);
+  empty.value = '';
+  empty.disabled = true;
+  empty.selected = !value || !items.some(item => String(item.id) === String(value));
+  select.append(empty);
+  for (const item of items) {
+    const option = el('option', '', item.label ?? item.id);
+    option.value = item.id;
+    option.selected = String(item.id) === String(value);
+    select.append(option);
+  }
+  select.onchange = () => onChange(select.value);
+  field.append(select);
+  return field;
+}
+
+function resumeCardSignature(session) {
+  return JSON.stringify([
+    session.compatible_resume_targets || [],
+    (snapshot.profiles || []).map(profile => [profile.id, profile.harness_kind]),
+    session.move_recovery,
+    session.profile_id,
+    session.target_id,
+    session.capabilities?.resume,
+    session.capabilities?.open,
+    session.lifecycle,
+    session.operation?.kind,
+    session.state,
+    session.has_error,
+    session.title,
+    session.display_location,
+    (session.queued_prompts || []).length,
+  ]);
+}
+
+function resumeTargetItems(session) {
+  return (session.compatible_resume_targets || []).map(id => {
+    const target = (snapshot.targets || []).find(item => item.id === id);
+    return { id, label: target?.label || target?.name || id };
+  });
+}
+
+function resumeCard(session) {
+  const card = el('article', 'card resume-card');
+  card.dataset.sessionId = session.id;
+  card._signature = '';
+  card._session = session;
+  updateResumeCard(card, session, true);
   return card;
+}
+
+function updateResumeCard(card, session, rebuild = false) {
+  const focused = document.activeElement;
+  const previousFocus = card.contains(focused) ? focused.closest?.('[data-role]')?.dataset?.role : null;
+  const signature = resumeCardSignature(session);
+  if (!rebuild && card._signature === signature) {
+    card._session = session;
+    const draft = resumeDraft(session);
+    card._errorNode.textContent = draft.error;
+    card._pendingNode.textContent = pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '';
+    card._invalid = !draft.profileId || !draft.targetId;
+    const submit = card.querySelector('button[data-action="resume"]');
+    if (submit) {
+      submit.dataset.profile = draft.profileId;
+      submit.dataset.target = draft.targetId;
+      submit.disabled = pendingActions.has(`resume:${session.id}`) || card._invalid === true;
+      submit.setAttribute('aria-busy', String(pendingActions.has(`resume:${session.id}`)));
+    }
+    return;
+  }
+  card._signature = signature;
+  card._session = session;
+  const recovery = session.move_recovery;
+  const draft = resumeDraft(session);
+  const targetItems = resumeTargetItems(session);
+  const profileItems = (snapshot.profiles || []).map(profile => ({ id: profile.id, label: profile.id }));
+  if (!draft.initialized) {
+    if (!profileItems.some(item => item.id === draft.profileId)) {
+      draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
+    }
+    if (!targetItems.some(item => item.id === draft.targetId)) {
+      draft.targetId = targetItems.length === 1 ? targetItems[0].id : '';
+    }
+    draft.initialized = true;
+  } else {
+    if (!profileItems.some(item => item.id === draft.profileId)) draft.profileId = '';
+    if (!targetItems.some(item => item.id === draft.targetId)) draft.targetId = '';
+  }
+  const body = el('div');
+  const heading = el('h3', '', session.title || session.id);
+  body.append(heading, el('p', 'dim', `${sessionLifecycleLabel(session)} · ${session.display_location || session.target_id || 'Unknown target'}`));
+  if (session.state === 'lost' && !recovery?.checkpoint_retained) body.append(el('p', 'resume-status error', 'The session is lost. No verified recovery checkpoint is available.'));
+  else if (session.state === 'destroyed-with-data-loss') body.append(el('p', 'resume-status error', 'The session was destroyed with data loss. No session data remains to resume.'));
+  else if (session.has_error) body.append(el('p', 'resume-status error', 'The previous operation reported an error. Review the available choices before trying again.'));
+  if (recovery) {
+    const phase = recovery.phase === 'cancelled' ? 'cancelled' : recovery.phase === 'failed' ? 'failed' : 'interrupted';
+    body.append(el('p', '', `Move was ${phase}.`));
+    if (recovery.checkpoint_retained) body.append(el('p', 'dim', 'A verified recovery checkpoint is retained.'));
+  }
+  const queuePinned = recovery?.queue_admission_started && !recovery.queue_admission_finished;
+  const moveRow = el('div', 'row');
+  if (recovery?.checkpoint_retained && ['failed', 'cancelled'].includes(recovery.phase)) {
+    const retry = button('Retry move', 'secondary', { action: 'move', id: session.id });
+    moveRow.append(retry);
+  }
+  if (moveRow.children.length) {
+    body.append(el('p', 'dim', queuePinned
+      ? 'Queued work already began on the destination. Retry the move using its retained destination and queue choice.'
+      : 'Retry the move with the retained destination, or resume with the source settings.'));
+    body.append(moveRow);
+  }
+  const noRecovery = !recovery?.checkpoint_retained && ['lost', 'destroyed-with-data-loss'].includes(session.state);
+  const canResume = session.capabilities?.resume === true && !queuePinned && !noRecovery;
+  const stale = session.capabilities?.open === true || ['live', 'starting', 'stopping'].includes(session.lifecycle);
+  card._invalid = false;
+  if (stale) {
+    body.append(el('p', 'dim', 'This session is active now and cannot be resumed.'));
+    const open = button(session.capabilities?.open ? 'Open session' : 'View session status', 'secondary');
+    open.onclick = () => navigate(session.capabilities?.open || isTransitioningSession(session)
+      ? { name: 'conversation', sessionId: session.id }
+      : { name: 'dashboard', workspaceId: session.workspace_id });
+    body.append(open);
+  } else if (!canResume) {
+    if (queuePinned) body.append(el('p', 'dim', 'Resume is unavailable while queued work is pinned to the retained destination.'));
+    else if (!recovery && !noRecovery) body.append(el('p', 'dim', 'This session cannot be resumed from the web viewer.'));
+  } else if (!targetItems.length) {
+    body.append(el('p', '', 'This session cannot resume on any target configured here. Finish recovery in the terminal.'));
+  } else {
+    const profileField = resumeChoiceField('Profile', `resume-profile-${session.id}`, profileItems, draft.profileId, value => {
+      draft.profileId = value;
+      renderResumeDetail();
+    });
+    profileField.dataset.role = 'resume-profile';
+    const targetField = resumeChoiceField('Target', `resume-target-${session.id}`, targetItems, draft.targetId, value => {
+      draft.targetId = value;
+      renderResumeDetail();
+    });
+    targetField.dataset.role = 'resume-target';
+    body.append(profileField, targetField);
+    const queued = (session.queued_prompts || []).length;
+    if (queued) {
+      const queueField = resumeChoiceField(
+        `${queued} queued prompt${queued === 1 ? '' : 's'}`,
+        `resume-queue-${session.id}`,
+        [{ id: 'start', label: 'Run them after resuming' }, { id: 'discard', label: 'Discard them' }],
+        draft.queue,
+        value => { draft.queue = value; },
+      );
+      queueField.dataset.role = 'resume-queue';
+      body.append(queueField);
+    }
+    const row = el('div', 'row');
+    const submit = action('Resume', '', { action: 'resume', id: session.id, profile: draft.profileId, target: draft.targetId });
+    submit.disabled = submit.disabled || !draft.profileId || !draft.targetId;
+    row.append(submit);
+    body.append(row);
+    card._invalid = !draft.profileId || !draft.targetId;
+  }
+  const pendingNode = el('p', 'dim', pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '');
+  pendingNode.setAttribute('role', 'status');
+  card._pendingNode = pendingNode;
+  body.append(pendingNode);
+  const errorNode = el('p', 'error', draft.error);
+  errorNode.dataset.resumeError = 'true';
+  errorNode.setAttribute('role', 'alert');
+  card._errorNode = errorNode;
+  body.append(errorNode);
+  card.replaceChildren(body);
+  if (previousFocus) card.querySelector(`[data-role="${previousFocus}"] select`)?.focus({ preventScroll: true });
+}
+
+function renderResumeDetail() {
+  const session = snapshot.sessions.find(item =>
+    item.id === route.sessionId && item.workspace_id === route.workspaceId);
+  if (!session) {
+    resumeDetail?.replaceChildren(el('p', 'dim', 'This session is no longer available. Return to the session list.'));
+    return;
+  }
+  let cached = resumeCards.get(session.id);
+  if (!cached) {
+    cached = resumeCard(session);
+    resumeCards.set(session.id, cached);
+  } else {
+    updateResumeCard(cached, session);
+  }
+  if (resumeDetail?.firstChild !== cached) resumeDetail?.replaceChildren(cached);
 }
 
 // ---------------------------------------------------------------------------
@@ -2102,6 +2313,10 @@ function showLogin() {
   }
   // Nothing from the previous viewer may survive a sign-out in this tab.
   pendingActions.clear();
+  resumeRows.clear();
+  resumeCards.clear();
+  resumeDrafts.clear();
+  resumeListStates.clear();
   pendingReviewSessions.clear();
   entryNodes.clear();
   elicitationCards.clear();
@@ -3792,9 +4007,21 @@ logout.onclick = async () => {
 };
 
 backButton.onclick = () => {
-  // Back means the page behind this one, which is the dashboard for the
-  // workspace this route belongs to.
+  if (route.name === 'resume' && route.sessionId) {
+    navigate({ name: 'resume', workspaceId: route.workspaceId });
+    return;
+  }
   navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
+};
+
+resumeDetailBack.onclick = () => {
+  navigate({ name: 'resume', workspaceId: route.workspaceId || selectedWorkspaceId() });
+};
+
+resumeSearch.oninput = () => {
+  const state = resumeListState(route.workspaceId || selectedWorkspaceId());
+  state.query = resumeSearch.value;
+  renderResumable();
 };
 
 workspaceStrip.onclick = event => {
@@ -3865,21 +4092,24 @@ moveForm.onsubmit = async event => {
 /// double tap cannot send twice and a failure cannot leave the control dead.
 async function runSessionAction(dataset, errorNode, extra) {
   const key = `${dataset.action}:${dataset.id}`;
-  if (pendingActions.has(key)) return;
+  if (pendingActions.has(key)) return false;
+  const actionExtra = { ...(extra || {}) };
+  delete actionExtra.workspace_id;
+  delete actionExtra.isCurrent;
   if (dataset.action === 'open') {
     navigate({ name: 'conversation', sessionId: dataset.id });
-    return;
+    return true;
   }
   if (dataset.action === 'move') {
     const session = snapshot.sessions.find(item => item.id === dataset.id);
-    if (!session) return;
+    if (!session) return false;
     closeSessionMenu();
     navigate({
       name: 'move',
       workspaceId: session.workspace_id || selectedWorkspaceId(),
       sessionId: session.id,
     });
-    return;
+    return true;
   }
   if (dataset.action === 'close') {
     const session = snapshot.sessions.find(item => item.id === dataset.id);
@@ -3901,7 +4131,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     // back to what the session last used.
     body.profile_id = extra?.profile_id || dataset.profile;
     body.target_id = extra?.target_id || dataset.target;
-    body.workspace_id = selectedWorkspaceId();
+    body.workspace_id = extra?.workspace_id || dataset.workspace_id || selectedWorkspaceId();
     body.queue = extra?.queue || 'start';
     if (extra && Object.prototype.hasOwnProperty.call(extra, 'additional_mounts')) {
       body.additional_mounts = extra.additional_mounts;
@@ -3914,8 +4144,10 @@ async function runSessionAction(dataset, errorNode, extra) {
     await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
     errorNode.textContent = '';
     await refresh();
+    return true;
   } catch (err) {
     errorNode.textContent = err.message;
+    return false;
   } finally {
     pendingActions.delete(key);
     renderRoute();
@@ -3956,22 +4188,41 @@ sessions.addEventListener('contextmenu', event => {
   openSessionMenu(card.dataset.sessionId, card._menuTrigger);
 });
 
-resumable.onclick = async e => {
+resumeDetail.onclick = async e => {
   const target = e.target.closest('button[data-action]');
   if (!target) return;
-  const card = target.closest('.session');
-  const pick = role => card?.querySelector(`[data-role="${role}"] input:checked`)?.value;
-  const recovery = target._resumeRecovery;
-  const settings = recovery ? {
-    additional_mounts: recovery.source_additional_mounts || [],
-    resource_allocation: recovery.source_resource_allocation ?? null,
-  } : {};
-  await runSessionAction(target.dataset, resumeError, {
-    target_id: pick('resume-target'),
-    profile_id: pick('resume-profile'),
-    queue: pick('resume-queue'),
-    ...settings,
+  const session = snapshot?.sessions.find(item =>
+    item.id === target.dataset.id && item.workspace_id === route.workspaceId);
+  if (!session) return;
+  if (target.dataset.action === 'move') {
+    navigate({ name: 'move', workspaceId: session.workspace_id, sessionId: session.id });
+    return;
+  }
+  const draft = resumeDraft(session);
+  const recovery = session.move_recovery;
+  const workspaceId = session.workspace_id;
+  const visit = resumeRouteVisit;
+  draft.error = '';
+  // Keep failures with their session even if the user has left or a snapshot
+  // rebuilt the card while the request was pending.
+  const errorSink = { set textContent(value) { draft.error = value; } };
+  const success = await runSessionAction(target.dataset, errorSink, {
+    workspace_id: workspaceId,
+    target_id: draft.targetId,
+    profile_id: draft.profileId,
+    queue: draft.queue,
+    ...(recovery ? {
+      additional_mounts: recovery.source_additional_mounts || [],
+      resource_allocation: recovery.source_resource_allocation ?? null,
+    } : {}),
   });
+  if (success
+    && route.name === 'resume'
+    && route.sessionId === session.id
+    && route.workspaceId === workspaceId
+    && resumeRouteVisit === visit) {
+    navigate({ name: 'dashboard', workspaceId });
+  }
 };
 
 document.querySelector('#prompt-form').onsubmit = e => {

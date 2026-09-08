@@ -1,8 +1,9 @@
 //! Prompt history: reverse-i-search over the stored prompts and the up/down
 //! walk through this session's and this project's earlier prompts.
 
+use crate::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::hel_text_input::TextInput;
@@ -379,8 +380,8 @@ pub(super) fn highlighted_input_lines(input: &str, query: &str) -> Vec<Line<'sta
             spans.push(Span::styled(
                 input[start..end].to_owned(),
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(theme::BACKGROUND)
+                    .bg(theme::WARNING)
                     .add_modifier(Modifier::BOLD),
             ));
             cursor = end;

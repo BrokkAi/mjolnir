@@ -9,11 +9,12 @@
 //! `cancel_modal`, which resets the surface to the dashboard.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use mj_chat::hel_selection::FrameSurfaces;
 
@@ -143,7 +144,7 @@ pub(crate) fn help_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
         lines.push(Line::styled(
             scope.heading().to_owned(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ));
         for spec in group {
@@ -159,31 +160,48 @@ pub(crate) fn help_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
                 Availability::Hidden => "  (not available here)".to_owned(),
                 Availability::Blocked(reason) => format!("  ({reason})"),
             };
-            let style = if availability == Availability::Ready {
+            let ready = availability == Availability::Ready;
+            let style = if ready {
                 Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                theme::muted()
             };
             let keys = if keys.is_empty() {
                 "—".to_owned()
             } else {
                 keys
             };
-            lines.push(Line::from(vec![Span::styled(
-                format!("  {keys:<12}  {}  {}{suffix}", spec.label, spec.description),
-                style,
-            )]));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {keys:<12}  "),
+                    Style::default().fg(if ready {
+                        theme::SECONDARY
+                    } else {
+                        theme::MUTED
+                    }),
+                ),
+                Span::styled(spec.label, style),
+                Span::styled(format!("  {}{suffix}", spec.description), theme::muted()),
+            ]));
         }
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "Composer".to_owned(),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme::ACCENT)
             .add_modifier(Modifier::BOLD),
     ));
     for (keys, description) in COMPOSER_KEYS {
-        lines.push(Line::raw(format!("  {keys:<24}  {description}")));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {keys:<24}  "),
+                Style::default().fg(theme::SECONDARY),
+            ),
+            Span::styled(*description, Style::default().fg(theme::TEXT)),
+        ]));
     }
     lines
 }
@@ -201,9 +219,12 @@ pub(crate) fn render_help(
     let paragraph = Paragraph::new(lines)
         .scroll((overlay.scroll as u16, 0))
         .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Keys · Up/Down scrolls · Esc or F1 closes "),
+            theme::modal()
+                .title(" Keyboard shortcuts ")
+                .title_bottom(Line::styled(
+                    " ↑↓ scroll · Esc or F1 closes ",
+                    theme::muted(),
+                )),
         );
     frame.render_widget(paragraph, popup);
 }

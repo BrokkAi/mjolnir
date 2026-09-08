@@ -19,11 +19,12 @@ use crossterm::event::{Event, KeyCode, KeyEventKind};
 use mj_chat::components::{
     ButtonRow, Checkbox, ChoiceList, ControlKind, Form, Interaction, TabStrip, TextField,
 };
+use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use hel::hel_config::{HarnessKind, HelConfig};
 use hel::hel_state::{HelState, MoveOperation, SessionRecord, SessionState};
@@ -32,9 +33,7 @@ use mj_chat::hel_text_input::TextInput;
 
 use crate::dialogs::{ConfirmDialog, Confirmation, ImportProfileOption};
 use crate::render::render_session_scrollbar;
-use crate::widgets::{
-    centered_modal, centered_rect, focus_border, format_resource_bytes, truncate_text,
-};
+use crate::widgets::{centered_modal, centered_rect, format_resource_bytes, truncate_text};
 use crate::{DashboardAction, DashboardState, Mode};
 
 /// Origin shown for a native session that has never run under Hel.
@@ -490,15 +489,37 @@ impl DashboardState {
     }
 
     /// Whether anything on screen animates on its own and so needs a redraw
-    /// faster than the one-second clock: the import progress dialog, or the
-    /// resume dialog's scanning spinner, or review settings discovery.
+    /// faster than the one-second clock: loading dialogs, session activity,
+    /// or an in-flight lifecycle transition.
     pub fn needs_fast_tick(&self) -> bool {
-        match &self.mode {
+        let dialog_animates = match &self.mode {
             Mode::Importing(_) => true,
+            Mode::TargetActions(dialog) => dialog.testing.is_some(),
             Mode::ResumeDialog(dialog) => dialog.is_scanning(),
             Mode::ReviewSettings(_) | Mode::Help(_) => self.review_settings_discovery_active(),
             _ => false,
-        }
+        };
+        dialog_animates
+            || self.opening_session.is_some()
+            || !self.session_operations.is_empty()
+            || self.state.sessions.values().any(|session| {
+                (session.last_error.is_none()
+                    && matches!(
+                        session.state,
+                        SessionState::Provisioning
+                            | SessionState::Checkpointing
+                            | SessionState::Closing
+                            | SessionState::Destroying
+                    ))
+                    || (session.state == SessionState::Running
+                        && !self.unreachable_sessions.contains(&session.id)
+                        && (self.session_details.get(&session.id).is_some_and(|detail| {
+                            !detail.activity.is_idle(detail.current_turn_started_at)
+                        }) || self
+                            .session_reviews
+                            .get(&session.id)
+                            .is_some_and(|review| review.is_working())))
+            })
     }
 
     pub fn show_resume_dialog(&mut self, discovery_id: u64, profiles: Vec<ImportProfileOption>) {
@@ -871,7 +892,7 @@ pub(crate) fn render_resume_dialog(
     } else {
         " Resume a session ".to_owned()
     };
-    let outer = Block::default().borders(Borders::ALL).title(title);
+    let outer = theme::modal().title(title);
     let inner = outer.inner(popup);
     frame.render_widget(outer, popup);
     let rows = Layout::default()
@@ -935,13 +956,10 @@ pub(crate) fn render_resume_dialog(
 
     let list_rows = dashboard.resume_rows();
     let sessions_focused = form.is_focused(ResumeFocus::Sessions);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(focus_border(sessions_focused || search_focused))
-        .title(match dialog.tab {
-            ResumeTab::Hel => " Mjolnir sessions · newest first ",
-            ResumeTab::Import => " Importable sessions · newest first ",
-        });
+    let block = theme::panel(sessions_focused || search_focused).title(match dialog.tab {
+        ResumeTab::Hel => " Mjolnir sessions · newest first ",
+        ResumeTab::Import => " Importable sessions · newest first ",
+    });
     let list_area = block.inner(rows[2]);
     // Registered after the dialog body so a drag over the rows selects the
     // list rather than the popup around it.
@@ -1005,7 +1023,7 @@ pub(crate) fn render_resume_dialog(
     if let Some(detail) = selected {
         footer.push(Line::styled(
             truncate_text(&detail.details, usize::from(rows[3].width)),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(theme::MUTED),
         ));
     }
     let errors = dialog.errors();
@@ -1017,7 +1035,7 @@ pub(crate) fn render_resume_dialog(
                 &format!("Scan failed for {error}"),
                 usize::from(rows[3].width),
             ),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         ));
     }
     footer.push(Line::styled(
@@ -1029,7 +1047,7 @@ pub(crate) fn render_resume_dialog(
                 "Enter imports · a archives · s shows archived · ←/→ tabs · / searches · Tab moves"
             }
         },
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme::MUTED),
     ));
     let note_area = Rect::new(
         rows[3].x,
@@ -1068,14 +1086,14 @@ pub(crate) fn render_resume_dialog(
     );
     form.end_frame(ResumeFocus::Sessions);
     if dialog.is_scanning() {
-        const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
-        let frame_index = (dialog.opened_at.elapsed().as_millis() / 125) as usize;
         frame.render_widget(
-            Paragraph::new(format!(
-                "{} Scanning…",
-                SPINNER[frame_index % SPINNER.len()]
-            ))
-            .style(Style::default().fg(Color::Gray)),
+            Paragraph::new(Line::from(vec![
+                mj_chat::spinner::compact_span(
+                    dashboard.config.spinner,
+                    dialog.opened_at.elapsed().as_millis(),
+                ),
+                Span::styled(" Scanning…", theme::muted()),
+            ])),
             Rect::new(
                 note_area.right().saturating_sub(14).max(note_area.x),
                 note_area.y,
@@ -1088,7 +1106,7 @@ pub(crate) fn render_resume_dialog(
 
 fn resume_header_line(layout: &RowLayout) -> Line<'static> {
     let style = Style::default()
-        .fg(Color::DarkGray)
+        .fg(theme::MUTED)
         .add_modifier(Modifier::BOLD);
     Line::from(vec![
         Span::styled(padded_cell("PROFILE", layout.profile), style),
@@ -1117,12 +1135,12 @@ where
     let title_style = if row.status.is_recoverable() {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(theme::WARNING)
     };
     let origin = match row.status.warning() {
         Some(warning) => Span::styled(
             format!("{:<width$}", warning, width = layout.origin),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::WARNING),
         ),
         None => Span::styled(
             format!(
@@ -1130,7 +1148,7 @@ where
                 truncate_text(&row.origin, layout.origin),
                 width = layout.origin
             ),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme::ACCENT),
         ),
     };
     let mut marks = String::new();
@@ -1152,7 +1170,7 @@ where
     Line::from(vec![
         Span::styled(
             padded_cell(&row.profile_id, layout.profile),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(theme::SECONDARY),
         ),
         Span::raw("  "),
         origin,
@@ -1162,11 +1180,11 @@ where
                 &format_last_active(now, row.last_activity_ms),
                 layout.activity,
             ),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(theme::MUTED),
         ),
         Span::raw("  "),
         Span::styled(truncate_text(&row.title, layout.title), title_style),
-        Span::styled(marks, Style::default().fg(Color::DarkGray)),
+        Span::styled(marks, Style::default().fg(theme::MUTED)),
     ])
 }
 

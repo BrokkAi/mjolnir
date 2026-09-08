@@ -319,6 +319,10 @@ pub enum DashboardAction {
     SaveReviewSettings {
         review: hel::hel_config::ReviewConfig,
     },
+    /// Persist the client-side activity animation without replacing other settings.
+    SaveSpinnerStyle {
+        style: hel::hel_config::SpinnerStyle,
+    },
     /// Per-session container provisioning inputs, taking effect the next time
     /// the container is created.
     SaveContainerSettings {
@@ -588,6 +592,7 @@ pub struct DashboardState {
     /// the dashboard prevents a late result from an older dialog instance
     /// matching a newly opened dialog with the same values.
     pub(crate) review_settings_generation: u64,
+    pub(crate) spinner_save_pending: bool,
     /// Successful reviewer selector discoveries, retained after the dialog
     /// closes. The key is the profile definition's id and the optional model
     /// whose effort choices were discovered.
@@ -599,6 +604,10 @@ pub struct DashboardState {
 }
 
 impl DashboardState {
+    pub fn finish_spinner_style_save(&mut self) {
+        self.spinner_save_pending = false;
+    }
+
     pub fn new(config: HelConfig, state: HelState, quotas: BTreeMap<String, ProfileQuota>) -> Self {
         let mut dashboard = Self {
             config,
@@ -640,6 +649,7 @@ impl DashboardState {
             last_row_click: None,
             mode: Mode::Dashboard,
             review_settings_generation: 0,
+            spinner_save_pending: false,
             review_settings_choices: BTreeMap::new(),
             session_preflight_generation: 0,
             notices: Notices::default(),

@@ -37,6 +37,13 @@ pub(crate) async fn apply_dashboard_action(
 ) -> Result<()> {
     match action {
         DashboardAction::None => {}
+        DashboardAction::SaveSpinnerStyle { style } => {
+            super::io::spawn_spinner_style_save(
+                style,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
         DashboardAction::QuitDetach => {
             context.request_shutdown();
         }

@@ -108,14 +108,14 @@ impl ContainerEditor {
             Row::Text(Line::raw(format!("Session: {}", self.session_id))),
             Row::Text(Line::styled(
                 CONTAINER_EDIT_SCOPE,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             )),
             Row::Text(Line::raw("")),
             Row::Field(Cpus, "CPUs", &self.cpus),
             Row::Field(Memory, "Memory", &self.memory),
             Row::Text(Line::styled(
                 "Empty keeps the target's value.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             )),
             Row::Text(Line::raw("")),
             Row::Text(Line::raw("Attached directories")),
@@ -123,7 +123,7 @@ impl ContainerEditor {
         if self.mounts.is_empty() {
             rows.push(Row::Text(Line::styled(
                 "  none",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             )));
         } else {
             rows.push(Row::List(
@@ -163,7 +163,7 @@ impl ContainerEditor {
         if let Some(error) = &self.error {
             rows.push(Row::Text(Line::styled(
                 error.clone(),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::WARNING),
             )));
         }
         rows
@@ -297,9 +297,7 @@ pub(crate) fn render_container_editor(
         .fold(0_u16, |height, row| height.saturating_add(row.height()));
     let popup = centered_modal(frame, surfaces, 70, total.saturating_add(5).max(18), area);
     frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Edit container size and mounts "),
+        theme::modal().title(" Edit container size and mounts "),
         popup,
     );
     let inner = popup.inner(Margin {
@@ -383,7 +381,7 @@ pub(crate) fn render_container_editor(
         frame.render_widget(
             Line::styled(
                 "Enter attaches/accepts · Space toggles · d removes · Tab moves",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             ),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
         );
@@ -541,7 +539,7 @@ mod tests {
         let mut dashboard = open();
         dashboard.handle_key(key(KeyCode::Char('4')));
         let lines = draw(&mut dashboard, 100, 40);
-        let save = point(&lines, "[ Save ]");
+        let save = point(&lines, "  Save  ");
         assert_eq!(
             dashboard.handle_mouse(pointer(MouseEventKind::Down(MouseButton::Left), save)),
             DashboardAction::None
@@ -591,13 +589,13 @@ mod tests {
         let lines = draw(&mut dashboard, 40, 10);
         assert!(lines.iter().any(|line| line.contains("Terminal too small")));
         let lines = draw(&mut dashboard, 72, 18);
-        assert!(lines.iter().any(|line| line.contains("[ Save ]")));
+        assert!(lines.iter().any(|line| line.contains("  Save  ")));
     }
 
     #[test]
     fn too_small_frame_removes_stale_button_hitboxes() {
         let mut dashboard = open();
-        let save = point(&draw(&mut dashboard, 100, 40), "[ Save ]");
+        let save = point(&draw(&mut dashboard, 100, 40), "  Save  ");
         let lines = draw(&mut dashboard, 20, 8);
         assert!(lines.iter().any(|line| line.contains("Terminal too small")));
         let down = pointer(MouseEventKind::Down(MouseButton::Left), save);

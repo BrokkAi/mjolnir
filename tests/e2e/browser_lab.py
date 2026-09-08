@@ -25,9 +25,8 @@ def parse_args() -> argparse.Namespace:
 
 def start_dashboard(lab: Lab):
     client = lab.start_tui("tui-1")
-    client.wait_for("Workspaces")
-    client.send(b"\r\r")
-    client.wait_for("Sessions")
+    # Startup opens the last workspace directly, including its empty state.
+    client.wait_for("Alt-S resume")
     return client
 
 
@@ -89,7 +88,7 @@ def focus_sessions(client) -> None:
 def stop_from_dashboard(client) -> None:
     focus_sessions(client)
     client.send(b"\x1bOQ")
-    client.wait_for("type to filter \u00b7 Up/Down")
+    client.wait_for("Enter runs \u00b7 Esc closes")
     client.send(b"stop\r")
     client.wait_for("Stop session?")
     client.send(b"\r")
@@ -120,7 +119,7 @@ def run_layout_matrix(lab: Lab, web_root: pathlib.Path, environment: dict[str, s
     """
     log = (lab.root / "layout.log").open("wb")
     matrix_environment = dict(environment)
-    matrix_environment["MJ_BROWSER_SPEC"] = "{layout,quota,plan-mode,new-session,project-groups,attachments}.spec.js"
+    matrix_environment["MJ_BROWSER_SPEC"] = "{layout,quota,plan-mode,new-session,project-groups,resume,attachments}.spec.js"
     matrix = subprocess.Popen(
         [str(web_root / "node_modules/.bin/playwright"), "test"],
         cwd=web_root,

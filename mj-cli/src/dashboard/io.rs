@@ -118,6 +118,9 @@ pub(crate) enum DashboardIoUpdate {
     ReviewSettingsSaved {
         result: std::result::Result<HelConfig, String>,
     },
+    SpinnerStyleSaved {
+        result: std::result::Result<HelConfig, String>,
+    },
     DetachedSessionState {
         session_id: String,
         result: std::result::Result<(), String>,
@@ -494,6 +497,26 @@ fn review_settings_choices(
         effort_choices: choices.effort_choices,
         effort_capabilities_discovered: choices.effort_capabilities_discovered,
     }
+}
+
+pub(crate) fn spawn_spinner_style_save(
+    style: hel::hel_config::SpinnerStyle,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_critical_io(
+        tracker,
+        "saving spinner style",
+        updates,
+        move || {
+            HelConfig::update(|config| {
+                config.spinner = style;
+                Ok(())
+            })
+            .map(|(config, ())| config)
+        },
+        |result| DashboardIoUpdate::SpinnerStyleSaved { result },
+    )
 }
 
 pub(crate) fn spawn_review_settings_save(
@@ -1521,6 +1544,23 @@ impl DashboardContext {
                     self.review_discovery_cancel = None;
                 }
             }
+            DashboardIoUpdate::SpinnerStyleSaved { result } => match result {
+                Ok(config) => {
+                    let style = config.spinner;
+                    self.dashboard.finish_spinner_style_save();
+                    self.controller.config = config.clone();
+                    self.dashboard.set_config(config);
+                    self.refresh_chat_context();
+                    self.dashboard.set_notice(format!(
+                        "Spinner: {style}. F2 → Next spinner style to change it."
+                    ));
+                }
+                Err(error) => {
+                    self.dashboard.finish_spinner_style_save();
+                    self.dashboard
+                        .set_failure_notice(format!("Could not save spinner style: {error}"));
+                }
+            },
             DashboardIoUpdate::ReviewSettingsSaved { result } => match result {
                 Ok(config) => {
                     self.review_discovery_cancel = None;

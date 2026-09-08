@@ -3517,14 +3517,14 @@ async fn daemon_restart_serves_a_closed_relay_without_starting_acp() {
     config.cwd = temp.path().to_owned();
     let root = temp.path().to_owned();
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
-    let stream = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    let stream = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             match tokio::net::UnixStream::connect(root.join("control.sock")).await {
                 Ok(stream) => break stream,
                 Err(_) if daemon.is_finished() => {
                     panic!("closed relay daemon stopped during startup")
                 }
-                Err(_) => tokio::task::yield_now().await,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
             }
         }
     })

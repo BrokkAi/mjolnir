@@ -33,7 +33,7 @@ const ROWS: u16 = 42;
 const CELL_WIDTH: u16 = 9;
 const CELL_HEIGHT: u16 = 18;
 const PADDING: u16 = 14;
-const TERMINAL_BACKGROUND: &str = "#09070e";
+const TERMINAL_BACKGROUND: &str = "#0b1220";
 
 #[test]
 #[ignore = "writes the committed documentation screenshots"]
@@ -344,27 +344,43 @@ fn buffer_svg(buffer: &Buffer, title: &str, description: &str) -> String {
     .unwrap();
     writeln!(
         svg,
-        "  <g font-family=\"JetBrains Mono, Menlo, Consolas, monospace\" font-size=\"14\" font-variant-ligatures=\"none\">"
+        "  <g font-family=\"Source Code Pro, JetBrains Mono, Menlo, Consolas, monospace\" font-size=\"15\" font-variant-ligatures=\"none\">"
     )
     .unwrap();
 
     for y in buffer.area.y..buffer.area.bottom() {
+        let background_at = |x| {
+            let cell = &buffer[(x, y)];
+            if cell.modifier.contains(Modifier::REVERSED) {
+                cell.fg
+            } else {
+                cell.bg
+            }
+        };
+        let mut start = buffer.area.x;
+        while start < buffer.area.right() {
+            let background = background_at(start);
+            let mut end = start + 1;
+            while end < buffer.area.right() && background_at(end) == background {
+                end += 1;
+            }
+            if background != Color::Reset {
+                writeln!(svg,
+                    "    <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{CELL_HEIGHT}\" fill=\"{}\"/>",
+                    PADDING + (start - buffer.area.x) * CELL_WIDTH,
+                    PADDING + (y - buffer.area.y) * CELL_HEIGHT,
+                    (end - start) * CELL_WIDTH,
+                    color_hex(background, TERMINAL_BACKGROUND),
+                ).unwrap();
+            }
+            start = end;
+        }
         for x in buffer.area.x..buffer.area.right() {
             let cell = &buffer[(x, y)];
             let reversed = cell.modifier.contains(Modifier::REVERSED);
             let foreground = if reversed { cell.bg } else { cell.fg };
-            let background = if reversed { cell.fg } else { cell.bg };
             let draw_x = PADDING + (x - buffer.area.x) * CELL_WIDTH;
             let draw_y = PADDING + (y - buffer.area.y) * CELL_HEIGHT;
-
-            if background != Color::Reset {
-                writeln!(
-                    svg,
-                    "    <rect x=\"{draw_x}\" y=\"{draw_y}\" width=\"{CELL_WIDTH}\" height=\"{CELL_HEIGHT}\" fill=\"{}\"/>",
-                    color_hex(background, TERMINAL_BACKGROUND)
-                )
-                .unwrap();
-            }
 
             let symbol = cell.symbol();
             if symbol.trim().is_empty() {
@@ -397,8 +413,49 @@ fn buffer_svg(buffer: &Buffer, title: &str, description: &str) -> String {
     svg
 }
 
-fn color_hex(color: Color, fallback: &'static str) -> &'static str {
+// Captures reproduce the terminal's rendered colors exactly, including the
+// standard indexed color cube; this encoder does not choose live UI colors.
+#[allow(clippy::disallowed_methods)]
+fn color_hex(color: Color, fallback: &str) -> String {
     match color {
+        Color::Rgb(red, green, blue) => return format!("#{red:02x}{green:02x}{blue:02x}"),
+        Color::Indexed(index) => {
+            return match index {
+                0..=15 => color_hex(
+                    [
+                        Color::Black,
+                        Color::Red,
+                        Color::Green,
+                        Color::Yellow,
+                        Color::Blue,
+                        Color::Magenta,
+                        Color::Cyan,
+                        Color::Gray,
+                        Color::DarkGray,
+                        Color::LightRed,
+                        Color::LightGreen,
+                        Color::LightYellow,
+                        Color::LightBlue,
+                        Color::LightMagenta,
+                        Color::LightCyan,
+                        Color::White,
+                    ][usize::from(index)],
+                    fallback,
+                ),
+                16..=231 => {
+                    let cube = index - 16;
+                    let level = |value: u8| if value == 0 { 0 } else { 55 + value * 40 };
+                    color_hex(
+                        Color::Rgb(level(cube / 36), level((cube / 6) % 6), level(cube % 6)),
+                        fallback,
+                    )
+                }
+                _ => {
+                    let gray = 8 + (index - 232) * 10;
+                    color_hex(Color::Rgb(gray, gray, gray), fallback)
+                }
+            };
+        }
         Color::Reset => fallback,
         Color::Black => "#09070e",
         Color::Red => "#ff6b6b",
@@ -416,8 +473,8 @@ fn color_hex(color: Color, fallback: &'static str) -> &'static str {
         Color::LightMagenta => "#d9b5ff",
         Color::LightCyan => "#a5ecf5",
         Color::White => "#f4f0fa",
-        Color::Indexed(_) | Color::Rgb(_, _, _) => fallback,
     }
+    .to_owned()
 }
 
 fn xml_escape(value: &str) -> String {

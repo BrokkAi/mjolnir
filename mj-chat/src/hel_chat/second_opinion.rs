@@ -11,13 +11,14 @@
 
 use std::sync::Arc;
 
+use crate::theme;
 use crossterm::event::{Event, KeyEvent, MouseEvent};
 use rat_event::ConsumedEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget};
 
 use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction};
 use crate::hel_selection::{SelectionRange, SurfaceFrame, SurfaceId};
@@ -929,10 +930,7 @@ pub(super) fn render_setup(
     form: &mut Form<SetupControl>,
 ) -> Rect {
     prepare_setup_form(setup, form);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Choose a reviewer ")
-        .border_style(Style::default().fg(Color::LightMagenta));
+    let block = theme::modal().title(" Choose a reviewer ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -947,7 +945,7 @@ pub(super) fn render_setup(
         ])
         .split(inner);
     frame.render_widget(
-        Paragraph::new(headline).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(headline).style(Style::default().fg(theme::MUTED)),
         chunks[0],
     );
     let (heading, rows, selected) = match setup.stage() {
@@ -986,7 +984,7 @@ pub(super) fn render_setup(
     form.begin_frame();
     if let Some(failure) = setup.failure() {
         frame.render_widget(
-            Paragraph::new(failure).style(Style::default().fg(Color::Red)),
+            Paragraph::new(failure).style(Style::default().fg(theme::ERROR)),
             chunks[2],
         );
         ButtonRow::render(
@@ -999,14 +997,14 @@ pub(super) fn render_setup(
             form,
         );
         frame.render_widget(
-            Paragraph::new("Enter retry · Esc cancel").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("Enter retry · Esc cancel").style(Style::default().fg(theme::MUTED)),
             chunks[4],
         );
         form.end_frame(SetupControl::Retry);
         return inner;
     } else if setup.busy() {
         frame.render_widget(
-            Paragraph::new("Starting the reviewer…").style(Style::default().fg(Color::Yellow)),
+            Paragraph::new("Starting the reviewer…").style(Style::default().fg(theme::WARNING)),
             chunks[2],
         );
         ButtonRow::render(
@@ -1017,7 +1015,7 @@ pub(super) fn render_setup(
         );
         frame.render_widget(
             Paragraph::new("Waiting for reviewer discovery · Esc cancel")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme::MUTED)),
             chunks[4],
         );
         form.end_frame(SetupControl::Cancel);
@@ -1051,7 +1049,7 @@ pub(super) fn render_setup(
         );
         frame.render_widget(
             Paragraph::new("↑/↓ choose · Tab controls · Enter confirm · Esc cancel")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme::MUTED)),
             chunks[4],
         );
     }
@@ -1081,10 +1079,9 @@ pub(super) fn render_reviewer_titled(
     title: &str,
     strip: Option<Line<'static>>,
 ) -> (Rect, usize, usize) {
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = theme::panel(false)
         .title(title.to_owned())
-        .border_style(Style::default().fg(Color::LightMagenta));
+        .border_style(Style::default().fg(theme::SECONDARY));
     let mut inner = block.inner(area);
     frame.render_widget(block, area);
     if let Some(strip) = strip
@@ -1110,7 +1107,7 @@ pub(super) fn render_reviewer_titled(
     let rows = if visible.is_empty() {
         vec![Line::from(Span::styled(
             status.to_owned(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ))]
     } else {
         visible
@@ -1181,7 +1178,7 @@ pub(super) fn render_split_actions(
     );
     if status_column < area.right() {
         frame.render_widget(
-            Paragraph::new(waiting).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(waiting).style(Style::default().fg(theme::MUTED)),
             Rect::new(
                 status_column,
                 area.y,

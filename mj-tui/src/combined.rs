@@ -8,11 +8,12 @@
 use hel::hel_state::SessionTransitionKind;
 use mj_chat::hel_chat::{ActiveChat, ChatRegions};
 use mj_chat::hel_selection::{SurfaceFrame, SurfaceId};
+use mj_chat::{spinner, theme};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::render::{
     MINIMUM_TERMINAL_WIDTH, TerminalSizeRequirement, minimized_pane_size_controls,
@@ -296,6 +297,7 @@ pub fn render_combined(
     dashboard.chat_transcript_area = None;
     dashboard.chat_prompt_area = None;
     let area = frame.area();
+    frame.render_widget(Block::default().style(theme::base()), area);
     if area.width < MINIMUM_TERMINAL_WIDTH {
         render_terminal_too_small(
             frame,
@@ -492,6 +494,7 @@ pub fn render_combined(
                     prompt_area,
                     prompt_focused,
                     reason,
+                    dashboard.config.spinner,
                 );
                 false
             }
@@ -502,13 +505,8 @@ pub fn render_combined(
     if sizes[1].1 == PaneSize::Minimized {
         let focused = dashboard.focus() == Focus::Targets;
         frame.render_widget(
-            Block::default()
+            theme::panel(focused)
                 .borders(Borders::TOP)
-                .border_type(if focused {
-                    BorderType::Double
-                } else {
-                    BorderType::Plain
-                })
                 .title(minimized_targets_line(
                     dashboard,
                     pane_title_content_width(targets_area.width),
@@ -526,13 +524,8 @@ pub fn render_combined(
     if sizes[2].1 == PaneSize::Minimized {
         let focused = dashboard.focus() == Focus::Quota;
         frame.render_widget(
-            Block::default()
+            theme::panel(focused)
                 .borders(Borders::TOP)
-                .border_type(if focused {
-                    BorderType::Double
-                } else {
-                    BorderType::Plain
-                })
                 .title(minimized_quota_line(
                     dashboard,
                     pane_title_content_width(quota_area.width),
@@ -639,6 +632,17 @@ fn render_transition_surface(
         .and_then(|operation| operation.resume_destination.as_ref())
         .map(|(profile, _)| profile.as_str())
         .unwrap_or(&session.last_profile);
+    let mut panel = theme::panel(false).title(format!(" Transition · {} ", transition.label()));
+    if !failed {
+        panel = panel.title(
+            Line::from(vec![
+                Span::raw(" "),
+                spinner::compact_span(dashboard.config.spinner, spinner::elapsed_ms()),
+                Span::raw(" "),
+            ])
+            .right_aligned(),
+        );
+    }
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
@@ -653,11 +657,7 @@ fn render_transition_surface(
             )),
         ])
         .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Transition · {} ", transition.label())),
-        ),
+        .block(panel),
         transcript_area,
     );
     let cancel_line = if !failed && operation.is_some_and(|operation| operation.cancellable) {
@@ -684,9 +684,9 @@ fn render_transition_surface(
                 "Select another session to keep working."
             }),
         ])
-        .style(Style::default().fg(Color::DarkGray))
+        .style(theme::muted())
         .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL).title(" Status ")),
+        .block(theme::panel(false).title(" Status ")),
         prompt_area,
     );
 }
@@ -705,18 +705,31 @@ fn render_empty_conversation(
     prompt_area: Rect,
     prompt_focused: bool,
     reason: EmptyConversation,
+    spinner_style: spinner::SpinnerStyle,
 ) {
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Conversation "),
-        transcript_area,
-    );
-    let border = if prompt_focused {
-        BorderType::Double
-    } else {
-        BorderType::Plain
-    };
+    frame.render_widget(theme::panel(false).title(" Conversation "), transcript_area);
+    if transcript_area.height >= 7 {
+        let hero = Rect::new(
+            transcript_area.x.saturating_add(1),
+            transcript_area.y + (transcript_area.height.saturating_sub(5) / 2).max(1),
+            transcript_area.width.saturating_sub(2),
+            4,
+        );
+        let invitation = match reason {
+            EmptyConversation::NoLiveSession => "A little spark. Something extraordinary.",
+            EmptyConversation::NoConversationOpen => "Your next idea starts here.",
+            EmptyConversation::Opening => "Bringing your conversation into focus…",
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled("✦  M J O L N I R", theme::title(true)),
+                Line::default(),
+                Line::styled(invitation, theme::muted()),
+            ])
+            .alignment(ratatui::layout::Alignment::Center),
+            hero,
+        );
+    }
     let (title, lines) = match reason {
         EmptyConversation::NoLiveSession => (
             " Prompt (no live session) ",
@@ -740,16 +753,19 @@ fn render_empty_conversation(
             ],
         ),
     };
+    let mut lines = lines.map(Line::raw).to_vec();
+    if matches!(reason, EmptyConversation::Opening) {
+        lines[0].spans.insert(0, Span::raw(" "));
+        lines[0].spans.insert(
+            0,
+            spinner::compact_span(spinner_style, spinner::elapsed_ms()),
+        );
+    }
     frame.render_widget(
-        Paragraph::new(lines.map(Line::raw).to_vec())
-            .style(Style::default().fg(Color::DarkGray))
+        Paragraph::new(lines)
+            .style(theme::muted())
             .wrap(Wrap { trim: true })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(border)
-                    .title(title),
-            ),
+            .block(theme::panel(prompt_focused).title(title)),
         prompt_area,
     );
 }

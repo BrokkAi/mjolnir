@@ -516,6 +516,7 @@ pub struct ChatState {
     /// Session-list identity snapshotted when the chat opened.
     header_target: String,
     header_profile: String,
+    spinner_style: hel::hel_config::SpinnerStyle,
     turn_started_at_epoch_seconds: Option<u64>,
     /// Whether a prompt of ours is in flight. `phase` also goes Running for a
     /// turn the harness started on its own, which the relay refuses to cancel,
@@ -622,6 +623,7 @@ impl ChatState {
             voice_form: voice_form(),
             header_target: String::new(),
             header_profile: String::new(),
+            spinner_style: hel::hel_config::SpinnerStyle::default(),
             turn_started_at_epoch_seconds: None,
             prompt_in_flight: snapshot.active_prompt.is_some(),
             session_activity: crate::usage_format::SessionActivity::default(),
@@ -1179,6 +1181,29 @@ impl ChatState {
 
     pub fn latest_seq(&self) -> u64 {
         self.latest_seq
+    }
+
+    pub fn set_spinner_style(&mut self, style: hel::hel_config::SpinnerStyle) {
+        self.spinner_style = style;
+    }
+
+    /// Activity animates only while the session has work to report.
+    pub fn needs_animation(&self) -> bool {
+        matches!(self.phase, WorkerPhase::Running | WorkerPhase::Closing)
+            || !self
+                .session_activity
+                .is_idle(self.turn_started_at_epoch_seconds)
+            || self
+                .turn_review()
+                .is_some_and(|review| review.view.is_working())
+    }
+
+    pub fn activity_spinner(&self) -> ratatui::text::Line<'static> {
+        crate::spinner::activity_line(
+            self.spinner_style,
+            crate::spinner::elapsed_ms(),
+            self.needs_animation(),
+        )
     }
 
     /// Mirrors `[review]` into the view, so `/review status` and the composer
@@ -2913,15 +2938,12 @@ impl Notices {
     }
 }
 
-/// Color of an active session's line. The terminal palette's plain yellow
-/// (amber or orange in common palettes) marks a session whose turn is still
-/// running; a session with no turn in flight is waiting on the user and
-/// switches to the brighter light yellow.
+/// Active work and ready sessions share the terminal's semantic palette.
 pub fn turn_band_color(turn_in_flight: bool) -> Color {
     if turn_in_flight {
-        Color::Yellow
+        crate::theme::ACCENT
     } else {
-        Color::LightYellow
+        crate::theme::SUCCESS
     }
 }
 
@@ -2950,6 +2972,23 @@ mod tests {
     use crate::hel_selection::SurfaceId;
     use base64::Engine;
     use hel::hel_worker::ActivePrompt;
+
+    #[test]
+    fn activity_animation_stops_when_foreground_and_background_work_settle() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        assert!(!chat.needs_animation());
+        chat.phase = WorkerPhase::Running;
+        assert!(chat.needs_animation());
+        chat.phase = WorkerPhase::Idle;
+        chat.session_activity.foreground_tool_started_at_ms = Some(1);
+        assert!(chat.needs_animation());
+        chat.session_activity = crate::usage_format::SessionActivity::default();
+        assert!(!chat.needs_animation());
+        chat.phase = WorkerPhase::Closing;
+        assert!(chat.needs_animation());
+        chat.phase = WorkerPhase::Closed;
+        assert!(!chat.needs_animation());
+    }
 
     /// Mirrors what `ActiveChat::open` does for a session with no warm view:
     /// build the state from the snapshot, then seed the saved draft.

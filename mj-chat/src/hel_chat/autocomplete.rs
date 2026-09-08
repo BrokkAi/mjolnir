@@ -1,11 +1,12 @@
 //! Slash commands: what they parse to, what the popup offers, and how a
 //! chosen completion lands back in the composer.
 
+use crate::theme;
 use agent_client_protocol::schema::v1::{AvailableCommandInput, SessionConfigOption};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem};
+use ratatui::style::Style;
+use ratatui::widgets::{Clear, List, ListItem};
 
 use hel::hel_acp::{SessionConfigChoice, session_config_choices};
 use hel::hel_transcript::{ChatEntry, ChatRole};
@@ -385,7 +386,7 @@ pub(super) fn render_autocomplete(
         AutocompleteKind::Commands => " commands · ↑/↓ select · Tab/Enter accept ",
         AutocompleteKind::ConfigValues { .. } => " values · ↑/↓ select · Tab/Enter accept ",
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = theme::modal().title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let start = autocomplete
@@ -400,10 +401,7 @@ pub(super) fn render_autocomplete(
             autocomplete_row(chat, autocomplete.kind, *index).map(|row| {
                 ListItem::new(truncate_to_width(&row, usize::from(inner.width))).style(
                     if selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::White)
-                            .add_modifier(Modifier::BOLD)
+                        theme::selection(true)
                     } else {
                         Style::default()
                     },

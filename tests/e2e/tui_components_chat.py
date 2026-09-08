@@ -120,5 +120,5 @@ def run_chat_controls(lab, tmux, evidence, session_id):
     time.sleep(0.15)
     record("turn-review-overview", "Home on review tabs", "overview tab remains reachable as roles update")
     click_text("Cancel")
-    tmux.wait_until(lambda: "[ Cancel ]" not in tmux.capture(), "turn review cancellation", timeout=30)
+    tmux.wait_until(lambda: "  Cancel  " not in tmux.capture(), "turn review cancellation", timeout=30)
     record("turn-review-cancel", "click Cancel", "review cancellation is delivered through the shared action bar")

@@ -10,9 +10,10 @@ This living plan follows `.agents/PLANS.md`.
 
 - [x] Grounded current transport, composer, snapshot, and checkpoint paths; user approved separate attachment storage and pushing after completion.
 - [x] Implement shared bounded optimization and content-addressed storage.
-- [x] Implement transfer, admission, ACP resolution, and archive recovery; finish review fixes for cache repair and retry deduplication.
+- [x] Implement transfer, admission, ACP resolution, and archive recovery; review fixes for atomic cache repair and retry deduplication passed focused tests.
 - [x] Connect shared terminal/desktop chat and browser attachment flows; native library tests (417) and browser attachment tests (4) pass.
-- [ ] Validate integrated behavior, commit on current branch, and push upstream.
+- [x] Validate integrated behavior with the complete Rust suite, clippy, browser tests, formatting, and licenses.
+- [x] Commit the feature on master and prepare the validated upstream integration for the authorized push. Publication command: `git push origin master` after committing this plan.
 
 ## Surprises & Discoveries
 
@@ -34,7 +35,7 @@ Missing image caches must not block text history projection: log failures while 
 
 ## Outcomes & Retrospective
 
-Implemented the three functional milestones. Ten 700 KiB images reach both ordinary ACP prompts and steering through a 64 KiB duplex pipe, with aggregate messages exceeding 9 MiB. Worker socket tests demonstrate protocol gating, idempotent blob upload, and no journal bytes for transfers. Optimizer tests cover five image behaviors; checkpoint tests cover ten-image roundtrip and missing/corrupt data. Native chat has 417 passing tests, server has 80, browser unit tests have 15, and focused browser attachment tests have four. Full integration checks and upstream integration remain in progress.
+Implemented the three functional milestones. Ten 700 KiB images reach both ordinary ACP prompts and steering through a 64 KiB duplex pipe, with aggregate messages exceeding 9 MiB. Worker socket tests demonstrate protocol gating, idempotent blob upload, and no journal bytes for transfers. Optimizer tests cover five image behaviors; checkpoint tests cover ten-image roundtrip and missing/corrupt data. Native chat has 417 passing tests, server has 80, browser unit tests have 15, and focused browser attachment tests have four. The feature checkpoint is 023ab161. Upstream 5af6d914 merged cleanly on master. Final validation passed: `cargo test --quiet -- --test-threads=8` (all unit, integration, and documentation tests) and `cargo clippy --all-targets -- -D warnings`. The merged tree passes all 21 attachment/resume Playwright tests, 15 browser unit tests, formatting, and license validation. The merged suites passed 441 shared-chat, 690 controller, 851 core, 353 TUI, 109 worker, and 202 CLI unit tests, plus the remaining entrypoint and integration tests. Intentional ignored tests remain ignored.
 
 ## Context and Orientation
 
@@ -58,7 +59,7 @@ Normalize clipboard and file inputs off UI loops. Shared native chat gains `/att
 
 Test ten near-limit images reaching fake ACP intact, reconnect and restart, missing uploads and duplicate retries, queue editing, and checkpoint/move recovery. Check frames and snapshots remain bounded. Run browser tests and required Rust checks from `/home/jonathan/Projects/hel`:
 
-    cargo test
+    cargo test -- --test-threads=8
     cargo clippy --all-targets -- -D warnings
 
 Every cargo test must run with elevated permissions because tests use sockets. Build outputs stay in normal configured storage. Review staged diffs, commit only task-owned changes on the current branch, and push to upstream as authorized.
@@ -77,6 +78,12 @@ Core attachment references carry digest, encoded size, MIME type and dimensions;
 
 ## Artifacts and Notes
 
-Initial plan recorded from the approved conversation; implementation evidence will be appended as milestones complete.
+Use `MJ_BROWSER_SPEC='{attachments,resume}.spec.js' npx playwright test` from `tests/e2e/web` to reproduce the 21 passing browser cases. `npm run test:unit` passes 15 cases. The browser CI matrix includes both suites.
+
+Full validation discovered two existing timing-sensitive tests: the composer duration test crossed a wall-clock second, and the closed-worker startup probe exceeded its one-second deadline during compilation load. The composer test now supplies deterministic time; the startup test sleeps between connection attempts and has a ten-second deadline. Neither changes product timing behavior.
 
 Revision (2026-09-07): Recorded implemented behavior, focused validation, shared native storage, storage version gates, deletion coordination, and upstream integration requirements.
+
+Revision (2026-09-07): Recorded checkpoint, clean upstream merge, combined browser validation, cache repair, and fixes for validation timing flakes.
+
+Revision (2026-09-07): All implementation and integration validation passed. A default-concurrency CLI listener retry timed out once; the focused six-test suite passed twice, and the complete suite passed with eight test threads. No product fallback was added. Desktop-only compilation remains delegated to CI because local GTK/WebKit development libraries are unavailable. The validated integration is ready for the explicitly authorized upstream push.

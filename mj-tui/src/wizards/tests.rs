@@ -747,7 +747,7 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("[x] Read-only (locked)"));
+    assert!(rendered.contains("[✓] Read-only (locked)"));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Esc)),
         DashboardAction::None
@@ -1910,7 +1910,7 @@ fn resume_target_next_mouse_release_advances_to_review() {
             let text = (0..140)
                 .map(|column| buffer[(column, row)].symbol())
                 .collect::<String>();
-            text.find("[ Next ]").map(|column| (column as u16 + 2, row))
+            text.find("  Next  ").map(|column| (column as u16 + 2, row))
         })
         .expect("Next button");
     for kind in [

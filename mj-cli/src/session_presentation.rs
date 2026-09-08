@@ -278,7 +278,7 @@ mod tests {
         );
         assert!(text.contains("Step"), "step clock missing from {text:?}");
         assert!(
-            colors.contains(&Color::Red),
+            colors.contains(&mj_chat::theme::ERROR),
             "disconnected row was not marked red"
         );
     }

@@ -1,8 +1,11 @@
 //! Markdown and width-aware transcript rendering.
 
+use crate::theme;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+#[cfg(test)]
+use ratatui::style::Color;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use textwrap::WordSplitter;
 use unicode_segmentation::UnicodeSegmentation;
@@ -36,16 +39,16 @@ pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
 pub(super) fn voice_button_line(voice_available: bool, voice_active: bool) -> Line<'static> {
     let style = if voice_active {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::LightRed)
+            .fg(theme::BACKGROUND)
+            .bg(theme::ERROR)
             .add_modifier(Modifier::BOLD)
     } else if voice_available {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(theme::BACKGROUND)
+            .bg(theme::ACCENT)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray).bg(Color::Black)
+        Style::default().fg(theme::MUTED).bg(theme::SURFACE_RAISED)
     };
     Line::from(Span::styled(format!(" {VOICE_BUTTON_GLYPH} "), style)).left_aligned()
 }
@@ -131,10 +134,10 @@ impl MarkdownWriter {
         let continuation_indent = display_width(&quote) + display_width(&item);
         let mut spans = Vec::with_capacity(self.spans.len() + 2);
         if !quote.is_empty() {
-            spans.push(Span::styled(quote, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(quote, Style::default().fg(theme::MUTED)));
         }
         if !item.is_empty() {
-            spans.push(Span::styled(item, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(item, Style::default().fg(theme::MUTED)));
         }
         spans.append(&mut self.spans);
         self.lines.push(LogicalLine {
@@ -241,10 +244,7 @@ impl MarkdownWriter {
                 .collect::<Vec<_>>()
                 .join(&" ".repeat(COLUMN_GAP));
             self.lines.push(LogicalLine {
-                line: Line::from(Span::styled(
-                    separator,
-                    Style::default().fg(Color::DarkGray),
-                )),
+                line: Line::from(Span::styled(separator, Style::default().fg(theme::MUTED))),
                 continuation_indent: 0,
             });
             for row in rows.iter().skip(1) {
@@ -256,7 +256,7 @@ impl MarkdownWriter {
                     self.lines.push(LogicalLine {
                         line: Line::from(Span::styled(
                             "────────────────────",
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(theme::MUTED),
                         )),
                         continuation_indent: 0,
                     });
@@ -362,7 +362,7 @@ pub(super) fn markdown_lines(
                     };
                     writer.spans.push(Span::styled(
                         format!("{} ", "#".repeat(count)),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::MUTED),
                     ));
                     style_stack.push(writer.style);
                     writer.style = accent_style.add_modifier(Modifier::BOLD);
@@ -380,13 +380,13 @@ pub(super) fn markdown_lines(
                         line: Line::from(Span::styled(
                             language,
                             Style::default()
-                                .fg(Color::DarkGray)
+                                .fg(theme::MUTED)
                                 .add_modifier(Modifier::BOLD),
                         )),
                         continuation_indent: 0,
                     });
                     style_stack.push(writer.style);
-                    writer.style = Style::default().fg(Color::Gray);
+                    writer.style = Style::default().fg(theme::TEXT).bg(theme::SURFACE_RAISED);
                 }
                 Tag::List(start) => writer.lists.push(ListState { next: start }),
                 Tag::Item => {
@@ -421,7 +421,7 @@ pub(super) fn markdown_lines(
                     style_stack.push(writer.style);
                     writer.style = writer
                         .style
-                        .fg(Color::Cyan)
+                        .fg(theme::ACCENT)
                         .add_modifier(Modifier::UNDERLINED);
                 }
                 Tag::Table(alignments) => {
@@ -483,7 +483,7 @@ pub(super) fn markdown_lines(
                 } else {
                     writer.spans.push(Span::styled(
                         code.into_string(),
-                        writer.style.fg(Color::Yellow),
+                        writer.style.fg(theme::SECONDARY).bg(theme::SURFACE_RAISED),
                     ));
                 }
             }
@@ -493,7 +493,7 @@ pub(super) fn markdown_lines(
                 writer.lines.push(LogicalLine {
                     line: Line::from(Span::styled(
                         "────────────────────",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::MUTED),
                     )),
                     continuation_indent: 0,
                 });
@@ -769,13 +769,13 @@ pub(super) fn append_trimmed_ellipsis(line: &mut Line<'static>, preserved_spans:
     line.spans.push(Span::styled("…", style));
 }
 
-/// Truncate a styled line to `width` characters, keeping each span's style and
+/// Truncate a styled line to `width` terminal cells, keeping each span's style and
 /// marking the cut with `…` in the style of the span it landed in.
 pub fn truncate_line_to_width(line: Line<'static>, width: usize) -> Line<'static> {
     let total = line
         .spans
         .iter()
-        .map(|span| span.content.chars().count())
+        .map(|span| display_width(&span.content))
         .sum::<usize>();
     if total <= width {
         return line;
@@ -791,12 +791,23 @@ pub fn truncate_line_to_width(line: Line<'static>, width: usize) -> Line<'static
             }
             return Line::from(spans);
         }
-        let count = span.content.chars().count();
+        let count = display_width(&span.content);
         if used + count <= budget {
             used += count;
             spans.push(span);
         } else {
-            let kept = span.content.chars().take(budget - used).collect::<String>();
+            let kept = span
+                .content
+                .graphemes(true)
+                .take_while(|grapheme| {
+                    let next = used + display_width(grapheme);
+                    if next > budget {
+                        return false;
+                    }
+                    used = next;
+                    true
+                })
+                .collect::<String>();
             let style = span.style;
             if !kept.is_empty() {
                 spans.push(Span::styled(kept, style));
@@ -812,16 +823,11 @@ pub fn truncate_line_to_width(line: Line<'static>, width: usize) -> Line<'static
 }
 
 pub(super) fn truncate_to_width(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_owned();
-    }
-    if width <= 1 {
-        return "…".chars().take(width).collect();
-    }
-    let mut truncated = text.chars().take(width - 1).collect::<String>();
-    truncated.truncate(truncated.trim_end_matches(trim_before_ellipsis).len());
-    truncated.push('…');
-    truncated
+    truncate_line_to_width(Line::raw(text.to_owned()), width)
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }
 
 #[cfg(test)]
@@ -887,7 +893,7 @@ mod tests {
         let lines = markdown_lines(
             "# Heading\n\n- **bold** and `code`\n\n```rust\nfn main() {}",
             Style::default(),
-            Style::default().fg(Color::Green),
+            Style::default().fg(theme::SUCCESS),
             40,
         );
         let rendered = lines.into_iter().map(|line| line.line).collect::<Vec<_>>();
@@ -939,7 +945,7 @@ mod tests {
         assert_eq!(truncate_to_width("alpha, beta", 7), "alpha…");
 
         let line = Line::from(vec![
-            Span::styled("alpha,", Style::default().fg(Color::Red)),
+            Span::styled("alpha,", Style::default().fg(theme::ERROR)),
             Span::styled(" beta", Style::default().fg(Color::Blue)),
         ]);
         let truncated = truncate_line_to_width(line, 7);
@@ -948,6 +954,19 @@ mod tests {
             truncated.spans.last().and_then(|span| span.style.fg),
             Some(Color::Blue)
         );
+    }
+
+    #[test]
+    fn truncation_respects_wide_glyphs_and_keeps_combining_sequences_intact() {
+        assert_eq!(truncate_to_width("界e\u{301}abc", 4), "界e\u{301}…");
+        assert_eq!(truncate_to_width("👩‍💻 abc", 3), "👩‍💻…");
+        for width in 0..8 {
+            let text = truncate_to_width("界e\u{301}👩‍💻 abc", width);
+            assert!(
+                display_width(&text) <= width,
+                "{text:?} exceeds {width} cells"
+            );
+        }
     }
 
     #[test]

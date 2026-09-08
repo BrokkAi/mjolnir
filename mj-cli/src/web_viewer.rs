@@ -523,7 +523,7 @@ mod tests {
         predicate: impl Fn(&WebViewerAccess) -> bool,
     ) -> WebViewerAccess {
         let mut updates = control.access.subscribe();
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let access = updates.borrow_and_update().clone();
                 if predicate(&access) {

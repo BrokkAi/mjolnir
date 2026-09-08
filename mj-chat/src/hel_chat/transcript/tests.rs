@@ -378,6 +378,33 @@ fn conversation_title_shows_review_activity_then_restores_primary_activity() {
 }
 
 #[test]
+fn long_conversation_titles_leave_a_gap_before_full_and_compact_activity() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_header_summary("界".repeat(80), "profile");
+    chat.mark_prompt_submitted("continue");
+    for width in [32, 48, 80] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 10)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_transcript(frame, area, &mut chat, false);
+            })
+            .expect("render conversation");
+        let activity_width = if width >= 48 {
+            chat.activity_spinner().width() + 2
+        } else {
+            3
+        };
+        let title_width = usize::from(width) - 2 - activity_width - 1;
+        let buffer = terminal.backend().buffer();
+        assert!((1..=title_width).any(|x| buffer[(x as u16, 0)].symbol() == "…"));
+        assert_eq!(buffer[(title_width as u16 + 1, 0)].symbol(), "─");
+    }
+}
+
+#[test]
 fn live_unclaimed_terminal_renders_a_quiet_running_card() {
     let started_at_ms = hel::clock::epoch_millis();
     let terminal = hel::hel_worker::ActiveAgentTerminal {
@@ -860,7 +887,7 @@ fn shows(rows: &[String], needle: &str) -> bool {
 /// The message bodies on screen, ignoring the title and composer chrome.
 fn visible_messages(rows: &[String]) -> Vec<String> {
     rows.iter()
-        .filter(|row| row.starts_with("│ message "))
+        .filter(|row| row.contains("│ message "))
         .cloned()
         .collect()
 }
@@ -1597,8 +1624,8 @@ fn agent_preview_head_removes_punctuation_before_its_ellipsis() {
 #[test]
 fn blank_rows_inside_messages_keep_the_role_gutter() {
     for (role, color) in [
-        (ChatRole::User, Color::Cyan),
-        (ChatRole::Agent, Color::Yellow),
+        (ChatRole::User, theme::ACCENT),
+        (ChatRole::Agent, theme::BORDER),
     ] {
         let entry = ChatEntry::plain(1, role, "1. first\n\n2. second");
         let lines = render_transcript_entry(&entry, 80, TranscriptRenderMode::Rich);
@@ -3040,7 +3067,7 @@ fn scrollbar_keeps_unseen_history_lazy_and_cancels_drag_on_resize() {
 fn empty_and_tiny_transcripts_ignore_scrollbar_drags() {
     use crossterm::event::MouseButton::Left;
     let mut chat = ChatState::new(&snapshot(), &[]);
-    for (width, height) in [(60, 24), (1, 1), (0, 0)] {
+    for (width, height) in [(60, 24), (4, 24), (3, 24), (2, 24), (1, 1), (0, 0)] {
         drawn_transcript(&mut chat, width, height);
         scrollbar_mouse(
             &mut chat,

@@ -62,6 +62,19 @@ pub struct RuntimeReviewView {
 }
 
 impl RuntimeReviewView {
+    /// Whether progress indicators should move. A verdict and a failed
+    /// handoff wait for the user even though they retain an activity label.
+    #[must_use]
+    pub fn is_working(&self) -> bool {
+        matches!(
+            self.phase,
+            TurnReviewPhase::CapturingDelta
+                | TurnReviewPhase::LaunchingReviewer
+                | TurnReviewPhase::Running { .. }
+                | TurnReviewPhase::Forwarding { error: None, .. }
+        )
+    }
+
     /// A compact activity label for session lists and headers. Read typed
     /// state rather than matching the driver's human-facing progress text.
     #[must_use]
@@ -2542,6 +2555,7 @@ mod tests {
             verdict: None,
         };
         assert_eq!(view.activity_label(), Some("Reviewing"));
+        assert!(view.is_working());
         view.phase = TurnReviewPhase::Running {
             roles: vec![RoleStatus {
                 role: hel::hel_review::driver::VALIDATOR_ROLE.to_owned(),
@@ -2551,17 +2565,32 @@ mod tests {
         };
         view.status = "checking source".to_owned();
         assert_eq!(view.activity_label(), Some("Validating"));
+        assert!(view.is_working());
         view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Findings {
             synthesis: "[P2] app.py:1 -- incorrect bounds".to_owned(),
             evidence: Default::default(),
         });
         assert_eq!(view.activity_label(), Some("Findings"));
+        assert!(!view.is_working());
         view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Failed {
             reason: "reviewer unavailable".to_owned(),
         });
         assert_eq!(view.activity_label(), Some("Review failed"));
+        assert!(!view.is_working());
+        view.phase = TurnReviewPhase::Forwarding {
+            synthesis: "findings".into(),
+            evidence: Default::default(),
+            command_id: "forward".into(),
+            error: None,
+        };
+        assert!(view.is_working());
+        if let TurnReviewPhase::Forwarding { error, .. } = &mut view.phase {
+            *error = Some("relay unavailable".into());
+        }
+        assert!(!view.is_working());
         view.phase = TurnReviewPhase::Resolved(Resolution::Cancelled);
         assert_eq!(view.activity_label(), None);
+        assert!(!view.is_working());
     }
 
     #[test]

@@ -988,6 +988,85 @@ details.block-fold > pre {
   font-size: 14px;
 }
 
+.resume-search-field {
+  margin: 8px 0 12px;
+}
+
+.resume-search-field input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.resume-session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  width: 100%;
+  min-height: 68px;
+  margin: 8px 0;
+  padding: 10px 12px;
+  text-align: left;
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.resume-session-row:hover,
+.resume-session-row:focus-visible {
+  border-color: var(--focus);
+}
+
+.resume-session-title,
+.resume-session-meta,
+.resume-session-recent {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resume-session-title {
+  grid-column: 1 / -1;
+  font-weight: 700;
+}
+
+.resume-session-meta {
+  color: var(--dim);
+  font-size: 13px;
+  grid-column: 1;
+}
+
+.resume-session-recent {
+  color: var(--dim);
+  font-size: 13px;
+  grid-column: 2;
+  grid-row: 2;
+  align-self: center;
+}
+
+.resume-detail-actions {
+  margin: 0 0 8px;
+}
+
+.resume-card {
+  margin-top: 8px;
+}
+
+.resume-card .resume-status {
+  border-left: 3px solid var(--failed);
+  padding-left: 10px;
+}
+
+.resume-card .field-value {
+  min-height: var(--touch);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  overflow-wrap: anywhere;
+}
+
 /* ---- wizards ---- */
 
 .review,
