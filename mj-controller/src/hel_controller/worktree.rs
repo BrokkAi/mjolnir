@@ -881,13 +881,15 @@ fn ensure_managed_worktree_excluded(
     Ok(())
 }
 
-fn path_exists_on_managed_target(
+pub(crate) fn path_exists_on_managed_target(
     executor: &impl CommandExecutor,
     target: &ManagedWorktreeTarget,
     path: &Path,
 ) -> Result<bool> {
     match target {
-        ManagedWorktreeTarget::Local => Ok(path.exists()),
+        ManagedWorktreeTarget::Local => path
+            .try_exists()
+            .with_context(|| format!("check managed project path {}", path.display())),
         ManagedWorktreeTarget::Ssh { .. } => {
             let command = managed_target_command(target, "test", ["-e", &path.to_string_lossy()])
                 .purpose("check managed worktree path");

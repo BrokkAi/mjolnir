@@ -209,7 +209,9 @@ pub enum DashboardAction {
         additional_mounts: Vec<AdditionalMount>,
         resource_allocation: Option<SessionResourceAllocation>,
         clear_resource_allocation: bool,
-        preparation_requested: bool,
+        /// `Some` requests asynchronous preparation; `None` executes the
+        /// preparation retained by the wizard.
+        preparation_request_id: Option<u64>,
         queue: Option<ResumeQueueDisposition>,
     },
     /// Retry a retained Move checkpoint, using the exact failed destination
@@ -598,6 +600,9 @@ pub struct DashboardState {
     /// whose effort choices were discovered.
     pub(crate) review_settings_choices: BTreeMap<(String, Option<String>), ReviewSettingsChoices>,
     session_preflight_generation: u64,
+    /// Monotonic identity for move preparation requests. This lives outside
+    /// the wizard so a late reply cannot match a newly opened wizard.
+    pub(crate) next_move_preparation_request_id: u64,
     pub(crate) notices: Notices,
     /// The workspace name, shown at the right of the Sessions title bar.
     pub(crate) workspace_name: String,
@@ -652,6 +657,7 @@ impl DashboardState {
             spinner_save_pending: false,
             review_settings_choices: BTreeMap::new(),
             session_preflight_generation: 0,
+            next_move_preparation_request_id: 0,
             notices: Notices::default(),
             workspace_name: String::new(),
         };

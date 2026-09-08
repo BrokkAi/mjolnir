@@ -470,101 +470,73 @@ pub(crate) async fn apply_dashboard_action(
             context.open_chat_session(&session_id);
         }
         action @ DashboardAction::ResumeSession { .. } => start_session_launch(context, action),
+        action @ DashboardAction::MoveSession {
+            preparation_request_id: Some(_),
+            ..
+        } => start_move_preparation(context, action),
         DashboardAction::MoveSession {
             session_id,
-            profile_id,
-            target_template_id,
-            additional_mounts,
-            resource_allocation,
-            clear_resource_allocation,
-            preparation_requested,
+            preparation_request_id: None,
             queue,
+            ..
         } => {
-            context.dashboard.set_notice(if !preparation_requested {
-                format!("Moving {}…", short_id(&session_id))
-            } else {
-                format!("Checking move of {}…", short_id(&session_id))
-            });
-            if !preparation_requested {
-                let Some(preparation) = context.dashboard.take_move_preparation(&session_id) else {
-                    context.dashboard.set_failure_notice(
-                        "Move confirmation expired; prepare the move again.".to_owned(),
-                    );
-                    return Ok(());
-                };
-                let request =
-                    context.begin_lifecycle_operation(&session_id, SessionOperationKind::Moving);
-                let runtime = tokio::runtime::Handle::current();
-                spawn_lifecycle_operation(
-                    request,
-                    context.critical_operations.clone(),
-                    move |_controller, cancelled| {
-                        runtime.block_on(async {
-                            let mut daemon = daemon::connect_or_start().await?;
-                            let operation = daemon.move_session(MoveSessionRequest {
-                                preparation,
-                                queue,
-                                acknowledge_interruption: true,
-                            });
-                            let mut operation = Box::pin(operation);
-                            let wait_for_cancel = async {
-                                loop {
-                                    if cancelled.load(Ordering::Acquire) {
-                                        break;
-                                    }
-                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                }
-                            };
-                            let outcome = tokio::select! {
-                                result = &mut operation => result?,
-                                () = wait_for_cancel => {
-                                    drop(operation);
-                                    let cancel = async {
-                                        let mut client = daemon::connect_or_start().await?;
-                                        client.cancel_lifecycle(session_id.clone()).await
-                                    };
-                                    tokio::time::timeout(std::time::Duration::from_secs(10), cancel)
-                                        .await
-                                        .context("request move cancellation")??;
-                                    bail!("move cancellation requested for {session_id}");
-                                }
-                            };
-                            if matches!(outcome.outcome.as_str(), "failed" | "cancelled") {
-                                bail!(
-                                    "move {}: {}",
-                                    outcome.outcome,
-                                    outcome.error.as_deref().unwrap_or("no further details")
-                                );
-                            }
-                            Ok(LifecycleSuccess::Moved(outcome))
-                        })
-                    },
+            let Some(preparation) = context.dashboard.take_move_preparation(&session_id) else {
+                context.dashboard.set_failure_notice(
+                    "Move confirmation expired; prepare the move again.".to_owned(),
                 );
-            } else {
-                let updates = context.dashboard_io_tx.clone();
-                tokio::spawn(async move {
-                    let result = async {
+                return Ok(());
+            };
+            context
+                .dashboard
+                .set_notice(format!("Moving {}…", short_id(&session_id)));
+            let request =
+                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Moving);
+            let runtime = tokio::runtime::Handle::current();
+            spawn_lifecycle_operation(
+                request,
+                context.critical_operations.clone(),
+                move |_controller, cancelled| {
+                    runtime.block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
-                        daemon
-                            .prepare_move_session(MoveSelection {
-                                session_id: session_id.clone(),
-                                profile_id: Some(profile_id),
-                                target_template_id: Some(target_template_id),
-                                additional_mounts: Some(additional_mounts),
-                                resource_allocation,
-                                clear_resource_allocation,
-                            })
-                            .await
-                    }
-                    .await
-                    .map_err(|error: anyhow::Error| format!("{error:#}"));
-                    if let Err(error) =
-                        updates.send(DashboardIoUpdate::MovePrepared { session_id, result })
-                    {
-                        tracing::debug!(%error, "move preparation result dropped after dashboard shutdown");
-                    }
-                });
-            }
+                        let operation = daemon.move_session(MoveSessionRequest {
+                            preparation,
+                            queue,
+                            acknowledge_interruption: true,
+                        });
+                        let mut operation = Box::pin(operation);
+                        let wait_for_cancel = async {
+                            loop {
+                                if cancelled.load(Ordering::Acquire) {
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            }
+                        };
+                        let outcome = tokio::select! {
+                            result = &mut operation => result?,
+                            () = wait_for_cancel => {
+                                drop(operation);
+                                let cancel = async {
+                                    let mut client = daemon::connect_or_start().await?;
+                                    client.cancel_lifecycle(session_id.clone()).await
+                                };
+                                tokio::time::timeout(std::time::Duration::from_secs(10), cancel)
+                                    .await
+                                    .context("request move cancellation")??;
+                                bail!("move cancellation requested for {session_id}");
+                            }
+                        };
+                        if matches!(outcome.outcome.as_str(), "failed" | "cancelled") {
+                            bail!(
+                                "move {}: {}",
+                                outcome.outcome,
+                                outcome.error.as_deref().unwrap_or("no further details")
+                            );
+                        }
+                        Ok(LifecycleSuccess::Moved(outcome))
+                    })
+                },
+            );
         }
         DashboardAction::RetryMove { operation } => {
             let operation = *operation;
@@ -770,6 +742,48 @@ pub(crate) async fn apply_dashboard_action(
         }
     }
     Ok(())
+}
+
+/// Begin read-only preparation from either wizard input or an attachment reply.
+pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: DashboardAction) {
+    let DashboardAction::MoveSession {
+        session_id,
+        profile_id,
+        target_template_id,
+        additional_mounts,
+        resource_allocation,
+        clear_resource_allocation,
+        preparation_request_id: Some(request_id),
+        ..
+    } = action
+    else {
+        return;
+    };
+    let updates = context.dashboard_io_tx.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let mut daemon = daemon::connect_or_start().await?;
+            daemon
+                .prepare_move_session(MoveSelection {
+                    session_id: session_id.clone(),
+                    profile_id: Some(profile_id),
+                    target_template_id: Some(target_template_id),
+                    additional_mounts: Some(additional_mounts),
+                    resource_allocation,
+                    clear_resource_allocation,
+                })
+                .await
+        }
+        .await
+        .map_err(|error: anyhow::Error| format!("{error:#}"));
+        if let Err(error) = updates.send(DashboardIoUpdate::MovePrepared {
+            session_id,
+            request_id,
+            result,
+        }) {
+            tracing::debug!(%error, "move preparation result dropped after dashboard shutdown");
+        }
+    });
 }
 
 fn resume_launch_destination(action: &DashboardAction) -> Result<(&str, &str)> {

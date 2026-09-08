@@ -90,6 +90,8 @@ fn invalidate_move_preparation(wizard: &mut ResumeWizard) {
     if wizard.moving {
         wizard.preparation = None;
         wizard.preparing = false;
+        wizard.preparation_request_id = None;
+        wizard.preparation_error = None;
     }
 }
 
@@ -141,14 +143,14 @@ fn declare_resume_controls(dashboard: &DashboardState, wizard: &ResumeWizard) {
                     true,
                 );
             }
-            let has_queue = dashboard
-                .session_details
-                .get(&wizard.session_id)
-                .is_some_and(|detail| !detail.queued_prompts.is_empty());
+            let has_queue = wizard.has_queued_work(dashboard);
             if has_queue {
                 form.declare_with_enabled(WizardControl::DiscardQueue, ControlKind::Checkbox, true);
             }
-            declare_review_controls(&mut form, can_attach, true);
+            let submit_enabled = !wizard.moving
+                || wizard.preparation.is_some()
+                || wizard.preparation_error.is_some();
+            declare_review_controls(&mut form, can_attach, submit_enabled);
         }
         WizardStep::Bundle | WizardStep::NewBundle | WizardStep::ProjectDirectory => {
             unreachable!("invalid resume wizard step")
@@ -339,6 +341,17 @@ impl DashboardState {
         event: Event,
         mut wizard: ResumeWizard,
     ) -> DashboardAction {
+        // Keep Enter on the pending default action from activating the form's
+        // fallback focus while the Move button is disabled.
+        if wizard.moving
+            && wizard.preparing
+            && wizard.step == WizardStep::Review
+            && wizard.review_focus == ReviewFocus::Submit
+            && matches!(&event, Event::Key(key) if key.code == KeyCode::Enter)
+        {
+            self.mode = Mode::Resume(wizard);
+            return DashboardAction::None;
+        }
         declare_resume_controls(self, &wizard);
         if let Event::Key(key) = &event
             && key.kind == crossterm::event::KeyEventKind::Release
@@ -1684,8 +1697,9 @@ impl DashboardState {
         &mut self,
         source: &str,
         result: Result<Option<String>, String>,
-    ) {
-        let (mounts, review_focus, step) = match &mut self.mode {
+    ) -> DashboardAction {
+        let mut entered_move_review = false;
+        let (mounts, review_focus, step, moving) = match &mut self.mode {
             Mode::New(wizard)
                 if wizard.step == WizardStep::Mounts && wizard.mounts.source == source =>
             {
@@ -1693,6 +1707,7 @@ impl DashboardState {
                     &mut wizard.mounts,
                     &mut wizard.review_focus,
                     &mut wizard.step,
+                    false,
                 )
             }
             Mode::Resume(wizard)
@@ -1702,9 +1717,10 @@ impl DashboardState {
                     &mut wizard.mounts,
                     &mut wizard.review_focus,
                     &mut wizard.step,
+                    wizard.moving,
                 )
             }
-            _ => return,
+            _ => return DashboardAction::None,
         };
         match result {
             Ok(forced) => {
@@ -1718,12 +1734,25 @@ impl DashboardState {
                 mounts.history_index = mounts.mounts.len().saturating_sub(1);
                 *review_focus = ReviewFocus::Attachments;
                 *step = WizardStep::Review;
+                entered_move_review = moving;
             }
             Err(error) => {
                 mounts.error = Some(error);
                 mounts.focus = MountFocus::Source;
             }
         }
+        if entered_move_review {
+            let Mode::Resume(wizard) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
+                unreachable!("move mount validation entered review without a resume wizard")
+            };
+            let profile_id = self
+                .compatible_profiles(&wizard.session_id)
+                .get(wizard.profile)
+                .map(|(id, _)| (*id).clone())
+                .expect("move wizard is only opened with a compatible profile");
+            return self.request_move_preparation_for_review(wizard, profile_id);
+        }
+        DashboardAction::None
     }
 
     pub fn apply_project_directory_validation(
@@ -1907,6 +1936,13 @@ impl DashboardState {
                 wizard.mounts.history_index = 0;
                 wizard.step = WizardStep::Review;
                 wizard.review_focus = ReviewFocus::Submit;
+                if wizard.moving {
+                    let profile_id = profiles
+                        .get(wizard.profile)
+                        .map(|(id, _)| (*id).clone())
+                        .expect("move wizard is only opened with a compatible profile");
+                    return self.request_move_preparation_for_review(wizard, profile_id);
+                }
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
@@ -1929,12 +1965,7 @@ impl DashboardState {
             mount_history_host(&self.config.targets[&nth_key(&self.config.targets, wizard.target)])
                 .is_some();
         let order = review_focus_order(can_attach, !wizard.mounts.mounts.is_empty());
-        if code == KeyCode::Char('q')
-            && self
-                .session_details
-                .get(&wizard.session_id)
-                .is_some_and(|detail| !detail.queued_prompts.is_empty())
-        {
+        if code == KeyCode::Char('q') && wizard.has_queued_work(self) {
             wizard.discard_queue = !wizard.discard_queue;
             self.mode = Mode::Resume(wizard);
             return DashboardAction::None;
@@ -1955,24 +1986,38 @@ impl DashboardState {
                 1,
             ),
             KeyCode::Delete if wizard.review_focus == ReviewFocus::Attachments => {
+                invalidate_move_preparation(&mut wizard);
                 remove_selected_mount(&mut wizard.mounts);
                 wizard.review_focus = if wizard.mounts.mounts.is_empty() {
                     ReviewFocus::Submit
                 } else {
                     ReviewFocus::Attachments
                 };
+                if wizard.moving {
+                    let profile_id = self.compatible_profiles(&wizard.session_id)[wizard.profile]
+                        .0
+                        .clone();
+                    return self.request_move_preparation_for_review(wizard, profile_id);
+                }
             }
             KeyCode::Enter => match wizard.review_focus {
-                ReviewFocus::Attachments => edit_selected_resume_mount(&mut wizard),
+                ReviewFocus::Attachments => {
+                    invalidate_move_preparation(&mut wizard);
+                    edit_selected_resume_mount(&mut wizard);
+                }
                 ReviewFocus::Cancel => {
                     self.cancel_modal();
                     return DashboardAction::None;
                 }
                 ReviewFocus::Back => {
+                    invalidate_move_preparation(&mut wizard);
                     wizard.step = WizardStep::Target;
                     wizard.focus = WizardFocus::Content;
                 }
-                ReviewFocus::Add if can_attach => begin_resume_mount_editor(&mut wizard),
+                ReviewFocus::Add if can_attach => {
+                    invalidate_move_preparation(&mut wizard);
+                    begin_resume_mount_editor(&mut wizard);
+                }
                 ReviewFocus::Add => {}
                 ReviewFocus::Submit => {
                     let profile_id = self
@@ -2125,6 +2170,14 @@ impl DashboardState {
                 MountFocus::Back => {
                     wizard.step = WizardStep::Review;
                     wizard.review_focus = ReviewFocus::Add;
+                    if wizard.moving {
+                        let profile_id = self
+                            .compatible_profiles(&wizard.session_id)
+                            .get(wizard.profile)
+                            .map(|(id, _)| (*id).clone())
+                            .expect("move wizard is only opened with a compatible profile");
+                        return self.request_move_preparation_for_review(wizard, profile_id);
+                    }
                     self.mode = Mode::Resume(wizard);
                     DashboardAction::None
                 }
@@ -2147,6 +2200,7 @@ impl DashboardState {
                     | MountFocus::Add => false,
                 };
                 if changed {
+                    invalidate_move_preparation(&mut wizard);
                     wizard.mounts.error = None;
                 }
                 self.mode = Mode::Resume(wizard);
@@ -2201,6 +2255,53 @@ impl DashboardState {
         }
     }
 
+    fn start_move_preparation(
+        &mut self,
+        mut wizard: ResumeWizard,
+        profile_id: String,
+    ) -> DashboardAction {
+        let target_template_id = nth_key(&self.config.targets, wizard.target);
+        let mounts = wizard.mounts.mounts.clone();
+        let clear_resource_allocation = matches!(
+            self.config.targets.get(&target_template_id),
+            Some(TargetTemplate::LocalBare | TargetTemplate::SshBare { .. })
+        );
+        self.next_move_preparation_request_id =
+            self.next_move_preparation_request_id.wrapping_add(1);
+        let request_id = self.next_move_preparation_request_id;
+        wizard.preparation_request_id = Some(request_id);
+        wizard.preparing = true;
+        wizard.preparation_error = None;
+        let action = DashboardAction::MoveSession {
+            session_id: wizard.session_id.clone(),
+            profile_id,
+            target_template_id,
+            additional_mounts: mounts,
+            resource_allocation: wizard.resource_allocation.clone(),
+            clear_resource_allocation,
+            preparation_request_id: Some(request_id),
+            queue: Some(if wizard.discard_queue {
+                ResumeQueueDisposition::Discard
+            } else {
+                ResumeQueueDisposition::Start
+            }),
+        };
+        self.mode = Mode::Resume(wizard);
+        action
+    }
+
+    fn request_move_preparation_for_review(
+        &mut self,
+        wizard: ResumeWizard,
+        profile_id: String,
+    ) -> DashboardAction {
+        if !wizard.moving || wizard.preparing || wizard.preparation.is_some() {
+            self.mode = Mode::Resume(wizard);
+            return DashboardAction::None;
+        }
+        self.start_move_preparation(wizard, profile_id)
+    }
+
     fn preflight_resume_session_action(
         &mut self,
         wizard: ResumeWizard,
@@ -2209,16 +2310,17 @@ impl DashboardState {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let mounts = wizard.mounts.mounts.clone();
         if wizard.moving {
-            let clear_resource_allocation = matches!(
-                self.config.targets.get(&target_template_id),
-                Some(TargetTemplate::LocalBare | TargetTemplate::SshBare { .. })
-            );
             if wizard.preparing {
                 self.mode = Mode::Resume(wizard);
                 return DashboardAction::None;
             }
-            let mut wizard = wizard;
-            wizard.preparing = wizard.preparation.is_none();
+            if wizard.preparation.is_none() {
+                return self.start_move_preparation(wizard, profile_id);
+            }
+            let clear_resource_allocation = matches!(
+                self.config.targets.get(&target_template_id),
+                Some(TargetTemplate::LocalBare | TargetTemplate::SshBare { .. })
+            );
             let action = DashboardAction::MoveSession {
                 session_id: wizard.session_id.clone(),
                 profile_id,
@@ -2226,7 +2328,7 @@ impl DashboardState {
                 additional_mounts: mounts,
                 resource_allocation: wizard.resource_allocation.clone(),
                 clear_resource_allocation,
-                preparation_requested: wizard.preparation.is_none(),
+                preparation_request_id: None,
                 queue: Some(if wizard.discard_queue {
                     ResumeQueueDisposition::Discard
                 } else {
@@ -2259,31 +2361,52 @@ impl DashboardState {
         }
     }
 
-    pub fn apply_move_preparation(&mut self, preparation: hel::hel_state::MovePreparation) {
+    pub fn apply_move_preparation(
+        &mut self,
+        request_id: u64,
+        preparation: hel::hel_state::MovePreparation,
+    ) -> bool {
         let session_id = preparation.selection.session_id.clone();
         let Mode::Resume(wizard) = &mut self.mode else {
-            return;
+            return false;
         };
-        if !wizard.moving || wizard.session_id != session_id {
-            return;
+        if !wizard.moving
+            || wizard.session_id != session_id
+            || wizard.step != WizardStep::Review
+            || !wizard.preparing
+            || wizard.preparation_request_id != Some(request_id)
+        {
+            return false;
         }
         wizard.resource_allocation = preparation.selection.resource_allocation.clone();
         wizard.preparation = Some(preparation);
         wizard.preparing = false;
+        wizard.preparation_error = None;
+        true
     }
 
-    pub fn set_move_preparation_failed(&mut self, session_id: &str, error: String) {
-        let message = format!("Move preparation failed: {error}");
+    pub fn set_move_preparation_failed(
+        &mut self,
+        session_id: &str,
+        request_id: u64,
+        error: String,
+    ) -> bool {
         let Mode::Resume(wizard) = &mut self.mode else {
-            self.set_failure_notice(message);
-            return;
+            return false;
         };
-        if !wizard.moving || wizard.session_id != session_id {
-            self.set_failure_notice(message);
-            return;
+        if !wizard.moving
+            || wizard.session_id != session_id
+            || wizard.step != WizardStep::Review
+            || !wizard.preparing
+            || wizard.preparation_request_id != Some(request_id)
+        {
+            return false;
         }
         wizard.preparing = false;
-        self.set_failure_notice(message);
+        wizard.preparation = None;
+        wizard.preparation_request_id = None;
+        wizard.preparation_error = Some(error);
+        true
     }
 
     pub fn take_move_preparation(
@@ -2467,6 +2590,8 @@ impl DashboardState {
             moving: false,
             preparation: None,
             preparing: false,
+            preparation_request_id: None,
+            preparation_error: None,
             step: WizardStep::Profile,
             focus: WizardFocus::Content,
             profile,
@@ -2520,6 +2645,8 @@ impl DashboardState {
             moving: true,
             preparation: None,
             preparing: false,
+            preparation_request_id: None,
+            preparation_error: None,
             step: WizardStep::Profile,
             focus: WizardFocus::Content,
             profile,
@@ -2583,6 +2710,8 @@ impl DashboardState {
             moving: true,
             preparation: None,
             preparing: false,
+            preparation_request_id: None,
+            preparation_error: None,
             step: WizardStep::Profile,
             focus: WizardFocus::Content,
             profile,

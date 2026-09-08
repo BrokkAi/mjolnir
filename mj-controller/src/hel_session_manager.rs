@@ -87,9 +87,19 @@ pub struct ProjectMemorySyncTarget {
     pub canonical_root: std::path::PathBuf,
 }
 
+/// The working directory a bare-target worker must be able to enter before it
+/// can serve a relay handshake. Container availability is checked separately
+/// by the target recovery plan; bare targets have no runtime object to inspect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerWorkspace {
+    pub target: hel::hel_state::ManagedWorktreeTarget,
+    pub directory: PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRecoveryPlan {
     pub target: Option<TargetRecoveryPlan>,
+    pub workspace: Option<WorkerWorkspace>,
     pub liveness_probe: CommandSpec,
     /// Refresh a stale installed worker before restarting it. The digest is
     /// computed inside the recovery task so hashing a large binary never
@@ -153,11 +163,12 @@ fn worker_connect_allows_live_restart(error: &anyhow::Error) -> bool {
     RelayTransportDead::marks_failed_handshake(error)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum WorkerRecoveryOutcome {
     Alive,
     Starting,
     TargetMissing,
+    WorkspaceMissing(PathBuf),
     RestartedDead,
     RestartedUnresponsive,
 }
@@ -243,12 +254,34 @@ async fn recover_worker(
             "starting" => Ok(WorkerRecoveryOutcome::Starting),
             "alive" if !restart_unresponsive => Ok(WorkerRecoveryOutcome::Alive),
             "alive" => {
+                if let Some(workspace) = plan.workspace.as_ref()
+                    && !crate::hel_controller::path_exists_on_managed_target(
+                        &executor,
+                        &workspace.target,
+                        &workspace.directory,
+                    )?
+                {
+                    return Ok(WorkerRecoveryOutcome::WorkspaceMissing(
+                        workspace.directory.clone(),
+                    ));
+                }
                 refresh_worker_binary_if_stale(&executor, plan.binary_refresh.as_ref())?;
                 refresh_worker_launch_if_stale(&executor, plan.launch_refresh.as_ref())?;
                 plan.restart.execute(&executor)?;
                 Ok(WorkerRecoveryOutcome::RestartedUnresponsive)
             }
             "dead" => {
+                if let Some(workspace) = plan.workspace.as_ref()
+                    && !crate::hel_controller::path_exists_on_managed_target(
+                        &executor,
+                        &workspace.target,
+                        &workspace.directory,
+                    )?
+                {
+                    return Ok(WorkerRecoveryOutcome::WorkspaceMissing(
+                        workspace.directory.clone(),
+                    ));
+                }
                 refresh_worker_binary_if_stale(&executor, plan.binary_refresh.as_ref())?;
                 refresh_worker_launch_if_stale(&executor, plan.launch_refresh.as_ref())?;
                 plan.restart.execute(&executor)?;
@@ -1743,7 +1776,10 @@ async fn run_session_actor(
                                         }
                                         WorkerRecoveryOutcome::Alive
                                         | WorkerRecoveryOutcome::Starting
-                                        | WorkerRecoveryOutcome::TargetMissing => unreachable!(),
+                                        | WorkerRecoveryOutcome::TargetMissing
+                                        | WorkerRecoveryOutcome::WorkspaceMissing(_) => {
+                                            unreachable!()
+                                        }
                                     };
                                     publish_view(&target.session_id, ManagedSessionView {
                                         snapshot,
@@ -1793,6 +1829,18 @@ async fn run_session_actor(
                                             "the managed Podman session container no longer exists"
                                                 .into(),
                                         )),
+                                    }, &view_tx, &updates);
+                                    interval.reset_after(RECONNECT_BACKOFF_CEILING);
+                                }
+                                Ok(WorkerRecoveryOutcome::WorkspaceMissing(directory)) => {
+                                    let snapshot = view_tx.borrow().snapshot.clone();
+                                    publish_view(&target.session_id, ManagedSessionView {
+                                        snapshot,
+                                        connected: false,
+                                        error: Some(ViewError::TargetMissing(format!(
+                                            "the worker working directory {} is missing; resume this session from its recovery archive to restore it",
+                                            directory.display(),
+                                        ))),
                                     }, &view_tx, &updates);
                                     interval.reset_after(RECONNECT_BACKOFF_CEILING);
                                 }
@@ -3534,6 +3582,10 @@ mod tests {
         let restarted = directory.path().join("restarted");
         let recovery = |liveness: &str| WorkerRecoveryPlan {
             target: None,
+            workspace: Some(WorkerWorkspace {
+                target: hel::hel_state::ManagedWorktreeTarget::Local,
+                directory: directory.path().to_path_buf(),
+            }),
             liveness_probe: CommandSpec::new("printf", [format!("{liveness}\n")])
                 .purpose("probe test worker liveness"),
             binary_refresh: None,
@@ -3580,6 +3632,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("removed-worktree");
+        let restarted = directory.path().join("worker-restarted");
+        let plan = WorkerRecoveryPlan {
+            target: None,
+            workspace: Some(WorkerWorkspace {
+                target: hel::hel_state::ManagedWorktreeTarget::Local,
+                directory: missing.clone(),
+            }),
+            liveness_probe: CommandSpec::new("printf", ["dead\n"])
+                .purpose("probe test worker liveness"),
+            binary_refresh: None,
+            launch_refresh: None,
+            restart: CommandPlan {
+                description: "must not restart missing workspace worker".into(),
+                commands: vec![
+                    CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
+                        .purpose("restart test worker"),
+                ],
+            },
+        };
+
+        assert_eq!(
+            recover_worker(plan, false).await.unwrap(),
+            WorkerRecoveryOutcome::WorkspaceMissing(missing.clone())
+        );
+        assert!(
+            !restarted.exists(),
+            "a missing workspace must not be restarted"
+        );
+    }
+
+    #[tokio::test]
     async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("current-worker");
@@ -3610,6 +3696,7 @@ mod tests {
             );
             WorkerRecoveryPlan {
                 target: None,
+                workspace: None,
                 liveness_probe: CommandSpec::new("printf", ["dead\n"])
                     .purpose("probe test worker liveness"),
                 binary_refresh: Some(WorkerBinaryRefresh::Prepared(WorkerBinaryRefreshPlan {
@@ -3679,6 +3766,7 @@ mod tests {
         let outcome = recover_worker(
             WorkerRecoveryPlan {
                 target: None,
+                workspace: None,
                 liveness_probe: CommandSpec::new("printf", ["dead\n"])
                     .purpose("probe test worker liveness"),
                 binary_refresh: None,
@@ -3776,6 +3864,7 @@ mod tests {
                     start,
                     session_id: "session-1".into(),
                 }),
+                workspace: None,
                 liveness_probe: liveness,
                 binary_refresh: None,
                 launch_refresh: None,
@@ -3811,6 +3900,7 @@ mod tests {
                     start: CommandSpec::new("false", std::iter::empty::<&str>()),
                     session_id: "session-1".into(),
                 }),
+                workspace: None,
                 liveness_probe: CommandSpec::new("false", std::iter::empty::<&str>()),
                 binary_refresh: None,
                 launch_refresh: None,
@@ -4560,6 +4650,7 @@ mod tests {
         );
         let worker_recovery = WorkerRecoveryPlan {
             target: None,
+            workspace: None,
             liveness_probe: CommandSpec::new("printf", ["alive\n"])
                 .purpose("probe test relay worker"),
             binary_refresh: None,

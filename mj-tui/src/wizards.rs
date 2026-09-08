@@ -250,6 +250,18 @@ impl NewWizard {
 }
 
 impl ResumeWizard {
+    fn has_queued_work(&self, dashboard: &DashboardState) -> bool {
+        self.preparation.as_ref().map_or_else(
+            || {
+                dashboard
+                    .session_details
+                    .get(&self.session_id)
+                    .is_some_and(|detail| !detail.queued_prompts.is_empty())
+            },
+            |preparation| !preparation.queued_commands.is_empty(),
+        )
+    }
+
     fn can_advance_target(&self, dashboard: &DashboardState) -> bool {
         let target_id = nth_key(&dashboard.config.targets, self.target);
         dashboard
@@ -286,6 +298,12 @@ pub(crate) struct ResumeWizard {
     pub(crate) moving: bool,
     pub(crate) preparation: Option<MovePreparation>,
     pub(crate) preparing: bool,
+    /// Identity of the preparation request currently owned by this wizard.
+    /// It is cleared whenever the draft changes or the wizard leaves review.
+    pub(crate) preparation_request_id: Option<u64>,
+    /// A failed preparation remains visible in the review modal so retry is
+    /// an explicit, single action.
+    pub(crate) preparation_error: Option<String>,
     pub(crate) step: WizardStep,
     pub(crate) focus: WizardFocus,
     pub(crate) profile: usize,
@@ -305,6 +323,8 @@ impl PartialEq for ResumeWizard {
             && self.moving == other.moving
             && self.preparation == other.preparation
             && self.preparing == other.preparing
+            && self.preparation_request_id == other.preparation_request_id
+            && self.preparation_error == other.preparation_error
             && self.step == other.step
             && self.focus == other.focus
             && self.profile == other.profile
@@ -796,6 +816,9 @@ pub(crate) fn render_new_wizard(
                 title: " New session · 4/4 review ",
                 submit_label: "Create",
                 moving: false,
+                preparing: false,
+                preparation_error: None,
+                submit_enabled: true,
                 active_interruption: false,
                 clear_resource_allocation: false,
                 queue: None,
@@ -1083,6 +1106,9 @@ struct ReviewWizardView<'a> {
     pub(crate) title: &'a str,
     submit_label: &'a str,
     moving: bool,
+    preparing: bool,
+    preparation_error: Option<&'a str>,
+    submit_enabled: bool,
     active_interruption: bool,
     clear_resource_allocation: bool,
     queue: Option<(usize, bool)>,
@@ -1109,6 +1135,9 @@ fn render_review_wizard(
         title,
         submit_label,
         moving,
+        preparing,
+        preparation_error,
+        submit_enabled,
         active_interruption,
         clear_resource_allocation,
         queue,
@@ -1156,6 +1185,23 @@ fn render_review_wizard(
             lines.push(Line::styled(
                 "Fixed/default destination resources will replace the source sizing.",
                 Style::default().fg(theme::WARNING),
+            ));
+        }
+    }
+    if moving {
+        if preparing {
+            lines.push(Line::styled(
+                "Checking move destination…",
+                Style::default().fg(theme::MUTED),
+            ));
+        } else if let Some(error) = preparation_error {
+            lines.push(Line::styled(
+                format!("Move preparation failed: {error}"),
+                Style::default().fg(theme::ERROR),
+            ));
+            lines.push(Line::styled(
+                "Press Retry to check the destination again.",
+                Style::default().fg(theme::MUTED),
             ));
         }
     }
@@ -1358,7 +1404,8 @@ fn render_review_wizard(
     buttons.push((
         WizardControl::Submit,
         submit_label,
-        allocation.is_some() || !matches!(target, TargetTemplate::AwsEc2 { .. }),
+        submit_enabled
+            && (allocation.is_some() || !matches!(target, TargetTemplate::AwsEc2 { .. })),
     ));
     ButtonRow::render(
         frame,
@@ -1638,8 +1685,19 @@ pub(crate) fn render_resume_wizard(
                 } else {
                     " Resume · 3/3 review "
                 },
-                submit_label: if wizard.moving { "Move" } else { "Resume" },
+                submit_label: if wizard.moving && wizard.preparation_error.is_some() {
+                    "Retry"
+                } else if wizard.moving {
+                    "Move"
+                } else {
+                    "Resume"
+                },
                 moving: wizard.moving,
+                preparing: wizard.preparing,
+                preparation_error: wizard.preparation_error.as_deref(),
+                submit_enabled: !wizard.moving
+                    || wizard.preparation.is_some()
+                    || wizard.preparation_error.is_some(),
                 active_interruption: wizard
                     .preparation
                     .as_ref()

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle};
+use hel::hel_database::DetachedSessionDraft;
 use hel::hel_state::{
     HelState, MaterializedSession, MovePreparation, ProjectSourceIdentity, SessionRecord,
     SessionState,
@@ -142,6 +143,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     MovePrepared {
         session_id: String,
+        request_id: u64,
         result: std::result::Result<MovePreparation, String>,
     },
     CheckpointArchiveSizes {
@@ -867,7 +869,7 @@ pub(crate) fn spawn_detached_session_state_persist(
     workspace_id: String,
     session_id: String,
     event_ordinal: u64,
-    draft: String,
+    draft: DetachedSessionDraft,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
@@ -1393,11 +1395,23 @@ impl DashboardContext {
                 }
                 match *result {
                     Ok(chat) => {
-                        let mut chat = chat.open_replacing(self.active_chat.as_ref());
                         // The old warm chat continued receiving feed updates
-                        // while this attach was in flight. Capture its latest
-                        // local form state just before replacing it.
+                        // while this attach was in flight. Capture and persist
+                        // its latest local composer just before replacing it.
+                        if let Some(ordinal) = self
+                            .active_chat
+                            .as_ref()
+                            .map(mj_chat::hel_chat::ActiveChat::latest_event_ordinal)
+                        {
+                            self.record_detach(ordinal);
+                        }
                         self.save_active_question_draft();
+                        let chat = if let Some(draft) = self.composer_drafts.get(&session_id) {
+                            chat.with_draft(draft.text.clone())
+                        } else {
+                            chat
+                        };
+                        let mut chat = chat.open_replacing(self.active_chat.as_ref());
                         self.restore_question_draft(&session_id, &mut chat);
                         self.active_chat = Some(chat);
                         // The context travelled with the attach, which is
@@ -1664,17 +1678,19 @@ impl DashboardContext {
                     ));
                 }
             }
-            DashboardIoUpdate::MovePrepared { session_id, result } => match result {
+            DashboardIoUpdate::MovePrepared {
+                session_id,
+                request_id,
+                result,
+            } => match result {
                 Ok(preparation) => {
-                    self.dashboard.apply_move_preparation(preparation);
-                    self.dashboard.set_notice(format!(
-                        "Move prepared for {}; review the current activity and queued work, then press Move again to confirm",
-                        short_id(&session_id)
-                    ));
+                    self.dashboard
+                        .apply_move_preparation(request_id, preparation);
                 }
-                Err(error) => self
-                    .dashboard
-                    .set_move_preparation_failed(&session_id, error),
+                Err(error) => {
+                    self.dashboard
+                        .set_move_preparation_failed(&session_id, request_id, error);
+                }
             },
             DashboardIoUpdate::CheckpointArchiveSizes { generation, sizes } => {
                 if generation == self.checkpoint_archive_generation {
@@ -1694,9 +1710,12 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Path completion failed: {error}")),
             },
-            DashboardIoUpdate::MountValidation { source, result } => self
-                .dashboard
-                .apply_mount_source_validation(&source, result),
+            DashboardIoUpdate::MountValidation { source, result } => {
+                let action = self
+                    .dashboard
+                    .apply_mount_source_validation(&source, result);
+                super::actions::start_move_preparation(self, action);
+            }
             DashboardIoUpdate::SessionMountValidation {
                 generation,
                 launch,
