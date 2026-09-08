@@ -4,10 +4,11 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use super::text_layout::multiline_rows;
 use super::{ControlKind, Form};
 use crate::hel_text_input::TextInput;
 use crate::theme;
@@ -122,6 +123,78 @@ impl TextField {
         id: K,
     ) {
         Self::render_editor(frame, area, input, false, false, true, form, id);
+    }
+
+    /// Draws a vertically scrolling field and registers its two-dimensional
+    /// cursor map. The map is built from the same grapheme-aware layout used
+    /// by the composer, so mouse clicks follow wrapped Unicode text.
+    pub fn render_multiline<K: Copy + Eq>(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        input: &TextInput,
+        enabled: bool,
+        focused: bool,
+        form: &mut Form<K>,
+        id: K,
+    ) {
+        let (rows, (cursor_column, cursor_row)) =
+            multiline_rows(input.value(), input.cursor(), usize::from(area.width));
+        let scroll = cursor_row
+            .saturating_add(1)
+            .saturating_sub(usize::from(area.height));
+        let mut cursor_map = Vec::new();
+        for (row, visual) in rows
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(usize::from(area.height))
+        {
+            let screen_row = area.y.saturating_add((row - scroll) as u16);
+            let mut column = 0usize;
+            cursor_map.push((area.x, screen_row, visual.start));
+            for grapheme in &visual.graphemes {
+                column = column.saturating_add(grapheme.width);
+                cursor_map.push((
+                    area.x.saturating_add(column as u16),
+                    screen_row,
+                    grapheme.end,
+                ));
+            }
+        }
+        if cursor_row >= rows.len()
+            && cursor_row >= scroll
+            && cursor_row < scroll.saturating_add(usize::from(area.height))
+        {
+            cursor_map.push((
+                area.x,
+                area.y.saturating_add((cursor_row - scroll) as u16),
+                input.value().len(),
+            ));
+        }
+        form.register_with_multiline_cursor_map(
+            id,
+            ControlKind::TextField,
+            area,
+            enabled,
+            cursor_map,
+        );
+        frame.render_widget(
+            Paragraph::new(input.value())
+                .wrap(Wrap { trim: false })
+                .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+            area,
+        );
+        if enabled && focused && form.is_focused(id) && area.width > 0 && area.height > 0 {
+            let cursor_row = cursor_row.saturating_sub(scroll);
+            if cursor_row < usize::from(area.height) {
+                frame.set_cursor_position((
+                    area.x.saturating_add(
+                        cursor_column.min(usize::from(area.width).saturating_sub(1)) as u16,
+                    ),
+                    area.y.saturating_add(cursor_row as u16),
+                ));
+            }
+        }
     }
 
     /// Draws an inline editor owned by an existing compound control.
@@ -630,6 +703,161 @@ mod tests {
         );
         TextField::apply(&mut input, FieldEdit::Cursor(4));
         assert_eq!(input.cursor(), "a界".len());
+    }
+
+    #[test]
+    fn multiline_field_click_tracks_wrapped_newlines_and_unicode() {
+        let mut form = Form::new();
+        let mut input = TextInput::multiline();
+        input.set_value("abcdefghi\nab界e\u{301}z\nfinal");
+        input.set_cursor(input.value().len());
+        form.declare(1, ControlKind::TextField);
+        form.end_frame(1);
+        let area = Rect::new(2, 1, 8, 2);
+        let mut terminal = Terminal::new(TestBackend::new(14, 5)).unwrap();
+        terminal
+            .draw(|frame| {
+                form.begin_frame();
+                TextField::render_multiline(frame, area, &input, true, true, &mut form, 1);
+                form.end_frame(1);
+            })
+            .unwrap();
+
+        // The caret is on the final line, so the field scrolls to show the
+        // second logical line and the final hard-newline-delimited line.
+        let click = |form: &mut Form<i32>, column, row| {
+            form.handle(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .action
+        };
+        let first = click(&mut form, area.x + 4, area.y);
+        assert_eq!(
+            first,
+            Some(Interaction::Edit(
+                1,
+                FieldEdit::Cursor("abcdefghi\n".len() + "ab界".len())
+            ))
+        );
+        let Some(Interaction::Edit(1, first_edit)) = first else {
+            panic!("wrapped row click should edit the field");
+        };
+        TextField::apply(&mut input, first_edit);
+        TextField::apply(
+            &mut input,
+            FieldEdit::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE)),
+        );
+
+        input.set_cursor(input.value().len());
+        terminal
+            .draw(|frame| {
+                form.begin_frame();
+                TextField::render_multiline(frame, area, &input, true, true, &mut form, 1);
+                form.end_frame(1);
+            })
+            .unwrap();
+
+        let second = click(&mut form, area.x, area.y + 1);
+        assert_eq!(
+            second,
+            Some(Interaction::Edit(
+                1,
+                FieldEdit::Cursor("abcdefghi\nab界Xe\u{301}z\n".len()),
+            ))
+        );
+        let Some(Interaction::Edit(1, second_edit)) = second else {
+            panic!("hard-newline row click should edit the field");
+        };
+        TextField::apply(&mut input, second_edit);
+        TextField::apply(
+            &mut input,
+            FieldEdit::Key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE)),
+        );
+        assert_eq!(input.value(), "abcdefghi\nab界Xe\u{301}z\nYfinal");
+    }
+
+    #[test]
+    fn multiline_field_click_scales_with_a_large_pasted_prompt() {
+        let mut form = Form::new();
+        let mut input = TextInput::multiline();
+        input.set_value("x".repeat(70_000));
+        input.set_cursor(input.value().len());
+        form.declare(1, ControlKind::TextField);
+        form.end_frame(1);
+        let area = Rect::new(1, 1, 20, 3);
+        let mut terminal = Terminal::new(TestBackend::new(24, 6)).unwrap();
+        terminal
+            .draw(|frame| {
+                form.begin_frame();
+                TextField::render_multiline(frame, area, &input, true, true, &mut form, 1);
+                form.end_frame(1);
+            })
+            .unwrap();
+
+        let result = form.handle(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.right() - 1,
+            row: area.bottom() - 1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(
+            result.action,
+            Some(Interaction::Edit(1, FieldEdit::Cursor(70_000)))
+        );
+        let Some(Interaction::Edit(1, edit)) = result.action else {
+            panic!("large prompt click should edit the field");
+        };
+        TextField::apply(&mut input, edit);
+        TextField::apply(
+            &mut input,
+            FieldEdit::Key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)),
+        );
+        assert_eq!(input.value().len(), 70_001);
+        assert_eq!(&input.value()[69_995..], "xxxxx!");
+    }
+
+    #[test]
+    fn multiline_field_click_after_a_zero_width_tab_keeps_the_byte_offset() {
+        let mut form = Form::new();
+        let mut input = TextInput::multiline();
+        input.set_value("a\t界");
+        input.set_cursor(input.value().len());
+        form.declare(1, ControlKind::TextField);
+        form.end_frame(1);
+        let area = Rect::new(1, 0, 8, 1);
+        let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
+        terminal
+            .draw(|frame| {
+                form.begin_frame();
+                TextField::render_multiline(frame, area, &input, true, true, &mut form, 1);
+                form.end_frame(1);
+            })
+            .unwrap();
+
+        // Ratatui skips the tab control character, so the visible wide glyph
+        // starts in the same cell as the tab's end boundary.
+        let result = form.handle(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 1,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(
+            result.action,
+            Some(Interaction::Edit(1, FieldEdit::Cursor("a\t".len())))
+        );
+        let Some(Interaction::Edit(1, edit)) = result.action else {
+            panic!("tab click should edit the field");
+        };
+        TextField::apply(&mut input, edit);
+        TextField::apply(
+            &mut input,
+            FieldEdit::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE)),
+        );
+        assert_eq!(input.value(), "a\tX界");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyModifiers};
-use mj_chat::components::{ButtonRow, ControlKind, FieldEdit, Form, Interaction};
+use mj_chat::components::{ButtonRow, ControlKind, FieldEdit, Form, Interaction, TextField};
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 use mj_chat::theme;
@@ -167,26 +167,14 @@ pub(crate) fn render_quick_new(
         inner.width,
         inner.height.saturating_sub(4),
     );
-    form.register(
-        DialogControl::Field,
-        ControlKind::TextField,
+    TextField::render_multiline(
+        frame,
         field,
+        &dialog.prompt,
         !dialog.preparing,
-    );
-    let value = if dialog.preparing {
-        dialog.prompt.value().to_owned()
-    } else {
-        dialog.prompt.with_cursor_marker("▏")
-    };
-    let paragraph = Paragraph::new(value).wrap(Wrap { trim: false });
-    let before_caret =
-        Paragraph::new(&dialog.prompt.value()[..dialog.prompt.cursor()]).wrap(Wrap { trim: false });
-    let scroll = before_caret
-        .line_count(field.width)
-        .saturating_sub(usize::from(field.height));
-    frame.render_widget(
-        paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
-        field,
+        !dialog.preparing,
+        &mut form,
+        DialogControl::Field,
     );
     if !dialog.preparing {
         ButtonRow::render(
@@ -207,6 +195,40 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn rendered_quick_new_click_inserts_at_the_clicked_character() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_quick_new();
+        dashboard.handle_paste("abcdefghi");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..30)
+            .find_map(|y| {
+                (0..92).find_map(|x| {
+                    let text = (x..x + 9)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>();
+                    (text == "abcdefghi").then_some((x, y))
+                })
+            })
+            .expect("prompt is rendered");
+        dashboard.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x + 4,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        });
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+        assert!(
+            matches!(&dashboard.mode, Mode::QuickNew(dialog) if dialog.prompt.value() == "abcdXefghi")
+        );
+    }
 
     #[test]
     fn a_background_launch_cannot_close_a_newer_task_prompt() {

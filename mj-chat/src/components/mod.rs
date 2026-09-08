@@ -3,6 +3,7 @@
 mod controls;
 mod layout;
 mod scope;
+pub(crate) mod text_layout;
 
 pub use controls::{Button, ButtonRow, Checkbox, ChoiceList, TabStrip, TextField};
 pub use layout::{FormViewport, dialog_content, dialog_rect, form_area, form_columns, form_rows};

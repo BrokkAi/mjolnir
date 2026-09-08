@@ -143,6 +143,7 @@ struct Control<K> {
     active: bool,
     kind: ControlKind,
     cursor_map: Vec<(u16, usize)>,
+    multiline_cursor_map: Vec<(u16, u16, usize)>,
     editor_area: Rect,
     region_map: Vec<(u16, u16, usize)>,
     list_offset: usize,
@@ -160,6 +161,7 @@ impl<K> Control<K> {
             active: true,
             kind,
             cursor_map: Vec::new(),
+            multiline_cursor_map: Vec::new(),
             editor_area: Rect::default(),
             region_map: Vec::new(),
             list_offset: 0,
@@ -238,6 +240,7 @@ impl<K: Copy + Eq> Form<K> {
         self.begin_update();
         for control in &mut self.controls {
             control.cursor_map.clear();
+            control.multiline_cursor_map.clear();
             control.editor_area = Rect::default();
         }
     }
@@ -263,6 +266,7 @@ impl<K: Copy + Eq> Form<K> {
         control.active = true;
         control.kind = kind;
         control.cursor_map = cursor_map;
+        control.multiline_cursor_map.clear();
         control.editor_area = if kind.is_field() {
             area
         } else {
@@ -292,6 +296,7 @@ impl<K: Copy + Eq> Form<K> {
         control.active = true;
         control.kind = kind;
         control.cursor_map.clear();
+        control.multiline_cursor_map.clear();
         control.editor_area = Rect::default();
         control.region_map = region_map;
         control.list_offset = 0;
@@ -318,6 +323,7 @@ impl<K: Copy + Eq> Form<K> {
         control.active = true;
         control.kind = kind;
         control.cursor_map.clear();
+        control.multiline_cursor_map.clear();
         control.editor_area = Rect::default();
         control.region_map.clear();
         control.list_offset = 0;
@@ -338,6 +344,38 @@ impl<K: Copy + Eq> Form<K> {
         if let Some(control) = self.control_mut(id) {
             control.editor_area = area;
             control.cursor_map = cursor_map;
+            control.multiline_cursor_map.clear();
+        }
+    }
+
+    /// Registers screen cells corresponding to cursors in a wrapped field.
+    pub(crate) fn register_with_multiline_cursor_map(
+        &mut self,
+        id: K,
+        kind: ControlKind,
+        area: Rect,
+        enabled: bool,
+        cursor_map: Vec<(u16, u16, usize)>,
+    ) {
+        let index = self.ensure_control(id, kind);
+        let control = &mut self.controls[index];
+        control.area = area;
+        control.enabled = enabled;
+        control.active = true;
+        control.kind = kind;
+        control.cursor_map.clear();
+        control.multiline_cursor_map = cursor_map;
+        control.editor_area = if kind.is_field() {
+            area
+        } else {
+            Rect::default()
+        };
+        control.region_map.clear();
+        control.list_offset = 0;
+        control.row_map.clear();
+        control.row_enabled.clear();
+        if !self.order.contains(&id) {
+            self.order.push(id);
         }
     }
 
@@ -359,6 +397,7 @@ impl<K: Copy + Eq> Form<K> {
             control.row_map.clear();
             control.row_enabled.clear();
             control.cursor_map.clear();
+            control.multiline_cursor_map.clear();
             control.editor_area = Rect::default();
             control.list_offset = 0;
         }
@@ -388,6 +427,7 @@ impl<K: Copy + Eq> Form<K> {
         for control in &mut self.controls {
             control.area = Rect::default();
             control.cursor_map.clear();
+            control.multiline_cursor_map.clear();
             control.editor_area = Rect::default();
         }
     }
@@ -874,7 +914,7 @@ impl<K: Copy + Eq> Form<K> {
                             control.id,
                             control.enabled,
                             control.kind,
-                            cursor_at(control, x),
+                            cursor_at(control, x, y),
                             control
                                 .editor_area
                                 .contains(ratatui::layout::Position::new(x, y)),
@@ -971,6 +1011,9 @@ impl<K: Copy + Eq> Clone for Form<K> {
                 cloned.enabled = control.enabled;
                 cloned.active = control.active;
                 cloned.cursor_map.clone_from(&control.cursor_map);
+                cloned
+                    .multiline_cursor_map
+                    .clone_from(&control.multiline_cursor_map);
                 cloned.editor_area = control.editor_area;
                 cloned.region_map.clone_from(&control.region_map);
                 cloned.list_offset = control.list_offset;
@@ -1086,7 +1129,30 @@ fn tab_selection(code: KeyCode, selected: usize, tabs: usize) -> Option<usize> {
     }
 }
 
-fn cursor_at<K>(control: &Control<K>, x: u16) -> usize {
+fn cursor_at<K>(control: &Control<K>, x: u16, y: u16) -> usize {
+    if !control.multiline_cursor_map.is_empty() {
+        let row_distance = control
+            .multiline_cursor_map
+            .iter()
+            .map(|(_, row, _)| row.abs_diff(y))
+            .min()
+            .unwrap_or(0);
+        let column_distance = control
+            .multiline_cursor_map
+            .iter()
+            .filter(|(_, row, _)| row.abs_diff(y) == row_distance)
+            .map(|(column, _, _)| column.abs_diff(x))
+            .min()
+            .unwrap_or(0);
+        return control
+            .multiline_cursor_map
+            .iter()
+            .filter(|(column, row, _)| {
+                row.abs_diff(y) == row_distance && column.abs_diff(x) == column_distance
+            })
+            .max_by_key(|(_, _, offset)| *offset)
+            .map_or(0, |(_, _, offset)| *offset);
+    }
     control
         .cursor_map
         .iter()

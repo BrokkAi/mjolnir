@@ -1189,10 +1189,18 @@ impl ChatState {
 
     /// Activity animates only while the session has work to report.
     pub fn needs_animation(&self) -> bool {
-        matches!(self.phase, WorkerPhase::Running | WorkerPhase::Closing)
-            || !self
+        let primary_working = match self.phase {
+            // A closed worker can leave its last operational snapshot in the
+            // chat while that snapshot is being reconciled. Its stale primary
+            // activity must not keep the spinner alive after the terminal
+            // lifecycle event has settled.
+            WorkerPhase::Closed => false,
+            WorkerPhase::Running | WorkerPhase::Closing => true,
+            WorkerPhase::Idle => !self
                 .session_activity
-                .is_idle(self.turn_started_at_epoch_seconds)
+                .is_idle(self.turn_started_at_epoch_seconds),
+        };
+        primary_working
             || self
                 .turn_review()
                 .is_some_and(|review| review.view.is_working())
@@ -2971,7 +2979,10 @@ mod tests {
     };
     use crate::hel_selection::SurfaceId;
     use base64::Engine;
+    use hel::hel_review::driver::TurnReviewPhase;
+    use hel::hel_review::lanes::ReviewTier;
     use hel::hel_worker::ActivePrompt;
+    use mj_controller::hel_review_host::RuntimeReviewView;
 
     #[test]
     fn activity_animation_stops_when_foreground_and_background_work_settle() {
@@ -2986,8 +2997,37 @@ mod tests {
         assert!(!chat.needs_animation());
         chat.phase = WorkerPhase::Closing;
         assert!(chat.needs_animation());
+        // A lifecycle snapshot can still carry the old primary activity when
+        // the terminal has already delivered Closed. The settled phase wins.
+        chat.phase = WorkerPhase::Closed;
+        chat.session_activity.execution = Some(hel::hel_worker::RelayExecutionState::Running);
+        chat.session_activity.foreground_tool_started_at_ms = Some(1);
+        assert!(!chat.needs_animation());
+    }
+
+    #[test]
+    fn idle_background_work_and_working_review_keep_animation_independent() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.session_activity
+            .background_commands
+            .push(hel::hel_worker::BackgroundCommand {
+                started_at_ms: 1,
+                command: "cargo test".into(),
+            });
+        assert!(chat.needs_animation());
+
         chat.phase = WorkerPhase::Closed;
         assert!(!chat.needs_animation());
+
+        chat.set_turn_review(Some(RuntimeReviewView {
+            session_id: "session-1".into(),
+            tier: ReviewTier::Quick,
+            phase: TurnReviewPhase::CapturingDelta,
+            roles: Vec::new(),
+            status: "capturing the turn".into(),
+            verdict: None,
+        }));
+        assert!(chat.needs_animation());
     }
 
     /// Mirrors what `ActiveChat::open` does for a session with no warm view:
