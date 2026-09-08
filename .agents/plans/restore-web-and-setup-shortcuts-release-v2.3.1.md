@@ -13,7 +13,8 @@ Restore F4 as the web viewer shortcut, expose Setup on F7, and make the composer
 - [x] (2026-09-08) Identify the regression: the Setup change reassigned F4 and moved web to F7, but the composer's independent footer still advertises F4 web and has no Setup hint.
 - [x] (2026-09-08) Restore F4 web, add F7 Setup, and supply composer footer hints from the action registry. The integration test fails on the old composer missing F7 and passes after the repair.
 - [x] (2026-09-08) Validate key dispatch and rendered hints; the full Rust suite, Clippy, portable-worker Clippy, license policy, supplemental notices, npm tests, and docs checks pass. Regenerate the four deterministic terminal captures and commit the repair on master.
-- [ ] Synchronize version 2.3.1 and license reports; validate the clean release commit locally and in CI.
+- [x] (2026-09-08) Commit the repair as `f334e3be`; synchronize all eight package versions, five internal dependencies, lockfile entries, and license report to 2.3.1 with no unrelated dependency changes.
+- [ ] Validate the clean 2.3.1 release commit locally and in CI.
 - [ ] Tag and publish v2.3.1, verify downloads and all registry packages, and record the outcome.
 
 ## Surprises & Discoveries
@@ -55,7 +56,7 @@ Run from the repository root, with logs under `target/release-v2.3.1/`:
     cargo fmt --check
     cargo test --locked
     cargo clippy --locked --all-targets -- -D warnings
-    cargo build --locked --release
+    cargo build --locked --release --target-dir target/release-host -j 8
     cargo build --locked --release --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
     cargo clippy --locked --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker -- -D warnings
     cargo check --locked --workspace --all-targets
@@ -93,3 +94,5 @@ Revision 2026-09-08: record the verified footer mismatch and the repair and rele
 Revision 2026-09-08: record the before/after regression evidence and use exact-commit CI for desktop and voice system dependencies unavailable locally.
 
 Revision 2026-09-08: record passing fix validation and regenerated captures before committing the repair.
+
+Revision 2026-09-08: record synchronized release versions and the validated fix checkpoint before committing the release candidate.
