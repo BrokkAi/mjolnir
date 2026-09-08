@@ -412,7 +412,6 @@ fn drawn_session_rows_with_options(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let animation_ms = mj_chat::spinner::elapsed_ms();
     let sessions = dashboard.ordered_sessions();
     let targets = session_display_targets(dashboard, &sessions);
     let flow_rows = dashboard.sessions_rows().into_iter().map(|row| match row {
@@ -460,14 +459,6 @@ fn drawn_session_rows_with_options(
                     state: session.state,
                     now_epoch_seconds,
                 };
-                let busy = !unreachable
-                    && session.state == SessionState::Running
-                    && (detail.is_some_and(|detail| {
-                        !detail.activity.is_idle(detail.current_turn_started_at)
-                    }) || review.is_some_and(RuntimeReviewView::is_working));
-                let spinner = busy.then(|| {
-                    mj_chat::spinner::compact_frame(dashboard.config.spinner, animation_ms)
-                });
                 let operation = dashboard.session_operations.get(&session.id);
                 let target = targets.get(index).cloned().unwrap_or_default();
                 let permission = session_permission_badge(session, operation, &dashboard.config);
@@ -475,7 +466,22 @@ fn drawn_session_rows_with_options(
                 // the caret marks it in both forms.
                 let selected = options.show_selection
                     && dashboard.selected_session_id.as_deref() == Some(session.id.as_str());
-                let prefix = if selected { "› " } else { "  " };
+                let transition = dashboard.transition_kind(&session.id);
+                let failure = dashboard.transition_failure_kind(&session.id);
+                let symbol = if let Some(transition) = transition {
+                    match transition {
+                        SessionTransitionKind::Starting => "↑",
+                        SessionTransitionKind::Resuming => "↻",
+                        SessionTransitionKind::Moving => "⇄",
+                        SessionTransitionKind::Stopping => "↓",
+                        SessionTransitionKind::Destroying => "⊗",
+                    }
+                } else if failure.is_some() {
+                    "×"
+                } else {
+                    facts.status_symbol(review, operation)
+                };
+                let prefix = format!("{}{symbol} ", if selected { "› " } else { "  " });
                 let (heading_key, heading_line) = match pending_heading.take() {
                     Some((key, line)) => (Some(key), Some(line)),
                     None => (None, None),
@@ -483,9 +489,9 @@ fn drawn_session_rows_with_options(
                 let mut lines = Vec::new();
                 lines.extend(heading_line);
                 let spacing = u16::from(expanded && !options.summary_only);
-                if let Some(transition) = dashboard.transition_kind(&session.id) {
+                if let Some(transition) = transition {
                     lines.push(session_transition_line(
-                        prefix,
+                        &prefix,
                         session,
                         transition,
                         operation,
@@ -503,9 +509,9 @@ fn drawn_session_rows_with_options(
                     });
                     continue;
                 }
-                if let Some(transition) = dashboard.transition_failure_kind(&session.id) {
+                if let Some(transition) = failure {
                     lines.push(session_transition_line(
-                        prefix,
+                        &prefix,
                         session,
                         transition,
                         None,
@@ -528,13 +534,13 @@ fn drawn_session_rows_with_options(
                         format!(
                             "{prefix}{} · {}",
                             session_name(session),
-                            sidebar_status(facts, review, spinner)
+                            sidebar_status(facts, review)
                         ),
                         facts.style(),
                     ));
                 } else if options.summary_only {
                     lines.push(session_top_line(
-                        prefix,
+                        &prefix,
                         session,
                         detail,
                         review,
@@ -543,7 +549,6 @@ fn drawn_session_rows_with_options(
                         now_epoch_seconds,
                         &target,
                         permission,
-                        spinner,
                     ));
                 } else if expanded {
                     expanded_session_lines(
@@ -562,18 +567,16 @@ fn drawn_session_rows_with_options(
                         &target,
                         permission,
                         width,
-                        selected,
-                        spinner,
+                        &prefix,
                     );
                 } else {
                     lines.push(collapsed_session_line(
-                        prefix,
+                        &prefix,
                         &target,
                         facts,
                         review,
                         usize::from(width.saturating_sub(4)),
                         permission,
-                        spinner,
                     ));
                 }
                 if selected {
@@ -614,10 +617,8 @@ fn expanded_session_lines(
     target: &str,
     permission: Option<Span<'static>>,
     width: u16,
-    selected: bool,
-    spinner: Option<&'static str>,
+    prefix: &str,
 ) {
-    let prefix = if selected { "› " } else { "  " };
     if width < 70 {
         let style = Style::default().fg(session_band_color(detail, unreachable, session.state));
         lines.push(Line::styled(
@@ -632,7 +633,6 @@ fn expanded_session_lines(
                 now_epoch_seconds,
             },
             review,
-            spinner,
         );
         lines.push(Line::styled(
             format!("  {status} · {}", session.last_profile),
@@ -665,7 +665,6 @@ fn expanded_session_lines(
         now_epoch_seconds,
         target,
         permission,
-        spinner,
     ));
     lines.push(prefixed_summary_line(
         "  ",
@@ -726,6 +725,65 @@ struct SessionRowFacts<'a> {
 }
 
 impl SessionRowFacts<'_> {
+    /// One static symbol set for every session layout. Operational work and
+    /// attention take precedence over unread messages and idle transcripts.
+    fn status_symbol(
+        &self,
+        review: Option<&RuntimeReviewView>,
+        operation: Option<&SessionOperationDisplay>,
+    ) -> &'static str {
+        use hel::hel_review::driver::TurnReviewPhase;
+        use hel::hel_review::verdict::ReviewVerdict;
+
+        if operation.is_some() {
+            return "◐";
+        }
+        match self.state {
+            SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
+                return "×";
+            }
+            SessionState::Stopped => return "■",
+            SessionState::Provisioning => return "↑",
+            SessionState::Checkpointing => return "▣",
+            SessionState::Closing => return "↓",
+            SessionState::Destroying => return "⊗",
+            SessionState::Disconnected => return "?",
+            SessionState::Running => {}
+        }
+        if self.unreachable {
+            return "?";
+        }
+        if self.needs_input() {
+            return "!";
+        }
+        if let Some(review) = review.filter(|review| review.activity_label().is_some()) {
+            if review.is_working() {
+                return "◐";
+            }
+            return match &review.phase {
+                TurnReviewPhase::Verdict(ReviewVerdict::Clean) => "✓",
+                TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
+                | TurnReviewPhase::Forwarding { error: Some(_), .. } => "×",
+                _ => "!",
+            };
+        }
+        let Some(detail) = self.detail else {
+            return "·";
+        };
+        if !detail.activity.is_idle(detail.current_turn_started_at) {
+            "◐"
+        } else if detail.materialized_applied_event_ordinal.is_none()
+            && detail.activity.execution.is_none()
+            && detail.activity.idle_since_ms.is_none()
+        {
+            "·"
+        } else if detail.has_unread() {
+            "✓"
+        } else {
+            "○"
+        }
+    }
+
     fn style(&self) -> Style {
         Style::default().fg(session_band_color(
             self.detail,
@@ -1120,11 +1178,7 @@ pub fn render_sessions_preview(
 }
 
 /// Keep attention and queued work visible even in the narrow sidebar.
-fn sidebar_status(
-    facts: SessionRowFacts<'_>,
-    review: Option<&RuntimeReviewView>,
-    spinner: Option<&str>,
-) -> String {
+fn sidebar_status(facts: SessionRowFacts<'_>, review: Option<&RuntimeReviewView>) -> String {
     let status = if facts.needs_input() {
         "Needs input".to_owned()
     } else if let Some(label) = review_status_label(review) {
@@ -1138,8 +1192,7 @@ fn sidebar_status(
     };
     let queued = facts.detail.map_or(0, |detail| detail.queued_prompts.len());
     format!(
-        "{}{status}{}",
-        spinner.map_or(String::new(), |spinner| format!("{spinner} ")),
+        "{status}{}",
         if queued > 0 {
             format!(" [Q {queued}]")
         } else {
@@ -1155,7 +1208,6 @@ fn collapsed_session_line(
     review: Option<&RuntimeReviewView>,
     width: usize,
     permission: Option<Span<'static>>,
-    spinner: Option<&'static str>,
 ) -> Line<'static> {
     // A review owns the compact activity slot while it is open. The primary
     // is idle during a review, so do not append a contradictory `[idle]`.
@@ -1164,10 +1216,6 @@ fn collapsed_session_line(
     let style = facts.style();
     let mut lead_width = prefix.chars().count() + target.chars().count() + 2;
     let mut spans = vec![Span::styled(format!("{prefix}{target}"), style)];
-    if let Some(spinner) = spinner {
-        spans.push(Span::styled(format!(" {spinner}"), style));
-        lead_width += 2;
-    }
     if let Some(permission) = permission {
         spans.push(Span::styled("  ", style));
         lead_width += permission.width() + 2;
@@ -1248,20 +1296,26 @@ fn session_transition_line(
     );
     let line = if width < 70 {
         format!(
-            "{prefix}{} · {} · {elapsed}{}",
+            "{} · {} · {elapsed}{}",
             transition.label(),
             session_name(session),
             if failure.is_some() { " · failed" } else { "" }
         )
     } else {
         format!(
-            "{prefix}{target}  {} · {stages} · {elapsed}  {profile} · {identity}{}",
+            "{target}  {} · {stages} · {elapsed}  {profile} · {identity}{}",
             transition.label(),
             failure.map_or_else(String::new, |error| format!(" · failed: {error}"))
         )
     };
     Line::styled(
-        crate::widgets::truncate_text(&line, usize::from(width.saturating_sub(2))),
+        format!(
+            "{prefix}{}",
+            crate::widgets::truncate_text(
+                &line,
+                usize::from(width.saturating_sub(2)).saturating_sub(prefix.chars().count()),
+            )
+        ),
         Style::default()
             .fg(if failure.is_some() {
                 theme::ERROR
@@ -1283,7 +1337,6 @@ fn session_top_line(
     now_epoch_seconds: u64,
     target: &str,
     permission: Option<Span<'static>>,
-    spinner: Option<&'static str>,
 ) -> Line<'static> {
     let (profile, _) = operation
         .and_then(|operation| operation.resume_destination.clone())
@@ -1334,9 +1387,6 @@ fn session_top_line(
         .expect("session summary starts with its target");
     let style = Style::default().fg(session_band_color(detail, unreachable, session.state));
     let mut spans = vec![Span::styled(format!("{prefix}{target}"), style)];
-    if let Some(spinner) = spinner {
-        spans.push(Span::styled(format!(" {spinner}"), style));
-    }
     if let Some(permission) = permission {
         spans.push(Span::styled("  ", style));
         spans.push(permission);
@@ -3330,7 +3380,7 @@ mod tests {
             }),
             "selection must not paint a background"
         );
-        assert!(lines[first_y as usize].contains("› podman [1]"));
+        assert!(lines[first_y as usize].contains("› · podman [1]"));
         assert_eq!(
             second_y,
             first_y + 5,
@@ -3421,7 +3471,7 @@ mod tests {
         let lines = buffer_lines(buffer);
         let first_y = lines
             .iter()
-            .position(|line| line.contains("› podman"))
+            .position(|line| line.contains("› · podman"))
             .expect("first session row") as u16;
         let second_heading_y = lines
             .iter()
@@ -3569,6 +3619,166 @@ mod tests {
         );
     }
 
+    fn assert_session_symbol_in_every_layout(dashboard: &mut DashboardState, symbol: &str) {
+        use ratatui::widgets::Widget;
+
+        let key = dashboard
+            .project_source(&dashboard.state.sessions["session-1"])
+            .key;
+        for collapsed in [false, true] {
+            if collapsed {
+                dashboard.collapsed_project_keys.insert(key.clone());
+            } else {
+                dashboard.collapsed_project_keys.remove(&key);
+            }
+            for width in [8, 40, 120] {
+                for options in [
+                    SessionRowsRenderOptions::DASHBOARD,
+                    SessionRowsRenderOptions::MINIMIZED,
+                    SessionRowsRenderOptions::PREVIEW,
+                ] {
+                    let rows = drawn_session_rows_with_options(dashboard, width, options);
+                    let row = rows.iter().find(|row| row.session.is_some()).unwrap();
+                    let line = row.lines[usize::from(row.heading.is_some())].clone();
+                    let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, width, 1));
+                    Paragraph::new(line).render(buffer.area, &mut buffer);
+                    assert_eq!(
+                        buffer[(2, 0)].symbol(),
+                        symbol,
+                        "collapsed={collapsed}, width={width}, options={options:?}: {buffer:?}"
+                    );
+                    assert_eq!(buffer[(3, 0)].symbol(), " ");
+                }
+            }
+        }
+        dashboard.collapsed_project_keys.remove(&key);
+    }
+
+    #[test]
+    fn session_symbols_follow_work_input_completion_and_connectivity_in_every_layout() {
+        let mut session = running_session();
+        session.session_title_override = Some("A long session name that fills the sidebar".into());
+        let mut dashboard = dashboard_with_session(session);
+        assert_session_symbol_in_every_layout(&mut dashboard, "·");
+
+        let mut materialized = materialized_session_for("session-1", Vec::new());
+        materialized.execution = MaterializedExecutionState::Idle;
+        dashboard.apply_materialized_session(&materialized);
+        assert_session_symbol_in_every_layout(&mut dashboard, "○");
+
+        materialized.execution = MaterializedExecutionState::Running {
+            started_at_ms: 1_000,
+        };
+        dashboard.apply_materialized_session(&materialized);
+        assert_session_symbol_in_every_layout(&mut dashboard, "◐");
+
+        materialized.pending_elicitations.push(
+            hel::hel_elicitation::ElicitationRequest::from_acp_params(
+                "request-1",
+                serde_json::json!({
+                    "mode": "form",
+                    "sessionId": "session-1",
+                    "message": "Choose a path",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}}
+                    }
+                }),
+            )
+            .unwrap(),
+        );
+        dashboard.apply_materialized_session(&materialized);
+        assert_session_symbol_in_every_layout(&mut dashboard, "!");
+
+        dashboard.set_session_connectivity("session-1", false);
+        assert_session_symbol_in_every_layout(&mut dashboard, "?");
+        dashboard.set_session_connectivity("session-1", true);
+
+        materialized = materialized_session_for("session-1", vec![agent_message(2, "Finished")]);
+        materialized.execution = MaterializedExecutionState::Idle;
+        dashboard.apply_materialized_session(&materialized);
+        assert_session_symbol_in_every_layout(&mut dashboard, "✓");
+
+        dashboard.set_session_activity(
+            "session-1",
+            mj_chat::usage_format::SessionActivity {
+                background_commands: vec![hel::hel_worker::BackgroundCommand {
+                    started_at_ms: 1_000,
+                    command: "cargo test".into(),
+                }],
+                ..Default::default()
+            },
+        );
+        assert_session_symbol_in_every_layout(&mut dashboard, "◐");
+        dashboard.set_session_activity("session-1", Default::default());
+        dashboard.handle_key(alt_key('a'));
+        assert_session_symbol_in_every_layout(&mut dashboard, "○");
+    }
+
+    #[test]
+    fn session_symbols_follow_review_progress_and_verdicts() {
+        use hel::hel_review::driver::TurnReviewPhase;
+        use hel::hel_review::verdict::ReviewVerdict;
+
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut materialized = materialized_session_for("session-1", Vec::new());
+        materialized.execution = MaterializedExecutionState::Idle;
+        dashboard.apply_materialized_session(&materialized);
+        let mut review = RuntimeReviewView {
+            session_id: "session-1".into(),
+            tier: hel::hel_review::lanes::ReviewTier::Quick,
+            phase: TurnReviewPhase::Running { roles: Vec::new() },
+            roles: Vec::new(),
+            status: "Reviewing".into(),
+            verdict: None,
+        };
+        dashboard.set_session_reviews([review.clone()]);
+        assert_session_symbol_in_every_layout(&mut dashboard, "◐");
+
+        review.phase = TurnReviewPhase::Verdict(ReviewVerdict::Findings {
+            synthesis: "A bug needs fixing".into(),
+            evidence: Default::default(),
+        });
+        dashboard.set_session_reviews([review.clone()]);
+        assert_session_symbol_in_every_layout(&mut dashboard, "!");
+
+        review.phase = TurnReviewPhase::Verdict(ReviewVerdict::Failed {
+            reason: "Reviewer disconnected".into(),
+        });
+        dashboard.set_session_reviews([review]);
+        assert_session_symbol_in_every_layout(&mut dashboard, "×");
+        dashboard.set_session_reviews(Vec::new());
+        assert_session_symbol_in_every_layout(&mut dashboard, "○");
+    }
+
+    #[test]
+    fn lifecycle_symbols_override_stale_activity_and_show_failed_stops() {
+        let mut dashboard = dashboard_with_session(running_session());
+        apply_materialized_transcript(&mut dashboard, vec![agent_message(2, "Finished")]);
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Moving, None);
+        assert_session_symbol_in_every_layout(&mut dashboard, "⇄");
+        dashboard.state.sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
+        assert_session_symbol_in_every_layout(&mut dashboard, "⇄");
+        dashboard.finish_session_operation("session-1");
+        dashboard.config.show_stopped_sessions = true;
+        assert_session_symbol_in_every_layout(&mut dashboard, "■");
+
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
+        assert_session_symbol_in_every_layout(&mut dashboard, "↻");
+        dashboard.finish_session_operation("session-1");
+        dashboard.state.sessions.get_mut("session-1").unwrap().state = SessionState::Checkpointing;
+        assert_session_symbol_in_every_layout(&mut dashboard, "▣");
+        dashboard.state.sessions.get_mut("session-1").unwrap().state = SessionState::Closing;
+        assert_session_symbol_in_every_layout(&mut dashboard, "↓");
+        dashboard
+            .state
+            .sessions
+            .get_mut("session-1")
+            .unwrap()
+            .last_error = Some("Checkpoint failed".into());
+        assert_session_symbol_in_every_layout(&mut dashboard, "×");
+    }
+
     #[test]
     fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         let normal = SessionDetail {
@@ -3616,7 +3826,6 @@ mod tests {
             },
             None,
             80,
-            None,
             None,
         );
         assert_eq!(collapsed.style.fg, Some(theme::ACCENT));
@@ -3739,7 +3948,6 @@ mod tests {
             },
             None,
             80,
-            None,
             None,
         );
         assert_eq!(unreachable_line.style.fg, Some(theme::ERROR));
