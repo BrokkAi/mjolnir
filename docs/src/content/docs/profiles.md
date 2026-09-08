@@ -265,7 +265,8 @@ other sessions or credentials. External Muse sessions normally come from
 restores them into the destination profile’s isolated data directory. The adapter does not accept
 injected MCP servers, so Muse cannot act as a reviewer or use Mjolnir's
 project-memory tools. Another supported reviewer can still review a Muse
-primary session. Muse is not selected automatically for utility work.
+primary session. Muse Spark can also supply utility inference for cross-harness handoffs; see
+[Durability and recovery](/durability/).
 
 - DeepSeek Harness ACP supports exactly one workspace root. Use either a
   single-repository bundle or one bare project directory, with no attached

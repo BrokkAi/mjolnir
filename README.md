@@ -1,497 +1,142 @@
 # Mjolnir
 
-Mjolnir (`mj`) is a terminal control plane for coding agents. It runs many long-lived
-agent sessions — Codex, Claude Code, Kimi Code, Grok Build, DeepSeek Harness, and Muse Code — in disposable
-isolated environments, keeps them working while you are away, and gives you one
-dashboard for their sessions, quotas, and credentials. Agents connect through
-the [Agent Client Protocol](https://agentclientprotocol.com) (ACP).
+Mjolnir (`mj`) is a session manager for coding agents that provisions their
+execution environments and lets you continue work across harnesses, accounts,
+and machines.
 
-Mjolnir 2.0 is a new product generation: the session control plane replaces
-the 1.x interactive client. The last 1.x release remains available at the
-[v1.17.0 tag](https://github.com/BrokkAi/mjolnir/releases/tag/v1.17.0).
+Start a task with Claude Code locally, continue with Codex in a remote container,
+and restore the session on another host. Choose the harness account and execution
+target independently; Mjolnir handles provisioning, credential synchronization,
+checkpointing, and the handoff.
+
+[Documentation](https://mjolnir.brokk.ai/) ·
+[Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
+[Releases](https://github.com/BrokkAi/mjolnir/releases)
 
 ## Why Mjolnir
 
-Running one coding agent in one terminal works. Running six of them across two
-Codex accounts and a Claude account, on three machines, overnight, does not.
-Mjolnir exists for the second case.
+- **Provision the environment with the session.** Launch disposable Docker or
+  Podman containers locally or over SSH, or EC2 instances from your launch
+  templates. Mjolnir uploads session workers to remote hosts without requiring a
+  resident Mjolnir daemon on each host. Multi-repository bundles give each session
+  the complete project layout.
+- **Choose the harness, account, and machine independently.** Keep multiple
+  profiles for the same harness, adopt existing native sessions, and move work to
+  another account or target. When switching harnesses, Mjolnir preserves repository
+  state and the visible conversation and gives the new harness a condensed
+  handoff. Same-harness resume restores native session state.
+- **Keep credentials and project knowledge available.** Mjolnir continuously
+  synchronizes whitelisted credentials into live targets and shares project memory
+  across sessions and harnesses. The dashboard brings profile quota and target
+  capacity together; independent adversarial review can check completed work.
 
-- **Sessions survive everything.** Prompts queue durably on the target and keep
-  executing in order while your terminal is closed or your laptop is off. Every
-  session records a hash-chained event journal. Recovery archives are verified
-  end to end before Mjolnir tears anything down, and crashed or wedged workers are
-  detected and restarted automatically.
-- **Full-access mode without fear.** Isolated targets run the agent in its
-  unrestricted mode — no permission prompts — because the blast radius is a
-  disposable container or instance, not your machine.
-- **Your credentials stay canonical.** Each profile keeps one credential set on
-  your machine. Mjolnir copies a minimal allowlist into each target, reconciles
-  rotating OAuth tokens across every live session within about a minute, and
-  structurally excludes credentials from event streams and recovery archives.
-- **One view of capacity.** Sessions, per-profile quota and usage, and host
-  capacity in one dashboard — and on your phone through the persistent Mjolnir daemon.
-- **Agents can operate it.** `mj doctor --json` and `mj setup instructions`
-  are designed so your coding agent can converge a host to session-ready by
-  looping on machine-readable checks.
+The comparison below covers product capabilities. **—** means no first-class
+capability; manual scripts, host setup, and filesystem access are described where
+relevant. Compared against repository snapshots inspected on **September 8, 2026**:
+[Herdr](https://github.com/herdrdev/herdr),
+[Paseo](https://github.com/getpaseo/paseo), and
+[T3 Code](https://github.com/pingdotgg/t3code).
 
-## Goals
+### Provisioning
 
-1. Run many concurrent, long-lived agent sessions and make them durable:
-   detached execution, verified recovery archives, resume onto a fresh target.
-2. Make unrestricted agent modes safe by pairing them with disposable,
-   isolated environments.
-3. Keep provisioning minimal and deterministic: per-harness allowlists,
-   SHA-256-verified workers and archives, no snowflake state in targets.
-4. Give one control plane across harnesses and profiles: sessions, quotas,
-   credentials, and remote control in one place.
-5. Fail loudly. A failed checkpoint leaves the session usable and says so;
-   retired formats are rejected, never half-converted.
-6. Stay operable by both humans (TUI, web) and coding agents (JSON output,
-   scriptable CLI).
+| Feature | Mjolnir | Herdr | Paseo | T3 Code |
+|---|---|---|---|---|
+| **Remote targets** | Anything reachable over SSH¹ | SSH machines with Herdr installed | Machines running a reachable Paseo daemon | SSH/WSL environments running a T3 backend |
+| **Remote execution** | Uploads an on-demand session worker; no resident per-host daemon | Requires a Herdr server on each host | Requires a Paseo daemon on each host | Requires a T3 backend in each environment |
+| **EC2** | Provisions and terminates instances from launch templates | Manual setup as a remote host | Manual setup as a remote host | Manual setup as a remote environment |
+| **Session containers** | Docker, Podman | — | — | — |
+| **Credential synchronization** | Continuously syncs whitelisted credentials into live targets | Host-local credentials | Per-daemon credentials | Per-environment credentials |
 
-## Non-goals
+### Session continuity
 
-- **Mjolnir is not an agent.** It does not write code, plan, or pick models. It
-  manages harnesses that do.
-- **No privileged host setup.** Mjolnir will not install container runtimes, edit
-  `subuid`/`subgid`, create AWS launch templates or security groups, or make
-  SSH hosts reachable. You (or your agent, with your credentials) do that;
-  `mj doctor` verifies it and prescribes the exact remediation.
-- **No wholesale environment transfer.** SSH and GPG keys, shell dotfiles,
-  editor configuration, package-registry credentials, cloud configuration, and
-  toolchain state are never copied into targets.
-- **Not a team server.** One controller process owns a session store, enforced
-  by an OS-backed lock. The web server is a personal remote control with one
-  viewer credential, not a multi-user service.
-- **Not an orchestration platform.** Containers are unnamed disposable
-  templates, rebuilt from checkpoints rather than upgraded in place. There is
-  no scheduler and no load-based admission; overcommit is your call.
-- **No compatibility shims.** Old relay protocols and archive schemas are
-  rejected with a clear error instead of being partially converted.
+| Feature | Mjolnir | Herdr | Paseo | T3 Code |
+|---|---|---|---|---|
+| **Native-session adoption** | All supported harnesses | No external adoption; only restarts sessions it was already supervising | All supported providers with native list/load support | No external adoption; continues T3-owned sessions |
+| **Resume sessions across profiles and harnesses** | ✓ | Manual handoff | `/paseo-handoff` skill | Same-harness only² |
+| **Cross-host move and restore** | ✓ — live Move or stop/resume onto another target | — | — | — |
+| **Multi-repo projects** | Bundles provision, checkpoint, review, move, and restore member repos together³ | Filesystem access only; separate workspaces or panes | Filesystem/provider access only; one root per workspace | Filesystem access only; one workspace root per project |
 
-## Harnesses and targets
+### Harnesses and accounts
 
-| Harness | Credentials & quota | Checkpoint/restore of native state |
-|---|---|---|
-| Codex | yes | yes |
-| Claude Code | yes | yes |
-| Kimi Code | yes | yes |
-| Grok Build | yes | yes |
-| DeepSeek Harness | credentials yes; usage-priced, no subscription quota | yes |
-| Muse Code | credentials yes; quota unavailable | yes |
+| Feature | Mjolnir | Herdr | Paseo | T3 Code |
+|---|---|---|---|---|
+| **Supported harnesses** | Claude Code, Codex, Kimi Code, Grok Build, DSH, Muse Code | Pi, OMP, Copilot, Devin, Kimi, Hermes, Qoder, Qwen, Droid, OpenCode, Kilo, MastraCode, Claude, Codex, Cursor, Amp, Grok, Antigravity, Kiro, Maki, Muse; any other CLI runs without agent-aware features | Claude, Codex, Copilot, OpenCode, Pi, OMP; catalog and custom ACP agents including Kimi, Cursor, Hermes, and Qwen | Codex, Claude, Cursor, Grok, OpenCode |
+| **Multiple profiles per harness** | First-class named profiles | Manual wrappers and environment configuration | Custom provider aliases | Provider instances; continuation compatibility varies by harness |
+| **Usage and quota view** | Live subscription quota by profile plus target capacity⁴ | — | Provider plan usage on demand | Token and API-cost analytics; not remaining subscription quota |
 
-All six harnesses support importing external native sessions through the Import
-view or `mj import <harness>`. Use `deepseek` (or `dsh`) for DSH and `muse` for
-Muse Code. Imports preserve native session identity and can resume in a relocated
-workspace; Muse and DSH accept one workspace root.
+### Assistance and control
 
-The set is extensible by design: these six are reference integrations, not a
-closed list. A new ACP-speaking harness needs a launch recipe or bridge, its
-credential file shapes and login command, its home environment variable, a
-checkpoint allowlist for native session state, and optionally a quota reader.
-Issues and pull requests for new harnesses are welcome.
+| Feature | Mjolnir | Herdr | Paseo | T3 Code |
+|---|---|---|---|---|
+| **Cross-session project memory** | Synchronized project memory shared across sessions, profiles, harnesses, and targets | — | — | — |
+| **Automatic adversarial review** | Built-in automatic or on-demand independent review | Scriptable through agent automation; no built-in review loop | Manual `/paseo-advisor` second opinion | — |
+| **Control surfaces** | TUI, web, desktop shell, CLI | TUI, CLI | Web, desktop, iOS, Android, CLI | Web, desktop, iOS, Android, CLI |
+| **Voice input** | TUI and web dictation | — | Dictation and conversational voice mode | — |
 
-| Target | Kind | Where it runs | Agent mode |
-|---|---|---|---|
-| Local Git worktree | `local-bare` | your machine | your configured approvals |
-| Podman container | `local-podman` | Linux, WSL2 | unrestricted |
-| Docker container | `local-docker` | Linux, WSL2 | unrestricted |
-| Apple container | `apple-container` | macOS 26+, Apple silicon | unrestricted |
-| SSH machine | `ssh-bare` | a Linux host you name | guardian or unrestricted |
-| Podman over SSH | `ssh-podman` | a Linux host you name | unrestricted |
-| Docker over SSH | `ssh-docker` | a Linux host with Docker Engine | unrestricted |
-| EC2 instance | `aws-ec2` | your AWS account | unrestricted |
+### Extensibility
 
-The controller (the `mj` binary you run) supports Linux and macOS. Windows is
-not supported; use WSL2.
+| Feature | Mjolnir | Herdr | Paseo | T3 Code |
+|---|---|---|---|---|
+| **Product plugins** | — | Workflow packages with actions, event hooks, terminal panes, and link handlers | Full-stack client/server plugins: UI surfaces, RPCs, tools, providers, themes, and commands | — |
 
-## Install
+“Native-session adoption” means discovering a session created outside the product
+and bringing it under management. Ordinary same-harness continuation is excluded.
 
-```console
+1. Mjolnir's SSH targets require a supported Linux host and the documented runtime
+   prerequisites. It also supports Apple's container runtime on compatible Macs.
+   See [targets](https://mjolnir.brokk.ai/targets/).
+2. T3 continuation also requires compatible provider homes: Codex can share history
+   across accounts using its shadow-home setup; separate Claude account homes
+   cannot continue the same thread.
+3. Bundles apply to managed targets. DSH (DeepSeek Harness) and Muse Code currently
+   accept one workspace root. Bare sessions can access neighboring repositories
+   subject to harness permissions, but do not manage them as a bundle.
+4. Quota availability depends on the harness. Muse currently cannot use the
+   project-memory tools or act as a reviewer. Cross-harness resume requires a
+   configured utility-capable profile to generate the handoff; see
+   [durability and recovery](https://mjolnir.brokk.ai/durability/).
+
+## Get started
+
+Install the release bundle on Linux or macOS (use WSL2 on Windows):
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash
 ```
 
-This downloads a verified release into `~/.local/bin` — no Rust toolchain
-needed. Each desktop release ships the headless `mj` controller, its separate
-`mj-desktop` application, the voice worker, and dedicated session workers.
-Linux workers are static musl binaries that Mjolnir uploads into disposable
-targets; the macOS bundle also has a native worker for `local-bare`. `mj` itself
-does not load native desktop libraries. Run `mj doctor` next. The installer also honors
-`MJOLNIR_VERSION` to install a specific tag and `MJOLNIR_INSTALL_DIR` (or
-`INSTALL_DIR`) to choose the install directory; see `--help`.
+From your project directory, run:
 
-npm works too:
-
-```console
-npm install -g @brokkai/mjolnir
+```sh
+mj
 ```
 
-For source development, build the native controller and the much smaller
-portable worker separately:
+First launch uses your configured Codex account by default and prefers usable
+Podman, then Docker, then a local directory session. Use `mj setup` to configure
+other harness accounts and targets, or `mj doctor` to check prerequisites.
 
-```console
-scripts/run.sh --release -- --version
-```
+Follow the [quickstart](https://mjolnir.brokk.ai/quickstart/) for your first
+session. The [installation guide](https://mjolnir.brokk.ai/install/) covers npm,
+source builds, desktop dependencies, and portable workers.
 
-On Linux this builds `mj` for the host and only `mj-worker` for musl. On macOS
-both are native, which supports `local-bare` development without Zig; managed
-Linux targets require a packaged static worker or an explicit worker override.
+## Documentation
 
-The desktop application is a separate native build. On x86-64 GNU/Linux,
-install the WebKitGTK development package for your distribution and run:
+- [Profiles and harnesses](https://mjolnir.brokk.ai/profiles/): accounts, login,
+  credentials, skills, and runtime prerequisites.
+- [Targets](https://mjolnir.brokk.ai/targets/) and
+  [bundles](https://mjolnir.brokk.ai/workspaces-bundles/): local, container, SSH,
+  and EC2 environments; multi-repository projects and shared memory.
+- [Session lifecycle](https://mjolnir.brokk.ai/sessions/) and
+  [durability](https://mjolnir.brokk.ai/durability/): adoption, move, resume,
+  checkpoints, and recovery.
+- [Terminal](https://mjolnir.brokk.ai/terminal-surface/) and
+  [web/desktop](https://mjolnir.brokk.ai/web-viewer/): controls and remote access.
+- [Adversarial review](https://mjolnir.brokk.ai/turn-review/),
+  [configuration](https://mjolnir.brokk.ai/configuration/),
+  [CLI reference](https://mjolnir.brokk.ai/cli-reference/), and
+  [security boundaries](https://mjolnir.brokk.ai/security/).
 
-```console
-cargo build --release -p brokk-mjolnir -p brokk-mj-desktop \
-  --target x86_64-unknown-linux-gnu
-./target/x86_64-unknown-linux-gnu/release/mj app
-```
-
-Use the corresponding host target on ARM64 Linux or macOS. Installing from
-crates.io likewise requires both `brokk-mjolnir` and `brokk-mj-desktop` when
-you want `mj app`; headless installations need only `brokk-mjolnir`.
-
-For container targets, pull the published multi-arch agent image (public, no
-authentication):
-
-```console
-podman pull ghcr.io/brokkai/mjolnir/agent-dev:latest
-# or
-docker pull ghcr.io/brokkai/mjolnir/agent-dev:latest
-```
-
-It includes Rust, cargo-nextest, Node, OpenJDK 25, Git, GitHub CLI, the Codex
-and Claude ACP bridges, and pinned DeepSeek Harness with its bundled ACP profile.
-It also bakes in Playwright's Chromium system libraries and the Chromium
-headless shell (in `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`), so headless
-browser tests run without a privileged install or a run-time download,
-and the profiling tools `perf`, `cargo-flamegraph`, `samply`, and `heaptrack`
-(`perf` also needs the host's `kernel.perf_event_paranoid` to be 1 or lower, or
-`--cap-add SYS_ADMIN` on the container).
-For optional local coverage analysis, the image carries the
-`llvm-tools-preview` component, pinned `cargo-llvm-cov`, and `lcov` for
-`genhtml`.
-See [docs/src/content/docs/custom-images.md](docs/src/content/docs/custom-images.md)
-to build your own.
-
-## Quickstart
-
-1. Run `mj` from your project directory. If no workspace exists, Mjolnir
-   creates one using the directory name. An empty workspace automatically
-   starts a session and focuses the prompt. Existing workspace selection and
-   live-session startup keep their current behavior.
-2. On Linux and macOS, a fresh configuration starts with your Codex home
-   (`CODEX_HOME`, or `~/.codex`). Automatic target selection prefers usable
-   Podman, then Docker, then a local directory session. Container sessions use
-   the current repository, including its uncommitted changes; plain directories
-   use the local target. Runtime checks and session launch run in the background.
-3. Type your first prompt when launch finishes. Use `[startup]` in `config.toml`
-   to set `profile = "your-profile"`, `target = "your-target"`, or
-   `enabled = false`. Explicit targets are honored even when unavailable, so
-   their launch errors remain visible. Use `mj setup` for guided configuration
-   of additional execution environments, and **New…** or `Alt+W` for a custom session.
-4. If launch reports a prerequisite failure, run `mj doctor` and use
-   `mj login --profile <id>` when authentication is needed. Detach with `Alt+Q`;
-   running sessions continue. Reattach with `mj` or use the daemon-owned web
-   viewer shown by `mj daemon status`.
-
-## The terminal surface
-
-Mjolnir's TUI is one screen. The **Workspace** switcher and **Sessions** list
-sit in a sidebar beside the **transcript**, **Prompt** composer, **Targets**,
-and **Quota**, with a footer that names the keys that apply right now. Nothing
-is behind a navigation step, so you can read an agent's output while seeing what your other
-agents are doing and how loaded your machines are.
-
-Mjolnir opens on the session in your opened workspace whose agent spoke most
-recently, with the cursor in Prompt. The Sessions sidebar shows every session across all workspaces, including
-stopped sessions. Select one and press Enter to switch to its conversation.
-Click the **Workspace** switcher above Sessions, or press `F3`, to choose the
-workspace where new sessions will be created. It shows the workspace you opened,
-even when you view a session from another workspace.
-
-Use **New…** below the switcher to choose session options, or **Quick new** to
-create with saved defaults. **Commands** opens the command palette; select an
-action and click **Run**. Each session's **⋯** button opens its actions. The
-workspace picker provides clickable Open, New, Rename, Recover, Delete, and
-Back controls, and displayed dashboard shortcut hints are clickable too.
-Click **Show stopped** at the bottom of Sessions, or press `h` in that panel,
-to hide or show stopped sessions. The choice is remembered.
-
-In Sessions, `n` immediately creates a session using your
-saved defaults: Codex when configured, a usable local Podman or Docker runtime,
-then a local worktree when neither runtime is available. The session uses the
-directory you launched Mjolnir in and belongs to the workspace you opened.
-Its normal Prompt receives focus when ready. `N` opens the full
-creation wizard. `s` stops and `r` restarts the selected session without
-confirmation. `d` deletes it after a Yes/No choice; no identifier typing is required.
-
-`F7` opens Setup for accounts, targets, projects, new-session defaults, sidebar
-placement, display, review, and web access. Choose Left or Right for the sidebar,
-and turn off **Focus prompt after creating** to keep focus in Sessions.
-Choose **Theme** for Midnight (the default), Light, or Dracula. Press `Enter` to
-apply the choice to your draft, then `Ctrl+S` to save and update the terminal
-colors immediately. The preference is kept across restarts.
-
-`Tab` moves the keyboard through the layout — Sessions, Prompt, Targets, Quota —
-and `Shift+Tab` reverses it. Every pane remains in that ring at every size. The
-transcript is not a Tab stop: read it with the mouse wheel or
-`PageUp`/`PageDown` from wherever you are. Moving focus never resizes a pane.
-
-Sessions, Targets, and Quota each have `▁`, `▪`, and `□` controls in their
-title bars for minimized, standard, and maximized size. Minimized Targets and
-Quota become one summary row each; minimized Sessions narrows the full-height
-sidebar and shows one line per session. Maximizing Sessions widens the sidebar.
-A maximized Targets or Quota pane gets available vertical space below Prompt. Only one pane can be maximized
-at a time.
-
-`Alt+Z` cycles the focused support pane through its three sizes without moving
-focus. `Alt+G` is the layout shortcut: from all-standard it minimizes Sessions,
-Targets, and Quota to leave more room for the conversation; from any customized
-layout it restores all three panes to standard. Tab leaves every chosen size alone.
-
-A few keys answer from everywhere, including while you are typing in Prompt:
-`F2` opens the command palette, `F3` the workspace picker, `F4` the web viewer,
-`F5` refreshes Targets and Quota, `F7` opens Setup, `Alt+N` opens quick New,
-`Alt+W` opens the full creation wizard,
-`Alt+S` resumes one, `Alt+A` marks everything read, `Alt+X` cancels whatever
-the selected session is in the middle of, `Alt+Z` sizes the focused support
-pane, `Alt+G` toggles the pane preset, and
-`Alt+Q` detaches this terminal client — the daemon and the sessions it runs
-keep working. The plain `n`, `N`, `s`, `r`, and `d` keys work in Sessions;
-the global chords also work while Prompt has focus.
-
-`F2` is the way to reach a command you have no key for. It lists the selected
-session's own commands first — rename it, edit its container settings, stop it
-— under a heading naming that session, then the commands for the pane you are
-in, then everything that works anywhere, each with the key that runs it. Type
-to filter by name or description, `Up`/`Down` to move, `Enter` to run, `Escape`
-to close. Commands that cannot run right now stay in the list, greyed, with the
-reason.
-
-In Prompt, `Ctrl+R` searches your prompt history, as in a shell, and `Alt+T`
-switches the transcript between rendered and raw. Inside the search, `Alt+R`
-cycles which history it reads. Every other `Ctrl` key in Prompt is a text
-editing key, as in a shell.
-
-`Alt` chords need Option to act as Meta in macOS terminals (iTerm2:
-Preferences, Profiles, Keys, "Left Option key: Esc+"; Terminal.app: "Use Option
-as Meta key"), and inside tmux a short `escape-time`, for example
-`set -sg escape-time 10` in `~/.tmux.conf`. Without those the terminal reports
-`Alt+N` as `Escape` then `n`. The command palette on `F2` and the key reference
-below are the fallbacks: every chord is also a line in both.
-
-`F1` opens the key reference, and so does `?` from any pane. It lists every key
-this screen answers, greying the ones that do not apply where you are; `Escape`,
-`F1`, or `?` closes it and puts back whatever it opened over. The footer is
-generated from the same list, so it names only the keys that apply right now —
-`Alt-X cancel launch`, for instance, appears only while the selected session is
-starting or stopping.
-
-The footer reads in three groups, separated by a vertical bar: what the pane
-you are in answers, the `Alt` chords that answer anywhere, then the function
-keys. A narrow terminal drops hints from the left-hand groups first; the
-function keys stay, because they are the way to the palette and the reference.
-
-The panes take plain keys, because the composer is a separate focus and never
-sees them. A plain letter is always pane-local: everything reachable from
-anywhere is a chord. On Sessions: `Enter` opens the selection, `Space` and
-`1`–`9` collapse and expand projects; a session's own commands are on `F2`. On
-Targets and Quota: `Enter` or `e` opens that row's actions, and `F5` refreshes
-both panes from anywhere.
-Every list also takes the arrow keys, `j`/`k`, `Ctrl+N`/`Ctrl+P`, and
-`Home`/`End`.
-
-`Escape` belongs to the conversation: it cancels a running turn or a shell
-command, and closes a dialog. It never detaches.
-
-In an attached TUI or the phone viewer, start a message with `!` to run the
-rest as `bash -lc` inside that session's target. Shell commands run in the
-session workspace without blocking an active agent turn. Their bounded live
-output is saved in the transcript and included once as hidden context on the
-next prompt submitted after the command finishes. Press Escape in the TUI, or
-use the shell's Cancel button in the viewer, to stop it.
-
-Configuration lives at `~/.config/mjolnir/config.toml` (the platform-equivalent
-directory elsewhere). First launch writes minimal local defaults; `mj setup`
-offers guided discovery, and further settings can be edited in TOML. A minimal example:
-
-```toml
-version = 2
-
-[profiles.codex-1]
-kind = "codex"
-home = "/home/me/.codex"
-
-[profiles.claude-1]
-kind = "claude"
-home = "/home/me/.claude"
-
-[bundles.myapp]
-primary_repo = "myapp"
-
-[[bundles.myapp.repositories]]
-id = "myapp"
-github = "your-org/myapp"        # or: local = "/home/me/src/myapp"
-destination = "myapp"
-
-[targets.podman]
-kind = "local-podman"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
-# Optional: auto (default), always, newer, missing, or never. Auto launches from
-# the cached image; the daemon refreshes remote latest tags hourly in the
-# background. Versioned tags stay cached and digest references stay pinned.
-# pull_policy = "auto"
-
-# Docker uses the same fields:
-# [targets.docker]
-# kind = "local-docker"
-# image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
-
-# Docker over SSH runs the Docker CLI and OverlayFS operations on the named
-# Linux host. The SSH alias must be usable with BatchMode=yes.
-# [targets.builder-docker]
-# kind = "ssh-docker"
-# host = "builder"
-# image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
-```
-
-`version` is the config schema version. A file written by a *newer* Mjolnir still
-loads: the settings this build understands keep working, and the config becomes
-read-only, so the older build refuses to save and never downgrades the file.
-`mj doctor` reports that state. Update Mjolnir, or change settings with the newer
-build, to make it writable again.
-
-Profiles point at harness home directories on your machine — run as many
-profiles per harness as you have accounts. Bundles describe the repositories a
-session checks out (multi-repository bundles give agents a virtual monorepo).
-Mjolnir-owned worker and bridge commands use non-login shells. On raw local, SSH,
-and EC2 targets, Mjolnir makes one bounded login-shell probe when each worker starts
-and carries only its discovered `PATH` into the non-login runtime; an explicit
-`environment.PATH` in the profile takes precedence. Raw SSH and EC2 workers install
-the exact Mjolnir-pinned harness runtime in a shared per-user cache and never fall
-back to an arbitrary executable from `PATH`. Their host still needs the installer
-prerequisites: Node.js 22 plus npm for npm-based harnesses, or curl and Bash for
-Kimi Code and Grok Build. Mjolnir does not use sudo to install those prerequisites.
-Later profile changes take effect after the worker restarts or the session resumes.
-Agent-requested shell commands still run as `bash -lc` and intentionally use the
-session user's login environment.
-Target prerequisites and full option lists are covered in
-[docs/PODMAN.md](docs/PODMAN.md), [docs/DOCKER.md](docs/DOCKER.md),
-[docs/SSH.md](docs/SSH.md), and
-[docs/AWS.md](docs/AWS.md).
-
-### Web viewer and Tailscale
-
-The daemon starts the authenticated web viewer by default. Run
-`mj daemon status` for its URL and six-digit login code. Without Tailscale it
-serves HTTP only on `127.0.0.1:3765`.
-
-`mj app` opens that viewer in the sibling `mj-desktop` executable. The main
-`mj` process remains headless and works without GUI libraries. On Linux the
-desktop executable uses the system WebKitGTK runtime; install
-`libwebkit2gtk-4.1-0` on Debian/Ubuntu or the equivalent package for your
-distribution if it is not already present.
-
-When the local Tailscale node has MagicDNS and HTTPS Certificates enabled, Mjolnir
-automatically requests the node's trusted `ts.net` certificate and serves HTTPS
-on all interfaces at the same port. Certificate issuance runs in the background
-and may take about 30 seconds the first time; certificates renew daily without a
-daemon restart. If HTTPS Certificates are unavailable, the status output keeps
-the viewer loopback-only and explains how to enable them. After changing the
-tailnet setting, run `mj daemon restart`.
-
-The historical configuration section remains `[phone]`. Explicit certificate
-configuration takes precedence over automatic Tailscale detection:
-
-```toml
-[phone]
-# Set false to disable the web viewer entirely.
-enabled = true
-bind = "127.0.0.1:3765"
-# Set false to keep the viewer loopback-only without probing Tailscale.
-tailscale_detect = true
-# tls_cert = "/path/to/cert.pem"
-# tls_key = "/path/to/key.pem"
-```
-
-## Security and isolation model
-
-- Execution policy is selected by target, then translated into each harness's
-  own controls. Containers and EC2 targets run unconstrained. Named raw SSH
-  targets (`ssh-bare`) explicitly select `permissions = "guardian"` to preserve
-  configured approvals or `permissions = "yolo"` for unconstrained execution.
-  A local worktree (`local-bare`) also preserves the profile and harness's
-  configured approval behavior. Codex, Claude Code, and Grok Build expose
-  guardian modes; Kimi Code and DeepSeek Harness do not, so Mjolnir shows a
-  prominent warning when guardian permissions cannot be enforced on a target.
-- Harness homes are copied by allowlist, not wholesale. For Claude Code, for
-  example: credentials, settings, `CLAUDE.md`, `skills/`, and `plugins/` — no
-  transcripts, history, or caches. Mjolnir sets `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
-  `KIMI_CODE_HOME`, `GROK_HOME`, or `DSH_HOME` in the target. Skill edits on your machine
-  propagate to live sessions within about a minute.
-- Credentials travel only between the controller and a session's worker. They
-  are never written to the event journal or recovery archives. When the
-  controller's `gh` is authenticated, Mjolnir continuously pushes its active
-  GitHub token to every live non-local session, including raw SSH targets.
-  The token is not stored in archives.
-- Rotating OAuth logins are single use, so a container and the controller that
-  reach the same expiry instant both spend the same refresh token: one wins and
-  the other session's turn dies with an expired session. For Codex profiles the
-  daemon rotates the login ahead of expiry and pushes the new file, so container
-  copies never arrive at that instant. Claude Code has no early refresh, so
-  store a long-lived token instead with `mj login --profile <id> --setup-token`;
-  new and resumed sessions of that profile run with `CLAUDE_CODE_OAUTH_TOKEN`
-  set, and a token that does not rotate cannot lose the race. It covers model
-  requests only, not Remote Control or claude.ai connectors, which Mjolnir
-  sessions do not use.
-- A repository configured with `local` is served to workers through a
-  per-session Git protocol bridge over the session's own transport: `git
-  fetch` and fast-forward `git push origin` operate on your checkout with no
-  inbound port and no writable mount. Force pushes, ref deletion, and receive
-  hooks are disabled; pushes to a dirty checked-out branch are rejected. Git
-  LFS is not supported through the bridge.
-- Attached directories reject symbolic links, so an attachment cannot escape
-  its source or destination tree.
-- The daemon's web viewer requires a six-digit code exchanged for a signed
-  session cookie. It binds only to loopback unless explicit TLS is configured
-  or automatic Tailscale detection obtains a trusted `ts.net` certificate.
-
-## Durability
-
-Mjolnir saves a recovery copy automatically after completed turns when the session
-is idle (at most every ten minutes), and `mj checkpoint --session <id>`
-forces one. "Idle" includes work the agent starts on its own: when Claude Code
-picks a task back up after a background command finishes, the session shows as
-running and a recovery copy waits until that work ends, and the composer's Esc
-cancels only a prompt you sent. Recovery archives are checked byte-for-byte
-against the target's SHA-256 before any teardown; their full structure and
-payload hashes are verified when they are read for resume or import. A normal
-Stop refuses teardown if its checksum gate fails. Explicit force-destroy is the
-data-loss escape hatch.
-
-A stopped session resumes by provisioning a fresh target from its archive,
-with its pending prompt queue intact (resume asks whether to keep or discard
-it). For Codex, the archive retains the primary thread and canonical transcript,
-including child-agent results surfaced in that transcript, but not child agents'
-private rollouts; stopped child agents cannot receive follow-ups after resume.
-A session recorded under one harness can be resumed under another; Mjolnir
-condenses the transcript into a size-bounded handoff for the new harness. That
-compaction is direct, tool-free inference and does not create an ACP session.
-Mjolnir chooses a configured profile with usable quota and a current model in
-this precedence: Codex GPT Luna, Muse Spark, Grok, Kimi, then DeepSeek Flash.
-Model versions come from each provider's live catalog. Claude profiles are never utility
-models; if Claude is the only configured harness, cross-harness compaction has
-no utility model and resume reports that error.
-
-If Mjolnir or its host crashes, workers and their queued prompts keep running.
-`mj recover scan` finds managed containers and instances that are no longer
-tracked; `mj recover adopt` reconnects one as a tracked session.
-
-After Mjolnir itself is upgraded, each running session's worker is replaced with
-the new one at the session's next quiet moment - no prompt running, no terminal
-or background command alive, nothing queued - because replacing a worker ends
-the agent process with it. A session that is never quiet keeps the worker it
-started with until it is stopped.
+The website source lives in [docs/](docs/README.md). For the previous product
+generation, see [Mjolnir 1.x](https://github.com/BrokkAi/mjolnir/releases/tag/v1.17.0).
 
 ## License
 
