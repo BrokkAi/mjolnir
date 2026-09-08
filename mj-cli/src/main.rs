@@ -910,11 +910,11 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             }
         }
         DaemonCommand::Stop => {
-            let mut daemon = daemon::connect_management()
+            let daemon = daemon::connect_management()
                 .await
                 .context("Mjolnir daemon is not running")?;
-            daemon.stop().await?;
-            println!("Mjolnir daemon is stopping; detached workers remain active.");
+            daemon.stop_and_wait().await?;
+            println!("Mjolnir daemon stopped; detached workers remain active.");
         }
         DaemonCommand::Restart => {
             if let Ok(daemon) = daemon::connect_management().await {

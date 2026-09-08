@@ -14,7 +14,7 @@ Anvil callers will be able to select `meta::muse-spark-1.3` using their normal M
 - [x] (2026-09-08) Prepare, validate, push, and publish all three Anvil 0.28.2 crates in version lockstep (trusted publication run 34277179722).
 - [ ] Finish cross-platform CI, tag v0.28.2, and verify GitHub/npm/PyPI release publication.
 - [x] (2026-09-08) Consume registry client 0.28.2 in Mjolnir; full tests, Clippy, licenses, and live compaction pass (120-byte Spark 1.3 snapshot).
-- [ ] Commit and push Mjolnir's Muse utility update.
+- [x] (2026-09-08) Commit and push Mjolnir's Muse utility update as d324aaa0.
 
 ## Surprises & Discoveries
 

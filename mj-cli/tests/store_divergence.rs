@@ -5,6 +5,8 @@
 //! writing through a connection whose schema check had passed once, and
 //! warning twice a second. It must now notice and leave.
 
+mod common;
+
 use std::{
     fs,
     process::{Child, Command, Stdio},
@@ -217,6 +219,8 @@ fn post_publication_error_runs_the_daemon_epilogue() {
 #[test]
 fn concurrent_starts_wait_for_controller_ownership_before_launching() {
     let (_storage, config_directory, data_directory) = configured_storage();
+    let _storage =
+        common::DaemonStorage::new(_storage, config_directory.clone(), data_directory.clone());
     fs::create_dir_all(&data_directory).unwrap();
     let owner = fs::OpenOptions::new()
         .create(true)
@@ -227,19 +231,6 @@ fn concurrent_starts_wait_for_controller_ownership_before_launching() {
         .unwrap();
     owner.lock().unwrap();
 
-    struct StopDaemon(std::path::PathBuf, std::path::PathBuf);
-    impl Drop for StopDaemon {
-        fn drop(&mut self) {
-            let _ = Command::new(env!("CARGO_BIN_EXE_mj"))
-                .args(["daemon", "stop"])
-                .env("MJ_CONFIG_DIR", &self.0)
-                .env("MJ_DATA_DIR", &self.1)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-    }
-    let _cleanup = StopDaemon(config_directory.clone(), data_directory.clone());
     let mut clients = (0..2)
         .map(|_| {
             ReapChild(Some(

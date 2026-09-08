@@ -73,6 +73,21 @@ temporary network loss does not move session ownership into the browser: the
 daemon and target keep working, and the viewer reconnects to their current
 state.
 
+## Dictate a prompt
+
+Open a session and select **Voice** in the composer. Allow microphone access,
+speak, then select **Stop & transcribe**. The transcription is inserted into your
+draft so you can review and edit it before sending. Cancel stops the operation.
+Recordings are limited to ten minutes.
+
+Browser recording requires HTTPS or localhost and browser microphone support.
+Transcription uses a configured Codex profile with ChatGPT subscription OAuth
+credentials; an API key alone is insufficient. The session itself may use another
+harness. Mjolnir prefers the session's Codex profile when applicable, then checks
+other configured Codex profiles. Audio is sent to the transcription provider
+through the controller. Permission, credential, and transcription failures are
+shown in the viewer.
+
 ## Recover a port conflict
 
 Press **F4** in the terminal to open **Web viewer**. If its port is occupied,

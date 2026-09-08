@@ -3,11 +3,17 @@ title: What is Mjolnir?
 description: Understand Mjolnir's purpose, boundaries, supported coding harnesses, and execution targets.
 ---
 
-Mjolnir (`mj`) is a terminal control plane for long-lived coding-agent
-sessions. It starts Codex, Claude Code, Kimi Code, Grok Build, and DeepSeek
-Harness through the Agent Client Protocol (ACP), gives each session a durable
-worker, and presents all of them in one terminal dashboard and personal web
-viewer.
+Mjolnir (`mj`) is a session manager for coding agents that provisions their
+execution environments and lets you continue work across harnesses, accounts,
+and machines. It supports Codex, Claude Code, Kimi Code, Grok Build, DeepSeek
+Harness, and Muse Code through the Agent Client Protocol (ACP), with a terminal
+dashboard, personal web viewer, and desktop app.
+
+Choose a harness account independently from the target where it runs. Mjolnir
+provisions containers or instances, synchronizes credentials, and can move the
+session to another compatible target or harness. Same-harness resume restores
+native session state; cross-harness resume preserves the visible conversation
+and repository state and supplies a condensed handoff to the new harness.
 
 Mjolnir is designed for the point where “one agent in one terminal” stops
 scaling: several accounts, several repositories, several machines, and work
@@ -98,20 +104,21 @@ workspace and supplies a size-bounded handoff derived from the canonical
 transcript. See [Durability and recovery](/durability/).
 
 Kimi Code and DeepSeek Harness do not provide a guardian approval mode. They
-should not be used on a raw, unsandboxed target. DeepSeek Harness currently
-accepts one workspace root, so use either a one-repository bundle or one bare
+should not be used on a raw, unsandboxed target. DeepSeek Harness and Muse Code currently
+accept one workspace root, so use either a one-repository bundle or one bare
 project directory, without attached directories.
 
 ## Supported targets
 
 | Target | Config kind | Runs on | Execution policy | Session boundary |
 | --- | --- | --- | --- | --- |
-| Local Git worktree | `local-bare` | Linux controller host | Configured approvals | A Mjolnir-managed local worktree |
+| Local Git worktree | `local-bare` | Linux or macOS controller host | Configured approvals | A Mjolnir-managed local worktree |
 | Podman container | `local-podman` | Linux or WSL2 | Unconstrained | Disposable container |
 | Docker container | `local-docker` | Linux or WSL2 | Unconstrained | Disposable container |
 | Apple container | `apple-container` | macOS 26+ on Apple silicon | Unconstrained | Disposable container |
 | SSH machine | `ssh-bare` | Named Linux host | Guardian or unconstrained | Managed workspace on the named host |
 | Podman over SSH | `ssh-podman` | Named Linux host | Unconstrained | Disposable remote container |
+| Docker over SSH | `ssh-docker` | Named Linux host | Unconstrained | Disposable remote container |
 | AWS EC2 | `aws-ec2` | Your AWS account | Unconstrained | Disposable instance |
 
 “Configured approvals” means the harness profile remains in control of its
@@ -126,9 +133,9 @@ full-access environment. Use SSH or EC2 when the work needs a different host,
 architecture, or capacity pool. Target-specific requirements are collected in
 the [Targets guide](/targets/).
 
-The controller and viewer run on Linux and macOS, but current `local-bare`
-worker launch is Linux-only. On macOS, use Apple Container or a remote target
-for sessions. Native Windows is not supported; run Mjolnir under WSL2 instead.
+The controller, viewer, and local-bare worker run on Linux and macOS. On macOS,
+Apple Container and remote targets are also available. Native Windows is not
+supported; run Mjolnir under WSL2 instead.
 
 ## Where to go next
 
