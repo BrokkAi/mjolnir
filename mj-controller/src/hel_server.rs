@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result as AnyResult};
-use axum::body::{Body, Bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_SECURITY_POLICY as CONTENT_SECURITY_POLICY_HEADER, CONTENT_TYPE, COOKIE,
@@ -28,6 +28,7 @@ use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use tokio::sync::Semaphore;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -41,6 +42,10 @@ use hel::hel_state::{
 };
 use hel::hel_targets::AdditionalMount;
 
+use crate::hel_dictation::{
+    DictationError, DictationOperation, DictationRequest, DictationResponse, MAX_AUDIO_BYTES,
+    validate_wav,
+};
 use crate::hel_image::optimize_image;
 
 // Keep all control surfaces on the same queue vocabulary. The resume flow
@@ -87,6 +92,10 @@ const MAX_PROMPT_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// own decoded-allocation bound; this is the HTTP envelope bound before that
 /// work starts.
 const MAX_ATTACHMENT_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+/// Keep two browser uploads/transcriptions in flight. The permit is acquired
+/// before reading the request body, so an overloaded client is rejected
+/// without accepting megabytes that cannot be processed yet.
+const MAX_CONCURRENT_DICTATIONS: usize = 2;
 /// Keep this in sync with the prompt admission bound and the browser composer.
 pub const MAX_PROMPT_IMAGES: usize = MAX_IMAGES;
 const COOKIE_KEY_BYTES: usize = 32;
@@ -201,6 +210,7 @@ pub struct ServerOptions {
     pub preflight_tx: mpsc::Sender<PreflightRequest>,
     pub move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     pub client_state_tx: mpsc::Sender<ClientStateRequest>,
+    pub dictation_tx: mpsc::Sender<DictationRequest>,
     pub shutdown: CancellationToken,
     pub session_ttl: Duration,
     /// Keep this enabled for direct HTTPS or an HTTPS reverse proxy. It may be
@@ -220,6 +230,7 @@ pub struct ServerRequests {
     pub preflight_tx: mpsc::Sender<PreflightRequest>,
     pub move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     pub client_state_tx: mpsc::Sender<ClientStateRequest>,
+    pub dictation_tx: mpsc::Sender<DictationRequest>,
 }
 
 impl ServerOptions {
@@ -239,6 +250,7 @@ impl ServerOptions {
             preflight_tx: requests.preflight_tx,
             move_preparation_tx: requests.move_preparation_tx,
             client_state_tx: requests.client_state_tx,
+            dictation_tx: requests.dictation_tx,
             shutdown: CancellationToken::new(),
             session_ttl: DEFAULT_SESSION_TTL,
             secure_cookie: true,
@@ -1597,6 +1609,10 @@ struct ServerState {
     preflight_tx: mpsc::Sender<PreflightRequest>,
     move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     client_state_tx: mpsc::Sender<ClientStateRequest>,
+    dictation_tx: mpsc::Sender<DictationRequest>,
+    dictation_permits: Arc<Semaphore>,
+    dictation_probe_permits: Arc<Semaphore>,
+    shutdown: CancellationToken,
     viewer_code: Arc<str>,
     login_token: Arc<str>,
     cookie_key: Arc<[u8]>,
@@ -1666,6 +1682,10 @@ fn router(options: ServerOptions) -> Router {
         preflight_tx: options.preflight_tx,
         move_preparation_tx: options.move_preparation_tx,
         client_state_tx: options.client_state_tx,
+        dictation_tx: options.dictation_tx,
+        dictation_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DICTATIONS)),
+        dictation_probe_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DICTATIONS)),
+        shutdown: options.shutdown,
         viewer_code: options.viewer_code.into(),
         login_token: options.login_token.into(),
         cookie_key: options.cookie_key.into(),
@@ -1685,6 +1705,10 @@ fn router(options: ServerOptions) -> Router {
         .route("/api/preflight/new", post(preflight_new))
         .route("/api/moves/prepare", post(prepare_move))
         .route("/api/sessions/{session_id}/client-state", get(client_state))
+        .route(
+            "/api/sessions/{session_id}/dictation",
+            get(dictation_availability).post(upload_dictation),
+        )
         .route(
             "/api/sessions/{session_id}/attachments",
             post(upload_attachment).layer(DefaultBodyLimit::max(MAX_ATTACHMENT_UPLOAD_BYTES)),
@@ -1711,6 +1735,8 @@ fn router(options: ServerOptions) -> Router {
         .route("/login", get(viewer))
         .route("/viewer.css", get(viewer_css))
         .route("/viewer.js", get(viewer_js))
+        .route("/voice-worklet.js", get(voice_worklet_js))
+        .route("/voice-worker.js", get(voice_worker_js))
         .route("/markdown.js", get(markdown_js))
         .route("/tool-output.js", get(tool_output_js))
         .route("/manifest.webmanifest", get(manifest))
@@ -2225,6 +2251,174 @@ async fn client_state(
     })
     .await
     .map(Json)
+}
+
+#[derive(Debug, Serialize)]
+struct DictationAvailability {
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DictationTranscript {
+    text: String,
+}
+
+/// Report whether one of the session's Codex profiles has usable subscription
+/// credentials. The controller selects profile paths from its current session
+/// state, so this endpoint never accepts a browser-supplied credential path.
+async fn dictation_availability(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<DictationAvailability>, ApiError> {
+    validate_public_id(&session_id)?;
+    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    let _permit = state
+        .dictation_probe_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::new(StatusCode::TOO_MANY_REQUESTS, "too many dictation requests"))?;
+    let result = dispatch_dictation(&state, session_id, DictationOperation::Availability).await?;
+    match result {
+        DictationResponse::Availability { available, reason } => {
+            Ok(Json(DictationAvailability { available, reason }))
+        }
+        DictationResponse::Transcript { .. } => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the controller returned an invalid dictation response",
+        )),
+    }
+}
+
+/// Receive one bounded WAV upload and send it to the supervised controller
+/// request loop. The semaphore is acquired before `Request::into_body`, so a
+/// third concurrent upload is rejected without polling its body at all.
+async fn upload_dictation(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    request: Request,
+) -> Result<Json<DictationTranscript>, ApiError> {
+    validate_public_id(&session_id)?;
+    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    let _permit = state
+        .dictation_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::new(StatusCode::TOO_MANY_REQUESTS, "too many dictation requests"))?;
+
+    if request
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_AUDIO_BYTES as u64)
+    {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "audio upload is too large",
+        ));
+    }
+    let body = tokio::select! {
+        biased;
+        _ = state.shutdown.cancelled() => return Err(ApiError::controller_unavailable()),
+        result = tokio::time::timeout(
+            crate::hel_dictation::DICTATION_TIMEOUT,
+            to_bytes(request.into_body(), MAX_AUDIO_BYTES),
+        ) => match result {
+            Ok(result) => result.map_err(|_| {
+                ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "audio upload is too large")
+            })?,
+            Err(_) => return Err(ApiError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "dictation upload timed out",
+            )),
+        },
+    };
+    // A bounded WAV may still contain millions of small metadata chunks.
+    // Keep that scan off the HTTP event loop as well as the provider work.
+    let audio = body.clone();
+    tokio::task::spawn_blocking(move || validate_wav(&audio))
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "dictation audio validation task failed");
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "audio validation failed")
+        })?
+        .map_err(dictation_api_error)?;
+    let result =
+        dispatch_dictation(&state, session_id, DictationOperation::Transcribe(body)).await?;
+    match result {
+        DictationResponse::Transcript { text } => Ok(Json(DictationTranscript { text })),
+        DictationResponse::Availability { .. } => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the controller returned an invalid dictation response",
+        )),
+    }
+}
+
+/// Cancels a request as soon as Axum drops its handler future, which happens
+/// when a browser disconnects while a provider request is still running.
+struct DictationCancellationGuard(CancellationToken);
+
+impl Drop for DictationCancellationGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+async fn dispatch_dictation(
+    state: &ServerState,
+    session_id: String,
+    operation: DictationOperation,
+) -> Result<DictationResponse, ApiError> {
+    let cancel = CancellationToken::new();
+    let _guard = DictationCancellationGuard(cancel.clone());
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let request = DictationRequest {
+        session_id,
+        operation,
+        cancel: cancel.clone(),
+        reply,
+    };
+    tokio::select! {
+        biased;
+        _ = state.shutdown.cancelled() => return Err(ApiError::controller_unavailable()),
+        result = state.dictation_tx.send(request) => {
+            result.map_err(|_| ApiError::controller_unavailable())?;
+        }
+    }
+    let answer = tokio::select! {
+        biased;
+        _ = state.shutdown.cancelled() => return Err(ApiError::controller_unavailable()),
+        result = answer => result.map_err(|_| ApiError::controller_unavailable())?,
+    };
+    answer.map_err(dictation_api_error)
+}
+
+fn dictation_api_error(error: DictationError) -> ApiError {
+    match error {
+        DictationError::SessionNotFound => ApiError::not_found("unknown session"),
+        DictationError::CredentialsUnavailable => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dictation is unavailable because no Codex subscription is signed in",
+        ),
+        DictationError::InvalidAudio(message) => ApiError::bad_request(message),
+        DictationError::Cancelled => {
+            ApiError::new(StatusCode::REQUEST_TIMEOUT, "dictation cancelled")
+        }
+        DictationError::TimedOut => ApiError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "dictation transcription timed out",
+        ),
+        DictationError::CredentialProbe => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dictation credentials could not be checked",
+        ),
+        DictationError::Provider(error) => {
+            tracing::warn!(%error, "Codex dictation transcription failed");
+            ApiError::new(StatusCode::BAD_GATEWAY, "dictation transcription failed")
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3236,6 +3430,8 @@ const VIEWER_CSS: &str = include_str!("web/viewer.css");
 const VIEWER_JS: &str = include_str!("web/viewer.js");
 const MARKDOWN_JS: &str = include_str!("web/markdown.js");
 const TOOL_OUTPUT_JS: &str = include_str!("web/tool-output.js");
+const VOICE_WORKLET_JS: &str = include_str!("web/voice-worklet.js");
+const VOICE_WORKER_JS: &str = include_str!("web/voice-worker.js");
 /// A fake DOM for running the shipped renderers under Node. It is deliberately
 /// not served: it exists so `cargo test` can exercise `markdown.js` without a
 /// browser.
@@ -3282,6 +3478,14 @@ async fn viewer_js() -> Response<Body> {
 
 async fn markdown_js() -> Response<Body> {
     static_response("text/javascript; charset=utf-8", MARKDOWN_JS, false)
+}
+
+async fn voice_worklet_js() -> Response<Body> {
+    static_response("text/javascript; charset=utf-8", VOICE_WORKLET_JS, false)
+}
+
+async fn voice_worker_js() -> Response<Body> {
+    static_response("text/javascript; charset=utf-8", VOICE_WORKER_JS, false)
 }
 
 async fn tool_output_js() -> Response<Body> {
@@ -3625,7 +3829,32 @@ mod tests {
         move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
         client_state_tx: mpsc::Sender<ClientStateRequest>,
     ) -> ServerOptions {
-        ServerOptions::new(
+        test_options_with_dictation(
+            snapshot_rx,
+            conversation_rx,
+            action_tx,
+            bundle_tx,
+            receipt_tx,
+            preflight_tx,
+            move_preparation_tx,
+            client_state_tx,
+        )
+        .0
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_options_with_dictation(
+        snapshot_rx: watch::Receiver<ViewerSnapshot>,
+        conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
+        action_tx: mpsc::Sender<ControllerRequest>,
+        bundle_tx: mpsc::Sender<BundleRequest>,
+        receipt_tx: mpsc::Sender<ReadReceiptRequest>,
+        preflight_tx: mpsc::Sender<PreflightRequest>,
+        move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
+        client_state_tx: mpsc::Sender<ClientStateRequest>,
+    ) -> (ServerOptions, mpsc::Receiver<DictationRequest>) {
+        let (dictation_tx, dictation_rx) = mpsc::channel(8);
+        let options = ServerOptions::new(
             "127.0.0.1:0".parse().unwrap(),
             snapshot_rx,
             conversation_rx,
@@ -3636,9 +3865,38 @@ mod tests {
                 preflight_tx,
                 move_preparation_tx,
                 client_state_tx,
+                dictation_tx,
             },
         )
-        .unwrap()
+        .unwrap();
+        (options, dictation_rx)
+    }
+
+    fn app_with_dictation_receiver() -> (Router, mpsc::Receiver<DictationRequest>) {
+        let (config, state) = sample_config_state();
+        let (_snapshot_tx, snapshot_rx) =
+            watch::channel(ViewerSnapshot::from_config_state(&config, &state, 1));
+        let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
+        let (action_tx, _action_rx) = mpsc::channel(8);
+        let (bundle_tx, _bundle_rx) = mpsc::channel(8);
+        let (receipt_tx, _receipt_rx) = mpsc::channel(8);
+        let (preflight_tx, _preflight_rx) = mpsc::channel(8);
+        let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
+        let (client_state_tx, _client_state_rx) = mpsc::channel(8);
+        let (options, dictation_rx) = test_options_with_dictation(
+            snapshot_rx,
+            conversation_rx,
+            action_tx,
+            bundle_tx,
+            receipt_tx,
+            preflight_tx,
+            move_preparation_tx,
+            client_state_tx,
+        );
+        (
+            router(options.with_test_credentials("123456", b"01234567890123456789012345678901")),
+            dictation_rx,
+        )
     }
 
     fn detached_options() -> ServerOptions {
@@ -3680,6 +3938,25 @@ mod tests {
         )
     }
 
+    fn valid_wav() -> Bytes {
+        let samples = vec![0_u8; 320];
+        let mut wav = Vec::with_capacity(44 + samples.len());
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36_u32 + samples.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&16_000_u32.to_le_bytes());
+        wav.extend_from_slice(&32_000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&samples);
+        Bytes::from(wav)
+    }
+
     async fn login_cookie(app: &Router) -> String {
         let response = app
             .clone()
@@ -3702,6 +3979,219 @@ mod tests {
             .next()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn dictation_availability_requires_auth_and_forwards_typed_request() {
+        let (app, mut requests) = app_with_dictation_receiver();
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get("/api/sessions/session-1/dictation")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert!(requests.try_recv().is_err());
+
+        let cookie = login_cookie(&app).await;
+        let pending = tokio::spawn({
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::get("/api/sessions/session-1/dictation")
+                        .header(COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        });
+        let request = requests.recv().await.unwrap();
+        assert_eq!(request.session_id, "session-1");
+        assert!(matches!(
+            request.operation,
+            DictationOperation::Availability
+        ));
+        request
+            .reply
+            .send(Ok(DictationResponse::Availability {
+                available: true,
+                reason: None,
+            }))
+            .unwrap();
+        let response = pending.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], br#"{"available":true}"#);
+    }
+
+    #[tokio::test]
+    async fn dictation_rejects_bad_wav_before_controller_dispatch() {
+        let (app, mut requests) = app_with_dictation_receiver();
+        let cookie = login_cookie(&app).await;
+        let response = app
+            .oneshot(
+                Request::post("/api/sessions/session-1/dictation")
+                    .header(COOKIE, cookie)
+                    .header(CONTENT_TYPE, "audio/wav")
+                    .body(Body::from("not wav"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dictation_rejects_a_third_upload_before_reading_its_body() {
+        let (app, mut requests) = app_with_dictation_receiver();
+        let cookie = login_cookie(&app).await;
+        let request = || {
+            Request::post("/api/sessions/session-1/dictation")
+                .header(COOKIE, cookie.clone())
+                .header(CONTENT_TYPE, "audio/wav")
+                .body(Body::from(valid_wav()))
+                .unwrap()
+        };
+        let first = tokio::spawn({
+            let app = app.clone();
+            let request = request();
+            async move { app.oneshot(request).await.unwrap() }
+        });
+        let second = tokio::spawn({
+            let app = app.clone();
+            let request = request();
+            async move { app.oneshot(request).await.unwrap() }
+        });
+        let first_request = requests.recv().await.unwrap();
+        let second_request = requests.recv().await.unwrap();
+        let third = app
+            .oneshot(
+                Request::post("/api/sessions/session-1/dictation")
+                    .header(COOKIE, cookie)
+                    .header(CONTENT_TYPE, "audio/wav")
+                    .body(Body::from_stream(futures::stream::poll_fn(
+                        |_| -> std::task::Poll<Option<Result<Bytes, std::io::Error>>> {
+                            panic!("overloaded dictation polled its body")
+                        },
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
+        first_request
+            .reply
+            .send(Ok(DictationResponse::Transcript {
+                text: "first".into(),
+            }))
+            .unwrap();
+        second_request
+            .reply
+            .send(Ok(DictationResponse::Transcript {
+                text: "second".into(),
+            }))
+            .unwrap();
+        assert_eq!(first.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(second.await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn dictation_upload_rejects_unauthorized_missing_and_oversized_requests() {
+        let (app, mut requests) = app_with_dictation_receiver();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/sessions/session-1/dictation")
+                    .body(Body::from(valid_wav()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let cookie = login_cookie(&app).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/sessions/missing/dictation")
+                    .header(COOKIE, &cookie)
+                    .body(Body::from(valid_wav()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // Exercise the streamed body limit without relying on Content-Length.
+        let response = app
+            .oneshot(
+                Request::post("/api/sessions/session-1/dictation")
+                    .header(COOKIE, cookie)
+                    .body(Body::from(vec![0_u8; MAX_AUDIO_BYTES + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dictation_provider_failure_is_actionable_and_does_not_expose_details() {
+        let (app, mut requests) = app_with_dictation_receiver();
+        let cookie = login_cookie(&app).await;
+        let pending = tokio::spawn(async move {
+            app.oneshot(
+                Request::post("/api/sessions/session-1/dictation")
+                    .header(COOKIE, cookie)
+                    .body(Body::from(valid_wav()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        });
+        let request = requests.recv().await.unwrap();
+        request
+            .reply
+            .send(Err(DictationError::Provider(
+                "private provider details".into(),
+            )))
+            .unwrap();
+        let response = pending.await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("transcription"));
+        assert!(!body.contains("private provider details"));
+    }
+
+    #[tokio::test]
+    async fn dropped_dictation_handler_cancels_controller_request() {
+        let (app, mut requests) = app_with_dictation_receiver();
+        let cookie = login_cookie(&app).await;
+        let pending = tokio::spawn({
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::post("/api/sessions/session-1/dictation")
+                        .header(COOKIE, cookie)
+                        .body(Body::from(valid_wav()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        });
+        let request = requests.recv().await.unwrap();
+        let cancel = request.cancel.clone();
+        pending.abort();
+        let _ = pending.await;
+        assert!(cancel.is_cancelled());
+        drop(request);
     }
 
     #[tokio::test]
@@ -6374,6 +6864,8 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         for path in [
             "/",
             "/viewer.js",
+            "/voice-worklet.js",
+            "/voice-worker.js",
             "/viewer.css",
             "/manifest.webmanifest",
             "/api/snapshot",

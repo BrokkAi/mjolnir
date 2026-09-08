@@ -1306,7 +1306,10 @@ impl ActiveChat {
         let Some(context) = &self.context else {
             return;
         };
-        let paths = crate::dictation::auth_paths(&context.config, &context.session.last_profile);
+        let paths = mj_controller::hel_dictation::auth_paths(
+            &context.config,
+            &context.session.last_profile,
+        );
         if paths != self.voice_probe_paths {
             self.voice_probe_paths.clone_from(&paths);
             self.voice_auth = None;
@@ -1327,7 +1330,7 @@ impl ActiveChat {
             let probed_paths = paths.clone();
             let result = tokio::task::spawn_blocking(move || {
                 if crate::speech::voice_input_supported() {
-                    crate::dictation::available_auth(paths)
+                    mj_controller::hel_dictation::available_auth(paths)
                 } else {
                     None
                 }

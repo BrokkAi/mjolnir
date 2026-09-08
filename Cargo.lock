@@ -604,7 +604,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "base64",
- "brokk-anvil-client",
  "brokk-mj-controller",
  "brokk-mj-core",
  "chrono",

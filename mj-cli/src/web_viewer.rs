@@ -504,6 +504,7 @@ mod tests {
                 preflight_tx: mpsc::channel(1).0,
                 move_preparation_tx: mpsc::channel(1).0,
                 client_state_tx: mpsc::channel(1).0,
+                dictation_tx: mpsc::channel(1).0,
             },
         )
         .unwrap()

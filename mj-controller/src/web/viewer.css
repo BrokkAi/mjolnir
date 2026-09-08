@@ -1566,6 +1566,33 @@ body[data-connection='reconnecting'] .connection::before {
   height: 20px;
 }
 
+.voice-input-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.voice-input-button[data-state='recording'] {
+  border-color: var(--failed);
+  color: var(--failed);
+}
+
+.voice-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.voice-status {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 /* ---- full-row native choice controls ---- */
 
 /* The fieldset supplies the group semantics; each option label is the whole

@@ -175,6 +175,14 @@
             <button id="send-button">Send</button>
             <button
               type="button"
+              id="voice-input"
+              class="secondary voice-input-button"
+              aria-label="Start voice input"
+            >
+              Voice
+            </button>
+            <button
+              type="button"
               id="attach-image"
               class="secondary paperclip-button"
               aria-label="Attach one or more images"
@@ -198,6 +206,10 @@
               </svg>
             </button>
             <input id="image-picker" type="file" accept="image/*" multiple hidden />
+          </div>
+          <div id="voice-controls" class="voice-controls hidden" aria-live="polite">
+            <span id="voice-status" class="voice-status" role="status"></span>
+            <button type="button" id="voice-cancel" class="secondary">Cancel</button>
           </div>
           <p id="conversation-error" role="alert"></p>
         </form>

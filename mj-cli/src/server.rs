@@ -748,6 +748,8 @@ pub(crate) async fn run_server(
     let (preflight_tx, mut preflight_rx) = tokio::sync::mpsc::channel(32);
     let (move_preparation_tx, mut move_preparation_rx) = tokio::sync::mpsc::channel(32);
     let (client_state_tx, mut client_state_rx) = tokio::sync::mpsc::channel(64);
+    let (dictation_tx, mut dictation_rx) =
+        tokio::sync::mpsc::channel::<mj_controller::hel_dictation::DictationRequest>(8);
     let SessionManagerChannels {
         targets: worker_targets_tx,
         control: worker_commands_tx,
@@ -774,6 +776,7 @@ pub(crate) async fn run_server(
             preflight_tx,
             move_preparation_tx,
             client_state_tx,
+            dictation_tx,
         },
     )?;
     options.shutdown = termination.clone();
@@ -847,6 +850,7 @@ pub(crate) async fn run_server(
             tokio::sync::mpsc::unbounded_channel::<BundleCreated>();
         let (move_prepared_tx, mut move_prepared_rx) =
             tokio::sync::mpsc::unbounded_channel::<MovePrepared>();
+        let mut dictation_jobs = tokio::task::JoinSet::new();
         let mut bundle_jobs = tokio::task::JoinSet::new();
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
         let mut move_recovery_jobs = tokio::task::JoinSet::new();
@@ -1166,6 +1170,23 @@ pub(crate) async fn run_server(
                         if let Some(notice) = credential_sync_notices.notice(&result, harness) {
                             eprintln!("Mjolnir: {notice}");
                         }
+                    }
+                }
+                request = dictation_rx.recv() => {
+                    let Some(request) = request else {
+                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering dictation requests");
+                        break;
+                    };
+                    let paths = controller.state.sessions.get(&request.session_id).map(|session| {
+                        mj_controller::hel_dictation::auth_paths(&controller.config, &session.last_profile)
+                    });
+                    dictation_jobs.spawn(mj_controller::hel_dictation::execute(
+                        request, paths, termination.clone(),
+                    ));
+                }
+                job = dictation_jobs.join_next(), if !dictation_jobs.is_empty() => {
+                    if let Some(Err(error)) = job {
+                        tracing::warn!(%error, "web dictation task failed");
                     }
                 }
                 stored = client_state_rx.recv() => {
@@ -1838,6 +1859,8 @@ pub(crate) async fn run_server(
                 }
             }
         }
+        // Stop provider requests before the HTTP request channels disappear.
+        dictation_jobs.shutdown().await;
         // Bundle jobs are supervised so shutdown never leaves a detached
         // request task behind holding the config mutation lock.
         bundle_jobs.shutdown().await;

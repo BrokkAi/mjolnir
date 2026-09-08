@@ -432,7 +432,15 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
     [
       'addAll',
       installedCache,
-      ['/', '/viewer.css', '/viewer.js', '/manifest.webmanifest', '/icon.svg'],
+      [
+        '/',
+        '/viewer.css',
+        '/viewer.js',
+        '/voice-worklet.js',
+        '/voice-worker.js',
+        '/manifest.webmanifest',
+        '/icon.svg',
+      ],
     ],
     ['skipWaiting'],
   ]);

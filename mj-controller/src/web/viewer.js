@@ -73,7 +73,11 @@ const login = document.querySelector('#login'),
   promptText = document.querySelector('#prompt-text'),
   attachments = document.querySelector('#attachments'),
   attachImage = document.querySelector('#attach-image'),
-  imagePicker = document.querySelector('#image-picker');
+  imagePicker = document.querySelector('#image-picker'),
+  voiceInput = document.querySelector('#voice-input'),
+  voiceControls = document.querySelector('#voice-controls'),
+  voiceStatus = document.querySelector('#voice-status'),
+  voiceCancel = document.querySelector('#voice-cancel');
 
 /// Every page, by the route name that shows it.
 const PAGES = {
@@ -2305,6 +2309,7 @@ function startEvents() {
 }
 
 function showLogin() {
+  cancelVoiceInput();
   snapshot = undefined;
   currentSession = null;
   if (eventSource) {
@@ -2966,6 +2971,414 @@ function composerInputChanged() {
   if (!composerPreserveEmptyBreak && !promptText.textContent && promptText.childNodes.length)
     promptText.replaceChildren();
 }
+
+// ---------------------------------------------------------------------------
+// Voice input
+// ---------------------------------------------------------------------------
+//
+// Microphone permission, audio capture and transcription are one browser
+// operation. The generation token makes every asynchronous boundary safe when
+// a person cancels, changes session, signs out, or leaves the page.
+const VOICE_MAX_RECORDING_MS = 10 * 60 * 1000;
+const VOICE_TRANSCRIPTION_TIMEOUT_MS = 120 * 1000;
+const VOICE_STATES = new Set(['permission', 'recording', 'transcribing']);
+let voiceState = 'idle';
+let voiceOperation = null;
+let voiceGeneration = 0;
+
+function voiceIsActive() {
+  return VOICE_STATES.has(voiceState);
+}
+
+function voiceOperationIsCurrent(operation) {
+  return (
+    voiceOperation === operation
+    && operation.generation === voiceGeneration
+    && currentSession === operation.sessionId
+  );
+}
+
+function syncSendButtonDisabled() {
+  const session = activeSession();
+  const canPrompt = Boolean(
+    session
+    && session.capabilities?.prompt !== false
+    && !session.turn_review
+    && !isTransitioningSession(session)
+    && !isLoadingConversationSession(session),
+  );
+  sendButton.disabled =
+    !canPrompt
+    || voiceIsActive()
+    || promptInFlight
+    || promptImages.some(image => image.state !== 'ready');
+}
+
+function renderVoiceState() {
+  const active = voiceIsActive();
+  const session = activeSession();
+  const canPrompt = Boolean(
+    session
+    && session.capabilities?.prompt !== false
+    && !session.turn_review
+    && !isTransitioningSession(session)
+    && !isLoadingConversationSession(session),
+  );
+  voiceControls.classList.toggle('hidden', !active);
+  voiceInput.dataset.state = voiceState;
+  voiceInput.textContent = voiceState === 'recording' ? 'Stop & transcribe' : 'Voice';
+  voiceInput.setAttribute(
+    'aria-label',
+    voiceState === 'recording' ? 'Stop recording and transcribe' : 'Start voice input',
+  );
+  voiceInput.disabled =
+    !canPrompt
+    || voiceState === 'permission'
+    || voiceState === 'transcribing';
+  voiceCancel.disabled = !active;
+  if (voiceState === 'permission') voiceStatus.textContent = 'Requesting microphone permission…';
+  else if (voiceState === 'recording') voiceStatus.textContent = 'Recording. Tap stop when finished.';
+  else if (voiceState === 'transcribing') voiceStatus.textContent = 'Transcribing…';
+  else voiceStatus.textContent = '';
+  syncSendButtonDisabled();
+}
+
+function stopVoiceTracks(stream) {
+  for (const track of stream?.getTracks?.() || []) track.stop();
+}
+
+function closeVoiceAudio(operation) {
+  clearTimeout(operation.prepareTimer);
+  operation.prepareTimer = null;
+  stopVoiceTracks(operation.stream);
+  operation.stream = null;
+  for (const node of [operation.source, operation.workletNode, operation.sink]) {
+    try { node?.disconnect(); } catch { /* already disconnected */ }
+  }
+  try { operation.workletNode?.port?.close?.(); } catch { /* already closed */ }
+  operation.source = null;
+  operation.workletNode = null;
+  operation.sink = null;
+  if (operation.audioContext && operation.audioContext.state !== 'closed') {
+    Promise.resolve(operation.audioContext.close()).catch(() => {});
+  }
+  operation.audioContext = null;
+}
+
+function cancelVoiceInput({ clearError = false } = {}) {
+  const operation = voiceOperation;
+  voiceGeneration += 1;
+  voiceOperation = null;
+  voiceState = 'idle';
+  if (operation) {
+    operation.controller.abort();
+    clearTimeout(operation.limitTimer);
+    closeVoiceAudio(operation);
+    try { operation.worker?.terminate(); } catch { /* already terminated */ }
+    operation.worker = null;
+  }
+  if (clearError) document.querySelector('#conversation-error').textContent = '';
+  renderVoiceState();
+}
+
+function failVoiceOperation(operation, message) {
+  if (!voiceOperationIsCurrent(operation)) return;
+  voiceGeneration += 1;
+  voiceOperation = null;
+  voiceState = 'idle';
+  operation.controller.abort();
+  clearTimeout(operation.limitTimer);
+  closeVoiceAudio(operation);
+  try { operation.worker?.terminate(); } catch { /* already terminated */ }
+  operation.worker = null;
+  document.querySelector('#conversation-error').textContent = message;
+  renderVoiceState();
+}
+
+function voiceBrowserSupportError() {
+  if (window.isSecureContext === false)
+    return 'Voice input requires a secure HTTPS connection.';
+  if (!navigator.mediaDevices?.getUserMedia)
+    return 'This browser does not support microphone input.';
+  if (!(window.AudioContext || window.webkitAudioContext))
+    return 'This browser does not support the audio capture required for voice input.';
+  if (!window.AudioWorkletNode || !window.Worker)
+    return 'This browser does not support the audio capture required for voice input.';
+  return null;
+}
+
+function voicePermissionError(error) {
+  if (error?.name === 'NotAllowedError' || error?.name === 'PermissionDeniedError')
+    return 'Microphone permission was denied. Allow microphone access and try again.';
+  if (error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError')
+    return 'No microphone was found. Connect a microphone and try again.';
+  if (error?.name === 'SecurityError')
+    return 'Microphone access was blocked by the browser security policy.';
+  if (error?.name === 'NotReadableError' || error?.name === 'TrackStartError')
+    return 'The microphone is already in use or could not be read.';
+  return error?.message || 'The browser could not start microphone input.';
+}
+
+async function transcribeVoice(operation, wav) {
+  operation.transcriptionTimedOut = false;
+  const timeout = setTimeout(() => {
+    operation.transcriptionTimedOut = true;
+    operation.controller.abort();
+  }, VOICE_TRANSCRIPTION_TIMEOUT_MS);
+  try {
+    const response = await fetch(
+      `/api/sessions/${encodeURIComponent(operation.sessionId)}/dictation`,
+      {
+        method: 'POST',
+        body: wav,
+        signal: operation.controller.signal,
+        headers: { 'content-type': 'audio/wav' },
+      },
+    );
+    if (response.status === 401) {
+      showLogin();
+      throw new Error('unauthorized');
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || response.statusText || 'Voice transcription failed.');
+    }
+    const result = await response.json();
+    if (typeof result.text !== 'string') throw new Error('The transcription response was invalid.');
+    return result.text;
+  } catch (error) {
+    if (error.name === 'AbortError' && operation.transcriptionTimedOut)
+      throw new Error('Voice transcription timed out after 120 seconds. Try a shorter recording.');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function appendVoiceText(text) {
+  const transcription = text.trim();
+  if (!transcription) {
+    announce('No speech was detected.');
+    return;
+  }
+  const existing = composerText();
+  const separator = existing && !/\s$/.test(existing) ? ' ' : '';
+  // Write at the end so an edit made while transcription was in flight is
+  // retained. Images are separate browser state and are intentionally left
+  // untouched here.
+  setComposerText(`${existing}${separator}${transcription}`);
+  composerInputChanged();
+  updateCommandPalette();
+  scheduleDraftSave();
+  announce('Voice transcription added to the draft.');
+}
+
+async function completeVoiceTranscription(operation, wav) {
+  if (!voiceOperationIsCurrent(operation)) return;
+  closeVoiceAudio(operation);
+  try { operation.worker?.terminate(); } catch { /* already terminated */ }
+  operation.worker = null;
+  try {
+    const text = await transcribeVoice(operation, wav);
+    if (!voiceOperationIsCurrent(operation)) return;
+    appendVoiceText(text);
+    clearTimeout(operation.limitTimer);
+    operation.limitTimer = null;
+    voiceOperation = null;
+    voiceState = 'idle';
+    renderVoiceState();
+  } catch (error) {
+    if (!voiceOperationIsCurrent(operation)) return;
+    clearTimeout(operation.limitTimer);
+    operation.limitTimer = null;
+    voiceOperation = null;
+    voiceState = 'idle';
+    document.querySelector('#conversation-error').textContent =
+      error.message === 'unauthorized'
+        ? ''
+        : error.message || 'Voice transcription failed.';
+    renderVoiceState();
+  }
+}
+
+function handleVoiceWorkerMessage(operation, message) {
+  if (!voiceOperationIsCurrent(operation)) return;
+  if (message.type === 'error') {
+    failVoiceOperation(operation, message.message);
+  } else if (message.type === 'limit') {
+    announce('Ten minute recording limit reached. Transcribing now.');
+    stopVoiceRecording();
+  } else if (message.type === 'wav') {
+    completeVoiceTranscription(operation, message.buffer);
+  }
+}
+
+function finishVoiceRecording(operation) {
+  if (!voiceOperationIsCurrent(operation) || operation.finishRequested) return;
+  operation.finishRequested = true;
+  operation.prepareTimer = setTimeout(() => {
+    failVoiceOperation(operation, 'The browser could not finish the recording. Please try again.');
+  }, 10_000);
+  if (operation.workletNode?.port) {
+    // The worklet posts `flushed` after its final PCM message. Posting WAV
+    // finish only then preserves every queued audio chunk.
+    operation.workletNode.port.postMessage({ type: 'flush' });
+  } else {
+    operation.worker?.postMessage({ type: 'finish' });
+  }
+}
+
+function stopVoiceRecording() {
+  const operation = voiceOperation;
+  if (!operation || voiceState !== 'recording') return;
+  voiceState = 'transcribing';
+  clearTimeout(operation.limitTimer);
+  operation.limitTimer = null;
+  renderVoiceState();
+  stopVoiceTracks(operation.stream);
+  // Keep the worklet graph alive until it acknowledges the flush, otherwise
+  // its final render quantum could be dropped when the node is disconnected.
+  finishVoiceRecording(operation);
+}
+
+async function startVoiceInput() {
+  if (voiceIsActive()) {
+    if (voiceState === 'recording') stopVoiceRecording();
+    return;
+  }
+  const sessionId = currentSession;
+  if (!sessionId) return;
+  const supportError = voiceBrowserSupportError();
+  if (supportError) {
+    document.querySelector('#conversation-error').textContent = supportError;
+    return;
+  }
+  const operation = {
+    sessionId,
+    generation: ++voiceGeneration,
+    controller: new AbortController(),
+    stream: null,
+    worker: null,
+    audioContext: null,
+    source: null,
+    workletNode: null,
+    sink: null,
+    limitTimer: null,
+    finishRequested: false,
+    transcriptionTimedOut: false,
+  };
+  voiceOperation = operation;
+  voiceState = 'permission';
+  document.querySelector('#conversation-error').textContent = '';
+  renderVoiceState();
+  try {
+    // Construct and resume the context in the click task. Mobile Safari can
+    // reject an AudioContext created only after the availability request.
+    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+    operation.audioContext = new AudioContextConstructor();
+    const resume = Promise.resolve(operation.audioContext.resume?.()).catch(error => {
+      failVoiceOperation(operation, voicePermissionError(error));
+    });
+    const available = await request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/dictation`,
+      { signal: operation.controller.signal },
+    );
+    if (!voiceOperationIsCurrent(operation)) return;
+    if (available?.available !== true)
+      throw new Error(available?.reason || 'Voice input is unavailable for this session.');
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: { ideal: 1 },
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    if (!voiceOperationIsCurrent(operation)) {
+      stopVoiceTracks(stream);
+      return;
+    }
+    operation.stream = stream;
+    for (const track of stream.getTracks?.() || []) {
+      track.addEventListener?.('ended', () => {
+        if (voiceOperationIsCurrent(operation) && voiceState !== 'transcribing')
+          failVoiceOperation(operation, 'The microphone stopped unexpectedly. Try again.');
+      }, { once: true });
+    }
+    const WorkerConstructor = window.Worker;
+    operation.worker = new WorkerConstructor('/voice-worker.js');
+    operation.worker.onmessage = event => handleVoiceWorkerMessage(operation, event.data || {});
+    operation.worker.onerror = () => handleVoiceWorkerMessage(operation, {
+      type: 'error',
+      message: 'The browser audio worker failed.',
+    });
+    operation.worker.postMessage({ type: 'start' });
+
+    if (!operation.audioContext.audioWorklet?.addModule)
+      throw new Error('This browser does not support the audio capture required for voice input.');
+    await operation.audioContext.audioWorklet.addModule('/voice-worklet.js');
+    if (!voiceOperationIsCurrent(operation)) return;
+    const source = operation.audioContext.createMediaStreamSource(stream);
+    const worklet = new window.AudioWorkletNode(
+      operation.audioContext,
+      'voice-capture-processor',
+    );
+    const sink = operation.audioContext.createGain();
+    sink.gain.value = 0;
+    operation.source = source;
+    operation.workletNode = worklet;
+    operation.sink = sink;
+    operation.audioContext.addEventListener?.('statechange', () => {
+      if (
+        voiceOperationIsCurrent(operation)
+        && voiceState === 'recording'
+        && operation.audioContext?.state !== 'running'
+      ) {
+        failVoiceOperation(operation, 'Audio capture was interrupted. Try again.');
+      }
+    });
+    worklet.addEventListener?.('processorerror', () => {
+      failVoiceOperation(operation, 'The browser audio processor failed. Try again.');
+    });
+    worklet.port.onmessage = event => {
+      if (!voiceOperationIsCurrent(operation)) return;
+      if (event.data?.type === 'pcm') {
+        try {
+          operation.worker?.postMessage(
+            { type: 'pcm', samples: event.data.samples },
+            [event.data.samples.buffer],
+          );
+        } catch (error) {
+          handleVoiceWorkerMessage(operation, {
+            type: 'error',
+            message: error.message || 'The browser could not transfer microphone audio.',
+          });
+        }
+      } else if (event.data?.type === 'flushed') {
+        operation.worker?.postMessage({ type: 'finish' });
+      }
+    };
+    worklet.port.start?.();
+    source.connect(worklet);
+    worklet.connect(sink);
+    sink.connect(operation.audioContext.destination);
+    await resume;
+    if (!voiceOperationIsCurrent(operation)) return;
+    voiceState = 'recording';
+    operation.limitTimer = setTimeout(stopVoiceRecording, VOICE_MAX_RECORDING_MS);
+    renderVoiceState();
+  } catch (error) {
+    if (!voiceOperationIsCurrent(operation)) return;
+    voiceOperation = null;
+    voiceState = 'idle';
+    closeVoiceAudio(operation);
+    try { operation.worker?.terminate(); } catch { /* already terminated */ }
+    operation.worker = null;
+    document.querySelector('#conversation-error').textContent = voicePermissionError(error);
+    renderVoiceState();
+  }
+}
 function imageDimensions(file) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
@@ -3143,7 +3556,7 @@ function renderAttachments() {
     chip.append(thumb, caption, remove);
     attachments.append(chip);
   }
-  sendButton.disabled = promptImages.some(image => image.state !== 'ready') || promptInFlight;
+  syncSendButtonDisabled();
 }
 // ---------------------------------------------------------------------------
 // Drafts and history
@@ -3551,7 +3964,7 @@ async function sendAction(body) {
 let promptInFlight = false;
 
 async function submitPrompt() {
-  if (!currentSession || promptInFlight) return;
+  if (!currentSession || promptInFlight || voiceIsActive()) return;
   const value = composerText();
   const images = promptImages;
   if (!value.trim() && !images.length) return;
@@ -3605,7 +4018,7 @@ async function submitPrompt() {
     error.textContent = err.message;
   } finally {
     promptInFlight = false;
-    sendButton.disabled = false;
+    syncSendButtonDisabled();
     renderAttachments();
   }
 }
@@ -3864,6 +4277,7 @@ async function loadConversation(delta = false) {
 
 async function openConversation(id) {
   if (currentSession === id) return;
+  cancelVoiceInput();
   const session = snapshot?.sessions.find(x => x.id === id);
   if (!session || (!session.capabilities?.open && !isTransitioningSession(session))) return;
   currentSession = id;
@@ -3925,8 +4339,18 @@ function renderConversationHeader(session) {
   }
   const canPrompt = session.capabilities?.prompt !== false && !reviewing;
   promptText.setAttribute('contenteditable', String(canPrompt));
-  sendButton.disabled =
-    !canPrompt || promptInFlight || promptImages.some(image => image.state !== 'ready');
+  voiceInput.disabled =
+    !canPrompt
+    || !currentSession
+    || voiceState === 'permission'
+    || voiceState === 'transcribing';
+  syncSendButtonDisabled();
+  if (
+    voiceIsActive()
+    && (!canPrompt || isTransitioningSession(session) || isLoadingConversationSession(session))
+  ) {
+    cancelVoiceInput();
+  }
   if (session.plan_mode_active) {
     state.textContent = `${sessionLifecycleLabel(session)} · plan`;
   }
@@ -3937,6 +4361,7 @@ function renderConversationHeader(session) {
 /// Leaving has to clear the keyed nodes and the pending elicitation cards, or
 /// the next conversation opens on top of the last one's rows.
 function leaveConversation() {
+  cancelVoiceInput();
   currentSession = null;
   conversationMode = null;
   conversationGeneration += 1;
@@ -4001,6 +4426,7 @@ menu.onclick = event => {
 };
 
 logout.onclick = async () => {
+  cancelVoiceInput();
   await request('/auth/session', { method: 'DELETE' });
   location.hash = '';
   location.reload();
@@ -4229,6 +4655,11 @@ document.querySelector('#prompt-form').onsubmit = e => {
   e.preventDefault();
   submitPrompt();
 };
+voiceInput.onclick = () => {
+  if (voiceState === 'recording') stopVoiceRecording();
+  else if (voiceState === 'idle') startVoiceInput();
+};
+voiceCancel.onclick = () => cancelVoiceInput();
 promptText.addEventListener('input', () => {
   composerInputChanged();
   if (historyOpen) {
@@ -4482,6 +4913,8 @@ function reconnect() {
 
 window.addEventListener('online', reconnect);
 window.addEventListener('offline', () => setConnection('offline'));
+window.addEventListener('pagehide', () => cancelVoiceInput());
+window.addEventListener('beforeunload', () => cancelVoiceInput());
 
 // A backgrounded progressive web app gets no `online` event, so the first
 // signal that it is back is somebody unlocking the screen.

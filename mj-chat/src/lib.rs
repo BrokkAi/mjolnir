@@ -2,7 +2,6 @@
 //! the usage formatting the surfaces render.
 
 pub mod components;
-mod dictation;
 pub mod speech;
 pub mod spinner;
 pub mod theme;

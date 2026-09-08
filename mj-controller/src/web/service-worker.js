@@ -10,8 +10,16 @@
 // CACHE_VERSION must change whenever any shell asset changes. Activation
 // deletes every cache that is not the current one, so an upgrade cannot leave
 // a previous version's assets behind.
-const CACHE_VERSION = 'mjolnir-shell-v10';
-const SHELL = ['/', '/viewer.css', '/viewer.js', '/manifest.webmanifest', '/icon.svg'];
+const CACHE_VERSION = 'mjolnir-shell-v11';
+const SHELL = [
+  '/',
+  '/viewer.css',
+  '/viewer.js',
+  '/voice-worklet.js',
+  '/voice-worker.js',
+  '/manifest.webmanifest',
+  '/icon.svg',
+];
 
 self.addEventListener('install', event => {
   event.waitUntil(
