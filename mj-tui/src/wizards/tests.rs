@@ -241,7 +241,7 @@ fn startup_reports_missing_agent_profiles() {
         dashboard
             .begin_startup_session(directory)
             .unwrap_err()
-            .contains("F4")
+            .contains("F7")
     );
 }
 

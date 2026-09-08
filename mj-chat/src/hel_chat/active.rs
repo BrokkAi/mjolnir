@@ -46,8 +46,9 @@ use super::second_opinion::{
 };
 use super::transcript::{ToolDiffstatRequest, materialized_prefix_entries, render_transcript};
 use super::{
-    ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatRegions, ChatSessionContext, ChatState,
-    MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity, queued_prompt_preview,
+    ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatFooter, ChatRegions,
+    ChatSessionContext, ChatState, MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity,
+    queued_prompt_preview,
 };
 use crate::hel_clipboard::{ClipboardContent, ClipboardImage};
 
@@ -2406,7 +2407,7 @@ impl ActiveChat {
     pub fn draw_in(
         &mut self,
         frame: &mut Frame,
-        regions: ChatRegions,
+        regions: ChatRegions<'_>,
         prompt_focused: bool,
         transcript_selected: bool,
     ) {
@@ -2550,7 +2551,7 @@ pub(super) fn render_full_frame(
         ChatRegions {
             transcript: chunks[0],
             prompt: chunks[1],
-            footer: Some(chunks[2]),
+            footer: Some(test_footer(chunks[2])),
             overlay: inner,
         },
         true,
@@ -2567,7 +2568,7 @@ pub(super) fn render_full_frame(
 pub(super) fn render_in(
     frame: &mut Frame,
     chat: &mut ChatState,
-    regions: ChatRegions,
+    regions: ChatRegions<'_>,
     prompt_focused: bool,
     transcript_selected: bool,
 ) {
@@ -2799,8 +2800,8 @@ pub(super) fn render_in(
             area,
         );
     }
-    if let Some(footer_area) = regions.footer {
-        render_chat_footer(frame, footer_area, chat, prompt_focused);
+    if let Some(footer) = regions.footer {
+        render_chat_footer(frame, footer, chat, prompt_focused);
     }
     // The popup overlays the prompt and whatever sits above it, so it
     // registers last and wins the cells it covers.
@@ -2869,7 +2870,7 @@ pub(super) fn render_in(
 /// for the composer.
 pub(super) fn render_chat_footer(
     frame: &mut Frame,
-    footer_area: Rect,
+    footer: ChatFooter<'_>,
     chat: &ChatState,
     prompt_focused: bool,
 ) {
@@ -2879,8 +2880,7 @@ pub(super) fn render_chat_footer(
     // The three groups are the dashboard's: what the composer answers, the
     // chords that answer from anywhere, then the function keys. Only the
     // first group changes with what the composer is doing.
-    const CHORDS: &[&str] = &["Alt-G panes", "Alt-Q detach"];
-    const FUNCTION_KEYS: &str = "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help";
+    let footer_area = footer.area;
     let composer_keys = if !prompt_focused {
         "Tab pane · PgUp/PgDn transcript"
     } else if chat.voice_active {
@@ -2890,7 +2890,12 @@ pub(super) fn render_chat_footer(
     } else {
         "Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Alt-T rendering · Shift-Enter newline"
     };
-    let default_footer = fit_footer(composer_keys, CHORDS, FUNCTION_KEYS, footer_area.width);
+    let default_footer = fit_footer(
+        composer_keys,
+        footer.chords,
+        footer.functions,
+        footer_area.width,
+    );
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
     let notice = chat.notices.current();
     let footer = search_footer
@@ -2926,15 +2931,31 @@ pub(super) fn render_chat_footer(
 }
 
 /// Fit the composer's hints with the dashboard's shared priority rules.
-fn fit_footer(composer_keys: &str, chords: &[&str], functions: &str, width: u16) -> String {
+fn fit_footer(composer_keys: &str, chords: &[&str], functions: &[&str], width: u16) -> String {
     theme::fit_footer(
         &composer_keys
             .split(theme::FOOTER_SEPARATOR)
             .collect::<Vec<_>>(),
         chords,
-        &functions.split(theme::FOOTER_SEPARATOR).collect::<Vec<_>>(),
+        functions,
         width,
     )
+}
+
+#[cfg(test)]
+fn test_footer(area: Rect) -> ChatFooter<'static> {
+    ChatFooter {
+        area,
+        chords: &["Alt-G panes", "Alt-Q detach"],
+        functions: &[
+            "F2 palette",
+            "F3 workspaces",
+            "F4 web",
+            "F5 refresh",
+            "F7 setup",
+            "F1 help",
+        ],
+    }
 }
 
 /// A remembered configuration value, or `None` when it stands for the
@@ -3323,7 +3344,10 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("UNDERLYING CHAT SENTINEL"))
         );
-        assert!(row_of("Tab pane") > popup_top);
+        // The footer remains outside the question even when width fitting
+        // drops composer hints to make room for the host's function keys.
+        assert_eq!(row_of("F1 help"), lines.len() - 1);
+        assert!(row_of("F1 help") > popup_top);
     }
 
     #[test]
@@ -4238,7 +4262,7 @@ mod tests {
             "Ctrl-R history",
             "Alt-T rendering",
             "│ Alt-G panes · Alt-Q detach │",
-            "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help",
+            "F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help",
         ] {
             assert!(footer.contains(hint), "{footer:?} omits {hint}");
         }
@@ -4256,7 +4280,7 @@ mod tests {
         for hint in [
             "Ctrl-R history",
             "│ Alt-G panes · Alt-Q detach │",
-            "F2 palette · F3 workspaces · F4 web · F5 refresh · F1 help",
+            "F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help",
         ] {
             assert!(footer.contains(hint), "{footer:?} omits {hint}");
         }
@@ -4270,7 +4294,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let area = frame.area();
-                    render_chat_footer(frame, area, &chat, true);
+                    render_chat_footer(frame, test_footer(area), &chat, true);
                 })
                 .expect("draw narrow footer");
             let text = terminal
@@ -4641,7 +4665,7 @@ mod tests {
         let regions = ChatRegions {
             transcript: Rect::new(0, 0, 80, 16),
             prompt: Rect::new(0, 16, 80, 6),
-            footer: Some(Rect::new(0, 22, 80, 1)),
+            footer: Some(test_footer(Rect::new(0, 22, 80, 1))),
             overlay: Rect::new(0, 0, 80, 24),
         };
 

@@ -3594,17 +3594,70 @@ mod tests {
         assert_eq!(chord(&dashboard, alt('n')), None);
     }
 
-    #[test]
-    fn f7_opens_the_web_dialog_from_the_composer() {
-        let mut dashboard = populated_dashboard();
-        dashboard.focus_prompt();
+    #[tokio::test]
+    async fn advertised_web_and_setup_shortcuts_open_their_dialogs_from_every_pane() {
+        for focus in [
+            hel_tui::Focus::Prompt,
+            hel_tui::Focus::Sessions,
+            hel_tui::Focus::Targets,
+            hel_tui::Focus::Quota,
+        ] {
+            let mut dashboard = populated_dashboard();
+            focus_on(&mut dashboard, focus);
+            let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+                "session-1",
+                1,
+            );
+            let notices = Notices::default();
+            let mut chat = ActiveChat::open(
+                fixture.stopped,
+                "bundle-1",
+                None,
+                fixture.control,
+                SessionHeaderIdentity::default(),
+                String::new(),
+                notices.clone(),
+            );
+            // The fixture has no database to restore a review from; expose
+            // the hints rather than the resulting startup notice.
+            notices.clear();
+            let mut terminal = Terminal::new(TestBackend::new(240, 40)).expect("terminal");
+            terminal
+                .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
+                .expect("draw combined surface");
+            let buffer = terminal.backend().buffer();
+            let footer = (0..buffer.area.width)
+                .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
+                .collect::<String>();
+            assert!(footer.contains("F4 web"), "{focus:?}: {footer}");
+            assert!(footer.contains("F7 setup"), "{focus:?}: {footer}");
 
-        let command = chord(&dashboard, function_key(7)).expect("F7 is a global chord");
-        assert_eq!(command, CommandId::WebViewer);
-        assert!(matches!(
-            dashboard.dispatch_command(command),
-            DashboardAction::LoadWebAccess
-        ));
+            let web = chord(&dashboard, function_key(4)).expect("F4 is global");
+            assert_eq!(
+                dashboard.dispatch_command(web),
+                DashboardAction::LoadWebAccess
+            );
+            assert!(dashboard.modal_open());
+            assert_eq!(chord(&dashboard, function_key(7)), None);
+            dashboard.cancel_modal();
+
+            let setup = chord(&dashboard, function_key(7)).expect("F7 is global");
+            assert_eq!(dashboard.dispatch_command(setup), DashboardAction::None);
+            assert!(dashboard.modal_open());
+            terminal
+                .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
+                .expect("draw Setup");
+            let screen = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(screen.contains("Setup"), "{focus:?}: {screen}");
+            assert!(screen.contains("Detect machine"), "{focus:?}: {screen}");
+            assert_eq!(chord(&dashboard, function_key(4)), None);
+        }
     }
 
     #[test]

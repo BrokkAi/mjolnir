@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn setup_is_available_with_existing_config_and_edits_quick_creation_defaults() {
         let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.handle_key(key(KeyCode::F(4)));
+        dashboard.handle_key(key(KeyCode::F(7)));
         choose(&mut dashboard, "startup");
         choose(&mut dashboard, "prompt");
         choose(&mut dashboard, "profile");

@@ -68,7 +68,7 @@ fn generate_documentation_screenshots() {
     );
 
     let mut setup = documentation_dashboard();
-    setup.handle_key(key(KeyCode::F(4)));
+    setup.handle_key(key(KeyCode::F(7)));
     capture(
         &output.join("setup.svg"),
         "Mjolnir Setup",

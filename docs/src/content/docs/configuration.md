@@ -96,7 +96,7 @@ its setup flow and requires a supported target.
 A completely unconfigured Linux or macOS installation gets a `codex` profile
 using `CODEX_HOME` or `~/.codex`, and a `localhost` target. Existing configuration
 is preserved. Authentication or provisioning failures appear on the dashboard;
-use `mj doctor`, `mj login`, or Setup (`F4`) to resolve them.
+use `mj doctor`, `mj login`, or Setup (`F7`) to resolve them.
 
 ## Web viewer `[phone]`
 
