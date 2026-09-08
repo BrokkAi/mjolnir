@@ -183,20 +183,6 @@ impl ControllerLog {
     }
 }
 
-pub(crate) fn start_stderr() -> Result<()> {
-    let (filter, filter_error) = env_filter("warn");
-    tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init()
-        .map_err(|error| anyhow::anyhow!("install Mjolnir stderr subscriber: {error}"))?;
-    if let Some(error) = filter_error {
-        tracing::warn!(%error, "ignored invalid RUST_LOG filter");
-    }
-    Ok(())
-}
-
 fn env_filter(default: &str) -> (EnvFilter, Option<String>) {
     match std::env::var("RUST_LOG") {
         Ok(value) => match EnvFilter::try_new(value) {

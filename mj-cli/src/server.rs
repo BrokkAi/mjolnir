@@ -9,8 +9,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use hel::hel_config::{HarnessProfile, HelConfig, PhoneConfig, is_bare_project_target};
+use hel::hel_remote_git::{default_branch, display_url, resolve_repository};
 use hel::hel_state::{HelState, MaterializedSession, ProjectSourceIdentity, SessionRecord};
-use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor, ProcessExecutor};
+#[cfg(test)]
+use hel::hel_targets::ProcessExecutor;
+use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor};
 use hel::hel_worker::RelayCommand;
 use hel::hel_workspace::WorkspaceRecord;
 use mj_controller::hel_controller::Controller;
@@ -448,6 +451,7 @@ fn spawn_tailscale_cert_renewer(
 
 const MAX_CONCURRENT_PHONE_ACTIONS: usize = 4;
 const MAX_CONCURRENT_BUNDLE_CREATIONS: usize = 4;
+const MAX_CONCURRENT_PREFLIGHTS: usize = 4;
 
 struct PhoneActionStarted {
     action_id: u64,
@@ -852,6 +856,7 @@ pub(crate) async fn run_server(
             tokio::sync::mpsc::unbounded_channel::<MovePrepared>();
         let mut dictation_jobs = tokio::task::JoinSet::new();
         let mut bundle_jobs = tokio::task::JoinSet::new();
+        let mut preflight_jobs = tokio::task::JoinSet::new();
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
         let mut move_recovery_jobs = tokio::task::JoinSet::new();
         let mut controller_reload_in_flight = false;
@@ -1383,12 +1388,12 @@ pub(crate) async fn run_server(
                         tracing::warn!(%error, "bundle creation task panicked");
                     }
                 }
-                preflight = preflight_rx.recv() => {
+                preflight = preflight_rx.recv(), if preflight_jobs.len() < MAX_CONCURRENT_PREFLIGHTS => {
                     let Some(mj_controller::hel_server::PreflightRequest {
                         bundle_id,
                         target_id,
                         project_directory,
-                        reply,
+                        mut reply,
                     }) = preflight else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering preflight requests");
                         break;
@@ -1399,11 +1404,34 @@ pub(crate) async fn run_server(
                     // every other feed.
                     let config = controller.config.clone();
                     let project_validation = project_directory.is_some();
-                    tokio::spawn(async move {
-                        let answer = tokio::task::spawn_blocking(move || {
-                            run_new_preflight(config, bundle_id, target_id, project_directory)
-                        })
-                        .await;
+                    let task_termination = termination.clone();
+                    preflight_jobs.spawn(async move {
+                        let cancelled = Arc::new(AtomicBool::new(false));
+                        let cancellation_guard = PreflightCancellationGuard(cancelled.clone());
+                        let mut blocking = tokio::task::spawn_blocking(move || {
+                            run_new_preflight_with_cancellation(
+                                config,
+                                bundle_id,
+                                target_id,
+                                project_directory,
+                                cancelled,
+                            )
+                        });
+                        let answer = tokio::select! {
+                            biased;
+                            _ = task_termination.cancelled() => None,
+                            _ = reply.closed() => None,
+                            answer = &mut blocking => Some(answer),
+                        };
+                        let Some(answer) = answer else {
+                            drop(cancellation_guard);
+                            match blocking.await {
+                                Err(error) => tracing::warn!(%error, "cancelled phone preflight task failed"),
+                                Ok(Err(error)) => tracing::debug!(%error, "phone preflight cancelled"),
+                                Ok(Ok(_)) => {}
+                            }
+                            return;
+                        };
                         let answer = match answer {
                             Ok(Ok(answer)) => Ok(answer),
                             Ok(Err(error)) => {
@@ -1415,7 +1443,7 @@ pub(crate) async fn run_server(
                                 Err(if project_validation {
                                     PreflightFailure::Validation
                                 } else {
-                                    PreflightFailure::Controller(format!("{error:#}"))
+                                    PreflightFailure::InvalidRepository(format!("{error:#}"))
                                 })
                             }
                             Err(error) => {
@@ -1429,6 +1457,11 @@ pub(crate) async fn run_server(
                             tracing::debug!("phone preflight reply dropped after client disconnect");
                         }
                     });
+                }
+                preflight_job = preflight_jobs.join_next(), if !preflight_jobs.is_empty() => {
+                    if let Some(Err(error)) = preflight_job {
+                        tracing::warn!(%error, "phone preflight task panicked");
+                    }
                 }
                 preparation = move_preparation_rx.recv() => {
                     let Some(MovePreparationRequest { selection, reply }) = preparation else {
@@ -1864,6 +1897,10 @@ pub(crate) async fn run_server(
         // Bundle jobs are supervised so shutdown never leaves a detached
         // request task behind holding the config mutation lock.
         bundle_jobs.shutdown().await;
+        // Preflight jobs own cancellation guards for their blocking Git
+        // probes. Aborting them here signals those probes before the server's
+        // request channels disappear.
+        preflight_jobs.shutdown().await;
         // Preparation tasks may be inspecting an archive or probing a target;
         // abort and drain them before the HTTP server's channels disappear.
         move_preparation_jobs.shutdown().await;
@@ -1953,27 +1990,55 @@ fn flatten_stored<T>(
     }
 }
 
-/// How one dirty repository is named to a phone.
-///
-/// The controller knows it by absolute path; a phone is told the leaf, which is
-/// enough for a person to recognise the repository they are about to launch
-/// over and says nothing about where it lives.
-fn dirty_repository_label(path: &std::path::Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
-/// Perform the filesystem half of a new-session preflight.
+/// Perform the preflight for a new session.
 ///
 /// This runs on the blocking task owned by the phone server. Bare targets
-/// need the same directory-and-Git-HEAD validation as the dashboard; isolated
-/// targets instead inspect the configured bundle for dirty local repositories.
+/// need the same directory-and-Git-HEAD validation as the dashboard. Isolated
+/// targets resolve every bundle repository to a network source and report the
+/// exact fetch branch and publication destinations. Local working-tree
+/// contents are never copied for this path.
+struct PreflightCancellationGuard(Arc<AtomicBool>);
+
+impl Drop for PreflightCancellationGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
 fn run_new_preflight(
     config: HelConfig,
     bundle_id: String,
     target_id: String,
     project_directory: Option<PathBuf>,
+) -> Result<mj_controller::hel_server::PreflightNew> {
+    run_new_preflight_with_cancellation(
+        config,
+        bundle_id,
+        target_id,
+        project_directory,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+fn run_new_preflight_with_cancellation(
+    config: HelConfig,
+    bundle_id: String,
+    target_id: String,
+    project_directory: Option<PathBuf>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<mj_controller::hel_server::PreflightNew> {
+    let executor =
+        CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
+    run_new_preflight_with_executor(config, bundle_id, target_id, project_directory, &executor)
+}
+
+fn run_new_preflight_with_executor(
+    config: HelConfig,
+    bundle_id: String,
+    target_id: String,
+    project_directory: Option<PathBuf>,
+    executor: &impl CommandExecutor,
 ) -> Result<mj_controller::hel_server::PreflightNew> {
     let target_is_bare = config
         .targets
@@ -1983,13 +2048,12 @@ fn run_new_preflight(
     if target_is_bare {
         let directory =
             project_directory.context("project directory is required for a bare target")?;
-        config_only_controller(config).validate_project_directory(
-            &target_id,
-            &directory,
-            &ProcessExecutor,
-        )?;
+        config_only_controller(config)
+            .validate_project_directory(&target_id, &directory, executor)?;
         return Ok(mj_controller::hel_server::PreflightNew {
             dirty_repositories: Vec::new(),
+            remote_repositories: Vec::new(),
+            local_changes_excluded: false,
         });
     }
     if project_directory.is_some() {
@@ -1997,12 +2061,30 @@ fn run_new_preflight(
     }
 
     let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
-    let dirty = hel::hel_local_git::dirty_local_repositories(bundle)?
-        .into_iter()
-        .map(|repository| dirty_repository_label(&repository.path))
-        .collect();
+    let remote_repositories = bundle
+        .repositories
+        .iter()
+        .map(|repository| {
+            let source = resolve_repository(repository, executor)
+                .with_context(|| format!("repository {:?}", repository.id))?;
+            let default_branch = default_branch(&source, executor)
+                .with_context(|| format!("repository {:?}", repository.id))?;
+            Ok(mj_controller::hel_server::PreflightRepository {
+                id: repository.id.clone(),
+                fetch_url: display_url(&source.fetch_url),
+                default_branch,
+                push_urls: source
+                    .push_urls
+                    .iter()
+                    .map(|url| display_url(url))
+                    .collect(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(mj_controller::hel_server::PreflightNew {
-        dirty_repositories: dirty,
+        dirty_repositories: Vec::new(),
+        remote_repositories,
+        local_changes_excluded: true,
     })
 }
 
@@ -2107,7 +2189,7 @@ async fn apply_phone_action(
             target_id,
             title,
             project_directory,
-            dirty_ack,
+            dirty_ack: _dirty_ack,
         } => {
             let workspace_id = if workspace_id.is_empty() {
                 let workspaces = hel::hel_database::list_workspaces()?;
@@ -2131,29 +2213,10 @@ async fn apply_phone_action(
                 format!("{project} via {profile_id}")
             });
             let session_title_override = Some(title.clone());
-            // The acknowledgement has to match the repositories that are dirty
-            // now, not the ones that were dirty when the phone was asked. A
-            // launch over changes nobody saw is the thing this prevents.
-            let allow_dirty_local = if dirty_ack.is_empty() {
-                false
-            } else {
-                let controller_bundle = controller
-                    .config
-                    .bundles
-                    .get(&bundle_id)
-                    .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
-                let dirty = hel::hel_local_git::dirty_local_repositories(controller_bundle)?
-                    .into_iter()
-                    .map(|repository| dirty_repository_label(&repository.path))
-                    .collect::<std::collections::BTreeSet<_>>();
-                let acknowledged = dirty_ack.iter().cloned().collect();
-                if dirty != acknowledged {
-                    bail!(
-                        "the repositories with uncommitted changes are not the ones that were acknowledged; check again"
-                    );
-                }
-                true
-            };
+            // Isolated creation always starts from the network default branch;
+            // the legacy field remains accepted on the wire for old phones but
+            // cannot opt local commits or dirty files into a new session.
+            let allow_dirty_local = false;
             let (published, publication) = tokio::sync::oneshot::channel();
             let registered = services
                 .daemon_runtime
@@ -3407,7 +3470,7 @@ mod tests {
     }
 
     #[test]
-    fn new_preflight_keeps_bundle_dirty_check_for_isolated_targets() {
+    fn new_preflight_requires_network_sources_for_isolated_targets() {
         let mut config = HelConfig::default();
         config.targets.insert(
             "podman".into(),
@@ -3429,17 +3492,16 @@ mod tests {
                 primary_repo: "hel".into(),
                 repositories: vec![ProjectRepository {
                     id: "hel".into(),
-                    github: Some("owner/hel".into()),
-                    local: None,
+                    github: None,
+                    local: Some(PathBuf::from("/definitely/not/a/repository")),
                     destination: "hel".into(),
                     git_ref: None,
                 }],
             },
         );
-        let answer = run_new_preflight(config, "hel".into(), "podman".into(), None)
-            .expect("a GitHub-only bundle has no local dirty repositories");
-
-        assert!(answer.dirty_repositories.is_empty());
+        let error = run_new_preflight(config, "hel".into(), "podman".into(), None)
+            .expect_err("an isolated bundle cannot use a local source");
+        assert!(error.to_string().contains("repository"));
     }
 
     #[test]

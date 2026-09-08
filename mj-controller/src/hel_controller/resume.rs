@@ -28,7 +28,7 @@ use hel::hel_worker::RelayCommand;
 use super::backend::{backend_locator, controller_github_token, validate_resource_allocation};
 use super::checkpoint::upload_checkpoint_spec;
 use super::provisioning::{
-    LocalBootstrap, ProvisioningFailureDisposition, StagedExecutor, execute_concurrent_lanes,
+    ProvisioningFailureDisposition, StagedExecutor, execute_concurrent_lanes,
     install_attached_resources,
 };
 use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
@@ -172,6 +172,7 @@ impl Controller {
                 repositories,
             },
             None,
+            plan != ResumePlan::WorkspaceToRaw,
             executor,
         )
     }
@@ -181,6 +182,7 @@ impl Controller {
         session_id: &str,
         verified: ResumeRepositoryBundles,
         skip_repository_id: Option<&str>,
+        use_archived_network_sources: bool,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
         let session = self
@@ -188,6 +190,30 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
+        ensure!(
+            verified.repositories.iter().all(|repository| {
+                !repository.metadata.origin.starts_with("mj-local:")
+                    && !repository.metadata.origin.starts_with("ext::")
+            }),
+            "resuming legacy host-bridge sessions is not supported; start a new network-backed session"
+        );
+        // The immutable archive supplies network provenance. Local source
+        // paths and later host configuration changes are irrelevant.
+        if use_archived_network_sources
+            && verified
+                .repositories
+                .iter()
+                .all(|repository| repository.metadata.remote_workspace)
+        {
+            return Ok(ResumeRepositorySourcePreflight::Ready(
+                ResumeRepositorySourceReceipt {
+                    session_id: session_id.to_owned(),
+                    bundle_id: session.bundle_id.clone(),
+                    checkpoint_sha256: verified.checkpoint_sha256,
+                    repositories: Vec::new(),
+                },
+            ));
+        }
         if verified.repositories.is_empty() {
             return Ok(ResumeRepositorySourcePreflight::Ready(
                 ResumeRepositorySourceReceipt {
@@ -370,6 +396,7 @@ impl Controller {
             session_id,
             verified,
             Some(repository_id),
+            false,
             executor,
         )
     }
@@ -663,9 +690,18 @@ impl Controller {
             .checkpoint
             .as_ref()
             .context("session has no checkpoint")?;
-        if !repository_preflight
-            .as_ref()
-            .is_some_and(|receipt| self.repository_source_receipt_is_current(session_id, receipt))
+        // A receipt for an isolated destination says nothing about a host
+        // checkout. Explicit moves to raw execution must check that source.
+        let moving_to_raw = previous.project_directory.is_none()
+            && self
+                .config
+                .targets
+                .get(target_id)
+                .is_some_and(hel::hel_config::is_bare_project_target);
+        if moving_to_raw
+            || !repository_preflight.as_ref().is_some_and(|receipt| {
+                self.repository_source_receipt_is_current(session_id, receipt)
+            })
         {
             let _phase = ResumePhaseTimer::new(session_id, "preflight repository sources");
             if let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) =
@@ -712,6 +748,13 @@ impl Controller {
         if archive_sha256 != checkpoint.sha256 || archive_manifest.session.id != session_id {
             bail!("persisted checkpoint verification failed");
         }
+        ensure!(
+            archive_manifest.repositories.iter().all(|repository| {
+                !repository.metadata.origin.starts_with("mj-local:")
+                    && !repository.metadata.origin.starts_with("ext::")
+            }),
+            "resuming legacy host-bridge sessions is not supported; start a new network-backed session"
+        );
         let canonical_session = Arc::new(canonical_session);
         let profile = self
             .config
@@ -725,6 +768,9 @@ impl Controller {
             .get(target_id)
             .with_context(|| format!("unknown target template {target_id:?}"))?
             .clone();
+        if !hel::hel_config::is_bare_project_target(&target_template) {
+            super::network_git::bundle_from_manifest(&archive_manifest)?;
+        }
         // Decide the representation before the record changes, so an
         // incompatible target fails here instead of during provisioning.
         self.validate_muse_resume_destination(&previous, profile.kind, target_id)?;
@@ -1112,12 +1158,7 @@ impl Controller {
             std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
             // Two independent lanes into the target. The checkpoint transfer
             // needs nothing from the worker install, and the worker install
-            // and the local Git connection together are the longer of the two,
-            // so overlapping them hides the smaller one entirely.
-            //
-            // The Git connection stays behind the worker install in its own
-            // lane: the target fetches through `ext::<worker root>/hel worker
-            // git-proxy`, so the binary has to be there before a fetch runs.
+            // is independent of archive upload, so both run concurrently.
             let controller = &*self;
             let backend_ref = &backend;
             let worker_root_ref = worker_root.as_str();
@@ -1136,18 +1177,7 @@ impl Controller {
                         backend_ref,
                         session_id,
                     )?;
-                    // The restore needs the fetched objects: a committed delta
-                    // bundle cannot be applied without its prerequisites, and a
-                    // bundle-free snapshot checks out a head commit only the
-                    // proxy can supply. The archive carries this session's
-                    // dirty state, so nothing is seeded.
-                    controller.connect_local_repositories(
-                        session_id,
-                        backend_ref,
-                        worker_root_ref,
-                        syncing,
-                        LocalBootstrap::Skip,
-                    )
+                    Ok(())
                 },
                 || {
                     let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
@@ -1185,19 +1215,7 @@ impl Controller {
                     &worker_root,
                     syncing,
                 )?;
-                self.connect_local_repositories(
-                    session_id,
-                    &backend,
-                    &worker_root,
-                    syncing,
-                    match conversion
-                        .as_ref()
-                        .and_then(ResumeConversion::raw_to_workspace)
-                    {
-                        Some(conversion) => LocalBootstrap::SeedFrom(conversion.checkout.clone()),
-                        None => LocalBootstrap::Seed,
-                    },
-                )?;
+
             }
             match projection_build {
                 Some(build) => {
@@ -1917,6 +1935,48 @@ mod tests {
     }
 
     #[test]
+    fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = committed_repository();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let mut session = checkpoint_test_session(session_id);
+        session.state = SessionState::Stopped;
+        session.checkpoint = Some(
+            super::super::test_support::write_network_checkpoint_archive(
+                directory.path(),
+                session_id,
+                0,
+            ),
+        );
+        let mut config = resume_compatibility_config();
+        config.bundles.insert(
+            "project".into(),
+            super::super::test_support::local_bundle(repository.path()),
+        );
+        let controller = Controller {
+            config,
+            state: HelState {
+                sessions: BTreeMap::from([(session_id.into(), session)]),
+                ..HelState::default()
+            },
+        };
+        assert!(matches!(
+            controller
+                .preflight_resume_repository_sources(session_id, "podman", &ProcessExecutor,)
+                .unwrap(),
+            ResumeRepositorySourcePreflight::Ready(_)
+        ));
+        let result = controller
+            .preflight_resume_repository_sources(session_id, "local-bare", &ProcessExecutor)
+            .unwrap();
+        let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) = result else {
+            panic!("moving into a host checkout must detect its missing archive base");
+        };
+        assert_eq!(mismatch.missing_commit, "a".repeat(40));
+        assert!(!repository.path().join(".mj/worktrees").exists());
+    }
+
+    #[test]
     fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
         struct UnusedExecutor;
 
@@ -2111,6 +2171,8 @@ mod tests {
                 .iter()
                 .map(|repository| CheckpointRepositoryBundle {
                     metadata: hel::hel_archive::RepositoryMetadata {
+                        push_urls: Vec::new(),
+                        remote_workspace: false,
                         id: repository.id.clone(),
                         relative_destination: repository.destination.clone(),
                         origin: repository.source_label(),
@@ -2135,8 +2197,9 @@ mod tests {
             .unwrap();
         let preflight = pool
             .install(|| {
-                controller
-                    .preflight_verified_repository_sources(session_id, verified, None, &executor)
+                controller.preflight_verified_repository_sources(
+                    session_id, verified, None, false, &executor,
+                )
             })
             .unwrap();
         let ResumeRepositorySourcePreflight::Ready(receipt) = preflight else {
@@ -2176,6 +2239,8 @@ mod tests {
         let head = "b".repeat(40);
         let archived = CheckpointRepositoryBundle {
             metadata: hel::hel_archive::RepositoryMetadata {
+                push_urls: Vec::new(),
+                remote_workspace: false,
                 id: "project".into(),
                 relative_destination: "project".into(),
                 origin: "https://github.com/archived/should-not-be-contacted.git".into(),
@@ -2829,7 +2894,11 @@ mod tests {
         let archive_directory = data_directory.join("archives");
         std::fs::create_dir_all(&archive_directory).unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
-        let checkpoint = write_checkpoint_gate_archive(&archive_directory, session_id, 7);
+        let checkpoint = super::super::test_support::write_network_checkpoint_archive(
+            &archive_directory,
+            session_id,
+            7,
+        );
         let archive = verify_archive_streaming(&checkpoint.archive_path).unwrap();
         let expected_projection =
             materialized_session_from_canonical(session_id, &archive.canonical_session).unwrap();
@@ -2866,8 +2935,8 @@ mod tests {
                 primary_repo: "project".into(),
                 repositories: vec![ProjectRepository {
                     id: "project".into(),
-                    github: Some("example/project".into()),
-                    local: None,
+                    github: None,
+                    local: Some(data_directory.join("host-clone-that-no-longer-exists")),
                     destination: "project".into(),
                     git_ref: None,
                 }],
@@ -3065,13 +3134,13 @@ mod tests {
     }
     const RAW_CONVERSION_TEST_CHILD: &str = "MJ_RAW_CONVERSION_TEST_CHILD";
     #[test]
-    fn a_failed_raw_conversion_keeps_the_bundle_and_leaves_the_worktree_alone() {
+    fn unsupported_raw_conversion_leaves_config_and_worktree_unchanged() {
         // MJ_DATA_DIR and MJ_CONFIG_DIR are process-global, so run the half
         // that writes them in an exact child test.
         if std::env::var_os(RAW_CONVERSION_TEST_CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
             let test_name = format!(
-                "{}::a_failed_raw_conversion_keeps_the_bundle_and_leaves_the_worktree_alone",
+                "{}::unsupported_raw_conversion_leaves_config_and_worktree_unchanged",
                 module_path!()
                     .strip_prefix("mj_controller::")
                     .unwrap_or(module_path!())
@@ -3143,6 +3212,7 @@ mod tests {
         // Production controllers read this configuration from disk; bundle
         // updates now deliberately reload it under the transaction lock.
         config.save().unwrap();
+        let original_config = config.clone();
         let mut controller = Controller {
             config,
             state: HelState {
@@ -3169,25 +3239,13 @@ mod tests {
             ))
             .unwrap_err();
         assert!(
-            format!("{error:#}").contains("podman is temporarily unavailable"),
+            format!("{error:#}").contains("network repository provenance"),
             "{error:#}"
         );
         assert!(!format!("{error:#}").contains("returned to stopped"));
 
-        // The bundle stays: it was saved before the record referenced it, and a
-        // retry reuses it instead of adding another.
-        let (_, bundle) = controller
-            .config
-            .bundles
-            .iter()
-            .find(|(_, bundle)| bundle.repositories[0].local.as_deref() == Some(repository.path()))
-            .expect("the conversion added a bundle for the checkout");
-        assert_eq!(
-            bundle.repositories[0].destination,
-            PathBuf::from(session_id)
-        );
-        let saved = hel::hel_config::HelConfig::load().unwrap();
-        assert_eq!(saved.bundles, controller.config.bundles);
+        assert_eq!(controller.config, original_config);
+        assert_eq!(hel::hel_config::HelConfig::load().unwrap(), original_config);
 
         let retained = controller.state.sessions.get(session_id).unwrap();
         assert_eq!(retained.state, SessionState::Stopped);

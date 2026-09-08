@@ -307,7 +307,10 @@ function applyRoute() {
   }
   // Arriving at the wizard starts it over; leaving it discards what was
   // half-answered rather than keeping it to surprise the next visit.
-  if (name !== 'new') newDraft = null;
+  if (name !== 'new') {
+    abortPendingNewPreflight();
+    newDraft = null;
+  }
   if (name !== 'move') moveDraft = null;
   renderRoute();
   // A screen reader should land at the top of the page it just moved to
@@ -1079,21 +1082,27 @@ function handleSessionMenuKeydown(event) {
 // covering a modal is how the previous single flat form became unusable, so
 // this is a route rather than a dialog.
 
-/// The steps, in order. `applies` lets a step drop out — a container target has
-/// no project directory to name, and a bundle with nothing dirty has nothing to
-/// confirm.
+/// The steps, in order. Every isolated creation shows the resolved network
+/// clone plan on the review step; raw local targets still validate their
+/// project directory before that review.
 const NEW_STEPS = [
   { key: 'profile', title: 'Profile', applies: () => true },
   { key: 'target', title: 'Target', applies: () => true },
   { key: 'project', title: 'Project', applies: () => true },
-  { key: 'dirty', title: 'Uncommitted changes', applies: draft => draft.dirty.length > 0 },
   { key: 'review', title: 'Review', applies: () => true },
 ];
 
 let newDraft = null;
 let pendingNewPreflight = null;
+let pendingNewPreflightController = null;
 let renderedNewDraft = null;
 let renderedNewSignature = null;
+
+function abortPendingNewPreflight() {
+  pendingNewPreflightController?.abort();
+  pendingNewPreflightController = null;
+  pendingNewPreflight = null;
+}
 
 function freshDraft() {
   return {
@@ -1104,8 +1113,9 @@ function freshDraft() {
     bundleId: snapshot?.bundles[0]?.id || '',
     projectDirectory: '',
     title: '',
-    dirty: [],
-    acknowledged: false,
+    remoteRepositories: [],
+    localChangesExcluded: false,
+    preflightError: '',
     preflighted: false,
     bundleSource: '',
     creatingBundle: false,
@@ -1135,6 +1145,9 @@ function derivedTitle() {
 
 function renderNewForm() {
   if (!newDraft || newDraft.workspaceId !== selectedWorkspaceId()) {
+    if (newDraft && newDraft.workspaceId !== selectedWorkspaceId()) {
+      abortPendingNewPreflight();
+    }
     newDraft = freshDraft();
     newError.textContent = '';
   }
@@ -1148,7 +1161,7 @@ function renderNewForm() {
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? snapshot.targets.map(t => [t.id, t.kind]) : null,
     project: step.key === 'project' ? [newDraft.targetId, snapshot.bundles, snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories, newDraft.showBundleSource] : null,
-    dirty: step.key === 'dirty' || step.key === 'review' ? newDraft.dirty : null,
+    remote: step.key === 'review' ? [newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
     creating: newDraft.creatingBundle,
@@ -1183,8 +1196,9 @@ function renderNewForm() {
           // Changing the target changes which project question is asked, and
           // invalidates anything the previous project answer was checked for.
           newDraft.preflighted = false;
-          newDraft.dirty = [];
-          newDraft.acknowledged = false;
+          newDraft.remoteRepositories = [];
+          newDraft.localChangesExcluded = false;
+          newDraft.preflightError = '';
         }),
       );
       break;
@@ -1229,8 +1243,9 @@ function renderNewForm() {
           pickerField('Bundle', 'new-bundle', snapshot.bundles, newDraft.bundleId, value => {
             newDraft.bundleId = value;
             newDraft.preflighted = false;
-            newDraft.dirty = [];
-            newDraft.acknowledged = false;
+            newDraft.remoteRepositories = [];
+            newDraft.localChangesExcluded = false;
+            newDraft.preflightError = '';
           }),
         );
         const create = el('button', 'secondary', 'Create bundle');
@@ -1243,7 +1258,7 @@ function renderNewForm() {
         body.append(create);
         if (newDraft.showBundleSource || !snapshot.bundles.length) {
           body.append(textField('Repository source', 'new-bundle-source', newDraft.bundleSource, value => { newDraft.bundleSource = value; }));
-          body.append(el('p', 'dim', 'GitHub owner/repository or URL, or an existing repository path on the controller host. Creates a reusable bundle in your shared configuration.'));
+          body.append(el('p', 'dim', 'Use a GitHub owner/repository or URL, or an existing repository path with a network remote. The isolated session starts from the remote default branch and excludes local unpublished changes.'));
           const save = el('button', '', newDraft.creatingBundle ? 'Creating bundle…' : 'Save bundle');
           save.type = 'button';
           save.onclick = createNewBundle;
@@ -1257,29 +1272,6 @@ function renderNewForm() {
       );
       break;
     }
-    case 'dirty': {
-      body.append(
-        el(
-          'p',
-          '',
-          'These repositories have uncommitted changes. Starting a session copies them as they are.',
-        ),
-      );
-      const list = el('ul');
-      for (const repository of newDraft.dirty) list.append(el('li', '', repository));
-      body.append(list);
-      const label = el('label', 'field-inline');
-      const box = el('input');
-      box.type = 'checkbox';
-      box.id = 'new-dirty-ack';
-      box.checked = newDraft.acknowledged;
-      box.onchange = () => {
-        newDraft.acknowledged = box.checked;
-      };
-      label.append(box, el('span', '', 'Start anyway'));
-      body.append(label);
-      break;
-    }
     default: {
       const review = el('dl', 'review');
       const rows = [
@@ -1290,7 +1282,16 @@ function renderNewForm() {
           : ['Bundle', newDraft.bundleId],
         ['Name', newDraft.title.trim() || derivedTitle()],
       ];
-      if (newDraft.dirty.length) rows.push(['Uncommitted changes', newDraft.dirty.join(', ')]);
+      if (newDraft.localChangesExcluded) {
+        rows.push(['Local changes', 'Excluded (unpublished commits and dirty files)']);
+        for (const repository of newDraft.remoteRepositories) {
+          rows.push([
+            `${repository.id} network source`,
+            `fetch ${repository.fetch_url} · ${repository.default_branch} · push ${repository.push_urls?.join(', ') || 'none'}`,
+          ]);
+        }
+      }
+      if (newDraft.preflightError) rows.push(['Repository preflight', newDraft.preflightError]);
       for (const [term, value] of rows) {
         review.append(el('dt', '', term), el('dd', '', value));
       }
@@ -1301,12 +1302,11 @@ function renderNewForm() {
   const checking = pendingNewPreflight === newDraft;
   if (checking) {
     newNextButton.textContent = 'Checking…';
-    newBackButton.disabled = true;
   }
-  const busy = checking || newDraft.committing === true || newDraft.creatingBundle;
+  const busy = newDraft.committing === true || newDraft.creatingBundle;
   newNextButton.disabled = busy;
   newBackButton.disabled ||= busy;
-  for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = busy;
+  for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = busy || checking;
   if (caret && !busy) {
     const input = document.getElementById(caret.id);
     input?.focus({ preventScroll: true });
@@ -1344,8 +1344,9 @@ async function createNewBundle() {
     draft.showBundleSource = false;
     draft.bundleSource = '';
     draft.preflighted = false;
-    draft.dirty = [];
-    draft.acknowledged = false;
+    draft.remoteRepositories = [];
+    draft.localChangesExcluded = false;
+    draft.preflightError = '';
     await refresh();
   } catch (error) {
     if (newDraft === draft) newError.textContent = error.message;
@@ -1372,11 +1373,14 @@ async function preflightNew() {
   const draft = newDraft;
   if (pendingNewPreflight === draft) return false;
   const bare = targetIsBare(draft.targetId);
+  const controller = new AbortController();
   pendingNewPreflight = draft;
+  pendingNewPreflightController = controller;
   renderNewForm();
   try {
     const answer = await request('/api/preflight/new', {
       method: 'POST',
+      signal: controller.signal,
       body: JSON.stringify({
         workspace_id: selectedWorkspaceId(),
         profile_id: draft.profileId,
@@ -1385,17 +1389,21 @@ async function preflightNew() {
         project_directory: bare ? draft.projectDirectory : null,
       }),
     });
-    if (newDraft !== draft) return false;
-    draft.dirty = answer.dirty_repositories || [];
+    if (controller.signal.aborted || newDraft !== draft) return false;
+    draft.remoteRepositories = answer.remote_repositories || [];
+    draft.localChangesExcluded = answer.local_changes_excluded === true;
+    draft.preflightError = '';
     draft.preflighted = true;
-    // A set the person has not seen cannot already be acknowledged.
-    draft.acknowledged = false;
     return true;
   } catch (error) {
+    if (controller.signal.aborted || error?.name === 'AbortError') return false;
     if (newDraft !== draft) return false;
     throw error;
   } finally {
-    if (pendingNewPreflight === draft) pendingNewPreflight = null;
+    if (pendingNewPreflightController === controller) {
+      pendingNewPreflight = null;
+      pendingNewPreflightController = null;
+    }
     if (newDraft === draft) renderNewForm();
   }
 }
@@ -1428,10 +1436,6 @@ async function advanceNew() {
     renderNewForm();
     return;
   }
-  if (step.key === 'dirty' && !newDraft.acknowledged) {
-    newError.textContent = 'Confirm before starting over uncommitted changes.';
-    return;
-  }
   if (step.key !== 'review') {
     newDraft.step += 1;
     renderNewForm();
@@ -1451,7 +1455,6 @@ async function commitNew() {
     bundle_id: newDraft.bundleId,
     target_id: newDraft.targetId,
     project_directory: bare ? newDraft.projectDirectory : null,
-    dirty_ack: newDraft.acknowledged ? newDraft.dirty : [],
   };
   if (newDraft.title.trim()) body.title = newDraft.title.trim();
   draft.committing = true;
@@ -4476,6 +4479,7 @@ for (const panel of [targetsPanel, quotaPanel]) {
 
 newBackButton.onclick = () => {
   if (!newDraft || newDraft.step === 0) return;
+  if (pendingNewPreflight === newDraft) abortPendingNewPreflight();
   newDraft.step -= 1;
   newError.textContent = '';
   renderNewForm();

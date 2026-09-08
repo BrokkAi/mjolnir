@@ -142,6 +142,8 @@ pub fn collect_git_metadata_snapshot(
             id: spec.id.clone(),
             relative_destination: spec.relative_destination.clone(),
             origin: identity.origin,
+            push_urls: identity.push_urls,
+            remote_workspace: false,
             base_commit: identity.head_commit.clone(),
             head_commit: identity.head_commit,
             branch: identity.branch,
@@ -155,6 +157,7 @@ pub fn collect_git_metadata_snapshot(
 
 struct CollectedGitIdentity {
     origin: String,
+    push_urls: Vec<String>,
     head_commit: String,
     branch: Option<String>,
 }
@@ -167,7 +170,7 @@ fn collect_git_identity(
     let head_commit = git_text(runner, repository, ["rev-parse", "--verify", "HEAD"])
         .context("repository has no valid Git HEAD")?;
     let origin = if let Some(origin) = origin_override {
-        origin.to_owned()
+        redact_origin_credentials(origin)?
     } else {
         let output = run_git(runner, repository, ["remote", "get-url", "origin"], &[])?;
         if output.status == 0 {
@@ -176,6 +179,7 @@ fn collect_git_identity(
             String::new()
         }
     };
+    let push_urls = collect_git_push_urls(runner, repository)?;
     let branch_output = run_git(
         runner,
         repository,
@@ -191,9 +195,74 @@ fn collect_git_identity(
     };
     Ok(CollectedGitIdentity {
         origin,
+        push_urls,
         head_commit,
         branch,
     })
+}
+
+/// Read only explicitly configured push destinations. `git remote get-url
+/// --push` falls back to the fetch URL when no push URL is configured, which
+/// would lose the distinction that lets a managed workspace keep its host's
+/// default push destination after restore.
+fn collect_git_push_urls(runner: &dyn GitCommandRunner, repository: &Path) -> Result<Vec<String>> {
+    let output = run_git(
+        runner,
+        repository,
+        ["config", "--local", "--get-all", "remote.origin.pushurl"],
+        &[],
+    )?;
+    match output.status {
+        0 => std::str::from_utf8(&output.stdout)
+            .context("decode Git push URLs")?
+            .lines()
+            .filter(|url| !url.trim().is_empty())
+            .map(|url| redact_origin_credentials(url.trim()))
+            .collect(),
+        1 => Ok(Vec::new()),
+        _ => Err(git_failure("read Git push URLs", &output)),
+    }
+}
+
+/// Read the immutable launch base recorded on a managed network workspace.
+/// Returning `None` for an absent or false marker keeps raw local DeltaFrom
+/// captures separate from the managed restore path.
+pub fn remote_workspace_base(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<Option<String>> {
+    let marker = run_git(
+        runner,
+        repository,
+        ["config", "--local", "--bool", "--get", "mj.remoteWorkspace"],
+        &[],
+    )?;
+    let marker = match marker.status {
+        0 => trim_output(&marker.stdout, "read managed workspace marker")?,
+        1 => return Ok(None),
+        _ => return Err(git_failure("read managed workspace marker", &marker)),
+    };
+    if marker != "true" {
+        return Ok(None);
+    }
+
+    let base = run_git(
+        runner,
+        repository,
+        ["config", "--local", "--get", "mj.baseCommit"],
+        &[],
+    )?;
+    ensure!(
+        base.status == 0,
+        "managed workspace is marked true but mj.baseCommit is missing: {}",
+        git_failure("read managed workspace base commit", &base)
+    );
+    let base = trim_output(&base.stdout, "read managed workspace base commit")?;
+    ensure!(
+        !base.is_empty(),
+        "managed workspace is marked true but mj.baseCommit is empty"
+    );
+    Ok(Some(base))
 }
 
 fn merge_base(
@@ -514,6 +583,8 @@ fn collect_git_contents(
             id: spec.id.clone(),
             relative_destination: spec.relative_destination.clone(),
             origin: identity.origin,
+            push_urls: identity.push_urls,
+            remote_workspace: false,
             base_commit,
             head_commit: identity.head_commit,
             branch: identity.branch,
@@ -530,6 +601,12 @@ pub fn restore_git_snapshot(
     repository: &Path,
     snapshot: &RepositorySnapshot,
 ) -> Result<()> {
+    if snapshot.metadata.remote_workspace {
+        crate::hel_remote_git::validate_network_url(&snapshot.metadata.origin)?;
+        for url in &snapshot.metadata.push_urls {
+            crate::hel_remote_git::validate_network_url(url)?;
+        }
+    }
     if let Some(branch) = &snapshot.metadata.branch {
         ensure_branch_available_for_checkout(runner, repository, branch)?;
     }
@@ -583,6 +660,7 @@ pub fn restore_git_snapshot(
         )
         .with_context(|| checkout_advice(snapshot))?;
     }
+    restore_remote_workspace_configuration(runner, repository, &snapshot.metadata)?;
     if !snapshot.staged_patch.is_empty() {
         git_bytes(
             runner,
@@ -602,6 +680,111 @@ pub fn restore_git_snapshot(
         )?;
     }
     restore_untracked_tar(repository, &snapshot.untracked_tar)
+}
+
+/// Rebuild the Git configuration that makes a managed network workspace
+/// resumable. This runs after the checkout has been selected so a caller that
+/// moved a session onto a different branch keeps that branch while still
+/// inheriting the archived push destinations and immutable launch base.
+fn restore_remote_workspace_configuration(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    metadata: &RepositoryMetadata,
+) -> Result<()> {
+    if !metadata.remote_workspace {
+        return Ok(());
+    }
+    ensure!(
+        !metadata.origin.is_empty(),
+        "managed network workspace has no Git origin"
+    );
+    ensure!(
+        !metadata.base_commit.is_empty(),
+        "managed network workspace has no immutable base commit"
+    );
+    git_success(
+        runner,
+        repository,
+        GitCommand {
+            arguments: vec![
+                "config".into(),
+                "--local".into(),
+                "--replace-all".into(),
+                "remote.origin.url".into(),
+                metadata.origin.clone().into(),
+            ],
+            stdin: Vec::new(),
+            env: Vec::new(),
+        },
+        "restore Git origin",
+    )?;
+
+    let unset = run_git(
+        runner,
+        repository,
+        ["config", "--local", "--unset-all", "remote.origin.pushurl"],
+        &[],
+    )?;
+    ensure!(
+        matches!(unset.status, 0 | 1 | 5),
+        "{}",
+        git_failure("clear restored Git push URLs", &unset)
+    );
+    let push_refspec = run_git(
+        runner,
+        repository,
+        ["config", "--local", "--unset-all", "remote.origin.push"],
+        &[],
+    )?;
+    ensure!(
+        matches!(push_refspec.status, 0 | 1 | 5),
+        "{}",
+        git_failure("clear restored Git push refspec", &push_refspec)
+    );
+    for push_url in &metadata.push_urls {
+        git_success(
+            runner,
+            repository,
+            GitCommand {
+                arguments: vec![
+                    "config".into(),
+                    "--local".into(),
+                    "--add".into(),
+                    "remote.origin.pushurl".into(),
+                    push_url.clone().into(),
+                ],
+                stdin: Vec::new(),
+                env: Vec::new(),
+            },
+            "restore Git push URL",
+        )?;
+    }
+    for (key, value) in [
+        ("mj.remoteWorkspace", "true"),
+        ("mj.baseCommit", metadata.base_commit.as_str()),
+        ("push.default", "current"),
+        ("push.autoSetupRemote", "true"),
+        ("remote.pushDefault", "origin"),
+        ("remote.origin.mirror", "false"),
+    ] {
+        git_success(
+            runner,
+            repository,
+            GitCommand {
+                arguments: vec![
+                    "config".into(),
+                    "--local".into(),
+                    "--replace-all".into(),
+                    key.into(),
+                    value.into(),
+                ],
+                stdin: Vec::new(),
+                env: Vec::new(),
+            },
+            "restore managed Git configuration",
+        )?;
+    }
+    Ok(())
 }
 
 /// Refuse to move a checkout onto a branch owned by another worktree.

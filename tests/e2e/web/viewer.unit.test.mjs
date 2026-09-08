@@ -78,6 +78,8 @@ test('project preflight prevents duplicate checks and ignores a cancelled wizard
   const context = vm.createContext({
     newDraft: draft,
     pendingNewPreflight: null,
+    pendingNewPreflightController: null,
+    AbortController,
     targetIsBare: () => true,
     selectedWorkspaceId: () => 'test',
     renderNewForm: () => {},
@@ -100,6 +102,30 @@ test('project preflight prevents duplicate checks and ignores a cancelled wizard
   await assert.rejects(vm.runInContext('preflightNew()', context), /invalid project/);
   assert.equal(context.pendingNewPreflight, null, 'failure releases the checking state');
   assert.equal(context.newDraft.preflighted, undefined);
+});
+
+test('an aborted preflight cannot clear a replacement check for the same draft', async () => {
+  const completions = [];
+  const draft = { targetId: 'podman' };
+  const context = vm.createContext({
+    newDraft: draft, pendingNewPreflight: null, pendingNewPreflightController: null,
+    AbortController, targetIsBare: () => false, selectedWorkspaceId: () => 'test',
+    renderNewForm: () => {},
+    request: () => new Promise(resolve => completions.push(resolve)),
+  });
+  vm.runInContext(sourceBetween('function abortPendingNewPreflight()', '\nfunction freshDraft()'), context);
+  vm.runInContext(sourceBetween('async function preflightNew()', '\nasync function advanceNew()'), context);
+  const old = vm.runInContext('preflightNew()', context);
+  vm.runInContext('abortPendingNewPreflight()', context);
+  const current = vm.runInContext('preflightNew()', context);
+  completions[0]({ remote_repositories: [{ id: 'old' }] });
+  assert.equal(await old, false);
+  assert.equal(context.pendingNewPreflight, draft);
+  assert.equal(draft.preflighted, undefined);
+  completions[1]({ remote_repositories: [{ id: 'current' }] });
+  assert.equal(await current, true);
+  assert.equal(draft.remoteRepositories[0].id, 'current');
+  assert.equal(context.pendingNewPreflight, null);
 });
 
 test('rolled-back launch errors remain visible only in their workspace and can be dismissed', () => {

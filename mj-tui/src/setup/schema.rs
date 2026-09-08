@@ -35,7 +35,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
 }
 
 pub(super) fn repository_default() -> Value {
-    json!({"id":"main","github":null,"local":null,"destination":"main","git_ref":null})
+    json!({"id":"main","github":null,"local":null,"destination":"main"})
 }
 
 fn target_defaults(kind: &str) -> Value {
@@ -143,7 +143,6 @@ pub(super) fn label(key: &str) -> String {
         "github" => "GitHub owner/repository",
         "local" => "Local repository directory",
         "destination" => "Checkout folder",
-        "git_ref" => "Git branch or tag",
         "root" => "Storage directory",
         "helper" => "Storage helper command",
         _ => key,

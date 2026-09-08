@@ -62,36 +62,41 @@ impl GitCommandRunner for CollectionGit {
             .iter()
             .map(|argument| argument.to_string_lossy())
             .collect::<Vec<_>>();
-        let stdout = match arguments.first().map(|argument| argument.as_ref()) {
-            Some("remote") => b"https://token@github.com/example/repo.git\n".to_vec(),
-            Some("rev-parse") => format!("{}\n", "b".repeat(40)).into_bytes(),
-            Some("merge-base") => format!("{}\n", "b".repeat(40)).into_bytes(),
-            Some("for-each-ref") => format!("{}\n", "c".repeat(40)).into_bytes(),
-            Some("symbolic-ref") => b"feature/hel\n".to_vec(),
-            Some("rev-list") => format!("{}\n", self.delta_count).into_bytes(),
+        let (status, stdout) = match arguments.first().map(|argument| argument.as_ref()) {
+            Some("remote") => (0, b"https://token@github.com/example/repo.git\n".to_vec()),
+            Some("rev-parse") => (0, format!("{}\n", "b".repeat(40)).into_bytes()),
+            Some("merge-base") => (0, format!("{}\n", "b".repeat(40)).into_bytes()),
+            Some("for-each-ref") => (0, format!("{}\n", "c".repeat(40)).into_bytes()),
+            Some("symbolic-ref") => (0, b"feature/hel\n".to_vec()),
+            Some("rev-list") => (0, format!("{}\n", self.delta_count).into_bytes()),
             Some("bundle") => {
                 self.payload_barrier.as_ref().unwrap().wait();
-                b"bundle".to_vec()
+                (0, b"bundle".to_vec())
             }
             Some("diff") => {
                 if let Some(barrier) = &self.payload_barrier {
                     barrier.wait();
                 }
                 if arguments.iter().any(|argument| argument == "--cached") {
-                    b"staged".to_vec()
+                    (0, b"staged".to_vec())
                 } else {
-                    b"unstaged".to_vec()
+                    (0, b"unstaged".to_vec())
                 }
             }
             Some("ls-files") => {
                 if let Some(barrier) = &self.payload_barrier {
                     barrier.wait();
                 }
-                b"note.txt\0.env\0".to_vec()
+                (0, b"note.txt\0.env\0".to_vec())
             }
+            Some("config") => (1, Vec::new()),
             other => return Err(anyhow!("unexpected Git command: {other:?}")),
         };
-        Ok(git_ok(stdout))
+        Ok(GitOutput {
+            status,
+            stdout,
+            stderr: Vec::new(),
+        })
     }
 }
 
@@ -174,6 +179,8 @@ fn repository(id: &str) -> RepositorySnapshot {
             id: id.to_string(),
             relative_destination: PathBuf::from(id),
             origin: format!("https://github.com/example/{id}.git"),
+            push_urls: Vec::new(),
+            remote_workspace: false,
             base_commit: "a".repeat(40),
             head_commit: "b".repeat(40),
             branch: Some("feature/hel".to_string()),
@@ -191,6 +198,8 @@ fn checkpoint_bundle(head: &str, contents: impl Into<Vec<u8>>) -> CheckpointRepo
             id: "project".into(),
             relative_destination: "project".into(),
             origin: "https://github.com/example/project.git".into(),
+            push_urls: Vec::new(),
+            remote_workspace: false,
             base_commit: String::new(),
             head_commit: head.into(),
             branch: Some("main".into()),
@@ -995,6 +1004,21 @@ fn schema_two_wire_rejects_unknown_and_omitted_required_fields() {
 }
 
 #[test]
+fn repository_metadata_defaults_network_fields_for_older_archives() {
+    let metadata = serde_json::json!({
+        "id": "repo",
+        "relative_destination": "repo",
+        "origin": "https://github.com/example/repo.git",
+        "base_commit": "",
+        "head_commit": "b".repeat(40),
+        "branch": null
+    });
+    let parsed: RepositoryMetadata = serde_json::from_value(metadata).unwrap();
+    assert!(parsed.push_urls.is_empty());
+    assert!(!parsed.remote_workspace);
+}
+
+#[test]
 fn content_matching_ignores_the_frontier_and_the_activity_watermark() {
     let archived = input().canonical_session;
     let mut latched = archived.clone();
@@ -1378,7 +1402,7 @@ fn git_collection_is_abstracted_redacts_origin_and_skips_credentials() {
         .map(|entry| entry.unwrap().path().unwrap().into_owned())
         .collect();
     assert_eq!(paths, vec![PathBuf::from("note.txt")]);
-    assert_eq!(runner.commands().len(), 9);
+    assert_eq!(runner.commands().len(), 10);
 }
 
 #[test]
@@ -1440,7 +1464,7 @@ fn git_collection_builds_independent_payloads_concurrently() {
     assert_eq!(snapshot.committed_bundle, b"bundle");
     assert_eq!(snapshot.staged_patch, b"staged");
     assert_eq!(snapshot.unstaged_patch, b"unstaged");
-    assert_eq!(runner.commands().len(), 10);
+    assert_eq!(runner.commands().len(), 11);
 }
 
 /// Checkpoint work runs with nobody watching the terminal it inherits, so
@@ -1878,6 +1902,151 @@ fn system_git_round_trip_restores_commits_index_worktree_and_untracked() {
     assert!(status.contains("A  staged.txt"));
     assert!(status.contains(" M dirty.txt"));
     assert!(status.contains("?? new.txt"));
+}
+
+#[test]
+fn remote_workspace_restore_keeps_published_history_push_urls_and_dirty_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let origin = directory.path().join("origin");
+    initialize_repository(&origin);
+    commit_file(&origin, "base.txt", b"base\n", "base");
+    commit_file(&origin, "dirty.txt", b"initial\n", "track dirty fixture");
+    let base = git_line(&origin, &["rev-parse", "HEAD"]);
+    let upstream = directory.path().join("upstream.git");
+    git(
+        directory.path(),
+        &["init", "--bare", "-q", upstream.to_str().unwrap()],
+    );
+    let source = clone_repository(directory.path(), &origin, "source");
+    git(
+        &source,
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            upstream.to_str().unwrap(),
+        ],
+    );
+    git(&source, &["switch", "-q", "-c", "mj/remote-session"]);
+    git(
+        &source,
+        &["config", "--local", "mj.remoteWorkspace", "true"],
+    );
+    git(&source, &["config", "--local", "mj.baseCommit", &base]);
+    commit_file(
+        &source,
+        "session.txt",
+        b"published session\n",
+        "session work",
+    );
+    let head = git_line(&source, &["rev-parse", "HEAD"]);
+    git(
+        &source,
+        &["push", "-q", "origin", "HEAD:refs/heads/mj/remote-session"],
+    );
+    // A fetch or push may advance an origin-tracking ref after publication.
+    // The managed checkpoint still measures from its immutable launch base.
+    git(&source, &["update-ref", "refs/remotes/origin/main", &head]);
+
+    // The transport fixtures above are local; archived managed provenance
+    // uses the network destinations a real provisioned workspace carries.
+    git(
+        &source,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://fetch.example.test/repo.git",
+        ],
+    );
+    git(
+        &source,
+        &[
+            "config",
+            "--replace-all",
+            "remote.origin.pushurl",
+            "https://push.example.test/repo.git",
+        ],
+    );
+    let large = vec![b'x'; 128 * 1024];
+    fs::write(source.join("staged.txt"), &large).unwrap();
+    git(&source, &["add", "staged.txt"]);
+    fs::write(source.join("dirty.txt"), &large).unwrap();
+    fs::write(source.join("untracked.txt"), &large).unwrap();
+
+    let mut snapshot = collect_git_snapshot(
+        &SystemGit,
+        &source,
+        &GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: PathBuf::from("repo"),
+            history: GitHistoryMode::DeltaFrom(base.clone()),
+            origin_override: None,
+        },
+    )
+    .unwrap();
+    snapshot.metadata.remote_workspace = true;
+    assert_eq!(snapshot.metadata.base_commit, base);
+    assert_eq!(
+        snapshot.metadata.push_urls,
+        vec!["https://push.example.test/repo.git".to_owned()]
+    );
+    assert!(!snapshot.committed_bundle.is_empty());
+    assert!(snapshot.staged_patch.len() > 64 * 1024);
+    assert!(snapshot.unstaged_patch.len() > 64 * 1024);
+    assert!(snapshot.untracked_tar.len() > 64 * 1024);
+
+    let destination = clone_repository(directory.path(), &origin, "restored");
+    restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
+    assert_eq!(git_line(&destination, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        git_line(&destination, &["config", "remote.origin.url"]),
+        "https://fetch.example.test/repo.git"
+    );
+    assert_eq!(
+        git_line(
+            &destination,
+            &["config", "--get-all", "remote.origin.pushurl"]
+        ),
+        "https://push.example.test/repo.git"
+    );
+    assert_eq!(
+        git_line(&destination, &["config", "mj.remoteWorkspace"]),
+        "true"
+    );
+    assert_eq!(git_line(&destination, &["config", "mj.baseCommit"]), base);
+    assert_eq!(
+        git_line(&destination, &["config", "push.default"]),
+        "current"
+    );
+    assert_eq!(
+        git_line(&destination, &["config", "push.autoSetupRemote"]),
+        "true"
+    );
+    assert_eq!(fs::read(destination.join("staged.txt")).unwrap(), large);
+    assert_eq!(fs::read(destination.join("dirty.txt")).unwrap(), large);
+    assert_eq!(fs::read(destination.join("untracked.txt")).unwrap(), large);
+    assert_eq!(
+        remote_workspace_base(&SystemGit, &destination).unwrap(),
+        Some(base.clone())
+    );
+    let repeated = collect_git_snapshot(
+        &SystemGit,
+        &destination,
+        &GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: GitHistoryMode::DeltaFrom(base),
+            origin_override: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(repeated.metadata.head_commit, head);
+    assert!(!repeated.committed_bundle.is_empty());
+    assert_eq!(repeated.staged_patch, snapshot.staged_patch);
+    assert_eq!(repeated.unstaged_patch, snapshot.unstaged_patch);
 }
 
 /// Enough text that the capture's patch crosses the 64 KiB pipe buffer a

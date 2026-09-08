@@ -545,7 +545,7 @@ pub struct ProjectRepository {
     /// GitHub HTTPS or SSH URL (or `owner/repository` shorthand).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github: Option<String>,
-    /// Absolute controller-side Git repository exposed through Hel's Git proxy.
+    /// Controller-side repository whose default network remotes seed isolated sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<PathBuf>,
     /// Safe relative path beneath the target's bundle root.
@@ -606,10 +606,10 @@ impl ProjectBundle {
                     repository.id,
                 );
             }
-            if repository.local.is_some() && repository.git_ref.is_some() {
+            if repository.git_ref.is_some() {
                 bail!(
-                    "bundle {bundle_id:?} repository {:?} cannot use `git_ref` with `local`",
-                    repository.id,
+                    "bundle {bundle_id:?} repository {:?}: git_ref is no longer supported; remove it to start from the remote's default branch",
+                    repository.id
                 );
             }
             validate_relative_destination(&repository.destination).with_context(|| {
@@ -629,16 +629,6 @@ impl ProjectBundle {
                 );
             }
             destinations.push(repository.destination.clone());
-            if repository
-                .git_ref
-                .as_deref()
-                .is_some_and(|git_ref| git_ref.trim().is_empty())
-            {
-                bail!(
-                    "bundle {bundle_id:?} repository {:?} has an empty git ref",
-                    repository.id
-                );
-            }
         }
         if !ids.contains(self.primary_repo.as_str()) {
             bail!(
@@ -1002,8 +992,7 @@ pub struct StartupConfig {
     /// Focus the normal composer when the new session is ready.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub prompt: bool,
-    /// Retained so older configuration files remain readable. Mjolnir no
-    /// longer creates or opens a session automatically from this flag.
+    /// Create a first session when opening an empty terminal workspace.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

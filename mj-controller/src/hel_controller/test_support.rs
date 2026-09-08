@@ -56,6 +56,44 @@ pub(super) fn write_checkpoint_gate_archive(
     session_id: &str,
     event_frontier: u64,
 ) -> CheckpointMetadata {
+    write_checkpoint_archive(directory, session_id, event_frontier, Vec::new())
+}
+
+pub(super) fn write_network_checkpoint_archive(
+    directory: &Path,
+    session_id: &str,
+    event_frontier: u64,
+) -> CheckpointMetadata {
+    use hel::hel_archive::{RepositoryMetadata, RepositorySnapshot};
+    write_checkpoint_archive(
+        directory,
+        session_id,
+        event_frontier,
+        vec![RepositorySnapshot {
+            metadata: RepositoryMetadata {
+                id: "project".into(),
+                relative_destination: "project".into(),
+                origin: "https://fetch.example.test/project.git".into(),
+                push_urls: vec!["https://push.example.test/project.git".into()],
+                remote_workspace: true,
+                base_commit: "a".repeat(40),
+                head_commit: "a".repeat(40),
+                branch: Some(format!("mj/{session_id}")),
+            },
+            committed_bundle: Vec::new(),
+            staged_patch: Vec::new(),
+            unstaged_patch: Vec::new(),
+            untracked_tar: Vec::new(),
+        }],
+    )
+}
+
+fn write_checkpoint_archive(
+    directory: &Path,
+    session_id: &str,
+    event_frontier: u64,
+    repositories: Vec<hel::hel_archive::RepositorySnapshot>,
+) -> CheckpointMetadata {
     let archive_path = directory.join(format!("{session_id}.hel.zip"));
     let verified = write_archive_atomic(
         &archive_path,
@@ -98,7 +136,7 @@ pub(super) fn write_checkpoint_gate_archive(
                 queued_prompts: Vec::new(),
             },
             native_artifacts: Vec::new(),
-            repositories: Vec::new(),
+            repositories,
         },
     )
     .unwrap();

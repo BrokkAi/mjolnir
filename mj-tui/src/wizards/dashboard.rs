@@ -482,13 +482,21 @@ impl DashboardState {
             Interaction::Select(id, selected) => {
                 match id {
                     WizardControl::ProfileList => wizard.profile = selected,
-                    WizardControl::BundleList => wizard.bundle = selected,
+                    WizardControl::BundleList => {
+                        if wizard.bundle != selected {
+                            self.invalidate_new_remote_preflight(&mut wizard);
+                        }
+                        wizard.bundle = selected;
+                    }
                     WizardControl::NewBundleRepositories => {
                         wizard.new_bundle_selected =
                             selected.min(wizard.new_bundle_repositories.len().saturating_sub(1));
                         wizard.new_bundle_focus = NewBundleFocus::Repositories;
                     }
                     WizardControl::TargetList => {
+                        if wizard.target != selected {
+                            self.invalidate_new_remote_preflight(&mut wizard);
+                        }
                         wizard.target = selected;
                         let action = self.prepare_new_target(&mut wizard);
                         self.mode = Mode::New(wizard);
@@ -1134,6 +1142,9 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if code == KeyCode::Enter && wizard.focus == WizardFocus::Back {
+            if wizard.step == WizardStep::Review {
+                self.invalidate_new_remote_preflight(&mut wizard);
+            }
             wizard.step = match wizard.step {
                 WizardStep::Target => WizardStep::Profile,
                 WizardStep::Bundle => WizardStep::Target,
@@ -1183,7 +1194,13 @@ impl DashboardState {
         };
         if wizard.focus == WizardFocus::Content && matches!(code, KeyCode::Up | KeyCode::Char('k'))
         {
+            let previous = *wizard.active_index_mut();
             move_index(wizard.active_index_mut(), len, -1);
+            if previous != *wizard.active_index_mut()
+                && matches!(wizard.step, WizardStep::Bundle | WizardStep::Target)
+            {
+                self.invalidate_new_remote_preflight(&mut wizard);
+            }
             let action = if wizard.step == WizardStep::Target {
                 self.prepare_new_target(&mut wizard)
             } else {
@@ -1195,7 +1212,13 @@ impl DashboardState {
         if wizard.focus == WizardFocus::Content
             && matches!(code, KeyCode::Down | KeyCode::Char('j'))
         {
+            let previous = *wizard.active_index_mut();
             move_index(wizard.active_index_mut(), len, 1);
+            if previous != *wizard.active_index_mut()
+                && matches!(wizard.step, WizardStep::Bundle | WizardStep::Target)
+            {
+                self.invalidate_new_remote_preflight(&mut wizard);
+            }
             let action = if wizard.step == WizardStep::Target {
                 self.prepare_new_target(&mut wizard)
             } else {
@@ -1213,7 +1236,10 @@ impl DashboardState {
                 WizardStep::Target => WizardStep::Profile,
                 WizardStep::Bundle => WizardStep::Target,
                 WizardStep::ProjectDirectory => WizardStep::Target,
-                WizardStep::Review => WizardStep::Target,
+                WizardStep::Review => {
+                    self.invalidate_new_remote_preflight(&mut wizard);
+                    WizardStep::Target
+                }
                 WizardStep::Mounts => {
                     unreachable!("mount input is handled before picker navigation")
                 }
@@ -1239,6 +1265,7 @@ impl DashboardState {
             }
             WizardStep::Bundle => {
                 if wizard.bundle == self.config.bundles.len() {
+                    self.invalidate_new_remote_preflight(&mut wizard);
                     wizard.step = WizardStep::NewBundle;
                     wizard.focus = WizardFocus::Content;
                     wizard.new_bundle_focus = NewBundleFocus::Source;
@@ -1572,11 +1599,36 @@ impl DashboardState {
         action
     }
 
+    fn invalidate_new_remote_preflight(&mut self, wizard: &mut NewWizard) {
+        self.invalidate_session_preflight();
+        wizard.remote_repositories = None;
+        wizard.remote_preflight_in_flight = false;
+        wizard.remote_preflight_error = None;
+    }
+
     fn preflight_create_session_action(&mut self, wizard: NewWizard) -> DashboardAction {
-        if wizard.mounts.mounts.is_empty() {
+        let launch = self.create_session_action_without_closing(&wizard);
+        let target_id = nth_key(&self.config.targets, wizard.target);
+        let raw_target = is_bare_project_target(&self.config.targets[&target_id]);
+        if !raw_target && wizard.remote_preflight_in_flight {
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
+        if !raw_target
+            && wizard.remote_repositories.is_some()
+            && wizard.remote_preflight_error.is_none()
+        {
             return self.create_session_action(&wizard);
         }
-        let launch = self.create_session_action_without_closing(&wizard);
+        if wizard.mounts.mounts.is_empty() {
+            if raw_target {
+                return self.create_session_action(&wizard);
+            }
+            self.mode = Mode::New(wizard);
+            return DashboardAction::PreflightCreateSession {
+                launch: Box::new(launch),
+            };
+        }
         let action = DashboardAction::ValidateSessionMounts {
             target_template_id: nth_key(&self.config.targets, wizard.target),
             mounts: wizard.mounts.mounts.clone(),
@@ -1590,7 +1642,7 @@ impl DashboardState {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
-            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
+            workspace_id: wizard.workspace_id.clone(),
             profile_id: nth_key(&self.config.profiles, wizard.profile),
             bundle_id: if raw_project {
                 raw_project_context_id(&wizard.project_directory)
@@ -1628,6 +1680,7 @@ impl DashboardState {
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         };
+        self.invalidate_new_remote_preflight(&mut wizard);
         wizard.bundle = index;
         wizard.step = WizardStep::Review;
         self.notices.set(format!("Created bundle {bundle_id}."));
@@ -2493,7 +2546,7 @@ impl DashboardState {
             return action;
         }
         let launch = DashboardAction::ResumeSession {
-            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
+            workspace_id: wizard.workspace_id.clone(),
             session_id: wizard.session_id.clone(),
             profile_id,
             target_template_id: target_template_id.clone(),
@@ -2614,7 +2667,48 @@ impl DashboardState {
         self.cancel_modal();
     }
 
-    /// Prepare the first session without opening the new-session wizard.
+    /// Mark the new-session review as waiting for its network clone plan.
+    /// The modal stays open so the result can be reviewed before creation.
+    pub fn begin_remote_session_preflight(&mut self, generation: u64) {
+        if generation != self.session_preflight_generation() {
+            return;
+        }
+        if let Mode::New(wizard) = &mut self.mode {
+            wizard.remote_preflight_in_flight = true;
+            wizard.remote_preflight_error = None;
+            wizard.remote_repositories = None;
+        }
+    }
+
+    /// Apply a completed network clone plan, retaining an error in the modal
+    /// when the configured bundle cannot be used as an isolated source.
+    pub fn apply_remote_session_preflight(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<crate::RemoteRepositoryPreview>, String>,
+    ) {
+        if generation != self.session_preflight_generation() {
+            return;
+        }
+        let Mode::New(wizard) = &mut self.mode else {
+            return;
+        };
+        wizard.remote_preflight_in_flight = false;
+        match result {
+            Ok(repositories) => {
+                wizard.remote_repositories = Some(repositories);
+                wizard.remote_preflight_error = None;
+                wizard.review_focus = ReviewFocus::Submit;
+            }
+            Err(error) => {
+                wizard.remote_repositories = None;
+                wizard.remote_preflight_error = Some(error);
+                wizard.review_focus = ReviewFocus::Submit;
+            }
+        }
+    }
+
+    /// Prepare the first prompt without opening the new-session wizard.
     /// Called once when the surface opens, never on subsequent state refreshes.
     pub fn begin_startup_session(
         &mut self,
@@ -2691,6 +2785,7 @@ impl DashboardState {
             })
             .unwrap_or(0);
         self.mode = Mode::New(NewWizard {
+            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             step: WizardStep::Profile,
             focus: WizardFocus::Content,
             profile,
@@ -2710,6 +2805,9 @@ impl DashboardState {
             resource_allocation: None,
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            remote_repositories: None,
+            remote_preflight_in_flight: false,
+            remote_preflight_error: None,
             form: std::cell::RefCell::new(mj_chat::components::Form::default()),
         });
         self.resolve_all_aws_resource_options_action()
@@ -2751,6 +2849,7 @@ impl DashboardState {
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
             session_id: session.id.clone(),
+            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: false,
             preparation: None,
             preparing: false,
@@ -2806,6 +2905,7 @@ impl DashboardState {
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
             session_id: session.id,
+            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: true,
             preparation: None,
             preparing: false,
@@ -2871,6 +2971,7 @@ impl DashboardState {
         };
         self.mode = Mode::Resume(ResumeWizard {
             session_id: session.id,
+            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: true,
             preparation: None,
             preparing: false,

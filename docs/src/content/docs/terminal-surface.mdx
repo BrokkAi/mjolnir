@@ -18,15 +18,18 @@ The Mjolnir TUI is a single control surface for conversations and the infrastruc
 </figure>
 
 At startup, Mjolnir opens the most recently active live session in the selected
-workspace when one is available. Empty workspaces stay empty until you choose
-**Create**. The bordered Workspace tab pane above Sessions filters the live
-session list immediately; every workspace continues running independently.
+workspace when one is available. When the opened workspace has no live sessions,
+the default startup setting creates one from the launch directory once while
+the dashboard opens. Set that setting off to leave the workspace empty until
+you choose **Create**. Switching workspace tabs only filters the live session
+list and never creates a session; every workspace continues running
+independently.
 Stopped history is available from **Resume**, including sessions that were
 previously archived by a provider. Provider archive metadata is read-only.
 
-The Workspace pane has three bordered tab rows above Sessions. Click a tab to
-switch immediately, or focus Workspaces and use the arrow keys to select a
-workspace without opening a manager. `F3` opens workspace management for
+The Workspace pane has one tab row framed by two borders above Sessions. Click a
+tab to switch immediately, or focus Workspaces and use the arrow keys to select
+a workspace without opening a manager. `F3` opens workspace management for
 creating, renaming, recovering, or deleting workspaces. The selected workspace
 also determines where **Create** attaches the new session.
 
@@ -92,14 +95,16 @@ Pane-specific actions are deliberately small:
 
 ## Pane sizes
 
-The bordered Workspaces and Sessions sidebar is 20 columns wide when minimized,
-uses `max(40, terminal width / 3)` columns at standard size, and uses half the
-terminal at maximized size. The Workspaces pane keeps three tab rows above the
-Sessions list at every sidebar size. Targets and Quota each have minimized
-(`▁`), standard (`▪`), and maximized (`□`) title-bar controls. Click a control,
-or focus a support pane and press `Alt+Z` to cycle through its sizes. The
-dashboard still requires at least 80 columns, so standard and maximized are both
-40 columns at the minimum width.
+The bordered Workspaces and Sessions sidebar is 20 columns wide when minimized.
+At standard size it uses one third of the terminal width, bounded to 40–80
+columns; maximized uses half, bounded to 40–100 columns. Both stay within half
+the terminal on narrow screens. The Workspaces pane keeps one bordered tab row
+above the Sessions list at every sidebar size. Sessions, Targets, and Quota each
+have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls.
+Click a control, or focus a support pane and press `Alt+Z` to cycle through its
+sizes. Max is hidden when it adds no space over Standard. The dashboard still
+requires at least 80 columns, so standard and maximized are both 40 columns at
+the minimum width.
 
 - A minimized Targets or Quota pane becomes a one-line summary.
 - A minimized sidebar narrows the workspace tabs and shows two lines per session.

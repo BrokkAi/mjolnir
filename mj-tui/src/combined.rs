@@ -50,6 +50,18 @@ const SUMMARY_ROW: u16 = 1;
 /// summaries occupy two lines, so the returned value is a content height.
 const TALL_TERMINAL_HEIGHT: u16 = 40;
 
+/// Width of the Sessions sidebar for an explicit pane size. The final half
+/// width bound keeps the conversation visible on narrow terminals even when a
+/// clamped size would otherwise be wider than the available screen.
+fn sessions_sidebar_width(width: u16, size: PaneSize) -> u16 {
+    match size {
+        PaneSize::Minimized => 20,
+        PaneSize::Standard => (width / 3).clamp(40, 80),
+        PaneSize::Maximized => (width / 2).clamp(40, 100),
+    }
+    .min(width / 2)
+}
+
 /// How many content lines the minimized Sessions list can show. Short and
 /// tall terminals retain the existing two- and five-entry caps respectively;
 /// each compact entry now occupies two lines.
@@ -288,7 +300,8 @@ fn sized_band(size: PaneSize, minimized_height: u16, full: u16, standard_cap: u1
 }
 
 fn support_panes_fit(area_width: u16, dashboard: &DashboardState) -> bool {
-    let hypothetical_content_width = area_width.saturating_sub(area_width / 2);
+    let hypothetical_content_width =
+        area_width.saturating_sub(sessions_sidebar_width(area_width, PaneSize::Maximized));
     capacity_table_width(dashboard).max(quota_table_width(dashboard)) <= hypothetical_content_width
 }
 
@@ -349,12 +362,8 @@ fn render_combined_themed(
         return;
     }
 
-    let sidebar_width = match dashboard.pane_size(SupportPane::Sessions) {
-        PaneSize::Minimized => 20,
-        PaneSize::Standard => (area.width / 3).max(40),
-        PaneSize::Maximized => area.width / 2,
-    }
-    .min(area.width / 2);
+    let sidebar_width =
+        sessions_sidebar_width(area.width, dashboard.pane_size(SupportPane::Sessions));
     let sidebar_right = dashboard.config.sessions_side == hel::hel_config::SessionsSide::Right;
     let content_area = Rect::new(
         area.x + if sidebar_right { 0 } else { sidebar_width },
@@ -480,7 +489,8 @@ fn render_combined_themed(
     let supports_adjacent = support_panes_fit(area.width, dashboard);
     let mut maximize_enabled =
         maximized_pane_is_effective(area.height, dimensions, desired_prompt, sizes);
-    maximize_enabled[0].1 = area.width / 2 >= (area.width / 3).max(40);
+    maximize_enabled[0].1 = sessions_sidebar_width(area.width, PaneSize::Maximized)
+        > sessions_sidebar_width(area.width, PaneSize::Standard);
     dashboard.set_pane_maximize_enabled(maximize_enabled);
     let allocation =
         allocate_combined_heights(area.height, sessions, targets, quota, desired_prompt, sizes);
@@ -557,9 +567,10 @@ fn render_combined_themed(
         (SupportPane::Targets, targets_area),
         (SupportPane::Quota, quota_area),
     ] {
+        let maximize_enabled = dashboard.pane_maximize_enabled(pane);
         dashboard
             .pane_size_control_areas
-            .extend(pane_size_control_areas(pane_area, pane));
+            .extend(pane_size_control_areas(pane_area, pane, maximize_enabled));
     }
 
     let rendered = render_sessions(frame, sessions_area, dashboard);
@@ -581,7 +592,10 @@ fn render_combined_themed(
                 .borders(Borders::TOP)
                 .title(minimized_targets_line(
                     dashboard,
-                    pane_title_content_width(targets_area.width),
+                    pane_title_content_width(
+                        targets_area.width,
+                        dashboard.pane_maximize_enabled(SupportPane::Targets),
+                    ),
                     focused,
                 ))
                 .title(minimized_pane_size_controls(
@@ -600,7 +614,10 @@ fn render_combined_themed(
                 .borders(Borders::TOP)
                 .title(minimized_quota_line(
                     dashboard,
-                    pane_title_content_width(quota_area.width),
+                    pane_title_content_width(
+                        quota_area.width,
+                        dashboard.pane_maximize_enabled(SupportPane::Quota),
+                    ),
                     focused,
                 ))
                 .title(minimized_pane_size_controls(
@@ -1061,7 +1078,7 @@ mod tests {
                 dashboard.set_pane_size(SupportPane::Sessions, size);
                 let required = capacity_table_width(&dashboard).max(quota_table_width(&dashboard));
                 let threshold = required.saturating_mul(2).saturating_sub(1);
-                for width in [threshold - 1, threshold, 80] {
+                for width in [threshold - 1, threshold, 80, 480] {
                     let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
                     terminal
                         .draw(|frame| render_combined(frame, &mut dashboard, None, false))

@@ -121,6 +121,11 @@ pub enum DashboardAction {
         allow_dirty_local: bool,
         resource_allocation: Option<SessionResourceAllocation>,
     },
+    /// Resolve all network sources for an isolated session and leave the
+    /// creation wizard open until the person reviews that plan.
+    PreflightCreateSession {
+        launch: Box<DashboardAction>,
+    },
     CompleteMountSource {
         target_template_id: String,
         prefix: String,
@@ -304,6 +309,17 @@ pub enum DashboardAction {
         draft_id: String,
     },
     QuitDetach,
+}
+
+/// The network plan shown before an isolated session is created. URLs have
+/// already been sanitized at the resolver boundary, so this type is safe to
+/// render in either the terminal or the phone viewer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRepositoryPreview {
+    pub repository_id: String,
+    pub fetch_url: String,
+    pub default_branch: String,
+    pub push_urls: Vec<String>,
 }
 
 pub use mj_controller::hel_server::{WebListenerProcess, WebViewerAccess, WebViewerRecovery};
@@ -542,7 +558,7 @@ pub struct DashboardState {
     /// selects it.
     pub(crate) session_row_areas: Vec<(usize, Rect)>,
     pub(crate) project_heading_areas: Vec<(String, Rect)>,
-    /// Click targets for the three size controls in each support-pane title.
+    /// Click targets for the visible size controls in each support-pane title.
     pub(crate) pane_size_control_areas: Vec<(SupportPane, PaneSize, Rect)>,
     /// Whether the current frame gives each pane a larger allocation when its
     /// size changes from Standard to the exclusive Maximized state.
@@ -1231,8 +1247,8 @@ impl DashboardState {
                 .find(|(_, _, area)| rect_contains(*area, mouse.column, mouse.row))
             {
                 if size == PaneSize::Maximized && !self.pane_maximize_enabled(pane) {
-                    // Keep the disabled control's hitbox consuming the click
-                    // so it cannot fall through to pane focus or row actions.
+                    // Defend against stale geometry if a resize arrives before
+                    // the next frame redraws the visible controls.
                     return DashboardAction::None;
                 }
                 self.set_pane_size(pane, size);
@@ -1729,6 +1745,13 @@ impl DashboardState {
     /// Identity for supervised launch checks; cancellation invalidates late replies.
     pub fn session_preflight_generation(&self) -> u64 {
         self.session_preflight_generation
+    }
+
+    /// Invalidates an in-flight session preflight while keeping its modal open.
+    /// Selection changes use this so a late result cannot describe a different
+    /// target or repository bundle.
+    pub(crate) fn invalidate_session_preflight(&mut self) {
+        self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);
     }
 
     pub fn cancel_modal(&mut self) {

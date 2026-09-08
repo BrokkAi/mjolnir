@@ -313,21 +313,150 @@ fn new_session_wizard_returns_all_three_choices() {
     );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::CreateSession {
-            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
-            profile_id: "codex-1".into(),
-            bundle_id: "hel".into(),
-            project_directory: None,
-            target_template_id: "podman".into(),
-            additional_mounts: vec![],
-            allow_dirty_local: false,
-            resource_allocation: Some(SessionResourceAllocation::Container {
-                cpus: BASELINE_CPUS,
-                memory_bytes: BASELINE_MEMORY_BYTES,
+        DashboardAction::PreflightCreateSession {
+            launch: Box::new(DashboardAction::CreateSession {
+                workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+                profile_id: "codex-1".into(),
+                bundle_id: "hel".into(),
+                project_directory: None,
+                target_template_id: "podman".into(),
+                additional_mounts: vec![],
+                allow_dirty_local: false,
+                resource_allocation: Some(SessionResourceAllocation::Container {
+                    cpus: BASELINE_CPUS,
+                    memory_bytes: BASELINE_MEMORY_BYTES,
+                }),
             }),
         }
     );
+    assert!(matches!(dashboard.mode, Mode::New(_)));
+}
+
+#[test]
+fn isolated_creation_waits_for_and_reviews_network_sources() {
+    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    dashboard.handle_key(alt_key('w'));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        action,
+        DashboardAction::PreflightCreateSession { .. }
+    ));
+    assert!(matches!(dashboard.mode, Mode::New(_)));
+
+    let generation = dashboard.session_preflight_generation();
+    dashboard.apply_remote_session_preflight(
+        generation,
+        Ok(vec![RemoteRepositoryPreview {
+            repository_id: "hel".into(),
+            fetch_url: "https://github.com/example/hel.git".into(),
+            default_branch: "main".into(),
+            push_urls: vec!["https://github.com/example/hel.git".into()],
+        }]),
+    );
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(action, DashboardAction::CreateSession { .. }));
     assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn isolated_creation_blocks_duplicate_preflight_and_allows_retry_after_failure() {
+    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    dashboard.handle_key(alt_key('w'));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let original_action = dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        original_action,
+        DashboardAction::PreflightCreateSession { .. }
+    ));
+
+    let generation = dashboard.session_preflight_generation();
+    dashboard.begin_remote_session_preflight(generation);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None,
+        "a second submit must not start a second resolver worker"
+    );
+
+    dashboard.apply_remote_session_preflight(generation, Err("remote unavailable".into()));
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw retry review");
+    assert!(
+        buffer_lines(terminal.backend().buffer())
+            .join("\n")
+            .contains("Retry")
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        original_action,
+        "a failed preflight must be retryable from the review button"
+    );
+}
+
+#[test]
+fn switching_workspaces_preserves_remote_preflight_in_its_original_workspace() {
+    let workspace_a = hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned();
+    let workspace_b = "workspace-b".to_owned();
+    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+
+    dashboard.handle_key(alt_key('w'));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let action_a = dashboard.handle_key(key(KeyCode::Enter));
+    let DashboardAction::PreflightCreateSession { launch: launch_a } = action_a else {
+        panic!("network creation should start a remote preflight");
+    };
+    assert!(matches!(
+        launch_a.as_ref(),
+        DashboardAction::CreateSession { workspace_id, .. }
+            if workspace_id == &workspace_a
+    ));
+
+    let generation_a = dashboard.session_preflight_generation();
+    dashboard.begin_remote_session_preflight(generation_a);
+    dashboard.set_active_workspace(Some(workspace_b.clone()));
+    assert!(
+        dashboard.modal_open(),
+        "switching tabs preserves the wizard"
+    );
+    assert_eq!(generation_a, dashboard.session_preflight_generation());
+
+    dashboard.apply_remote_session_preflight(
+        generation_a,
+        Ok(vec![RemoteRepositoryPreview {
+            repository_id: "hel".into(),
+            fetch_url: "https://github.com/example/hel.git".into(),
+            default_branch: "main".into(),
+            push_urls: vec!["https://github.com/example/hel.git".into()],
+        }]),
+    );
+    let completed = dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        completed,
+        DashboardAction::CreateSession { workspace_id, .. } if workspace_id == workspace_a
+    ));
+    assert_eq!(dashboard.active_workspace_id(), Some(workspace_b.as_str()));
+
+    dashboard.handle_key(alt_key('w'));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let action_b = dashboard.handle_key(key(KeyCode::Enter));
+    let DashboardAction::PreflightCreateSession { launch: launch_b } = action_b else {
+        panic!("workspace B should start its own remote preflight");
+    };
+    assert!(matches!(
+        launch_b.as_ref(),
+        DashboardAction::CreateSession { workspace_id, .. }
+            if workspace_id == &workspace_b
+    ));
 }
 
 #[test]
@@ -646,7 +775,7 @@ fn new_bundle_editor_renders_separate_input_and_help_and_accepts_mouse_add() {
     let rendered = lines.join("\n");
     assert!(rendered.contains("New bundle"));
     assert!(rendered.contains("Create bundle"));
-    assert!(rendered.contains("Local Git path or GitHub owner/repository"));
+    assert!(rendered.contains("GitHub source or local Git path with a network remote"));
     assert!(!rendered.contains("Create repository"));
     let (row, column) = lines
         .iter()
@@ -929,17 +1058,19 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
     dashboard.handle_key(key(KeyCode::Enter));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::CreateSession {
-            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
-            profile_id: "codex-1".into(),
-            bundle_id: "zebra-recent".into(),
-            project_directory: None,
-            target_template_id: "podman".into(),
-            additional_mounts: vec![],
-            allow_dirty_local: false,
-            resource_allocation: Some(SessionResourceAllocation::Container {
-                cpus: BASELINE_CPUS,
-                memory_bytes: BASELINE_MEMORY_BYTES,
+        DashboardAction::PreflightCreateSession {
+            launch: Box::new(DashboardAction::CreateSession {
+                workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+                profile_id: "codex-1".into(),
+                bundle_id: "zebra-recent".into(),
+                project_directory: None,
+                target_template_id: "podman".into(),
+                additional_mounts: vec![],
+                allow_dirty_local: false,
+                resource_allocation: Some(SessionResourceAllocation::Container {
+                    cpus: BASELINE_CPUS,
+                    memory_bytes: BASELINE_MEMORY_BYTES,
+                }),
             }),
         }
     );
@@ -1349,6 +1480,28 @@ fn resume_can_convert_to_another_harness() {
     assert!(matches!(dashboard.mode, Mode::Resume(_)));
     dashboard.finish_resume_repository_preflight();
     assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn resume_keeps_the_workspace_where_its_dialog_was_opened() {
+    let workspace_a = hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned();
+    let workspace_b = "workspace-b".to_owned();
+    let mut dashboard = dashboard_with_session(stopped_session());
+    open_resume_wizard(&mut dashboard);
+    dashboard.set_active_workspace(Some(workspace_b));
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let DashboardAction::PreflightResumeRepositories { launch } =
+        dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("resume should retain its captured workspace");
+    };
+    assert!(matches!(
+        launch.as_ref(),
+        DashboardAction::ResumeSession { workspace_id, .. }
+            if workspace_id == &workspace_a
+    ));
 }
 
 #[test]

@@ -650,9 +650,13 @@ fn local_repository_collection_preserves_bundle_order() {
         ],
     };
 
-    let snapshots =
-        collect_local_repositories(&bundle, &[app.clone(), workspace.join("worker")], None)
-            .unwrap();
+    let snapshots = collect_local_repositories(
+        &bundle,
+        &[app.clone(), workspace.join("worker")],
+        true,
+        None,
+    )
+    .unwrap();
     let ids = snapshots
         .iter()
         .map(|snapshot| snapshot.metadata.id.as_str())
@@ -683,10 +687,13 @@ fn local_source_repository_import_carries_no_committed_bundle() {
         }],
     };
 
-    let snapshots = collect_local_repositories(&bundle, &[app], None).unwrap();
+    let snapshots =
+        collect_local_repositories(&bundle, std::slice::from_ref(&app), false, None).unwrap();
 
     assert!(snapshots[0].committed_bundle.is_empty());
-    assert_eq!(snapshots[0].metadata.origin, "mj-local:app");
+    assert_eq!(snapshots[0].metadata.origin, app.to_string_lossy());
+    assert!(!snapshots[0].metadata.remote_workspace);
+    assert!(snapshots[0].metadata.push_urls.is_empty());
     assert!(!snapshots[0].untracked_tar.is_empty());
 }
 
@@ -701,6 +708,22 @@ fn import_without_remote_tracking_refs_reports_how_to_recover() {
         .output()
         .unwrap();
     assert!(output.status.success());
+    let error = import_delta_base(&app, "https://github.com/example/app.git").unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("has no remote-tracking refs to import against"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn isolated_repository_import_records_network_provenance_and_delta() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = directory.path().join("app");
+    initialize_repository(&app, "app");
+    fs::write(app.join("session.txt"), "session work").unwrap();
+    run_git(&app, &["add", "session.txt"]);
+    run_git(&app, &["commit", "-qm", "session work"]);
     let bundle = ProjectBundle {
         primary_repo: "app".into(),
         repositories: vec![ProjectRepository {
@@ -712,12 +735,46 @@ fn import_without_remote_tracking_refs_reports_how_to_recover() {
         }],
     };
 
-    let error = collect_local_repositories(&bundle, &[app], None).unwrap_err();
+    let snapshots = collect_local_repositories(&bundle, &[app], true, None).unwrap();
+    let snapshot = &snapshots[0];
 
-    assert!(
-        format!("{error:#}").contains("has no remote-tracking refs to import against"),
-        "{error:#}"
+    assert_eq!(
+        snapshot.metadata.origin,
+        "https://github.com/example/app.git"
     );
+    assert_eq!(
+        snapshot.metadata.push_urls,
+        ["https://github.com/example/app.git"]
+    );
+    assert!(snapshot.metadata.remote_workspace);
+    assert!(!snapshot.metadata.base_commit.is_empty());
+    assert!(!snapshot.committed_bundle.is_empty());
+}
+
+#[test]
+fn isolated_local_source_import_resolves_the_checkout_network_remote() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = directory.path().join("app");
+    initialize_repository(&app, "app");
+    let bundle = ProjectBundle {
+        primary_repo: "app".into(),
+        repositories: vec![ProjectRepository {
+            id: "app".into(),
+            github: None,
+            local: Some(app.clone()),
+            destination: "app".into(),
+            git_ref: None,
+        }],
+    };
+
+    let snapshots = collect_local_repositories(&bundle, &[app], true, None).unwrap();
+    let snapshot = &snapshots[0];
+
+    assert_eq!(
+        snapshot.metadata.origin,
+        "https://github.com/example/app.git"
+    );
+    assert!(snapshot.metadata.remote_workspace);
 }
 
 #[test]
@@ -2052,4 +2109,23 @@ fn agent_text(event: &WorkerEvent) -> Option<String> {
         .pointer("/update/content/text")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+#[test]
+fn detached_import_uses_the_selected_nonorigin_remote_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = directory.path().join("app");
+    initialize_repository(&app, "app");
+    run_git(&app, &["remote", "rename", "origin", "upstream"]);
+    run_git(
+        &app,
+        &[
+            "symbolic-ref",
+            "refs/remotes/upstream/HEAD",
+            "refs/remotes/upstream/main",
+        ],
+    );
+    run_git(&app, &["checkout", "--detach"]);
+    let baseline = import_delta_base(&app, "https://github.com/example/app.git").unwrap();
+    assert!(!baseline.is_empty());
 }

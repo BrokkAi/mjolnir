@@ -1,6 +1,6 @@
 ---
 title: Workspaces and bundles
-description: Organize Mjolnir sessions, compose multi-repository projects, bridge local Git repositories, and understand persistent project memory.
+description: Organize Mjolnir sessions, compose multi-repository projects, use network-backed Git remotes, and understand persistent project memory.
 ---
 
 Workspaces and bundles solve different problems:
@@ -88,7 +88,6 @@ primary_repo = "app"
 id = "app"
 github = "acme/app"
 destination = "app"
-git_ref = "main"
 
 [[bundles.product.repositories]]
 id = "shared"
@@ -111,9 +110,10 @@ Bundle and repository IDs use 1–64 ASCII letters, digits, `.`, `-`, or `_`;
 Each repository declares exactly one source:
 
 - `github` accepts `owner/repository`, a GitHub HTTPS URL, or a supported GitHub
-  SSH URL. An optional non-blank `git_ref` selects a branch, tag, or commit.
-- `local` names an absolute controller-side Git repository. It cannot be
-  combined with `git_ref`.
+  SSH URL.
+- `local` names an absolute controller-side Git repository whose network remote
+  configuration is resolved at session creation. Its local commits and working
+  tree are never copied into an isolated session.
 
 `destination` is a non-empty relative path beneath the bundle root. It cannot
 contain `.` or `..`, and two destinations cannot overlap. For example, `api`
@@ -126,8 +126,9 @@ form and validation rule.
 
 The terminal new-session wizard can quick-add a simple bundle from an existing
 local repository path or a GitHub `owner/repository`/URL. Edit `config.toml`
-when you need a stable multi-repository layout, a particular `git_ref`, or a
-different primary repository.
+when you need a stable multi-repository layout or a different primary
+repository. Isolated sessions always begin at the resolved fetch remote's
+default branch; `git_ref` is obsolete and is rejected with migration guidance.
 
 Bare targets work differently. A new `local-bare` or `ssh-bare` session selects
 an existing absolute Git project directory instead of a configured bundle.
@@ -140,7 +141,7 @@ existing linked worktree keeps that worktree. See
 
 ## GitHub repositories
 
-GitHub members clone using their configured source and ref. For private HTTPS
+GitHub members clone the default branch of their configured source. For private HTTPS
 repositories, Mjolnir looks for a token in `GH_TOKEN`, then `GITHUB_TOKEN`, then
 the authenticated GitHub CLI. The active token is injected into managed
 non-local sessions and kept out of checkpoints and recovery archives.
@@ -157,42 +158,36 @@ user-only permissions. Unused mirrors are pruned after 30 days and the mirror
 set has a 20 GiB least-recently-used soft cap. Session snapshots are removed
 with their containers.
 
-## Local repositories and the Git bridge
+## Local paths and network remotes
 
-A `local` bundle member is not mounted writable into a target. Instead, Mjolnir
-starts a per-session Git protocol bridge over the session's existing transport.
-The target sees that bridge as its `origin`.
+A `local` bundle member is a controller-side path used to resolve its network
+fetch and push configuration. Mjolnir creates an independent target clone from
+the fetch remote's advertised default branch, then creates the session branch
+`mj/<session-id>`. The target's `origin` keeps the fetch URL and the configured
+push destination(s), including a separate push repository when one is set.
 
-This design provides:
-
-- normal `git fetch` from the controller-side repository;
-- fast-forward `git push origin` back to it;
-- no inbound listening port;
-- no SSH-key copy; and
-- no general writable mount of your source checkout.
-
-Force pushes, ref deletion, and receive hooks are disabled. A push to the
-controller repository's currently checked-out branch is rejected while that
-checkout is dirty. Git LFS is not supported through the bridge.
-
-At initial launch Mjolnir can seed the target from the local repository's
-current branch and uncommitted state. Because this copies work the agent can
-change independently, the new-session flow requires explicit acknowledgment
-when a local repository is dirty. The session's checkpoint then becomes the
-durable source for later resumes rather than reseeding the user's checkout.
+The source checkout is never mounted or copied into the target, and Mjolnir does
+not provide a Git service backed by it. Unpublished commits, staged changes,
+unstaged changes, and untracked files stay on the host. If the source has no
+usable network remote, isolated creation fails before provisioning; a raw local
+session is the only no-remote exception. Closing an isolated session saves its
+checkpoint and does not publish a branch to the host checkout. New
+network-backed sessions can resume from their saved checkpoint, including work
+made after the clone.
 
 Managed targets inherit a small allowlist of useful controller Git settings,
-including identity, pull/rebase behavior, conflict style, rerere, pruning, and
-push defaults. They do not inherit arbitrary Git configuration or credential
-helpers.
+including identity, pull/rebase behavior, conflict style, rerere, and pruning.
+Each new clone uses `push.default=current` so a normal push publishes its session
+branch to the configured push destination(s). Targets do not inherit arbitrary
+Git configuration or credential helpers.
 
 ## Multi-root behavior
 
 The primary repository is the session `cwd`. Other bundle repositories are
 sent through ACP as additional workspace directories, so a capable harness can
 reason across the set without pretending the repositories are one Git tree.
-Each repository keeps its own `.git`, origin, ref, dirty state, and archive
-material.
+Each repository keeps its own `.git`, origin, session branch, dirty state, and
+archive material.
 
 DeepSeek Harness ACP supports one workspace root only. Pair it with a
 single-repository bundle or one bare project directory, and do not add attached

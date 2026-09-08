@@ -1413,9 +1413,10 @@ pub fn command_thread_panic_message(payload: &(dyn std::any::Any + Send)) -> Str
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositorySpec {
-    /// Clone URL for network-backed repositories. `None` creates an empty
-    /// repository which a verified local snapshot restores later.
+    /// Network clone URL. Managed workspaces require a configured remote.
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_urls: Vec<String>,
     pub destination: String,
     pub git_ref: Option<String>,
     /// Read-only bare repository mounted into the target for Git object reuse.
@@ -1439,13 +1440,23 @@ impl ProjectBundleSpec {
         let mut destinations = std::collections::BTreeSet::new();
         for repository in &self.repositories {
             validate_relative_path(&repository.destination)?;
-            if repository
-                .url
-                .as_deref()
-                .is_some_and(|url| url.trim().is_empty() || url.starts_with('-'))
-            {
-                bail!("invalid repository URL");
+            ensure!(
+                repository
+                    .url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty() && !url.starts_with('-')),
+                "isolated repositories require a network Git remote; configure a remote or use a raw local session"
+            );
+            crate::hel_remote_git::validate_network_url(
+                repository.url.as_deref().expect("checked above"),
+            )?;
+            for push_url in &repository.push_urls {
+                crate::hel_remote_git::validate_network_url(push_url)?;
             }
+            ensure!(
+                repository.git_ref.is_none(),
+                "git_ref is no longer supported; remove it to start from the remote's default branch"
+            );
             if !destinations.insert(&repository.destination) {
                 bail!(
                     "duplicate repository destination {}",
@@ -2524,25 +2535,6 @@ fn inspect_recovery_target(
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
         .context("container session target inspection has no state")
-}
-
-/// Run the target-side half of the local Git bridge over the same trusted
-/// execution boundary Hel uses for worker control.
-pub fn git_bridge_command(locator: &TargetLocator, session_id: &str) -> Result<CommandSpec> {
-    let root = worker_root(locator, session_id)?;
-    let binary = format!("{root}/hel");
-    command_on_locator(
-        locator,
-        session_id,
-        vec![
-            binary,
-            "worker".into(),
-            "git-bridge".into(),
-            "--root".into(),
-            root,
-        ],
-        "bridge local Git repositories",
-    )
 }
 
 /// Wrap an argv vector for execution at a provisioned session target.
@@ -3667,21 +3659,19 @@ fn clone_commands(
     ];
     for repository in &bundle.repositories {
         let destination = format!("{workspace}/{}", repository.destination);
-        let Some(url) = &repository.url else {
-            commands.push(
-                wrap(vec!["git".into(), "init".into(), "--".into(), destination])
-                    .purpose(format!("initialize {}", repository.destination))
-                    .stage(ProvisionStage::Cloning)
-                    .parallel_group(BUNDLE_REPOSITORIES_PARALLEL_GROUP),
-            );
-            continue;
-        };
+        let url = repository
+            .url
+            .as_ref()
+            .expect("validated network repository");
         let mut args = vec!["git".to_owned(), "clone".to_owned()];
+        for push_url in &repository.push_urls {
+            args.extend([
+                "--config".into(),
+                format!("remote.origin.pushurl={push_url}"),
+            ]);
+        }
         if let Some(reference) = &repository.reference {
             args.extend(["--reference-if-able".to_owned(), reference.clone()]);
-        }
-        if let Some(git_ref) = &repository.git_ref {
-            args.extend(["--branch".to_owned(), git_ref.clone()]);
         }
         args.push("--".to_owned());
         args.push(url.clone());

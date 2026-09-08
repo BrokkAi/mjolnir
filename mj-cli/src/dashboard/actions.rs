@@ -7,10 +7,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
+use hel::hel_config::is_bare_project_target;
+use hel::hel_remote_git::{default_branch, display_url, resolve_repository};
 use hel::hel_state::{MoveSelection, MoveSessionRequest};
-use hel::hel_targets::CancellableProcessExecutor;
+use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor};
 use hel_tui::WebViewerAccess;
-use hel_tui::{DashboardAction, SessionOperationKind};
+use hel_tui::{DashboardAction, RemoteRepositoryPreview, SessionOperationKind};
 use mj_controller::hel_controller::{Controller, ResumeRepositorySourceReceipt};
 use mj_controller::hel_review_settings::ReviewDiscoveryRequest;
 
@@ -468,6 +470,9 @@ pub(crate) async fn apply_dashboard_action(
                 move |result| DashboardIoUpdate::ProjectValidation { directory, result },
             );
         }
+        DashboardAction::PreflightCreateSession { launch } => {
+            start_create_session_preflight(context, *launch);
+        }
         action @ (DashboardAction::CreateSession { .. }
         | DashboardAction::CreateStartupSession { .. }) => start_session_launch(context, action),
         DashboardAction::RestartSession { session_id } => {
@@ -883,6 +888,86 @@ pub(crate) fn start_resume_repository_preflight(
         },
     );
     Ok(())
+}
+
+/// Resolve the network plan for an isolated creation while the wizard remains
+/// visible. Every Git and network operation is supervised by the cancellable
+/// blocking worker; the terminal event loop only receives the finished plan.
+pub(crate) fn start_create_session_preflight(
+    context: &mut DashboardContext,
+    launch: DashboardAction,
+) {
+    let DashboardAction::CreateSession {
+        bundle_id,
+        target_template_id,
+        ..
+    } = &launch
+    else {
+        context
+            .dashboard
+            .set_failure_notice("invalid session preflight request".to_owned());
+        return;
+    };
+    let Some(target) = context.controller.config.targets.get(target_template_id) else {
+        context
+            .dashboard
+            .set_failure_notice(format!("unknown target template {target_template_id:?}"));
+        return;
+    };
+    if is_bare_project_target(target) {
+        // Raw local targets have no network source plan and are validated by
+        // the existing project-directory flow.
+        context.dashboard.finish_session_mount_preflight();
+        start_session_launch(context, launch);
+        return;
+    }
+    let config = context.controller.config.clone();
+    let bundle_id = bundle_id.clone();
+    let generation = context.dashboard.session_preflight_generation();
+    context.cancel_session_preflight();
+    context.dashboard.begin_remote_session_preflight(generation);
+    let (cancelled, _) = spawn_cancellable_io_with_token(
+        context.critical_operations.clone(),
+        "resolving session repositories",
+        context.dashboard_io_tx.clone(),
+        move |cancelled| {
+            let executor = CancellableProcessExecutor::new(cancelled)
+                .with_deadline(std::time::Duration::from_secs(30));
+            let bundle = config
+                .bundles
+                .get(&bundle_id)
+                .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
+            bundle
+                .repositories
+                .iter()
+                .map(|repository| {
+                    if executor.cancellation_requested() {
+                        bail!("repository preflight cancelled");
+                    }
+                    let source = resolve_repository(repository, &executor)
+                        .with_context(|| format!("repository {:?}", repository.id))?;
+                    let default_branch = default_branch(&source, &executor)
+                        .with_context(|| format!("repository {:?}", repository.id))?;
+                    Ok(RemoteRepositoryPreview {
+                        repository_id: repository.id.clone(),
+                        fetch_url: display_url(&source.fetch_url),
+                        default_branch,
+                        push_urls: source
+                            .push_urls
+                            .iter()
+                            .map(|url| display_url(url))
+                            .collect(),
+                    })
+                })
+                .collect()
+        },
+        move |result| DashboardIoUpdate::RemotePreflight {
+            generation,
+            launch: Box::new(launch),
+            result,
+        },
+    );
+    context.session_preflight_cancel = Some((generation, cancelled));
 }
 
 pub(crate) fn start_session_launch(context: &mut DashboardContext, action: DashboardAction) {

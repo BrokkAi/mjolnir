@@ -229,13 +229,15 @@ permissions, launch-template contract, and connectivity.
 Managed targets—Podman, Docker, Apple Container, SSH Podman, and EC2—clone a
 configured bundle into a new session workspace. `primary_repo` is the agent's
 working directory and every other repository is an additional ACP workspace
-root. GitHub repositories clone normally; controller-side `local` repositories
-use Mjolnir's confined Git bridge.
+root. Every repository clones its network fetch remote's default branch. A
+controller-side `local` path supplies only its configured network fetch and
+push destinations; no Git connection back to that checkout is created.
 
 Local and SSH bare sessions instead choose an existing project directory.
-Moving or resuming a stopped single-repository local session can convert between
-the bundle and bare representations when the destination supports it; a
-multi-repository bundle cannot become one checkout.
+A single-repository isolated session can move into a raw local worktree when
+its source repository is available and contains the archive's prerequisite
+history. Raw sessions cannot move into isolated targets; start a new isolated
+session instead. A multi-repository bundle cannot become one checkout.
 
 DeepSeek Harness supports one ACP workspace root, so it requires a
 single-repository bundle or one existing bare project directory, with no

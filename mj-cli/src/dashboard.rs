@@ -378,6 +378,9 @@ pub(crate) struct DashboardContext {
     /// The active global review choice discovery. New profile/model
     /// selections cancel the old request before starting another one.
     pub(crate) review_discovery_cancel: Option<Arc<AtomicBool>>,
+    /// The cancellable worker resolving an isolated session's network clone
+    /// plan, keyed by the TUI generation that requested it.
+    pub(crate) session_preflight_cancel: Option<(u64, Arc<AtomicBool>)>,
 
     worker_targets_tx: watch::Sender<Vec<WorkerPollTarget>>,
     worker: Feed<SessionManagerUpdates>,
@@ -792,6 +795,12 @@ pub(crate) async fn run_dashboard_for_workspace(
 }
 
 impl DashboardContext {
+    pub(crate) fn cancel_session_preflight(&mut self) {
+        if let Some((_, cancelled)) = self.session_preflight_cancel.take() {
+            cancelled.store(true, Ordering::Release);
+        }
+    }
+
     pub(crate) fn request_shutdown(&mut self) {
         self.begin_shutdown(true);
     }
@@ -1078,6 +1087,7 @@ impl DashboardContext {
             manual_quota_refresh_generation: None,
             target_test_cancel: None,
             review_discovery_cancel: None,
+            session_preflight_cancel: None,
             worker_targets_tx,
             worker: Feed::new(worker_updates_rx),
             runtime_state: Feed::new(runtime_state_rx),
@@ -1916,6 +1926,7 @@ impl DashboardContext {
         if let Some(cancelled) = &self.review_discovery_cancel {
             cancelled.store(true, Ordering::Release);
         }
+        self.cancel_session_preflight();
         for operation in self.lifecycle_operations.values() {
             operation.cancelled.store(true, Ordering::Release);
         }
@@ -2801,7 +2812,11 @@ fn dispatch_event(
                 && !chat.component_modal_open()
         }
         None => {
+            let preflight_generation = context.dashboard.session_preflight_generation();
             *action = dashboard_event_action(&mut context.dashboard, event);
+            if context.dashboard.session_preflight_generation() != preflight_generation {
+                context.cancel_session_preflight();
+            }
             context.controller_changed = true;
             // A modal can change its control geometry without asking for domain
             // work. Draw that state before taking the next queued pointer event.

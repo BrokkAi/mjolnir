@@ -30,10 +30,12 @@ use hel::hel_config::{
 };
 use hel::hel_local_git::main_worktree_root;
 use hel::hel_projection::canonical_session_from_materialized;
+use hel::hel_remote_git::resolve_repository;
 use hel::hel_state::{
     CheckpointMetadata, HelState, SessionRecord, SessionState, harness_session_title,
     new_session_id, normalize_session_title,
 };
+use hel::hel_targets::ProcessExecutor;
 use hel::hel_worker::{SequencedEvent, WorkerEvent, strip_hidden_prompt_context};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2450,7 +2452,9 @@ fn import_claude_session_inner(
             .unwrap_or_else(|| format!("Imported Claude session {}", source.native_session_id)),
     };
     let targets = session_edit_targets(transcript, claude_home)?;
-    let repositories = collect_local_repositories(bundle, &targets.git_roots, control)?;
+    let raw_project = raw_project_import(config, &targets);
+    let repositories =
+        collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
     let native_artifacts = collect_native_artifacts(
         HarnessKind::Claude,
         claude_home,
@@ -2463,7 +2467,6 @@ fn import_claude_session_inner(
     let timestamp = timestamp();
     let profile_id = import_profile_id(config, profile_id, HarnessKind::Claude, claude_home)?;
     let target_id = default_import_target_id(config);
-    let raw_project = raw_project_import(config, &targets);
     let archive_path = archive_directory.join(format!("{session_id}.hel.zip"));
     if let Some(control) = control {
         control.report(ImportArchiveProgress::WritingArchive)?;
@@ -2756,7 +2759,9 @@ pub fn import_native_session(
         }),
     };
     let targets = session_edit_targets(transcript, harness_home)?;
-    let repositories = collect_local_repositories(bundle, &targets.git_roots, control)?;
+    let raw_project = raw_project_import(config, &targets);
+    let repositories =
+        collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
     let native_artifacts =
         collect_import_native_artifacts(harness, harness_home, native_session_id, source_path)?;
     if matches!(harness, HarnessKind::Deepseek | HarnessKind::Muse) {
@@ -2790,7 +2795,6 @@ pub fn import_native_session(
     let timestamp = timestamp();
     let profile_id = import_profile_id(config, profile_id, harness, harness_home)?;
     let target_id = default_import_target_id(config);
-    let raw_project = raw_project_import(config, &targets);
     let archive_path = archive_directory.join(format!("{session_id}.hel.zip"));
     if let Some(control) = control {
         control.report(ImportArchiveProgress::WritingArchive)?;
@@ -2932,6 +2936,7 @@ fn raw_project_import(
 fn collect_local_repositories(
     bundle: &ProjectBundle,
     detected_roots: &[PathBuf],
+    isolated: bool,
     control: Option<&ImportControl<'_>>,
 ) -> Result<Vec<hel::hel_archive::RepositorySnapshot>> {
     let detected = detected_roots
@@ -2942,9 +2947,26 @@ fn collect_local_repositories(
         .repositories
         .iter()
         .map(|repository| {
-            let identity = configured_repository_identity(repository)
-                .with_context(|| format!("repository {:?} has no usable source", repository.id))?;
-            let path = detected.get(&identity).cloned().with_context(|| {
+            // A local source remains identified by its configured path even
+            // after its checkout gains a network origin. GitHub-origin
+            // detection is still used for configured network sources.
+            let path = if let Some(configured_path) = repository.local.as_ref() {
+                let configured_path =
+                    fs::canonicalize(configured_path).unwrap_or_else(|_| configured_path.clone());
+                detected_roots
+                    .iter()
+                    .find(|root| {
+                        fs::canonicalize(root).unwrap_or_else(|_| (*root).clone())
+                            == configured_path
+                    })
+                    .cloned()
+            } else {
+                let identity = configured_repository_identity(repository).with_context(|| {
+                    format!("repository {:?} has no usable source", repository.id)
+                })?;
+                detected.get(&identity).cloned()
+            };
+            let path = path.with_context(|| {
                 format!(
                     "repository {:?} was not detected in the native session",
                     repository.id
@@ -2979,27 +3001,37 @@ fn collect_local_repositories(
                 repository.id,
                 path.display()
             );
-            let history = if repository.is_local() {
-                // The local-repository proxy serves committed history and
-                // provisioning fetches it, so the archive only has to carry
-                // identity and dirty state.
-                GitHistoryMode::NoBundle
+            let source = isolated
+                .then(|| {
+                    resolve_repository(repository, &ProcessExecutor)
+                        .with_context(|| format!("resolve network source for {:?}", repository.id))
+                })
+                .transpose()?;
+            // Isolated imports restore the native session's committed work on
+            // top of the source's available network baseline. Raw imports
+            // continue to use the live local checkout, including repositories
+            // without any remote.
+            let history = if isolated {
+                GitHistoryMode::DeltaFrom(import_delta_base(
+                    &path,
+                    &source.as_ref().expect("isolated source resolved").fetch_url,
+                )?)
             } else {
-                // Import starts from the common ancestor of the local checkout
-                // and the tracked remote, so unpushed commits are included in
-                // the committed delta bundle.
-                GitHistoryMode::DeltaFrom(import_delta_base(&path)?)
+                GitHistoryMode::NoBundle
             };
-            collect_git_snapshot_with_progress(
+            let origin_override = if let Some(source) = &source {
+                Some(source.fetch_url.clone())
+            } else {
+                Some(path.to_string_lossy().into_owned())
+            };
+            let mut snapshot = collect_git_snapshot_with_progress(
                 &git,
                 &path,
                 &GitCollectionSpec {
                     id: repository.id.clone(),
                     relative_destination: repository.destination.clone(),
                     history,
-                    origin_override: repository
-                        .is_local()
-                        .then(|| format!("mj-local:{}", repository.id)),
+                    origin_override,
                 },
                 control.is_none_or(|control| control.include_untracked),
                 &|progress| {
@@ -3020,7 +3052,18 @@ fn collect_local_repositories(
                     }
                 },
             )
-            .with_context(|| format!("collect local repository {:?}", repository.id))
+            .with_context(|| format!("collect local repository {:?}", repository.id))?;
+            if let Some(source) = source {
+                snapshot.metadata.push_urls = source
+                    .push_urls
+                    .iter()
+                    .map(|url| hel::hel_archive::redact_origin_credentials(url))
+                    .collect::<Result<Vec<_>>>()?;
+                snapshot.metadata.remote_workspace = true;
+            } else {
+                snapshot.metadata.push_urls.clear();
+            }
+            Ok(snapshot)
         })
         .collect()
 }
@@ -3090,23 +3133,45 @@ fn import_profile_id(
 /// The upstream revision an imported repository deltas from. A repository
 /// without remote-tracking refs cannot tell us which ancestry a newly
 /// provisioned clone has, and Hel never bundles full history, so it fails here.
-fn import_delta_base(path: &Path) -> Result<String> {
-    let upstream = git_optional_text(path, ["rev-parse", "--verify", "--quiet", "@{upstream}"])?
-        .or(git_optional_text(
-            path,
-            [
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                "refs/remotes/origin/HEAD",
-            ],
-        )?);
-    upstream.with_context(|| {
-        format!(
-            "repository {} has no remote-tracking refs to import against; fetch its remote first",
-            path.display()
-        )
-    })
+fn import_delta_base(path: &Path, fetch_url: &str) -> Result<String> {
+    let remotes = git_optional_text(path, ["remote"])?.unwrap_or_default();
+    let upstream_ref = git_optional_text(
+        path,
+        [
+            "rev-parse",
+            "--symbolic-full-name",
+            "--verify",
+            "--quiet",
+            "@{upstream}",
+        ],
+    )?;
+    for remote in remotes.lines() {
+        let Some(url) = git_optional_text(path, ["remote", "get-url", remote])? else {
+            continue;
+        };
+        let same_source = url == fetch_url
+            || hel::hel_state::ProjectSourceIdentity::git_remote(&url).is_some_and(|identity| {
+                Some(identity) == hel::hel_state::ProjectSourceIdentity::git_remote(fetch_url)
+            });
+        if !same_source {
+            continue;
+        }
+        let prefix = format!("refs/remotes/{remote}/");
+        let revision = upstream_ref
+            .as_deref()
+            .filter(|reference| reference.starts_with(&prefix))
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{prefix}HEAD"));
+        if let Some(base) =
+            git_optional_text(path, ["rev-parse", "--verify", "--quiet", &revision])?
+        {
+            return Ok(base);
+        }
+    }
+    bail!(
+        "repository {} has no remote-tracking refs to import against for its selected network source; fetch its remote first",
+        path.display()
+    )
 }
 
 fn git_optional_text<const N: usize>(cwd: &Path, arguments: [&str; N]) -> Result<Option<String>> {

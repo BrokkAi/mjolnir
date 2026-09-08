@@ -14,8 +14,9 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
         { id: 'remote', kind: 'ssh', requires_project_directory: true, recent_project_directories: ['/remote/recent'] },
       ], bundles, capacity: [], launch_failures: [],
     },
-    snapshots: 0, preflights: [], actions: [], creates: [], dirty: [], rejectCreate: false,
+    snapshots: 0, preflights: [], preflightFailures: 0, actions: [], creates: [], rejectCreate: false,
     holdCreate: null, holdLaunch: null,
+    holdPreflight: null,
   };
   const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
   await page.addInitScript(() => {
@@ -28,12 +29,24 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       close() {}
     };
   });
+  page.on('requestfailed', request => {
+    if (request.url().endsWith('/api/preflight/new')) state.preflightFailures++;
+  });
   await page.route('**/*', async route => {
     const pathname = new URL(route.request().url()).pathname;
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
     if (pathname === '/api/snapshot') { state.snapshots++; return json(state.snapshot); }
     if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
-    if (pathname === '/api/preflight/new') { state.preflights.push(route.request().postDataJSON()); return json({ dirty_repositories: state.dirty }); }
+    if (pathname === '/api/preflight/new') {
+      const request = route.request().postDataJSON();
+      state.preflights.push(request);
+      const bare = state.snapshot.targets.find(target => target.id === request.target_id)?.requires_project_directory === true;
+      if (state.holdPreflight) await state.holdPreflight;
+      return json({
+        remote_repositories: bare ? [] : [{ id: request.bundle_id, fetch_url: 'https://github.com/example/repo.git', default_branch: 'main', push_urls: ['https://github.com/example/repo.git'] }],
+        local_changes_excluded: !bare,
+      });
+    }
     if (pathname === '/api/bundles') {
       state.creates.push(route.request().postDataJSON());
       if (state.holdCreate) await state.holdCreate;
@@ -122,7 +135,7 @@ test('raw projects use host-specific recents and preserve edited paths across Ba
   expect(state.preflights[0]).toMatchObject({ target_id: 'local', project_directory: '/work/custom' });
 });
 
-test('empty bundle list supports creation, retry, selection, and dirty confirmation', async ({ page }) => {
+test('empty bundle list supports creation, retry, selection, and remote review', async ({ page }) => {
   const state = await mount(page, { bundles: [] });
   await projectStep(page);
   await page.locator('#new-next').click();
@@ -136,16 +149,13 @@ test('empty bundle list supports creation, retry, selection, and dirty confirmat
   await page.getByRole('button', { name: 'Save bundle', exact: true }).click();
   await expect(page.locator('#new-bundle').getByRole('radio', { name: 'created', exact: true })).toBeChecked();
   expect(state.creates).toEqual([{ source: 'example/created' }, { source: 'example/created' }]);
-  state.dirty = ['created'];
   await page.locator('#new-next').click();
-  await page.locator('#new-next').click();
-  await expect(page.locator('#new-error')).toContainText('Confirm before starting');
-  await page.getByLabel('Start anyway').check();
-  await page.locator('#new-next').click();
+  await expect(page.locator('#new-step')).toContainText('Local changes');
   await page.locator('#new-next').click();
   await expect(page).toHaveURL(/#workspace\/test$/);
   expect(state.actions).toHaveLength(1);
-  expect(state.actions[0]).toMatchObject({ action: 'new', workspace_id: 'test', bundle_id: 'created', dirty_ack: ['created'] });
+  expect(state.actions[0]).toMatchObject({ action: 'new', workspace_id: 'test', bundle_id: 'created' });
+  expect(state.actions[0]).not.toHaveProperty('dirty_ack');
 });
 
 test('late launch completion cannot replace another workspace wizard', async ({ page }) => {
@@ -164,6 +174,22 @@ test('late launch completion cannot replace another workspace wizard', async ({ 
   await expect(page).toHaveURL(/#workspace\/other\/new$/);
   await expect(page.locator('#new-profile')).toBeVisible();
   expect(state.actions[0].workspace_id).toBe('test');
+});
+
+test('leaving a new wizard aborts its stale preflight request', async ({ page }) => {
+  const state = await mount(page);
+  await projectStep(page);
+  let release;
+  state.holdPreflight = new Promise(resolve => { release = resolve; });
+  await page.locator('#new-next').click();
+  await expect.poll(() => state.preflights.length).toBe(1);
+  await expect(page.locator('#new-next')).toHaveText('Checking…');
+  await page.evaluate(() => { location.hash = '#workspace/other/new'; });
+  await expect(page.locator('#new-profile')).toBeVisible();
+  release();
+  await expect.poll(() => state.preflightFailures).toBeGreaterThan(0);
+  await expect(page.locator('#new-step')).toContainText('Profile');
+  await expect(page.locator('#new-step')).not.toContainText('Local changes');
 });
 
 test('bundle save stays single-flight and a late result cannot alter a replacement wizard', async ({ page }) => {

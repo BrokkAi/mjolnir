@@ -124,12 +124,13 @@ does not copy SSH keys, and raw local sessions are excluded from this token
 sync. Authenticate `gh` on the controller, wait for the next synchronization,
 and use HTTPS Git URLs in isolated targets.
 
-For a repository configured with `local`, the confined Git bridge supports
-normal fetch and fast-forward push, but not Git LFS, force-push, ref deletion,
-or a push into a dirty checked-out branch. Clean or commit the controller-side
-worktree before retrying. See
-[Workspaces and bundles](/workspaces-bundles/) and
-[Security boundaries](/security/).
+For a repository configured with `local`, isolated sessions resolve its default
+network fetch and push remotes. Check those URLs and the fetch remote's
+advertised default branch. Local unpublished commits and dirty files are not
+copied, so cleaning the host working tree does not fix a remote-authentication
+failure. Repositories without network remotes require a raw local session.
+Legacy host-bridge checkpoints cannot resume; start a new network-backed
+session. See [Workspaces and bundles](/workspaces-bundles/).
 
 ## The harness exists in a shell but Mjolnir cannot launch it
 
