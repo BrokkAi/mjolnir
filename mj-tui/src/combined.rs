@@ -45,6 +45,18 @@ const SUMMARY_ROW: u16 = 1;
 /// taller five-row cap; below it the list is capped at two rows.
 const TALL_TERMINAL_HEIGHT: u16 = 40;
 
+/// Width of the Sessions sidebar for an explicit pane size. The final half
+/// width bound keeps the conversation visible on narrow terminals even when a
+/// clamped size would otherwise be wider than the available screen.
+fn sessions_sidebar_width(width: u16, size: PaneSize) -> u16 {
+    match size {
+        PaneSize::Minimized => 24,
+        PaneSize::Standard => (width / 3).clamp(40, 80),
+        PaneSize::Maximized => (width / 2).clamp(40, 100),
+    }
+    .min(width / 2)
+}
+
 /// How many one-line entries the minimized Sessions list can show. Short and
 /// tall terminals retain the existing two- and five-row caps respectively.
 pub(crate) fn minimized_session_rows(frame_height: u16, content_height: usize) -> u16 {
@@ -372,12 +384,8 @@ fn render_combined_themed(
         return;
     }
 
-    let sidebar_width = match dashboard.pane_size(SupportPane::Sessions) {
-        PaneSize::Minimized => 24,
-        PaneSize::Standard => (area.width / 3).clamp(28, 44),
-        PaneSize::Maximized => area.width / 2,
-    }
-    .min(area.width / 2);
+    let sidebar_width =
+        sessions_sidebar_width(area.width, dashboard.pane_size(SupportPane::Sessions));
     let sidebar_right = dashboard.config.sessions_side == hel::hel_config::SessionsSide::Right;
     let content_area = Rect::new(
         area.x + if sidebar_right { 0 } else { sidebar_width },
@@ -496,7 +504,8 @@ fn render_combined_themed(
     let quota = bands[2];
     let mut maximize_enabled =
         maximized_pane_is_effective(area.height, dimensions, desired_prompt, sizes);
-    maximize_enabled[0].1 = area.width / 2 > (area.width / 3).clamp(28, 44);
+    maximize_enabled[0].1 = sessions_sidebar_width(area.width, PaneSize::Maximized)
+        > sessions_sidebar_width(area.width, PaneSize::Standard);
     dashboard.set_pane_maximize_enabled(maximize_enabled);
     let allocation =
         allocate_combined_heights(area.height, sessions, targets, quota, desired_prompt, sizes);
@@ -535,9 +544,10 @@ fn render_combined_themed(
         (SupportPane::Targets, targets_area),
         (SupportPane::Quota, quota_area),
     ] {
+        let maximize_enabled = dashboard.pane_maximize_enabled(pane);
         dashboard
             .pane_size_control_areas
-            .extend(pane_size_control_areas(pane_area, pane));
+            .extend(pane_size_control_areas(pane_area, pane, maximize_enabled));
     }
 
     render_workspace_switcher(frame, workspace_area, &dashboard.workspace_name);
@@ -649,7 +659,10 @@ fn render_combined_themed(
                 .borders(Borders::TOP)
                 .title(minimized_targets_line(
                     dashboard,
-                    pane_title_content_width(targets_area.width),
+                    pane_title_content_width(
+                        targets_area.width,
+                        dashboard.pane_maximize_enabled(SupportPane::Targets),
+                    ),
                     focused,
                 ))
                 .title(minimized_pane_size_controls(
@@ -668,7 +681,10 @@ fn render_combined_themed(
                 .borders(Borders::TOP)
                 .title(minimized_quota_line(
                     dashboard,
-                    pane_title_content_width(quota_area.width),
+                    pane_title_content_width(
+                        quota_area.width,
+                        dashboard.pane_maximize_enabled(SupportPane::Quota),
+                    ),
                     focused,
                 ))
                 .title(minimized_pane_size_controls(

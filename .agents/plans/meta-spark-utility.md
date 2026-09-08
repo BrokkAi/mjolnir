@@ -12,7 +12,7 @@ Anvil callers will be able to select `meta::muse-spark-1.3` using their normal M
 - [x] (2026-09-08) Implement Anvil's Meta client and routing; six local tests and the live prefixed structured-inference test pass. Full release gates are running.
 - [x] (2026-09-08) Mj utility unit tests and live Muse compaction pass against the local release client; Spark 1.3 returned a 107-byte structured snapshot.
 - [x] (2026-09-08) Prepare, validate, push, and publish all three Anvil 0.28.2 crates in version lockstep (trusted publication run 34277179722).
-- [ ] Finish cross-platform CI, tag v0.28.2, and verify GitHub/npm/PyPI release publication.
+- [x] (2026-09-08) Cross-platform CI passed, v0.28.2 was tagged, and GitHub, npm (34281751313), and PyPI (34282247064) publication succeeded.
 - [x] (2026-09-08) Consume registry client 0.28.2 in Mjolnir; full tests, Clippy, licenses, and live compaction pass (120-byte Spark 1.3 snapshot).
 - [x] (2026-09-08) Commit and push Mjolnir's Muse utility update as d324aaa0.
 
@@ -72,6 +72,8 @@ Live protocol proof: `muse-spark-1.3` returned `{"ok":true}` with `response.comp
 
 ## Outcomes & Retrospective
 
-Anvil implementation and all local release gates passed. Commit 0dda93f was pushed to master; trusted publication run 34277179722 succeeded for all three crates, and CI run 34276918491 is underway. Both the prefixed client test and actual CLI returned valid live JSON. Mj's manifest, lockfile, and license report use registry client 0.28.2. Its complete registry-based suite, Clippy, focused ordering tests, and final live structured compaction passed. The final live run returned a 120-byte Spark 1.3 snapshot. Mj is ready to commit and push; Anvil tagging and platform publication remain in progress.
+Anvil implementation and all local release gates passed. Commit 0dda93f was pushed to master; trusted publication run 34277179722 published all three crates, and master CI 34276918491 passed before tagging v0.28.2. Tag CI 34279410346, Docs 34279410361, and idempotent crate publication 34279410374 passed. Release run 34279410324 built all five platform bundles and published https://github.com/BrokkAi/anvil/releases/tag/v0.28.2; npm 34281751313 and PyPI 34282247064 publication succeeded.
+
+Both the prefixed client test and actual CLI returned valid live JSON without modifying native authentication. Mj's manifest, lockfile, and license report use registry client 0.28.2. Its complete registry-based suite, Clippy, focused ordering tests, and final live structured compaction passed. The final live run returned a 120-byte Spark 1.3 snapshot. Mj's Muse integration was committed and pushed as d324aaa0. The separately requested daemon cleanup fix was subsequently pushed as 63b2ec37.
 
 Revision note: initial plan records the confirmed native authentication flow, provider boundaries, release ordering, and acceptance criteria.

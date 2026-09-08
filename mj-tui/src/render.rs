@@ -285,17 +285,35 @@ pub(crate) struct SessionRowsRendered {
 }
 
 const PANE_SIZE_CONTROLS_WIDTH: u16 = 11;
+const PANE_SIZE_CONTROLS_WIDTH_WITHOUT_MAXIMUM: u16 = 7;
 const PANE_SIZE_CONTROL_WIDTH: u16 = 3;
 
-/// The width left for a pane's left title after preserving the border, a gap,
-/// and all three right-aligned size controls.
-pub(crate) fn pane_title_content_width(width: u16) -> u16 {
-    width.saturating_sub(2 + 1 + PANE_SIZE_CONTROLS_WIDTH)
+fn pane_size_controls_width(maximize_enabled: bool) -> u16 {
+    if maximize_enabled {
+        PANE_SIZE_CONTROLS_WIDTH
+    } else {
+        PANE_SIZE_CONTROLS_WIDTH_WITHOUT_MAXIMUM
+    }
 }
 
-/// The three title-bar controls. Their padded backgrounds are the buttons;
-/// the unstyled cells between them keep inactive controls visually distinct.
+/// The width left for a pane's left title after preserving the border, a gap,
+/// and the currently visible right-aligned size controls.
+pub(crate) fn pane_title_content_width(width: u16, maximize_enabled: bool) -> u16 {
+    width.saturating_sub(2 + 1 + pane_size_controls_width(maximize_enabled))
+}
+
+fn displayed_pane_size(active: PaneSize, maximize_enabled: bool) -> PaneSize {
+    if active == PaneSize::Maximized && !maximize_enabled {
+        PaneSize::Standard
+    } else {
+        active
+    }
+}
+
+/// The title-bar controls. Their padded backgrounds are the buttons; the
+/// unstyled cells between them keep inactive controls visually distinct.
 pub(crate) fn pane_size_controls(active: PaneSize, maximize_enabled: bool) -> Line<'static> {
+    let active = displayed_pane_size(active, maximize_enabled);
     let mut spans = Vec::new();
     for (index, (size, glyph)) in [
         (PaneSize::Minimized, "▁"),
@@ -303,16 +321,13 @@ pub(crate) fn pane_size_controls(active: PaneSize, maximize_enabled: bool) -> Li
         (PaneSize::Maximized, "□"),
     ]
     .into_iter()
+    .filter(|(size, _)| *size != PaneSize::Maximized || maximize_enabled)
     .enumerate()
     {
         if index > 0 {
             spans.push(Span::raw(" "));
         }
-        let style = if size == PaneSize::Maximized && !maximize_enabled {
-            Style::default()
-                .fg(theme::palette().border)
-                .remove_modifier(Modifier::BOLD)
-        } else if size == active {
+        let style = if size == active {
             Style::default()
                 .fg(theme::palette().accent)
                 .bg(theme::palette().surface_raised)
@@ -341,13 +356,15 @@ pub(crate) fn minimized_pane_size_controls(
 pub(crate) fn pane_size_control_areas(
     area: Rect,
     pane: SupportPane,
+    maximize_enabled: bool,
 ) -> Vec<(SupportPane, PaneSize, Rect)> {
     let start = area
         .right()
         .saturating_sub(1)
-        .saturating_sub(PANE_SIZE_CONTROLS_WIDTH);
+        .saturating_sub(pane_size_controls_width(maximize_enabled));
     [PaneSize::Minimized, PaneSize::Standard, PaneSize::Maximized]
         .into_iter()
+        .filter(|size| *size != PaneSize::Maximized || maximize_enabled)
         .enumerate()
         .map(|(index, size)| {
             (
@@ -887,9 +904,9 @@ pub(crate) fn minimized_sessions_content_height(dashboard: &DashboardState, widt
 }
 
 /// The Sessions title keeps the workspace ahead of the long pane label when
-/// the screen is narrow, while the size controls always retain their cells.
-fn sessions_title(workspace_name: &str, width: u16) -> Line<'static> {
-    let budget = usize::from(pane_title_content_width(width));
+/// the screen is narrow, while visible size controls retain their cells.
+fn sessions_title(workspace_name: &str, width: u16, maximize_enabled: bool) -> Line<'static> {
+    let budget = usize::from(pane_title_content_width(width, maximize_enabled));
     if workspace_name.is_empty() {
         return Line::raw(crate::widgets::truncate_text(" Sessions ", budget));
     }
@@ -917,12 +934,13 @@ fn sessions_title_with_pending(
     workspace_name: &str,
     width: u16,
     pending_count: usize,
+    maximize_enabled: bool,
 ) -> Line<'static> {
-    let base = sessions_title(workspace_name, width);
+    let base = sessions_title(workspace_name, width, maximize_enabled);
     if pending_count == 0 {
         return base;
     }
-    let budget = usize::from(pane_title_content_width(width));
+    let budget = usize::from(pane_title_content_width(width, maximize_enabled));
     let suffix = Span::styled(
         format!(" · Needs input: {pending_count}"),
         Style::default()
@@ -963,6 +981,7 @@ fn sessions_block(
             } else {
                 0
             },
+            maximize_enabled,
         ))
         .title(pane_size_controls(size, maximize_enabled))
 }
@@ -2462,7 +2481,12 @@ pub(crate) fn render_quotas(
     let label = " Quota ";
     let title_budget = size.map_or_else(
         || area.width.saturating_sub(2),
-        |_| pane_title_content_width(area.width),
+        |_| {
+            pane_title_content_width(
+                area.width,
+                dashboard.pane_maximize_enabled(SupportPane::Quota),
+            )
+        },
     );
     let status_budget = usize::from(title_budget).saturating_sub(label.chars().count());
     let status = crate::widgets::truncate_text(&format!("({refresh_status}) "), status_budget);
@@ -2992,15 +3016,15 @@ mod tests {
 
     #[test]
     fn the_sessions_title_prioritizes_workspace_and_controls_at_minimum_width() {
-        let wide = sessions_title("a-workspace", 120).to_string();
+        let wide = sessions_title("a-workspace", 120, true).to_string();
         assert_eq!(wide, " Sessions · a-workspace ");
         assert!(!wide.contains("Turn"));
         assert!(!wide.contains("Step"));
 
-        let narrow = sessions_title("a-rather-long-workspace-name", 32).to_string();
+        let narrow = sessions_title("a-rather-long-workspace-name", 32, true).to_string();
         assert!(narrow.starts_with(" S · "), "{narrow:?}");
         assert!(narrow.contains('…'), "{narrow:?}");
-        assert!(narrow.chars().count() <= usize::from(pane_title_content_width(32)));
+        assert!(narrow.chars().count() <= usize::from(pane_title_content_width(32, true)));
     }
 
     #[test]
@@ -3012,27 +3036,52 @@ mod tests {
             .draw(|frame| render(frame, &mut dashboard))
             .expect("draw controls");
 
-        assert_eq!(dashboard.pane_size_control_areas.len(), 9);
+        let expected_control_count = [
+            SupportPane::Sessions,
+            SupportPane::Targets,
+            SupportPane::Quota,
+        ]
+        .into_iter()
+        .map(|pane| {
+            if dashboard.pane_maximize_enabled(pane) {
+                3
+            } else {
+                2
+            }
+        })
+        .sum::<usize>();
+        assert_eq!(
+            dashboard.pane_size_control_areas.len(),
+            expected_control_count
+        );
         let buffer = terminal.backend().buffer();
-        for (pane, expected_glyphs) in [
-            (SupportPane::Sessions, ['▁', '▪', '□']),
-            (SupportPane::Targets, ['▁', '▪', '□']),
-            (SupportPane::Quota, ['▁', '▪', '□']),
+        for pane in [
+            SupportPane::Sessions,
+            SupportPane::Targets,
+            SupportPane::Quota,
         ] {
+            let maximize_enabled = dashboard.pane_maximize_enabled(pane);
+            let expected_sizes = [PaneSize::Minimized, PaneSize::Standard, PaneSize::Maximized]
+                .into_iter()
+                .filter(|size| *size != PaneSize::Maximized || maximize_enabled)
+                .collect::<Vec<_>>();
             let controls = dashboard
                 .pane_size_control_areas
                 .iter()
+                .copied()
                 .filter(|(candidate, _, _)| *candidate == pane)
                 .collect::<Vec<_>>();
-            assert_eq!(controls.len(), 3);
-            for ((_, size, area), glyph) in controls.into_iter().zip(expected_glyphs) {
+            assert_eq!(controls.len(), expected_sizes.len());
+            for ((_, size, area), expected_size) in controls.into_iter().zip(expected_sizes) {
+                assert_eq!(size, expected_size);
                 let cell = &buffer[(area.x + 1, area.y)];
-                assert_eq!(cell.symbol(), glyph.to_string());
-                if *size == PaneSize::Maximized && !dashboard.pane_maximize_enabled(pane) {
-                    assert_eq!(cell.bg, theme::palette().surface);
-                    assert_eq!(cell.fg, theme::palette().border);
-                    assert!(!cell.modifier.contains(Modifier::BOLD));
-                } else if *size == PaneSize::Standard {
+                let glyph = match size {
+                    PaneSize::Minimized => "▁",
+                    PaneSize::Standard => "▪",
+                    PaneSize::Maximized => "□",
+                };
+                assert_eq!(cell.symbol(), glyph);
+                if size == PaneSize::Standard {
                     assert_eq!(cell.bg, theme::palette().surface_raised);
                     assert_eq!(cell.fg, theme::palette().accent);
                     assert!(cell.modifier.contains(Modifier::BOLD));
@@ -3051,10 +3100,16 @@ mod tests {
         let target_controls = dashboard
             .pane_size_control_areas
             .iter()
+            .copied()
             .filter(|(pane, _, _)| *pane == SupportPane::Targets)
             .collect::<Vec<_>>();
-        for ((_, _, area), glyph) in target_controls.iter().zip(['▁', '▪', '□']) {
-            assert_eq!(buffer[(area.x + 1, area.y)].symbol(), glyph.to_string());
+        assert_eq!(target_controls.len(), 2);
+        for ((_, size, area), (glyph, expected_size)) in target_controls
+            .into_iter()
+            .zip([("▁", PaneSize::Minimized), ("▪", PaneSize::Standard)])
+        {
+            assert_eq!(size, expected_size);
+            assert_eq!(buffer[(area.x + 1, area.y)].symbol(), glyph);
         }
         let targets_area = dashboard.pane_areas.expect("pane areas")[1];
         assert_eq!(
@@ -3074,24 +3129,120 @@ mod tests {
         assert!(focused_targets.ends_with('─'));
         assert!(!focused_targets.contains('═'));
         dashboard.focus = Focus::Sessions;
-
-        let target_max = dashboard
-            .pane_size_control_areas
-            .iter()
-            .find(|(pane, size, _)| *pane == SupportPane::Targets && *size == PaneSize::Maximized)
-            .map(|(_, _, area)| *area)
-            .expect("Targets maximum control");
-        assert_eq!(dashboard.focus(), Focus::Sessions);
-        dashboard.handle_mouse(mouse_at_row(
-            MouseEventKind::Down(MouseButton::Left),
-            target_max,
-            0,
-        ));
-        assert_eq!(
-            dashboard.pane_size(SupportPane::Targets),
-            PaneSize::Minimized
+        assert!(
+            dashboard
+                .pane_size_control_areas
+                .iter()
+                .all(
+                    |(pane, size, _)| *pane != SupportPane::Targets || *size != PaneSize::Maximized
+                )
         );
         assert_eq!(dashboard.focus(), Focus::Sessions);
+    }
+
+    #[test]
+    fn unavailable_sessions_maximum_is_hidden_and_returns_on_resize() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
+
+        let mut narrow = Terminal::new(TestBackend::new(80, 40)).expect("narrow terminal");
+        narrow
+            .draw(|frame| render(frame, &mut dashboard))
+            .expect("draw narrow dashboard");
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Sessions),
+            PaneSize::Maximized
+        );
+        assert!(!dashboard.pane_maximize_enabled(SupportPane::Sessions));
+        assert_eq!(dashboard.pane_areas.expect("pane areas")[0].width, 40);
+        let session_controls = dashboard
+            .pane_size_control_areas
+            .iter()
+            .copied()
+            .filter(|(pane, _, _)| *pane == SupportPane::Sessions)
+            .collect::<Vec<_>>();
+        assert_eq!(session_controls.len(), 2);
+        assert!(
+            session_controls
+                .iter()
+                .all(|(_, size, _)| *size != PaneSize::Maximized)
+        );
+        let sessions_area = dashboard.pane_areas.expect("pane areas")[0];
+        let session_title = (sessions_area.x..sessions_area.right())
+            .map(|x| narrow.backend().buffer()[(x, sessions_area.y)].symbol())
+            .collect::<String>();
+        assert!(!session_title.contains('□'), "{session_title:?}");
+        assert_eq!(session_controls[1].2.x, session_controls[0].2.x + 4);
+        assert_eq!(session_controls[1].2.right(), sessions_area.right() - 1);
+        let standard = session_controls
+            .iter()
+            .find(|(_, size, _)| *size == PaneSize::Standard)
+            .map(|(_, _, area)| *area)
+            .expect("visible Standard control");
+        let cell = &narrow.backend().buffer()[(standard.x + 1, standard.y)];
+        assert_eq!(cell.bg, theme::palette().surface_raised);
+        assert_eq!(cell.fg, theme::palette().accent);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+
+        dashboard.focus_sessions();
+        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Standard);
+        dashboard.handle_key(alt_key('z'));
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Sessions),
+            PaneSize::Minimized,
+            "Alt-Z skips unavailable Maximized from Standard"
+        );
+
+        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
+        let mut wide = Terminal::new(TestBackend::new(120, 40)).expect("wide terminal");
+        wide.draw(|frame| render(frame, &mut dashboard))
+            .expect("draw wide dashboard");
+        assert_eq!(
+            dashboard.pane_size(SupportPane::Sessions),
+            PaneSize::Maximized
+        );
+        assert!(dashboard.pane_maximize_enabled(SupportPane::Sessions));
+        assert_eq!(dashboard.pane_areas.expect("pane areas")[0].width, 60);
+        let maximum = dashboard
+            .pane_size_control_areas
+            .iter()
+            .find(|(pane, size, _)| *pane == SupportPane::Sessions && *size == PaneSize::Maximized)
+            .map(|(_, _, area)| *area)
+            .expect("visible Maximized control");
+        let sessions_area = dashboard.pane_areas.expect("pane areas")[0];
+        assert_eq!(maximum.right(), sessions_area.right() - 1);
+        let cell = &wide.backend().buffer()[(maximum.x + 1, maximum.y)];
+        assert_eq!(cell.bg, theme::palette().surface_raised);
+        assert_eq!(cell.fg, theme::palette().accent);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn sessions_sidebar_layout_uses_fractional_sizes_and_caps() {
+        for (width, standard, maximized) in
+            [(80, 40, 40), (120, 40, 60), (240, 80, 100), (480, 80, 100)]
+        {
+            let mut standard_dashboard = dashboard_with_session(running_session());
+            standard_dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Standard);
+            drawn(&mut standard_dashboard, width, 40);
+            assert_eq!(
+                standard_dashboard.pane_areas.expect("standard pane areas")[0].width,
+                standard,
+                "standard width at {width} columns"
+            );
+
+            let mut maximized_dashboard = dashboard_with_session(running_session());
+            maximized_dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
+            drawn(&mut maximized_dashboard, width, 40);
+            assert_eq!(
+                maximized_dashboard
+                    .pane_areas
+                    .expect("maximized pane areas")[0]
+                    .width,
+                maximized,
+                "maximized width at {width} columns"
+            );
+        }
     }
 
     #[test]
@@ -5502,7 +5653,7 @@ mod tests {
             .expect("the minimized Targets row");
         let targets = &lines[targets_row];
         assert!(targets.contains("local 3%, morannon 95%"), "{targets:?}");
-        assert!(targets.contains("─ ▁   ▪   □ "), "{targets:?}");
+        assert!(targets.contains("─ ▁   ▪ "), "{targets:?}");
 
         let quota_row = lines
             .iter()
@@ -5643,7 +5794,7 @@ mod tests {
             "the readings are cut rather than wrapped: {:?}",
             rows[0]
         );
-        assert!(rows[0].contains("─ ▁   ▪   □ "), "{:?}", rows[0]);
+        assert!(rows[0].contains("─ ▁   ▪ "), "{:?}", rows[0]);
     }
 
     #[test]
@@ -5818,7 +5969,7 @@ mod tests {
             capacity_target("precision-3260", &["precision-3260"]),
             capacity_target("morannon", &["morannon-podman", "morannon-raw"]),
         ]);
-        let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
 
         terminal
             .draw(|frame| render(frame, &mut dashboard))

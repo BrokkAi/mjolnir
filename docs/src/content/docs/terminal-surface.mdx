@@ -61,12 +61,16 @@ Pane-specific actions are deliberately small:
 
 ## Pane sizes
 
-Sessions, Targets, and Quota each have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls. Click a control, or focus the pane and press `Alt+Z` to cycle through the three sizes.
+Sessions, Targets, and Quota each have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls. Click a control, or focus the pane and press `Alt+Z` to cycle through the available sizes. Max is hidden when it adds no space over Standard.
 
 - A minimized Targets or Quota pane becomes a one-line summary.
 - A minimized Sessions pane narrows the sidebar and shows one line per session.
 - Only one support pane can be maximized at a time.
 - Maximized Sessions widens the full-height sidebar. Maximized Targets or Quota receives available vertical space below Prompt.
+
+Standard Sessions uses one third of the terminal width, bounded to 40–80 columns;
+maximized uses half, bounded to 40–100 columns. Both stay within half the terminal
+on narrow screens.
 
 `Alt+G` toggles a dashboard preset. When all panes are standard, it minimizes Sessions, Targets, and Quota. When sizes have been customized, it restores all three to standard. `Tab` changes only focus and never changes a pane's size.
 
