@@ -143,6 +143,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     MovePrepared {
         session_id: String,
+        request_id: u64,
         result: std::result::Result<MovePreparation, String>,
     },
     CheckpointArchiveSizes {
@@ -1677,17 +1678,19 @@ impl DashboardContext {
                     ));
                 }
             }
-            DashboardIoUpdate::MovePrepared { session_id, result } => match result {
+            DashboardIoUpdate::MovePrepared {
+                session_id,
+                request_id,
+                result,
+            } => match result {
                 Ok(preparation) => {
-                    self.dashboard.apply_move_preparation(preparation);
-                    self.dashboard.set_notice(format!(
-                        "Move prepared for {}; review the current activity and queued work, then press Move again to confirm",
-                        short_id(&session_id)
-                    ));
+                    self.dashboard
+                        .apply_move_preparation(request_id, preparation);
                 }
-                Err(error) => self
-                    .dashboard
-                    .set_move_preparation_failed(&session_id, error),
+                Err(error) => {
+                    self.dashboard
+                        .set_move_preparation_failed(&session_id, request_id, error);
+                }
             },
             DashboardIoUpdate::CheckpointArchiveSizes { generation, sizes } => {
                 if generation == self.checkpoint_archive_generation {
@@ -1707,9 +1710,12 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Path completion failed: {error}")),
             },
-            DashboardIoUpdate::MountValidation { source, result } => self
-                .dashboard
-                .apply_mount_source_validation(&source, result),
+            DashboardIoUpdate::MountValidation { source, result } => {
+                let action = self
+                    .dashboard
+                    .apply_mount_source_validation(&source, result);
+                super::actions::start_move_preparation(self, action);
+            }
             DashboardIoUpdate::SessionMountValidation {
                 generation,
                 launch,

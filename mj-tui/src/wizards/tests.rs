@@ -1129,6 +1129,46 @@ fn resume_wizard(dashboard: &DashboardState) -> &ResumeWizard {
     wizard
 }
 
+fn open_move_review(dashboard: &mut DashboardState) -> u64 {
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None,
+        "profile selection advances to the move target"
+    );
+    let DashboardAction::MoveSession {
+        preparation_request_id: Some(request_id),
+        ..
+    } = dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("entering move review should request preparation");
+    };
+    assert!(resume_wizard(dashboard).preparing);
+    assert_eq!(resume_wizard(dashboard).step, WizardStep::Review);
+    request_id
+}
+
+fn move_preparation() -> hel::hel_state::MovePreparation {
+    hel::hel_state::MovePreparation {
+        selection: hel::hel_state::MoveSelection {
+            session_id: "session-1".into(),
+            profile_id: Some("codex-1".into()),
+            target_template_id: Some("podman".into()),
+            additional_mounts: Some(Vec::new()),
+            resource_allocation: None,
+            clear_resource_allocation: false,
+        },
+        source_profile_id: "codex-1".into(),
+        source_target_template_id: "podman".into(),
+        cross_harness: false,
+        active: true,
+        queued_commands: Vec::new(),
+        fingerprint: "fingerprint".into(),
+        operation_id: "move-1".into(),
+    }
+}
+
 #[test]
 fn resume_dialog_attaches_an_additional_resource() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -1341,7 +1381,14 @@ fn move_wizard_labels_each_step_as_move() {
     assert!(rendered.contains("Move · 2/3"));
     assert!(!rendered.contains("Resume · 2/3"));
 
-    dashboard.handle_key(key(KeyCode::Enter));
+    let preparation_request = dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        preparation_request,
+        DashboardAction::MoveSession {
+            preparation_request_id: Some(_),
+            ..
+        }
+    ));
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .expect("draw move review step");
@@ -1354,37 +1401,25 @@ fn move_wizard_labels_each_step_as_move() {
         .collect::<String>();
     assert!(rendered.contains("Move · 3/3"));
     assert!(!rendered.contains("Resume · 3/3"));
+    assert!(rendered.contains("Checking move destination"));
 }
 
 #[test]
 fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+    let request_id = open_move_review(&mut dashboard);
 
     // A submission that arrives before preparation is ready must leave the
     // wizard open so the user can wait or reprepare the move.
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
     assert!(dashboard.take_move_preparation("session-1").is_none());
     assert!(matches!(dashboard.mode, Mode::Resume(_)));
 
-    let preparation = hel::hel_state::MovePreparation {
-        selection: hel::hel_state::MoveSelection {
-            session_id: "session-1".into(),
-            profile_id: Some("codex-1".into()),
-            target_template_id: Some("podman".into()),
-            additional_mounts: Some(Vec::new()),
-            resource_allocation: None,
-            clear_resource_allocation: false,
-        },
-        source_profile_id: "codex-1".into(),
-        source_target_template_id: "podman".into(),
-        cross_harness: false,
-        active: true,
-        queued_commands: Vec::new(),
-        fingerprint: "fingerprint".into(),
-        operation_id: "move-1".into(),
-    };
-    dashboard.apply_move_preparation(preparation.clone());
+    let preparation = move_preparation();
+    assert!(dashboard.apply_move_preparation(request_id, preparation.clone()));
 
     // A stale action for another session must not consume the confirmation.
     assert!(dashboard.take_move_preparation("other-session").is_none());
@@ -1393,6 +1428,15 @@ fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     };
     assert_eq!(wizard.preparation.as_ref(), Some(&preparation));
 
+    // Once ready, one click emits execution directly. The controller then
+    // takes the retained preparation as the lifecycle handoff.
+    assert!(matches!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::MoveSession {
+            preparation_request_id: None,
+            ..
+        }
+    ));
     assert_eq!(
         dashboard.take_move_preparation("session-1"),
         Some(preparation.clone())
@@ -1402,8 +1446,165 @@ fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     // State/lifecycle replies arriving after handoff must not resurrect the
     // confirmation modal or reapply the consumed preparation.
     dashboard.set_state(dashboard.state.clone());
-    dashboard.apply_move_preparation(preparation);
+    assert!(!dashboard.apply_move_preparation(request_id, preparation));
     assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn failed_move_preparation_stays_visible_and_retry_requests_preparation() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let request_id = open_move_review(&mut dashboard);
+    assert!(dashboard.set_move_preparation_failed(
+        "session-1",
+        request_id,
+        "destination is unavailable".into(),
+    ));
+
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("preparation failure should keep the review open");
+    };
+    assert!(!wizard.preparing);
+    assert!(wizard.preparation.is_none());
+    assert_eq!(
+        wizard.preparation_error.as_deref(),
+        Some("destination is unavailable")
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw failed move review");
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(rendered.contains("Move preparation failed: destination is unavailable"));
+    assert!(rendered.contains("Retry"));
+
+    let retry_id = match dashboard.handle_key(key(KeyCode::Enter)) {
+        DashboardAction::MoveSession {
+            preparation_request_id: Some(request_id),
+            ..
+        } => request_id,
+        action => panic!("retry should request preparation, got {action:?}"),
+    };
+    assert_ne!(retry_id, request_id);
+    assert!(resume_wizard(&dashboard).preparing);
+    assert!(resume_wizard(&dashboard).preparation_error.is_none());
+
+    let preparation = move_preparation();
+    assert!(!dashboard.apply_move_preparation(request_id, preparation.clone()));
+    assert!(dashboard.apply_move_preparation(retry_id, preparation));
+}
+
+#[test]
+fn stale_move_preparation_is_ignored_after_cancel_and_reopen() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let old_request_id = open_move_review(&mut dashboard);
+    let preparation = move_preparation();
+
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+    assert!(!dashboard.apply_move_preparation(old_request_id, preparation.clone()));
+    assert!(!dashboard.set_move_preparation_failed(
+        "session-1",
+        old_request_id,
+        "late failure".into(),
+    ));
+
+    let new_request_id = open_move_review(&mut dashboard);
+    assert_ne!(new_request_id, old_request_id);
+    assert!(!dashboard.apply_move_preparation(old_request_id, preparation));
+    assert!(resume_wizard(&dashboard).preparing);
+}
+
+#[test]
+fn stale_move_preparation_is_ignored_after_back_and_reentering_review() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let old_request_id = open_move_review(&mut dashboard);
+    let preparation = move_preparation();
+
+    // Submit is disabled while loading; Tab reaches Back from the form's
+    // fallback focus. Returning to the target picker invalidates the request.
+    dashboard.handle_key(key(KeyCode::Tab));
+    assert_eq!(resume_wizard(&dashboard).review_focus, ReviewFocus::Back);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Target);
+    assert!(!dashboard.apply_move_preparation(old_request_id, preparation));
+
+    let new_request_id = match dashboard.handle_key(key(KeyCode::Enter)) {
+        DashboardAction::MoveSession {
+            preparation_request_id: Some(request_id),
+            ..
+        } => request_id,
+        action => panic!("reentering review should request preparation: {action:?}"),
+    };
+    assert_ne!(new_request_id, old_request_id);
+    assert!(resume_wizard(&dashboard).preparing);
+}
+
+#[test]
+fn queue_choice_keeps_a_ready_move_confirmation_when_only_prepared_queue_exists() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let request_id = open_move_review(&mut dashboard);
+    let mut preparation = move_preparation();
+    preparation.queued_commands = vec![hel::hel_state::MaterializedQueuedPrompt {
+        command_id: "queued-1".into(),
+        kind: hel::hel_state::QueuedCommandKind::Prompt,
+        content: Vec::new(),
+        queued_at_ms: 1,
+    }];
+    assert!(dashboard.apply_move_preparation(request_id, preparation.clone()));
+
+    // There is no queue in session_details; the prepared queue still owns the
+    // review checkbox and changing its disposition must preserve readiness.
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('q'))),
+        DashboardAction::None
+    );
+    assert!(!resume_wizard(&dashboard).discard_queue);
+    assert_eq!(
+        resume_wizard(&dashboard).preparation.as_ref(),
+        Some(&preparation)
+    );
+
+    assert!(matches!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::MoveSession {
+            preparation_request_id: None,
+            queue: Some(hel::hel_state::ResumeQueueDisposition::Start),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn removing_a_move_attachment_invalidates_and_reprepares_the_review() {
+    let mut session = running_session();
+    session.additional_mounts = vec![AdditionalMount {
+        source: "/opt/cache".into(),
+        destination: "/mnt/cache".into(),
+        read_only: false,
+    }];
+    let mut dashboard = dashboard_with_session(session);
+    let old_request_id = open_move_review(&mut dashboard);
+    assert!(dashboard.apply_move_preparation(old_request_id, move_preparation()));
+
+    // Submit wraps to the attachment list; removing the selected directory
+    // changes the move selection and immediately starts a fresh preparation.
+    dashboard.handle_key(key(KeyCode::Tab));
+    let new_request_id = match dashboard.handle_key(key(KeyCode::Delete)) {
+        DashboardAction::MoveSession {
+            preparation_request_id: Some(request_id),
+            ..
+        } => request_id,
+        action => panic!("removing an attachment should reprepare: {action:?}"),
+    };
+    assert_ne!(new_request_id, old_request_id);
+    let wizard = resume_wizard(&dashboard);
+    assert!(wizard.mounts.mounts.is_empty());
+    assert!(wizard.preparation.is_none());
+    assert!(wizard.preparing);
 }
 
 #[test]

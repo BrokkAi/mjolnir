@@ -911,7 +911,7 @@ impl DashboardState {
 mod tests {
     use super::*;
     use crate::SessionOperationKind;
-    use crate::test_support::{dashboard_with_session, operation, running_session};
+    use crate::test_support::{dashboard_with_session, key, operation, running_session};
 
     #[test]
     fn spinner_selection_waits_for_the_current_save_before_accepting_another() {
@@ -1067,6 +1067,17 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         let _ = dashboard.dispatch_command(CommandId::MoveSession);
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        let preparation_request_id = match dashboard.handle_key(key(KeyCode::Enter)) {
+            DashboardAction::MoveSession {
+                preparation_request_id: Some(request_id),
+                ..
+            } => request_id,
+            action => panic!("entering move review should request preparation: {action:?}"),
+        };
         let preparation = hel::hel_state::MovePreparation {
             selection: hel::hel_state::MoveSelection {
                 session_id: "session-1".into(),
@@ -1084,11 +1095,18 @@ mod tests {
             fingerprint: "fingerprint".into(),
             operation_id: "move-1".into(),
         };
-        dashboard.apply_move_preparation(preparation.clone());
+        assert!(dashboard.apply_move_preparation(preparation_request_id, preparation.clone()));
         let crate::Mode::Resume(wizard) = &dashboard.mode else {
             panic!("move remains in its confirmation wizard");
         };
         assert_eq!(wizard.preparation.as_ref(), Some(&preparation));
         assert!(!wizard.preparing);
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::MoveSession {
+                preparation_request_id: None,
+                ..
+            }
+        ));
     }
 }
