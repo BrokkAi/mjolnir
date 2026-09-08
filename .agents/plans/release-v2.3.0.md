@@ -13,14 +13,18 @@ Publish the work since v2.2.0, including immediate New, startup workspace correc
 - [x] (2026-09-08) Read the release instructions and merge origin/master's native import commit into the current master branch without conflicts.
 - [x] Select minor version 2.3.0 for the combined additions since v2.2.0.
 - [x] (2026-09-08) Synchronize all eight package versions, five dependency constraints, lockfile entries, and the generated license report; supplemental notices match. Prepare the clean release commit for validation.
-- [ ] Run clean-commit formatting, tests, Clippy, release builds, source packaging, license, documentation, and version checks.
-- [ ] Push master, verify CI for the exact release commit, create the annotated tag, and push it.
+- [x] (2026-09-08) Run clean-commit formatting, tests, host and musl Clippy/release builds, whole-workspace checks, all eight source packages, licenses, npm tests, documentation, and version checks against candidate `10004d18`.
+- [x] Push `10004d18` to origin/master; CI passes reliability, Linux desktop, licenses, and voice checks, but exposes an incorrect raw-output readiness assertion in the macOS PTY test.
+- [ ] Validate the corrected PTY readiness check, push the replacement candidate, and verify its CI.
+- [ ] Create and push the annotated tag after exact-commit validation passes.
 - [ ] Verify GitHub artifacts and registry publication.
 
 ## Surprises & Discoveries
 
 
 Local master had two session correction commits while origin/master had one native import commit. A normal merge preserved both without conflicts. The v2.2.0 GitHub, crates.io, and npm workflows all completed successfully. Publisher configuration is unchanged; the user's explicit instruction not to repeat the trust-list detour overrides RELEASING.md's settings-inspection requirement. No authentication or publisher changes are needed.
+
+The macOS PTY log shows the empty preview is correctly rendered through separate cursor-addressed writes (`N`, then ` session`), retaining unchanged cells from `Loading sessions…`. Waiting for contiguous `No sessions` bytes is invalid for incremental terminal rendering. The termination test now waits for the first-frame `PgUp/PgDn preview` controls, after the live feed has started, and preserves its signal, bounded-exit, and terminal-restoration assertions. Empty-preview content is already covered by the preview's buffer-rendering tests.
 
 ## Decision Log
 
@@ -30,7 +34,7 @@ Use 2.3.0 because the release also contains browser voice input and native impor
 ## Outcomes & Retrospective
 
 
-The merged release candidate has synchronized versions and notices. Clean-commit validation, pushing, and publication remain. No v2.3.0 tag has been created yet.
+The release code and version candidate passed local validation and is public on master. A macOS test synchronization repair is being validated before the tag. Publication remains; no v2.3.0 tag has been created yet.
 
 ## Context and Orientation
 
@@ -87,3 +91,5 @@ Use the repository's Rust 1.96 toolchain, cargo-about 0.9.1, cargo-deny 0.20.2, 
 Revision 2026-09-08: start the resumed release with the merged feature scope and explicit commit/push/tag authorization.
 
 Revision 2026-09-08: record synchronized versions and notice checks before creating the clean release candidate.
+
+Revision 2026-09-08: record successful local validation, the public candidate, and the evidence-backed macOS PTY test repair.

@@ -612,8 +612,9 @@ fn live_workspace_preview_terminates_without_reopening_the_fallback_dashboard() 
     wait_for_output(
         &mut master,
         &mut output,
-        // The settled preview has its final geometry after the loading row.
-        b"No sessions",
+        // The live feed starts before the first picker frame. Its controls
+        // mark readiness; preview text can arrive as incremental cell updates.
+        b"PgUp/PgDn preview",
         Instant::now() + TIMEOUT,
     );
     // PageDown and End are harmless even when there is no session to scroll.
