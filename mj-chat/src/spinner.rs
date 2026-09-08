@@ -4,7 +4,7 @@
 //! as `spinner` in `config.toml` and changeable from the command palette.
 //!
 //! Every style renders to frames of exactly [`SPINNER_WIDTH`] display columns
-//! (including its idle frame) so the prompt title never reflows when a turn
+//! (including its idle frame) so the activity row never reflows when a turn
 //! starts, ends, or the style changes. Frames are generated once on first use.
 //!
 //! Frames carry color as [`SpinnerInk`] slots rather than concrete colors, so

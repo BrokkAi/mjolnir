@@ -37,7 +37,9 @@ use super::remote::{
     ChatRemoteOperation, ChatRemoteResult, ChatRemoteSupervisor, apply_chat_remote_result,
     queue_chat_remote_operation, restore_unsent_input, restore_unsent_prompt,
 };
-use super::rendering::{display_width, truncate_to_width, voice_button_area, voice_button_line};
+use super::rendering::{
+    display_width, truncate_line_to_width, truncate_to_width, voice_button_area, voice_button_line,
+};
 use super::second_opinion::{
     CapturedProposal, ReviewerPane, SecondOpinion, SecondOpinionIntent, render_reviewer,
     render_setup, render_split_actions, review_role_session_id, reviewer_session_id,
@@ -2578,9 +2580,19 @@ pub(super) fn render_in(
     // Modals and the completion popup are centred in the whole frame, not
     // in the band the transcript happens to have been given.
     let inner = regions.overlay;
-    let transcript_area = regions.transcript;
+    let mut transcript_area = regions.transcript;
     let prompt_area = regions.prompt;
     let prompt_width = prompt_content_width(prompt_area.width);
+    // Keep activity next to the composer without taking space from its input.
+    let activity_area = (chat.needs_animation() && transcript_area.height > 3).then(|| {
+        transcript_area.height -= 1;
+        Rect::new(
+            transcript_area.x,
+            transcript_area.bottom(),
+            transcript_area.width,
+            1,
+        )
+    });
     // The button lives on the prompt's bottom border, so it is not part of
     // the selectable prompt interior. Clear the hitbox first because a split
     // view or modal may replace the composer for this frame.
@@ -2661,7 +2673,11 @@ pub(super) fn render_in(
         chat.split_action_areas.clear();
         chat.turn_review_action_areas.clear();
         let queued = chat.queued_prompts.len();
-        let prompt_title = prompt_title(chat, queued);
+        let prompt_title = if activity_area.is_some() {
+            " Prompt ".to_owned()
+        } else {
+            prompt_title(chat, queued)
+        };
         let mut prompt_block = theme::panel(prompt_focused)
             .padding(Padding::horizontal(1))
             .title(prompt_title);
@@ -2758,6 +2774,30 @@ pub(super) fn render_in(
                 input_scroll,
             );
         }
+    }
+    if let Some(area) = activity_area {
+        let mut activity = if area.width >= 48 {
+            chat.activity_spinner()
+        } else {
+            Line::from(crate::spinner::compact_span(
+                chat.spinner_style,
+                crate::spinner::elapsed_ms(),
+            ))
+        };
+        activity.spans.insert(0, Span::raw("  "));
+        let status = chat
+            .turn_review()
+            .and_then(|review| review.view.activity_label())
+            .map_or_else(
+                || prompt_title(chat, chat.queued_prompts.len()),
+                |label| format!(" {label} "),
+            );
+        activity.spans.push(Span::styled(status, theme::muted()));
+        frame.render_widget(
+            Paragraph::new(truncate_line_to_width(activity, usize::from(area.width)))
+                .style(theme::base()),
+            area,
+        );
     }
     if let Some(footer_area) = regions.footer {
         render_chat_footer(frame, footer_area, chat, prompt_focused);
@@ -4538,6 +4578,55 @@ mod tests {
                 "",
                 "row {y} sits below the prompt region and must stay untouched"
             );
+        }
+    }
+
+    #[test]
+    fn activity_stays_above_the_prompt_without_moving_the_input() {
+        for width in [32, 48, 80] {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.set_input("my follow-up".into());
+            let idle = drawn_transcript(&mut chat, width, 24);
+            let input = chat
+                .frame_surfaces()
+                .surface(SurfaceId::PromptInput)
+                .unwrap()
+                .rect;
+
+            chat.mark_prompt_submitted("continue");
+            let running = drawn_transcript(&mut chat, width, 24);
+            let activity_row = usize::from(input.y - 2);
+            let activity = &running[activity_row];
+            let status = activity.find("Running").expect("running status by prompt");
+            assert_eq!(
+                display_width(&activity[..status]),
+                2 + if width >= 48 {
+                    crate::spinner::SPINNER_WIDTH
+                } else {
+                    1
+                } + 1,
+                "the spinner leads the status at the left: {activity}"
+            );
+            assert_eq!(running[0], idle[0], "activity leaves the header alone");
+            assert_eq!(
+                &running[activity_row + 1..],
+                &idle[activity_row + 1..],
+                "the prompt, draft, and footer keep their positions"
+            );
+            assert!(
+                chat.frame_surfaces()
+                    .surface(SurfaceId::Transcript)
+                    .unwrap()
+                    .rect
+                    .bottom()
+                    <= activity_row as u16,
+                "activity is outside the selectable transcript"
+            );
+
+            chat.phase = WorkerPhase::Idle;
+            chat.prompt_in_flight = false;
+            chat.turn_started_at_epoch_seconds = None;
+            assert_eq!(drawn_transcript(&mut chat, width, 24), idle);
         }
     }
 

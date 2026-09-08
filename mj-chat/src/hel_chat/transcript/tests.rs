@@ -378,7 +378,7 @@ fn conversation_title_shows_review_activity_then_restores_primary_activity() {
 }
 
 #[test]
-fn long_conversation_titles_leave_a_gap_before_full_and_compact_activity() {
+fn long_conversation_titles_use_the_header_width_while_working() {
     use ratatui::{Terminal, backend::TestBackend};
 
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -392,15 +392,8 @@ fn long_conversation_titles_leave_a_gap_before_full_and_compact_activity() {
                 render_transcript(frame, area, &mut chat, false);
             })
             .expect("render conversation");
-        let activity_width = if width >= 48 {
-            chat.activity_spinner().width() + 2
-        } else {
-            3
-        };
-        let title_width = usize::from(width) - 2 - activity_width - 1;
         let buffer = terminal.backend().buffer();
-        assert!((1..=title_width).any(|x| buffer[(x as u16, 0)].symbol() == "…"));
-        assert_eq!(buffer[(title_width as u16 + 1, 0)].symbol(), "─");
+        assert_eq!(buffer[(width - 2, 0)].symbol(), "…");
     }
 }
 

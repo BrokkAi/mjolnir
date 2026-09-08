@@ -138,7 +138,8 @@ pub fn review_status_line(review: &hel::hel_config::ReviewConfig, open: bool) ->
 /// Where a host surface has told the chat to draw itself.
 ///
 /// `transcript` and `prompt` are the *outer* rectangles including each block's
-/// border. `footer` is `Some` only when the host wants the chat to own the
+/// border. While busy, the transcript's last row holds activity above the
+/// prompt. `footer` is `Some` only when the host wants the chat to own the
 /// footer row, which it does while the composer has focus. `overlay` is the
 /// whole frame: modals and the autocomplete popup are centred and clamped
 /// inside it rather than inside the bands above.

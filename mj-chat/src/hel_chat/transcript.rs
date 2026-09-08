@@ -2112,28 +2112,10 @@ pub(super) fn render_transcript(
     let at_tail = window.anchor == TranscriptAnchor::Bottom;
     let top = window.top;
     let title = transcript_title(chat, hel::clock::epoch_seconds());
-    let activity = (chat.needs_animation() && area.width >= 12).then(|| {
-        let mut activity = if area.width >= 48 {
-            chat.activity_spinner()
-        } else {
-            Line::from(crate::spinner::compact_span(
-                chat.spinner_style,
-                crate::spinner::elapsed_ms(),
-            ))
-        };
-        activity.spans.insert(0, Span::raw(" "));
-        activity.spans.push(Span::raw(" "));
-        activity
-    });
-    let title_width = usize::from(area.width.saturating_sub(2))
-        .saturating_sub(activity.as_ref().map_or(0, |line| line.width() + 1));
-    let mut block = block.title(truncate_line_to_width(
+    let block = block.title(truncate_line_to_width(
         Line::styled(title, theme::title(false)),
-        title_width,
+        usize::from(area.width.saturating_sub(2)),
     ));
-    if let Some(activity) = activity {
-        block = block.title(activity.right_aligned());
-    }
     frame.render_widget(block, area);
     let visible = window
         .rows
