@@ -3614,6 +3614,7 @@ mod tests {
     fn regular_prompt_draws_microphone_after_the_title_on_its_top_border() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_voice_available(true);
+        chat.mark_prompt_submitted("continue");
 
         let rows = drawn_transcript(&mut chat, 80, 24);
         assert!(
@@ -3636,6 +3637,20 @@ mod tests {
                 .y
                 .saturating_sub(1)
         );
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: button.x + 1,
+            row: button.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(chat.handle_mouse(press), ChatAction::None);
+        assert_eq!(
+            chat.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                ..press
+            }),
+            ChatAction::ToggleVoice
+        );
     }
 
     #[test]
@@ -3656,6 +3671,33 @@ mod tests {
         assert!(!screen.contains("Background:"), "{screen}");
 
         let task_area = chat.task_control_area.expect("task control hitbox");
+        chat.mark_prompt_submitted("continue");
+        chat.steering_supported = Some(true);
+        chat.queued_prompts.push_back(queued("next", "follow up"));
+        let rows = drawn_transcript(&mut chat, 100, 24);
+        let shifted_task_area = chat.task_control_area.expect("shifted task control hitbox");
+        assert!(shifted_task_area.x > task_area.x);
+        let border = &rows[usize::from(shifted_task_area.y)];
+        assert!(border.contains("1 queued · Esc steers next"), "{border}");
+        let task_offset = border.find("View tasks (1)").expect("task label");
+        assert_eq!(
+            rendering::display_width(&border[..task_offset]),
+            usize::from(shifted_task_area.x + 1)
+        );
+        for width in [32, 48, 56, 80] {
+            let rows = drawn_transcript(&mut chat, width, 24);
+            let border = &rows[usize::from(shifted_task_area.y)];
+            assert!(border.contains("1 queued · Esc steers next"), "{border}");
+            if width == 32 {
+                assert!(chat.task_control_area.is_none());
+                assert!(!border.contains("View tasks"), "{border}");
+            } else {
+                assert!(chat.task_control_area.is_some());
+                assert!(border.contains("View tasks (1)"), "{border}");
+            }
+        }
+        drawn_transcript(&mut chat, 100, 24);
+        let task_area = shifted_task_area;
         let cursor_before = chat.input_cursor;
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
