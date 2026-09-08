@@ -824,7 +824,13 @@ async fn run_bridge(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("launch ACP bridge {}", spec.command.display()))?;
+        .with_context(|| {
+            format!(
+                "launch ACP bridge {} in working directory {}",
+                spec.command.display(),
+                spec.cwd.display()
+            )
+        })?;
     let stdin = child.stdin.take().context("ACP bridge stdin unavailable")?;
     let stdout = child
         .stdout

@@ -1646,6 +1646,39 @@ fn mark_session_target_missing_to(
     detail: &str,
     updated_at: &str,
 ) -> Result<Option<SessionState>> {
+    mark_session_target_missing_if_current_to(path, session_id, detail, updated_at, None)
+}
+
+/// Record a definitive worker failure only while the observed session record
+/// is still current. A delayed background write must not invalidate a resume.
+pub fn mark_session_target_missing_if_current(
+    session_id: &str,
+    detail: &str,
+    updated_at: &str,
+    observed_updated_at: &str,
+) -> Result<Option<SessionState>> {
+    let session_id = session_id.to_owned();
+    let detail = detail.to_owned();
+    let updated_at = updated_at.to_owned();
+    let observed_updated_at = observed_updated_at.to_owned();
+    submit_database_write("mark_session_target_missing_if_current", move |_| {
+        mark_session_target_missing_if_current_to(
+            &database_path(),
+            &session_id,
+            &detail,
+            &updated_at,
+            Some(&observed_updated_at),
+        )
+    })
+}
+
+fn mark_session_target_missing_if_current_to(
+    path: &Path,
+    session_id: &str,
+    detail: &str,
+    updated_at: &str,
+    observed_updated_at: Option<&str>,
+) -> Result<Option<SessionState>> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
@@ -1660,8 +1693,9 @@ fn mark_session_target_missing_to(
              last_error = ?2,
              updated_at = ?3
          WHERE session_id = ?1
+           AND (?4 IS NULL OR updated_at = ?4)
            AND state IN ('provisioning', 'running', 'disconnected', 'error')",
-        params![session_id, detail, updated_at],
+        params![session_id, detail, updated_at, observed_updated_at],
     )?;
     ensure!(changed <= 1, "updated {changed} sessions for {session_id}");
     let state = if changed == 1 {

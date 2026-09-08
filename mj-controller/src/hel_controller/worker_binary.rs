@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::hel_session_manager::{
     ProjectMemorySyncTarget, RemoteWorkerBinaryRefresh, WorkerBinaryRefresh,
-    WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan,
+    WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
 };
 use hel::hel_config::{
     ExecutionPolicy, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write,
@@ -195,8 +195,10 @@ impl Controller {
     pub fn worker_recovery_plan(&self, session_id: &str) -> Result<WorkerRecoveryPlan> {
         let (backend, worker_root) = self.worker_placement(session_id)?;
         let launch = self.current_worker_launch_config(session_id, &backend)?;
+        let workspace = worker_workspace_for_recovery(&backend, &launch.cwd);
         Ok(WorkerRecoveryPlan {
             target: hel_targets::target_recovery_plan(&backend, session_id)?,
+            workspace,
             liveness_probe: worker_liveness_command(&backend, &worker_root),
             binary_refresh: worker_binary_refresh_plan(&backend, session_id)?,
             launch_refresh: Some(worker_launch_refresh_plan(&backend, session_id, &launch)?),
@@ -282,6 +284,33 @@ impl Controller {
             canonical_root: canonical_memory_root(&launch.project_key),
         })
     }
+}
+
+fn worker_workspace_for_recovery(
+    backend: &hel_targets::TargetLocator,
+    directory: &Path,
+) -> Option<WorkerWorkspace> {
+    let target = match backend {
+        hel_targets::TargetLocator::LocalBare { .. } => {
+            hel::hel_state::ManagedWorktreeTarget::Local
+        }
+        hel_targets::TargetLocator::SshBare { ssh, .. } => {
+            hel::hel_state::ManagedWorktreeTarget::Ssh {
+                destination: ssh.destination.clone(),
+                ssh_args: ssh.ssh_args.clone(),
+            }
+        }
+        hel_targets::TargetLocator::LocalPodman { .. }
+        | hel_targets::TargetLocator::LocalDocker { .. }
+        | hel_targets::TargetLocator::AppleContainer { .. }
+        | hel_targets::TargetLocator::AwsEc2 { .. }
+        | hel_targets::TargetLocator::SshPodman { .. }
+        | hel_targets::TargetLocator::SshDocker { .. } => return None,
+    };
+    Some(WorkerWorkspace {
+        target,
+        directory: directory.to_path_buf(),
+    })
 }
 
 fn worker_launch_config(
@@ -2699,6 +2728,67 @@ mod tests {
             identity_file: None,
             extra_args: Vec::new(),
         }
+    }
+
+    #[test]
+    fn recovery_workspace_uses_the_launch_directory_for_bare_targets_only() {
+        let cwd = PathBuf::from("/workspace/session/project");
+        let local = worker_workspace_for_recovery(
+            &hel_targets::TargetLocator::LocalBare {
+                worker_root: "/workspace/session/worker".into(),
+            },
+            &cwd,
+        )
+        .expect("local bare targets need a workspace probe");
+        assert_eq!(local.directory, cwd);
+        assert_eq!(local.target, hel::hel_state::ManagedWorktreeTarget::Local);
+
+        let remote = worker_workspace_for_recovery(
+            &hel_targets::TargetLocator::SshBare {
+                ssh: SshTarget {
+                    destination: "dev@builder".into(),
+                    ssh_args: vec!["-oBatchMode=yes".into()],
+                },
+                workspace: "/workspace/session".into(),
+            },
+            &cwd,
+        )
+        .expect("SSH bare targets need a workspace probe");
+        assert_eq!(remote.directory, cwd);
+        assert_eq!(
+            remote.target,
+            hel::hel_state::ManagedWorktreeTarget::Ssh {
+                destination: "dev@builder".into(),
+                ssh_args: vec!["-oBatchMode=yes".into()],
+            }
+        );
+
+        assert!(
+            worker_workspace_for_recovery(
+                &hel_targets::TargetLocator::LocalPodman {
+                    container_id: "container".into(),
+                    workspace_storage: Default::default(),
+                },
+                &cwd,
+            )
+            .is_none()
+        );
+        assert!(
+            worker_workspace_for_recovery(
+                &hel_targets::TargetLocator::AwsEc2 {
+                    profile: "default".into(),
+                    region: "us-east-1".into(),
+                    instance_id: "i-test".into(),
+                    ssh: SshTarget {
+                        destination: "dev@builder".into(),
+                        ssh_args: Vec::new(),
+                    },
+                    workspace: "/workspace/session".into(),
+                },
+                &cwd,
+            )
+            .is_none()
+        );
     }
 
     #[test]

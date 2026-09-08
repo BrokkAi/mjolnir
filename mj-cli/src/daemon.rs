@@ -1012,6 +1012,68 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// Definitive missing-target evidence belongs to the daemon, including
+    /// when no terminal is attached. Generic connection failures stay transient.
+    fn missing_target_record(
+        &self,
+        session_id: &str,
+        view: &ManagedSessionView,
+    ) -> Option<(String, String)> {
+        let Some(ViewError::TargetMissing(detail)) = &view.error else {
+            return None;
+        };
+        if view.connected {
+            return None;
+        }
+        if self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(session_id)
+            .is_some_and(|active| active.result.borrow().is_none())
+        {
+            return None;
+        }
+        let controller = self
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let session = controller.state.sessions.get(session_id)?;
+        if !matches!(
+            session.state,
+            SessionState::Running | SessionState::Disconnected
+        ) {
+            return None;
+        }
+        Some((detail.clone(), session.updated_at.clone()))
+    }
+
+    async fn persist_missing_target(
+        &self,
+        session_id: &str,
+        detail: String,
+        observed_updated_at: String,
+    ) -> Result<()> {
+        let changed = blocking({
+            let session_id = session_id.to_owned();
+            let detail = detail.clone();
+            move || {
+                hel::hel_database::mark_session_target_missing_if_current(
+                    &session_id,
+                    &detail,
+                    &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    &observed_updated_at,
+                )
+            }
+        })
+        .await?;
+        if changed.is_some() {
+            self.reload_controller().await?;
+            self.push_notice(session_id, detail);
+        }
+        Ok(())
+    }
+
     async fn publish_session(&self, session_id: String, view: ManagedSessionView) -> Result<()> {
         let connected = view.connected;
         let has_snapshot = view.snapshot.is_some();
@@ -3880,6 +3942,20 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
                     let Some(update) = update else {
                         bail!("controller daemon session manager stopped");
                     };
+                    if let Some((detail, observed_updated_at)) =
+                        state.missing_target_record(&update.session_id, &update.view)
+                    {
+                        let state = state.clone();
+                        let session_id = update.session_id.clone();
+                        client_tasks.spawn(async move {
+                            if let Err(error) = state.persist_missing_target(
+                                &session_id, detail, observed_updated_at,
+                            ).await {
+                                tracing::warn!(%session_id, %error, "could not persist missing worker target");
+                                state.push_notice(&session_id, format!("Could not record missing session target: {error:#}"));
+                            }
+                        });
+                    }
                     if let Some(publisher) = phone_publisher.as_ref()
                         && let Err(error) = publisher.try_publish(
                             update.session_id.clone(),
@@ -5493,6 +5569,58 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(ids, BTreeSet::from(["history", "local"]));
+    }
+
+    #[tokio::test]
+    async fn daemon_records_definitive_missing_workspaces_without_an_attached_surface() {
+        let state = test_runtime_state();
+        let session = runtime_test_session("missing", "workspace", SessionState::Running);
+        state
+            .controller
+            .lock()
+            .unwrap()
+            .state
+            .sessions
+            .insert(session.id.clone(), session.clone());
+        assert!(state.attachments.lock().unwrap().is_empty());
+        let mut view = ManagedSessionView {
+            snapshot: None,
+            connected: false,
+            error: Some(ViewError::Unreachable(
+                "relay proxy disconnected during hello".into(),
+            )),
+        };
+        assert!(state.missing_target_record(&session.id, &view).is_none());
+        view.error = Some(ViewError::TargetMissing(
+            "working directory /missing is gone".into(),
+        ));
+        assert_eq!(
+            state.missing_target_record(&session.id, &view),
+            Some((
+                "working directory /missing is gone".into(),
+                session.updated_at
+            )),
+        );
+        state
+            .controller
+            .lock()
+            .unwrap()
+            .state
+            .sessions
+            .get_mut(&session.id)
+            .unwrap()
+            .state = SessionState::Closing;
+        assert!(state.missing_target_record(&session.id, &view).is_none());
+        state
+            .controller
+            .lock()
+            .unwrap()
+            .state
+            .sessions
+            .get_mut(&session.id)
+            .unwrap()
+            .state = SessionState::Error;
+        assert!(state.missing_target_record(&session.id, &view).is_none());
     }
 
     #[tokio::test]

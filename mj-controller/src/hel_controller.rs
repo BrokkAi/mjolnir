@@ -61,6 +61,7 @@ pub use backend::image_refresh_plan;
 use backend::validate_resource_allocation;
 use provisioning::apply_failed_new_session_rollback;
 pub(crate) use worker_binary::refresh_remote_worker_binary_if_stale;
+pub(crate) use worktree::path_exists_on_managed_target;
 
 pub use checkpoint::{
     CheckpointArtifact, CheckpointDeferred, checkpoint_was_deferred,

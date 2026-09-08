@@ -3556,34 +3556,40 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
 #[tokio::test]
 async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
     let temp = tempfile::tempdir().unwrap();
-    let (_request_tx, request_rx) = mpsc::channel(1);
-    let (event_tx, mut event_rx) = mpsc::channel(16);
-    let missing_bridge = temp.path().join("missing-acp-bridge");
-    let spec = LaunchSpec {
-        command: missing_bridge.clone(),
-        args: Vec::new(),
-        environment: BTreeMap::new(),
-        cwd: temp.path().to_path_buf(),
-        additional_directories: Vec::new(),
-        extra_mcp_servers: Vec::new(),
-        project_memory: None,
-        resume_session: None,
-        accepted_config: Default::default(),
-        harness: HarnessKind::Kimi,
-        execution_policy: ExecutionPolicy::Unconstrained,
-        acp_activity: AcpActivityClock::default(),
-        step_clock: crate::hel_acp::StepClock::default(),
-    };
+    for (bridge, cwd) in [
+        (
+            temp.path().join("missing-acp-bridge"),
+            temp.path().to_path_buf(),
+        ),
+        (PathBuf::from("sh"), temp.path().join("missing-checkout")),
+    ] {
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let spec = LaunchSpec {
+            command: bridge.clone(),
+            args: Vec::new(),
+            environment: BTreeMap::new(),
+            cwd: cwd.clone(),
+            additional_directories: Vec::new(),
+            extra_mcp_servers: Vec::new(),
+            project_memory: None,
+            resume_session: None,
+            accepted_config: Default::default(),
+            harness: HarnessKind::Kimi,
+            execution_policy: ExecutionPolicy::Unconstrained,
+            acp_activity: AcpActivityClock::default(),
+            step_clock: crate::hel_acp::StepClock::default(),
+        };
 
-    let error = run(spec, request_rx, event_tx).await.unwrap_err();
-    assert!(
-        format!("{error:#}").contains(&format!("launch ACP bridge {}", missing_bridge.display()))
-    );
-    assert!(matches!(
-        event_rx.recv().await,
-        Some(RuntimeEvent::Warning { message }) if message.contains("ACP runtime failed")
-    ));
-    assert!(matches!(event_rx.recv().await, Some(RuntimeEvent::Stopped)));
+        let error = run(spec, request_rx, event_tx).await.unwrap_err();
+        assert!(format!("{error:#}").contains(&format!("launch ACP bridge {}", bridge.display())));
+        assert!(format!("{error:#}").contains(&format!("working directory {}", cwd.display())));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(RuntimeEvent::Warning { message }) if message.contains("ACP runtime failed")
+        ));
+        assert!(matches!(event_rx.recv().await, Some(RuntimeEvent::Stopped)));
+    }
 }
 
 #[test]

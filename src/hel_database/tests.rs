@@ -921,6 +921,52 @@ fn missing_target_keeps_a_checkpointed_session_recoverable_and_loses_one_without
 }
 
 #[test]
+fn a_late_missing_workspace_report_cannot_invalidate_a_newer_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut live = session("session-1", "project-1");
+    live.state = SessionState::Running;
+    live.updated_at = "2026-09-08T00:00:00Z".into();
+    save_session_to(&database, &live).unwrap();
+    let observed = live.updated_at.clone();
+    live.updated_at = "2026-09-08T00:01:00Z".into();
+    save_session_to(&database, &live).unwrap();
+
+    assert_eq!(
+        mark_session_target_missing_if_current_to(
+            &database,
+            &live.id,
+            "old working directory is missing",
+            "2026-09-08T00:02:00Z",
+            Some(&observed),
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&live.id].state,
+        SessionState::Running
+    );
+    assert_eq!(
+        mark_session_target_missing_if_current_to(
+            &database,
+            &live.id,
+            "current working directory is missing",
+            "2026-09-08T00:02:00Z",
+            Some(&live.updated_at),
+        )
+        .unwrap(),
+        Some(SessionState::Error)
+    );
+    let loaded = load_state_from(&database).unwrap();
+    assert_eq!(loaded.sessions[&live.id].checkpoint, live.checkpoint);
+    assert_eq!(
+        loaded.sessions[&live.id].last_error.as_deref(),
+        Some("current working directory is missing")
+    );
+}
+
+#[test]
 fn version_thirteen_restores_checkpointed_lost_sessions_to_recoverable_errors() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

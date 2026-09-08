@@ -2340,6 +2340,15 @@ mod tests {
     fn podman_controller(state: SessionState) -> Controller {
         let session_id = "0123456789abcdef0123456789abcdef";
         let mut config = HelConfig::default();
+        config.profiles.insert(
+            "codex".into(),
+            hel::hel_config::HarnessProfile {
+                kind: hel::hel_config::HarnessKind::Codex,
+                home: PathBuf::from("/home/dev/.codex"),
+                environment: Default::default(),
+                context_window_bytes: None,
+            },
+        );
         config.targets.insert(
             "podman".into(),
             hel::hel_config::TargetTemplate::LocalPodman {
@@ -2400,10 +2409,12 @@ mod tests {
         let running = podman_controller(SessionState::Running);
         assert_eq!(dashboard_worker_targets(&running).len(), 1);
         assert_eq!(dashboard_resource_targets(&running).len(), 1);
+        assert_eq!(credential_sync_targets(&running).len(), 1);
 
         let recoverable_error = podman_controller(SessionState::Error);
         assert!(dashboard_worker_targets(&recoverable_error).is_empty());
         assert!(dashboard_resource_targets(&recoverable_error).is_empty());
+        assert!(credential_sync_targets(&recoverable_error).is_empty());
     }
 
     /// A session gets its `target` as soon as the target exists, which is
