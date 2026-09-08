@@ -3434,13 +3434,15 @@ impl ManagementClient {
     }
 
     pub(crate) async fn stop(&mut self) -> Result<()> {
-        self.inner.stop().await
+        tokio::time::timeout(STOP_TIMEOUT, self.inner.stop())
+            .await
+            .context("Mjolnir daemon did not acknowledge the stop before the deadline")?
     }
 
     /// Ask the daemon to stop and wait for its process to actually exit.
     pub(crate) async fn stop_and_wait(mut self) -> Result<()> {
         let pid = self.inner.metadata.pid;
-        self.inner.stop().await?;
+        self.stop().await?;
         wait_for_exit(pid).await.with_context(|| {
             format!(
                 "Mjolnir daemon {pid} accepted the stop but was still running after {}s",
@@ -5839,6 +5841,31 @@ mod tests {
     #[test]
     fn shutdown_force_exit_finishes_before_the_stop_deadline() {
         assert!(SHUTDOWN_FORCE_EXIT_TIMEOUT < STOP_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn management_stop_is_bounded_when_the_daemon_never_acknowledges() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: 1,
+            address: listener.local_addr().unwrap(),
+            token: "test-token".into(),
+            started_at: "now".into(),
+            build_version: "test".into(),
+        };
+        let mut client = ManagementClient {
+            inner: DaemonClient::connect(metadata).await.unwrap(),
+        };
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let stop = tokio::spawn(async move { client.stop().await });
+        let request: RequestEnvelope = read_frame(&mut peer).await.unwrap();
+        assert!(matches!(request.action, DaemonAction::Stop));
+        // Pause only after the real socket exchange reaches the fake daemon.
+        tokio::time::pause();
+        tokio::time::advance(STOP_TIMEOUT).await;
+        let error = stop.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("did not acknowledge"));
     }
 
     #[tokio::test]

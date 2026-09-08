@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod common;
+
 use std::{
     fs,
     fs::File,
@@ -166,46 +168,12 @@ fn wait_for_exit(
     }
 }
 
-struct DashboardStorage {
-    directory: Option<tempfile::TempDir>,
-    stop_daemon: bool,
-}
-
-impl DashboardStorage {
-    fn path(&self) -> &std::path::Path {
-        self.directory.as_ref().expect("fixture storage").path()
-    }
-}
-
-impl Drop for DashboardStorage {
-    fn drop(&mut self) {
-        if self.stop_daemon {
-            // Stop the writer before removing its database and working files.
-            match Command::new(env!("CARGO_BIN_EXE_mj"))
-                .args(["daemon", "stop"])
-                .env("MJ_CONFIG_DIR", self.path().join("config/hel"))
-                .env("MJ_DATA_DIR", self.path().join("data/hel"))
-                .status()
-            {
-                Ok(status) if status.success() => {}
-                result => {
-                    let retained = self.directory.take().expect("fixture storage").keep();
-                    eprintln!(
-                        "Could not stop PTY fixture daemon: {result:?}; retained {}",
-                        retained.display()
-                    );
-                }
-            }
-        }
-    }
-}
-
 struct DashboardPty {
-    _storage: DashboardStorage,
     master: File,
     slave: File,
     original_termios: libc::termios,
     child: ReapChild,
+    _storage: common::DaemonStorage,
 }
 
 fn spawn_dashboard_pty() -> DashboardPty {
@@ -225,10 +193,10 @@ fn spawn_dashboard_pty_with_startup(
     pending_session: bool,
     local_startup: bool,
 ) -> DashboardPty {
-    let storage = DashboardStorage {
-        directory: Some(tempfile::tempdir().expect("create Hel test storage")),
-        stop_daemon: !exit_when_idle,
-    };
+    let directory = tempfile::tempdir().expect("create Hel test storage");
+    let config_directory = directory.path().join("config/hel");
+    let data_directory = directory.path().join("data/hel");
+    let storage = common::DaemonStorage::new(directory, config_directory, data_directory);
     let config_root = storage.path().join("config");
     fs::create_dir_all(config_root.join("hel")).expect("create Hel config directory");
     fs::write(
@@ -371,6 +339,29 @@ image = "ubuntu:24.04"
         original_termios,
         child: ReapChild(Some(child)),
     }
+}
+
+#[test]
+fn panicking_dashboard_fixture_reaps_the_dashboard_before_removing_storage() {
+    let mut fixture = spawn_dashboard_pty();
+    let mut output = Vec::new();
+    wait_for_output(
+        &mut fixture.master,
+        &mut output,
+        READY_MARKER,
+        Instant::now() + TIMEOUT,
+    );
+    let root = fixture._storage.path().to_path_buf();
+    let pid = fixture.child.child_mut().id();
+    let panic = std::panic::catch_unwind(move || {
+        let _fixture = fixture;
+        panic!("exercise dashboard fixture unwinding");
+    });
+    assert!(panic.is_err());
+    assert!(!root.exists(), "dashboard fixture storage survived cleanup");
+    // The owned dashboard child must have been killed and reaped by its guard.
+    assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+    assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
 }
 
 #[test]
