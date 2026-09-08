@@ -67,6 +67,16 @@ pub enum RelayRequest {
         command: RelayCommand,
     },
     Status,
+    AttachmentPresent {
+        reference: crate::hel_attachment::AttachmentRef,
+    },
+    InstallAttachment {
+        reference: crate::hel_attachment::AttachmentRef,
+        data: String,
+    },
+    ReadAttachment {
+        reference: crate::hel_attachment::AttachmentRef,
+    },
     /// Add hidden background context attached to the next real prompt.
     /// This mutates only the relay-private snapshot and is never projected as
     /// conversation history.
@@ -257,6 +267,9 @@ impl RelayRequest {
             Self::InstallPromptContext { .. } => "install_prompt_context",
             Self::ProjectMemorySnapshot => "project_memory_snapshot",
             Self::InstallProjectMemorySnapshot { .. } => "install_project_memory_snapshot",
+            Self::AttachmentPresent { .. } => "attachment_present",
+            Self::InstallAttachment { .. } => "install_attachment",
+            Self::ReadAttachment { .. } => "read_attachment",
             Self::CredentialState => "credential_state",
             Self::ReadCredentials => "read_credentials",
             Self::InstallCredentials { .. } => "install_credentials",
@@ -274,8 +287,11 @@ impl RelayRequest {
     /// answers landed in protocol 2, hidden context in 3, project-memory sync
     /// in 4, user shell commands in 5, the reviewer sidecar in 6, and the
     /// non-steering turn cancellation in 7.
-    pub const fn minimum_protocol(&self) -> u32 {
+    pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::AttachmentPresent { .. }
+            | Self::InstallAttachment { .. }
+            | Self::ReadAttachment { .. } => 8,
             Self::RespondElicitation { .. } => 2,
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
@@ -285,7 +301,7 @@ impl RelayRequest {
         }
     }
 
-    pub const fn supported_at(&self, protocol_version: u32) -> bool {
+    pub fn supported_at(&self, protocol_version: u32) -> bool {
         RelayVersionRange::CURRENT.contains(protocol_version)
             && protocol_version >= self.minimum_protocol()
     }
@@ -369,6 +385,13 @@ pub enum RelayResponsePayload {
         ordinal: u64,
     },
     Status(RelayOperationalState),
+    AttachmentPresent {
+        present: bool,
+    },
+    AttachmentInstalled,
+    AttachmentData {
+        data: String,
+    },
     PromptContextInstalled,
     ProjectMemorySnapshot {
         baseline: ProjectMemorySnapshot,

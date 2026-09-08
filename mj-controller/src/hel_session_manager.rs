@@ -2834,6 +2834,28 @@ impl StandaloneSession {
     /// regularly releasing it lets other session actors keep their views
     /// current. The relay GC watermark advances only after the complete page.
     async fn apply_event_page(&mut self, page: RelayEventPage) -> Result<RelayCursor> {
+        for event in &page.events {
+            if let hel::hel_worker::RelayObservation::CommandQueued {
+                command: RelayCommand::Prompt { prompt },
+                ..
+            } = &event.observation
+            {
+                for reference in hel::hel_attachment::references(prompt)? {
+                    if let Err(error) = self.client.cache_attachment(&reference).await {
+                        // History remains readable even if a blob was lost. A
+                        // later submission still verifies every image before
+                        // admission, and must report missing data to the user.
+                        tracing::warn!(
+                            session_id = %self.materialized.session_id,
+                            attachment = %reference.sha256,
+                            %error,
+                            "could not cache image attachment during replay"
+                        );
+                    }
+                }
+            }
+        }
+
         let RelayEventPage {
             events,
             through_ordinal,

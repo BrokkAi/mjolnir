@@ -90,10 +90,11 @@ pub enum RelayCommand {
 }
 
 impl RelayCommand {
-    pub const fn minimum_protocol(&self) -> u32 {
+    pub fn minimum_protocol(&self) -> u32 {
         match self {
             Self::RunUserShell { .. } | Self::CancelUserShell { .. } => 5,
             Self::CancelTurn => 7,
+            Self::Prompt { prompt } if crate::hel_attachment::has_references(prompt) => 8,
             _ => super::RELAY_MIN_PROTOCOL_VERSION,
         }
     }
@@ -624,6 +625,9 @@ pub enum RelayCommandOutcome {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClaimedSteeringPrompt {
+    /// Runtime-only store location; never sent or persisted.
+    #[serde(skip)]
+    pub attachment_root: Option<std::path::PathBuf>,
     pub queued_command_id: String,
     pub prompt: Vec<ContentBlock>,
 }

@@ -173,7 +173,7 @@ const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// Current durable ACP relay protocol. Peers that only speak an older
 /// version in [`RELAY_MIN_PROTOCOL_VERSION`]..=this range still connect.
 /// Protocol 0 is the retired pre-relay worker protocol and is rejected.
-pub const RELAY_PROTOCOL_VERSION: u32 = 7;
+pub const RELAY_PROTOCOL_VERSION: u32 = 8;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
 /// Digest for the empty relay event prefix (ordinal zero).
 pub const RELAY_EVENT_GENESIS_DIGEST: &str = crate::hel_archive::EVENT_FRONTIER_GENESIS_DIGEST;
@@ -188,7 +188,7 @@ pub(crate) const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 /// A v1 snapshot is upgraded in place to the current schema on open (its stored
 /// frontier digests stay valid, since each is recomputed with the formula that
 /// matches the record's format).
-const RELAY_STATE_VERSION: u32 = 3;
+const RELAY_STATE_VERSION: u32 = 4;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
@@ -967,7 +967,10 @@ impl DurableRelay {
                 self.install_prompt_context(text.clone())?;
                 RelayResponsePayload::PromptContextInstalled
             }
-            RelayRequest::CredentialState
+            RelayRequest::AttachmentPresent { .. }
+            | RelayRequest::InstallAttachment { .. }
+            | RelayRequest::ReadAttachment { .. }
+            | RelayRequest::CredentialState
             | RelayRequest::ReadCredentials
             | RelayRequest::InstallCredentials { .. }
             | RelayRequest::SkillsState
@@ -1108,9 +1111,8 @@ impl DurableRelay {
                 None,
             )));
         }
-        if self.snapshot.handled_commands.contains_key(command_id) {
+        if let Some(handled) = self.snapshot.handled_commands.get(command_id) {
             let accepted_ordinal = {
-                let handled = &self.snapshot.handled_commands[command_id];
                 if handled.command != command {
                     return Ok(Err(relay_protocol_error(
                         RelayErrorCode::InvalidRequest,
@@ -1131,6 +1133,23 @@ impl DurableRelay {
                 command_id: command_id.to_owned(),
                 ordinal: accepted_ordinal,
             }));
+        }
+        if let RelayCommand::Prompt { prompt } = &command {
+            let verified = crate::hel_attachment::references(prompt).and_then(|references| {
+                let store = crate::hel_attachment::AttachmentStore::worker(&self.root);
+                for reference in references {
+                    store.read(&reference)?;
+                }
+                Ok(())
+            });
+            if let Err(error) = verified {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidRequest,
+                    error.to_string(),
+                    false,
+                    None,
+                )));
+            }
         }
         let pending_close_barrier = self.pending_close_barrier_id().map(str::to_owned);
         let completes_pending_close = pending_close_barrier.as_deref().is_some_and(|barrier| {
@@ -1535,6 +1554,7 @@ impl DurableRelay {
             .flatten()
             .and_then(|queued| match &queued.payload {
                 StoredQueuedRelayPayload::Prompt { prompt } => Some(ClaimedSteeringPrompt {
+                    attachment_root: None,
                     queued_command_id: queued.command_id.clone(),
                     prompt: prompt.clone(),
                 }),
@@ -3402,6 +3422,42 @@ mod tests {
             RelayObservation::CommandInterrupted { command_id, .. }
                 if command_id == "command-two"
         )));
+    }
+
+    #[test]
+    fn duplicate_image_command_is_idempotent_after_attachment_loss() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::hel_attachment::AttachmentStore::worker(temp.path());
+        let bytes = b"\x89PNG\r\n\x1a\nverified-image".to_vec();
+        let reference =
+            crate::hel_attachment::AttachmentRef::new(&bytes, "image/png".into(), 100, 100)
+                .unwrap();
+        store.install(&reference, &bytes).unwrap();
+        let command = RelayCommand::Prompt {
+            prompt: vec![reference.content_block()],
+        };
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        let ordinal = submit_relay(&mut relay, "image-command", command.clone());
+        fs::remove_file(store.root().join(&reference.sha256)).unwrap();
+        let latest_before_retry = relay.latest_ordinal();
+
+        let response = relay.handle(relay_request(
+            "image-command-retry",
+            RelayRequest::Submit {
+                command_id: "image-command".into(),
+                command,
+            },
+        ));
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Accepted {
+                    command_id,
+                    ordinal: accepted_ordinal,
+                }
+            } if command_id == "image-command" && accepted_ordinal == ordinal
+        ));
+        assert_eq!(relay.latest_ordinal(), latest_before_retry);
     }
 
     fn successful_shell(command: &str, stdout: &str) -> UserShellResult {

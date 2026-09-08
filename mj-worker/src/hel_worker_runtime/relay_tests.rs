@@ -4381,3 +4381,92 @@ async fn abandoned_project_memory_requests_do_not_overlap_blocking_io() {
         .unwrap();
     second.await.unwrap().unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn large_photo_transfer_is_verified_without_journaling_image_bytes() {
+    use base64::Engine as _;
+    use hel::hel_attachment::{AttachmentRef, MAX_IMAGE_BYTES};
+    let temp = tempfile::tempdir().unwrap();
+    let relay_root = temp.path().join("relay");
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(&relay_root, SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let (wake_tx, _wake_rx) = mpsc::channel(1);
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    let server_task = tokio::spawn(unix::serve_client(
+        server,
+        relay.clone(),
+        wake_tx,
+        test_credentials(),
+        None,
+        fatal_reports().0,
+    ));
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.resize(MAX_IMAGE_BYTES, 29);
+    let reference = AttachmentRef::new(&bytes, "image/png".into(), 1024, 768).unwrap();
+    for protocol_version in [7, RELAY_PROTOCOL_VERSION, RELAY_PROTOCOL_VERSION] {
+        let request = RelayRequestEnvelope {
+            request_id: "upload-photo".into(),
+            protocol_version,
+            request: RelayRequest::InstallAttachment {
+                reference: reference.clone(),
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            },
+        };
+        let mut encoded = serde_json::to_vec(&request).unwrap();
+        encoded.push(b'\n');
+        writer.write_all(&encoded).await.unwrap();
+        let response: RelayResponseEnvelope =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        if protocol_version < 8 {
+            assert!(matches!(response.body, RelayResponseBody::Error { .. }));
+        } else {
+            assert!(matches!(
+                response.body,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::AttachmentInstalled
+                }
+            ));
+        }
+    }
+    let request = RelayRequestEnvelope {
+        request_id: "read-photo".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::ReadAttachment {
+            reference: reference.clone(),
+        },
+    };
+    let mut encoded = serde_json::to_vec(&request).unwrap();
+    encoded.push(b'\n');
+    writer.write_all(&encoded).await.unwrap();
+    let response: RelayResponseEnvelope =
+        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::AttachmentData { data },
+    } = response.body
+    else {
+        panic!("image read failed")
+    };
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap(),
+        bytes
+    );
+    assert_eq!(relay.lock().unwrap().latest_ordinal(), 0);
+    assert_eq!(
+        std::fs::metadata(relay_root.join("attachments").join(reference.sha256))
+            .unwrap()
+            .len(),
+        MAX_IMAGE_BYTES as u64
+    );
+    drop(writer);
+    drop(lines);
+    tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}

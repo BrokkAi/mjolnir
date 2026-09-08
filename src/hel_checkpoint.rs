@@ -337,6 +337,27 @@ pub fn restore_checkpoint(spec: &CheckpointRestoreSpec, git: &dyn GitCommandRunn
         restore_repositories_from_archive(&archive, &spec.workspace_root, git)?;
     }
 
+    // Attachment data belongs to the relay, even when native harness history
+    // is deliberately not restored. Install before publishing the queue seed.
+    let image_store = crate::hel_attachment::AttachmentStore::worker(&spec.relay_root);
+    for descriptor in &archive.manifest.payloads {
+        if let PayloadRole::NativeArtifact { relative_path } = &descriptor.role
+            && relative_path.starts_with(crate::hel_attachment::ARCHIVE_ATTACHMENT_DIR)
+        {
+            image_store.restore_artifact(relative_path, archive.payload(descriptor)?)?;
+        }
+    }
+    for queued in &seed.queued_prompts {
+        let blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = queued
+            .content
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<_, _>>()?;
+        for reference in crate::hel_attachment::references(&blocks)? {
+            image_store.read(&reference)?;
+        }
+    }
     fs::create_dir_all(&spec.relay_root)?;
     crate::hel_worker::clear_native_session_identity(&spec.relay_root)?;
     write_private_file(
@@ -358,6 +379,9 @@ pub fn restore_checkpoint(spec: &CheckpointRestoreSpec, git: &dyn GitCommandRunn
             let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
                 continue;
             };
+            if relative_path.starts_with(crate::hel_attachment::ARCHIVE_ATTACHMENT_DIR) {
+                continue;
+            }
             let native_data = archive.payload(descriptor)?;
             let relative_path = restored_native_relative_path(
                 archive.manifest.session.harness_kind,
@@ -1457,6 +1481,8 @@ fn collect_checkpoint_native_artifacts(
         }
         artifacts
     };
+    artifacts
+        .extend(crate::hel_attachment::AttachmentStore::worker(relay_root).archive_artifacts()?);
     let launch_path = relay_root.join("launch.json");
     match read_project_memory_checkpoint_endpoint(&launch_path) {
         Ok(launch) => {
@@ -2642,6 +2668,7 @@ fn remove_failed_checkpoint_install(path: &Path, error: anyhow::Error) -> anyhow
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::process::Command;
@@ -5111,6 +5138,117 @@ mod tests {
         );
         assert!(discarded.queued_prompts.is_empty());
         assert!(!relay_root.join("events.jsonl").exists());
+    }
+
+    fn image_checkpoint_fixture(
+        temp: &Path,
+    ) -> (
+        CheckpointExportSpec,
+        crate::hel_attachment::AttachmentRef,
+        Vec<u8>,
+        PathBuf,
+    ) {
+        let (mut spec, _) = fixture(temp);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFgAI/yZmaPdoAAAAASUVORK5CYII=")
+            .unwrap();
+        let reference =
+            crate::hel_attachment::AttachmentRef::new(&bytes, "image/png".into(), 1, 1).unwrap();
+        let store = crate::hel_attachment::AttachmentStore::worker(&spec.relay_root);
+        store.install(&reference, &bytes).unwrap();
+        let image_block = serde_json::to_value(reference.content_block()).unwrap();
+        spec.canonical_session.queued_prompts[0].content = vec![image_block; 10];
+        export_checkpoint(&spec).unwrap();
+        assert_eq!(
+            read_archive_verified(&spec.output_path)
+                .unwrap()
+                .manifest
+                .schema_version,
+            crate::hel_archive::ARCHIVE_SCHEMA_VERSION_ATTACHMENTS
+        );
+
+        let restored_relay = temp.join("restored-image-relay");
+        restore_checkpoint(
+            &CheckpointRestoreSpec {
+                archive_path: spec.output_path.clone(),
+                workspace_root: spec.workspace_root.clone(),
+                relay_root: restored_relay.clone(),
+                harness_home: temp.join("restored-image-harness"),
+                restore_repositories: false,
+                restore_native: false,
+                discard_queued_prompts: false,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap();
+
+        (spec, reference, bytes, restored_relay)
+    }
+
+    #[test]
+    fn checkpoint_round_trips_ten_image_references_and_restores_the_blob() {
+        let temp = tempfile::tempdir().unwrap();
+        let (spec, reference, bytes, restored_relay) = image_checkpoint_fixture(temp.path());
+        let seed = restored_seed(&restored_relay);
+
+        assert_eq!(
+            seed.queued_prompts[0].content,
+            spec.canonical_session.queued_prompts[0].content
+        );
+        let mut blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = seed.queued_prompts
+            [0]
+        .content
+        .iter()
+        .cloned()
+        .map(serde_json::from_value)
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+        assert_eq!(
+            crate::hel_attachment::references(&blocks).unwrap(),
+            vec![reference.clone(); 10]
+        );
+
+        crate::hel_attachment::AttachmentStore::worker(&restored_relay)
+            .resolve(&mut blocks)
+            .unwrap();
+        for block in blocks {
+            let agent_client_protocol::schema::v1::ContentBlock::Image(image) = block else {
+                panic!("checkpoint image queue contained a non-image block");
+            };
+            assert!(image.uri.is_none());
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(image.data)
+                    .unwrap(),
+                bytes
+            );
+        }
+    }
+
+    #[test]
+    fn restored_image_resolution_rejects_missing_and_corrupt_blobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, reference, bytes, restored_relay) = image_checkpoint_fixture(temp.path());
+        let store = crate::hel_attachment::AttachmentStore::worker(&restored_relay);
+        let attachment_path = store.root().join(&reference.sha256);
+        let queued = restored_seed(&restored_relay).queued_prompts[0]
+            .content
+            .clone();
+        let mut blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = queued
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+
+        fs::remove_file(&attachment_path).unwrap();
+        assert!(store.resolve(&mut blocks).is_err());
+
+        let mut corrupt = bytes;
+        corrupt[0] ^= 1;
+        fs::write(&attachment_path, corrupt).unwrap();
+        assert!(store.resolve(&mut blocks).is_err());
     }
 
     /// The relay seed must stay proportional to the queue, never to the

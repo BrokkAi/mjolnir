@@ -2078,6 +2078,47 @@ async fn steering_bridge(
 
 #[tokio::test]
 async fn cancel_steers_the_queued_prompt_when_the_agent_supports_it() {
+    exercise_image_steering(false).await;
+}
+
+#[tokio::test]
+async fn ten_large_photos_reach_acp_for_both_prompt_and_steering() {
+    tokio::time::timeout(Duration::from_secs(20), exercise_image_steering(true))
+        .await
+        .expect("large image delivery must not deadlock");
+}
+
+async fn exercise_image_steering(with_images: bool) {
+    use base64::Engine as _;
+    let images_root = tempfile::tempdir().unwrap();
+    let store = crate::hel_attachment::AttachmentStore::worker(images_root.path());
+    let mut image_blocks = Vec::new();
+    let mut expected_images = Vec::new();
+    if with_images {
+        for index in 0..10 {
+            let mut bytes = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+            bytes.resize(crate::hel_attachment::MAX_IMAGE_BYTES, index);
+            let reference =
+                crate::hel_attachment::AttachmentRef::new(&bytes, "image/png".into(), 1, 1)
+                    .unwrap();
+            store.install(&reference, &bytes).unwrap();
+            image_blocks.push(reference.content_block());
+            expected_images.push(base64::engine::general_purpose::STANDARD.encode(bytes));
+        }
+    }
+    let blocks = |text: &str| {
+        let mut blocks = vec![ContentBlock::Text(TextContent::new(text))];
+        blocks.extend(image_blocks.clone());
+        blocks
+    };
+    let assert_images = |request: &serde_json::Value| {
+        let prompt = request["params"]["prompt"].as_array().unwrap();
+        assert_eq!(prompt.len(), expected_images.len() + 1);
+        for (image, expected) in prompt.iter().skip(1).zip(&expected_images) {
+            assert_eq!(image["data"].as_str(), Some(expected.as_str()));
+            assert!(image["uri"].is_null());
+        }
+    };
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (complete_tx, complete_rx) = mpsc::channel(1);
@@ -2114,15 +2155,24 @@ async fn cancel_steers_the_queued_prompt_when_the_agent_supports_it() {
     });
 
     request_tx
-        .send(CommandRequest::Prompt {
-            request_id: "prompt-1".into(),
-            prompt: vec![ContentBlock::Text(TextContent::new("start"))],
+        .send(if with_images {
+            CommandRequest::PromptAttachments {
+                request_id: "prompt-1".into(),
+                prompt: blocks("start"),
+                root: images_root.path().to_path_buf(),
+            }
+        } else {
+            CommandRequest::Prompt {
+                request_id: "prompt-1".into(),
+                prompt: blocks("start"),
+            }
         })
         .await
         .unwrap();
     loop {
         let request = observed_rx.recv().await.expect("prompt reaches bridge");
         if request["method"] == "session/prompt" {
+            assert_images(&request);
             break;
         }
     }
@@ -2130,8 +2180,9 @@ async fn cancel_steers_the_queued_prompt_when_the_agent_supports_it() {
         .send(CommandRequest::Cancel {
             request_id: "cancel-1".into(),
             steering_prompt: Some(ClaimedSteeringPrompt {
+                attachment_root: with_images.then(|| images_root.path().to_path_buf()),
                 queued_command_id: "queued-1".into(),
-                prompt: vec![ContentBlock::Text(TextContent::new("change direction"))],
+                prompt: blocks("change direction"),
             }),
         })
         .await
@@ -2144,6 +2195,7 @@ async fn cancel_steers_the_queued_prompt_when_the_agent_supports_it() {
         }
         assert_ne!(request["method"], "session/cancel");
     };
+    assert_images(&steering);
     assert_eq!(steering["params"]["sessionId"], "steering-session");
     assert_eq!(steering["params"]["prompt"][0]["text"], "change direction");
     assert_eq!(
@@ -3532,4 +3584,17 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         Some(RuntimeEvent::Warning { message }) if message.contains("ACP runtime failed")
     ));
     assert!(matches!(event_rx.recv().await, Some(RuntimeEvent::Stopped)));
+}
+
+#[test]
+fn echoed_user_images_do_not_reenter_the_relay_journal() {
+    use agent_client_protocol::schema::v1::{ContentChunk, ImageContent};
+    let update = SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Image(
+        ImageContent::new("x".repeat(700 * 1024), "image/png"),
+    )));
+    assert!(!session_update_is_relay_visible(
+        &update,
+        &Mutex::new(BTreeSet::new()),
+        "session-1"
+    ));
 }

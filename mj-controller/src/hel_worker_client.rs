@@ -681,12 +681,87 @@ impl RelayClient {
         )
     }
 
+    /// Copy a verified controller blob to this session before admitting its reference.
+    pub async fn ensure_attachment(
+        &mut self,
+        reference: &hel::hel_attachment::AttachmentRef,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.protocol_version >= 8,
+            "photo attachments require an updated worker (protocol 8); upgrade the worker and retry"
+        );
+        match self
+            .call(RelayRequest::AttachmentPresent {
+                reference: reference.clone(),
+            })
+            .await?
+        {
+            RelayResponsePayload::AttachmentPresent { present: true } => return Ok(()),
+            RelayResponsePayload::AttachmentPresent { present: false } => {}
+            _ => bail!("unexpected image presence response"),
+        }
+        let store = hel::hel_attachment::AttachmentStore::controller(&self.session_id)?;
+        let reference_copy = reference.clone();
+        let bytes = tokio::task::spawn_blocking(move || store.read(&reference_copy))
+            .await
+            .context("image loading task failed")??;
+        match self
+            .call(RelayRequest::InstallAttachment {
+                reference: reference.clone(),
+                data: BASE64.encode(bytes),
+            })
+            .await?
+        {
+            RelayResponsePayload::AttachmentInstalled => Ok(()),
+            _ => bail!("unexpected image upload response"),
+        }
+    }
+
+    /// Recover the local copy needed for queue editing and resubmission.
+    pub async fn cache_attachment(
+        &mut self,
+        reference: &hel::hel_attachment::AttachmentRef,
+    ) -> Result<()> {
+        let store = hel::hel_attachment::AttachmentStore::controller(&self.session_id)?;
+        let local = store.clone();
+        let reference_copy = reference.clone();
+        if tokio::task::spawn_blocking(move || local.contains(&reference_copy))
+            .await
+            .context("image lookup task failed")??
+        {
+            return Ok(());
+        }
+        let RelayResponsePayload::AttachmentData { data } = self
+            .call(RelayRequest::ReadAttachment {
+                reference: reference.clone(),
+            })
+            .await?
+        else {
+            bail!("unexpected image download response")
+        };
+        let reference = reference.clone();
+        tokio::task::spawn_blocking(move || {
+            anyhow::ensure!(
+                data.len() <= hel::hel_attachment::MAX_IMAGE_BYTES.div_ceil(3) * 4,
+                "image download is too large"
+            );
+            store.install(&reference, &BASE64.decode(data)?)
+        })
+        .await
+        .context("image caching task failed")?
+    }
+
     pub async fn submit(
         &mut self,
         command_id: impl Into<String>,
         command: RelayCommand,
     ) -> Result<u64> {
         let command_id = command_id.into();
+        if let RelayCommand::Prompt { prompt } = &command {
+            for reference in hel::hel_attachment::references(prompt)? {
+                self.ensure_attachment(&reference).await?;
+            }
+        }
         match self
             .call(RelayRequest::Submit {
                 command_id: command_id.clone(),

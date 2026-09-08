@@ -2,7 +2,8 @@
 //! transcript and composer the combined surface asks it to draw into the
 //! regions it has chosen.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use mj_controller::hel_session_manager::{
     SessionManagerControl, ViewError, new_command_id,
 };
 
+use super::attachments;
 use super::autocomplete::render_autocomplete;
 use super::elicitation::render_elicitation_in;
 use super::history::{highlighted_input_lines, history_scope_name, history_search_footer};
@@ -44,7 +46,7 @@ use super::{
     ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatRegions, ChatSessionContext, ChatState,
     MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity, queued_prompt_preview,
 };
-use crate::hel_clipboard::ClipboardContent;
+use crate::hel_clipboard::{ClipboardContent, ClipboardImage};
 
 /// Durable chat-side state that a host process must ask the daemon to store.
 #[derive(Debug, Clone)]
@@ -95,7 +97,11 @@ enum ChatIoUpdate {
         generation: u64,
         result: std::result::Result<Vec<PromptHistoryEntry>, String>,
     },
-    Clipboard(std::result::Result<ClipboardContent, String>),
+    Clipboard {
+        generation: u64,
+        result: std::result::Result<ClipboardContent, String>,
+    },
+    AttachmentFinished(AttachmentResult),
     /// The history a large session did not convert when it opened, built off
     /// the event loop. `attempt` counts the tries so far, so a transcript that
     /// keeps changing under the conversion cannot retry for ever.
@@ -131,6 +137,21 @@ enum ChatIoUpdate {
         role: String,
         result: std::result::Result<Vec<hel::hel_worker::RelayEvent>, String>,
     },
+}
+
+const MAX_ATTACHMENT_TASKS: usize = 2;
+
+#[derive(Debug)]
+struct AttachmentResult {
+    sequence: u64,
+    command: Option<String>,
+    result: std::result::Result<ClipboardImage, String>,
+}
+
+#[derive(Debug)]
+enum AttachmentSource {
+    Clipboard(ClipboardImage),
+    Path(PathBuf),
 }
 
 /// How many times a refused prefix is rebuilt before the view settles for its
@@ -278,11 +299,13 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
         ChatIoUpdate::HistorySearchResults { generation, result } => {
             chat.apply_history_search_results(generation, result);
         }
-        ChatIoUpdate::Clipboard(Ok(content)) => chat.handle_clipboard_content(content),
-        ChatIoUpdate::Clipboard(Err(error)) => {
-            tracing::warn!(%error, "clipboard read failed and was shown in the UI");
-            chat.set_notice(format!("Paste failed: {error}"));
-        }
+        ChatIoUpdate::Clipboard { result, .. } => match result {
+            Ok(content) => chat.handle_clipboard_content(content),
+            Err(error) => {
+                tracing::warn!(%error, "clipboard read failed and was shown in the UI");
+                chat.set_notice(format!("Paste failed: {error}"));
+            }
+        },
         ChatIoUpdate::ToolDiffstats {
             tool_call_id,
             revision,
@@ -295,6 +318,9 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
         | ChatIoUpdate::ReviewerStarted(_)
         | ChatIoUpdate::ReviewerEvents { .. }
         | ChatIoUpdate::TurnReviewEvents { .. } => {}
+        ChatIoUpdate::AttachmentFinished(_) => {
+            unreachable!("attachment results are applied by ActiveChat")
+        }
         ChatIoUpdate::SessionReconnected(_) => {
             unreachable!("session reconnects are applied by ActiveChat")
         }
@@ -431,6 +457,12 @@ pub struct ActiveChat {
     /// At most one native clipboard operation may run for this chat. A second
     /// paste is reported instead of starting an unbounded burst of readers.
     paste_in_flight: bool,
+    /// Image codecs and session-store writes run in supervised blocking tasks.
+    /// Each result carries its marker sequence, so completion order cannot
+    /// reorder images already laid out in the composer.
+    attachment_queue: VecDeque<(u64, AttachmentSource, Option<String>)>,
+    attachment_tasks_in_flight: usize,
+    next_attachment_sequence: u64,
 }
 
 /// Sendable chat initialization data. Build this off the UI thread, then
@@ -738,6 +770,9 @@ impl ActiveChat {
             persistence,
             deferred_elicitation_draft: None,
             paste_in_flight: false,
+            attachment_queue: VecDeque::new(),
+            attachment_tasks_in_flight: 0,
+            next_attachment_sequence: 0,
         };
         chat.refresh_voice_availability();
         if chat.state.second_opinion_split() {
@@ -1147,11 +1182,32 @@ impl ActiveChat {
                 self.apply_turn_review_role_events(role, result);
                 return;
             }
+            ChatIoUpdate::Clipboard { generation, result } => {
+                self.paste_in_flight = false;
+                if generation != self.state.input_generation() {
+                    self.state
+                        .set_notice("Clipboard result discarded because the draft changed");
+                    return;
+                }
+                match result {
+                    Ok(ClipboardContent::Image(image)) => {
+                        self.queue_attachment(AttachmentSource::Clipboard(image), None);
+                    }
+                    Ok(content) => self.state.handle_clipboard_content(content),
+                    Err(error) => {
+                        tracing::warn!(%error, "clipboard read failed and was shown in the UI");
+                        self.state.set_notice(format!("Paste failed: {error}"));
+                    }
+                }
+                return;
+            }
+            ChatIoUpdate::AttachmentFinished(result) => {
+                self.apply_attachment_result(result);
+                self.pump_attachment_queue();
+                return;
+            }
             update => update,
         };
-        if matches!(&update, ChatIoUpdate::Clipboard(_)) {
-            self.paste_in_flight = false;
-        }
         if matches!(&update, ChatIoUpdate::ToolDiffstats { .. }) {
             self.diffstats_in_flight = self.diffstats_in_flight.saturating_sub(1);
         }
@@ -1164,6 +1220,55 @@ impl ActiveChat {
             &self.chat_io_tx,
             &mut self.diffstats_in_flight,
         );
+    }
+
+    fn queue_attachment(&mut self, source: AttachmentSource, command: Option<String>) {
+        let sequence = self.next_attachment_sequence;
+        if !self.state.reserve_attachment(sequence) {
+            return;
+        }
+        self.next_attachment_sequence = self.next_attachment_sequence.wrapping_add(1);
+        self.attachment_queue.push_back((sequence, source, command));
+        self.pump_attachment_queue();
+    }
+
+    fn pump_attachment_queue(&mut self) {
+        while self.attachment_tasks_in_flight < MAX_ATTACHMENT_TASKS {
+            let Some((sequence, source, command)) = self.attachment_queue.pop_front() else {
+                break;
+            };
+            self.attachment_tasks_in_flight += 1;
+            let session_id = self.session.session_id().to_owned();
+            let updates = self.chat_io_tx.clone();
+            tokio::spawn(async move {
+                let result = match tokio::task::spawn_blocking(move || match source {
+                    AttachmentSource::Clipboard(image) => {
+                        attachments::install_clipboard_image(&session_id, image)
+                    }
+                    AttachmentSource::Path(path) => attachments::install_path(&session_id, &path),
+                })
+                .await
+                {
+                    Ok(result) => result.map_err(|error| format!("{error:#}")),
+                    Err(error) => Err(format!("attachment task failed: {error}")),
+                };
+                if let Err(error) =
+                    updates.send(ChatIoUpdate::AttachmentFinished(AttachmentResult {
+                        sequence,
+                        command,
+                        result,
+                    }))
+                {
+                    tracing::debug!(%error, "attachment result dropped because the chat closed");
+                }
+            });
+        }
+    }
+
+    fn apply_attachment_result(&mut self, result: AttachmentResult) {
+        self.attachment_tasks_in_flight = self.attachment_tasks_in_flight.saturating_sub(1);
+        self.state
+            .finish_attachment(result.sequence, result.result, result.command);
     }
 
     /// Restarts the history conversion against the session's current snapshot,
@@ -1406,6 +1511,9 @@ impl ActiveChat {
                     &mut self.state,
                 );
             }
+            ChatAction::Attach { path, command } => {
+                self.queue_attachment(AttachmentSource::Path(path), Some(command));
+            }
             ChatAction::RunShell(command) => {
                 let Some(command_id) = self.command_id("shell") else {
                     restore_unsent_input(&mut self.state, &format!("!{command}"));
@@ -1528,6 +1636,7 @@ impl ActiveChat {
                 self.state.set_notice("Reading clipboard…");
                 let updates = self.chat_io_tx.clone();
                 let text_only = self.state.clipboard_is_text_only();
+                let generation = self.state.input_generation();
                 tokio::spawn(async move {
                     let result = match tokio::task::spawn_blocking(move || {
                         if text_only {
@@ -1543,7 +1652,8 @@ impl ActiveChat {
                         Ok(result) => result,
                         Err(error) => Err(format!("clipboard task failed: {error}")),
                     };
-                    if let Err(error) = updates.send(ChatIoUpdate::Clipboard(result)) {
+                    if let Err(error) = updates.send(ChatIoUpdate::Clipboard { generation, result })
+                    {
                         tracing::debug!(%error, "clipboard result dropped because the chat closed");
                     }
                 });
@@ -2773,14 +2883,13 @@ fn remembered_value(stored: Option<&str>) -> Option<String> {
 
 /// What the agent left running, named for the composer title. One command is
 /// worth naming; several are worth counting, with the clock on the oldest.
-fn background_work_label(chat: &ChatState) -> Option<String> {
+fn background_work_label(chat: &ChatState, now_seconds: u64) -> Option<String> {
     let commands = &chat.session_activity().background_commands;
     let oldest = commands
         .iter()
         .min_by_key(|command| command.started_at_ms)?;
     let elapsed = crate::usage_format::format_clock(
-        hel::clock::epoch_seconds()
-            .saturating_sub(u64::try_from(oldest.started_at_ms / 1_000).unwrap_or_default()),
+        now_seconds.saturating_sub(u64::try_from(oldest.started_at_ms / 1_000).unwrap_or_default()),
     );
     Some(if commands.len() == 1 {
         format!(
@@ -2793,6 +2902,10 @@ fn background_work_label(chat: &ChatState) -> Option<String> {
 }
 
 fn prompt_title(chat: &ChatState, queued: usize) -> String {
+    prompt_title_at(chat, queued, hel::clock::epoch_seconds())
+}
+
+fn prompt_title_at(chat: &ChatState, queued: usize, now_seconds: u64) -> String {
     let mut parts = [chat.current_model(), chat.current_effort()]
         .into_iter()
         .flatten()
@@ -2808,9 +2921,8 @@ fn prompt_title(chat: &ChatState, queued: usize) -> String {
             // An idle session can still have work of its own running: a
             // command the agent backgrounded outlives the turn that started
             // it, and the composer names it rather than reading "Prompt".
-            WorkerPhase::Idle => {
-                parts.push(background_work_label(chat).unwrap_or_else(|| "Prompt".into()))
-            }
+            WorkerPhase::Idle => parts
+                .push(background_work_label(chat, now_seconds).unwrap_or_else(|| "Prompt".into())),
             WorkerPhase::Running if chat.pursuing_goal() => parts.push("Pursuing goal".into()),
             WorkerPhase::Running => parts.push("Running".into()),
             WorkerPhase::Closing => parts.push("Closing".into()),
@@ -4073,9 +4185,10 @@ mod tests {
     /// instead of reading "Prompt": one command by name, several by count.
     #[test]
     fn composer_title_names_the_work_the_agent_left_running() {
-        let started_at_ms = i64::try_from(hel::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
+        let now_seconds = 10_000;
+        let started_at_ms = now_seconds as i64 * 1_000 - 2_616_000;
         let mut chat = ChatState::new(&snapshot(), &[]);
-        assert!(prompt_title(&chat, 0).contains("Prompt"));
+        assert!(prompt_title_at(&chat, 0, now_seconds).contains("Prompt"));
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
             idle_since_ms: None,
@@ -4089,9 +4202,9 @@ mod tests {
             active_user_shells: Vec::new(),
         });
         assert!(
-            prompt_title(&chat, 0).contains("Background: cargo test (43m36s)"),
+            prompt_title_at(&chat, 0, now_seconds).contains("Background: cargo test (43m36s)"),
             "{}",
-            prompt_title(&chat, 0)
+            prompt_title_at(&chat, 0, now_seconds)
         );
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
@@ -4112,14 +4225,14 @@ mod tests {
             active_user_shells: Vec::new(),
         });
         assert!(
-            prompt_title(&chat, 0).contains("Background: 2 tasks, oldest 43m36s"),
+            prompt_title_at(&chat, 0, now_seconds).contains("Background: 2 tasks, oldest 43m36s"),
             "{}",
-            prompt_title(&chat, 0)
+            prompt_title_at(&chat, 0, now_seconds)
         );
 
         // A running turn is named as a turn, whatever it left behind.
         chat.phase = WorkerPhase::Running;
-        assert!(prompt_title(&chat, 0).contains("Running"));
+        assert!(prompt_title_at(&chat, 0, now_seconds).contains("Running"));
     }
 
     #[test]

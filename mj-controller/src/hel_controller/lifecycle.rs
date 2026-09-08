@@ -569,6 +569,9 @@ impl Controller {
                 )
             });
         }
+        hel::hel_attachment::AttachmentStore::controller(session_id)?
+            .remove_session_data()
+            .context("remove session image attachments")?;
         hel::hel_database::delete_session(session_id)
             .context("destroy stopped session in database")?;
         self.state.destroy_stopped_session(session_id)?;
@@ -627,6 +630,9 @@ impl Controller {
                 )
             });
         }
+        hel::hel_attachment::AttachmentStore::controller(session_id)?
+            .remove_session_data()
+            .context("remove session image attachments")?;
         delete(session_id).context("force destroy session in database")?;
         self.state.destroy_session_force(session_id)?;
         Ok(())
