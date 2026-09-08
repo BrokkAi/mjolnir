@@ -421,14 +421,14 @@ mod tests {
         // down, so the PID has to be the exec'd program rather than the
         // short-lived intermediate, and it has to lead that group.
         let log_dir = tempfile::tempdir().expect("create log directory");
-        let mut command = Command::new("sh");
-        command.arg("-c").arg("sleep 30");
+        let mut command = Command::new("sleep");
+        command.arg("30");
         let pid = spawn_detached(&mut command, &log_dir.path().join("child.log"))
             .expect("spawn_detached should start the child");
 
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
             .expect("the reported pid must name a live process");
-        assert_eq!(comm.trim(), "sh");
+        assert_eq!(comm.trim(), "sleep");
 
         let raw_pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
         // SAFETY: getpgid only reads the group of an existing process.
