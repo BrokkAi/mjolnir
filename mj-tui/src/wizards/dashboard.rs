@@ -2489,7 +2489,7 @@ impl DashboardState {
                     .map(|(id, _)| id)
             })
             .or_else(|| self.config.profiles.keys().next())
-            .ok_or("No agent account is configured. Press F4 to add one in Setup.")?;
+            .ok_or("No agent account is configured. Press F7 to add one in Setup.")?;
         if !self.config.profiles.contains_key(profile_id) {
             return Err(format!("Startup profile {profile_id:?} is not configured."));
         }

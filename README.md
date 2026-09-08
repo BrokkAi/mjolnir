@@ -219,7 +219,7 @@ Its normal Prompt receives focus when ready. `N` opens the full
 creation wizard. `s` stops and `r` restarts the selected session without
 confirmation. `d` deletes it after a Yes/No choice; no identifier typing is required.
 
-`F4` opens Setup for accounts, targets, projects, new-session defaults, sidebar
+`F7` opens Setup for accounts, targets, projects, new-session defaults, sidebar
 placement, display, review, and web access. Choose Left or Right for the sidebar,
 and turn off **Focus prompt after creating** to keep focus in Sessions.
 
@@ -241,8 +241,8 @@ Targets, and Quota to leave more room for the conversation; from any customized
 layout it restores all three panes to standard. Tab leaves every chosen size alone.
 
 A few keys answer from everywhere, including while you are typing in Prompt:
-`F2` opens the command palette, `F3` the workspace picker, `F4` Setup,
-`F7` the web viewer, `F5` refreshes Targets and Quota, `Alt+N` opens quick New,
+`F2` opens the command palette, `F3` the workspace picker, `F4` the web viewer,
+`F5` refreshes Targets and Quota, `F7` opens Setup, `Alt+N` opens quick New,
 `Alt+W` opens the full creation wizard,
 `Alt+S` resumes one, `Alt+A` marks everything read, `Alt+X` cancels whatever
 the selected session is in the middle of, `Alt+Z` sizes the focused support

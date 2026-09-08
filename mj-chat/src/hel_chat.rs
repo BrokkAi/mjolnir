@@ -143,11 +143,19 @@ pub fn review_status_line(review: &hel::hel_config::ReviewConfig, open: bool) ->
 /// whole frame: modals and the autocomplete popup are centred and clamped
 /// inside it rather than inside the bands above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChatRegions {
+pub struct ChatRegions<'a> {
     pub transcript: Rect,
     pub prompt: Rect,
-    pub footer: Option<Rect>,
+    pub footer: Option<ChatFooter<'a>>,
     pub overlay: Rect,
+}
+
+/// The footer area and global hints supplied by the host's command registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatFooter<'a> {
+    pub area: Rect,
+    pub chords: &'a [&'a str],
+    pub functions: &'a [&'a str],
 }
 
 /// The local form state saved while the dashboard attaches another session.

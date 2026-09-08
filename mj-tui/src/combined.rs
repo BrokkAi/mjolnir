@@ -6,7 +6,7 @@
 //! to switch to, so nothing is ever hidden behind a navigation step.
 
 use hel::hel_state::SessionTransitionKind;
-use mj_chat::hel_chat::{ActiveChat, ChatRegions};
+use mj_chat::hel_chat::{ActiveChat, ChatFooter, ChatRegions};
 use mj_chat::hel_selection::{SurfaceFrame, SurfaceId};
 use mj_chat::{spinner, theme};
 use ratatui::Frame;
@@ -546,12 +546,22 @@ pub fn render_combined(
     } else {
         match chat {
             Some(chat) => {
+                let chords =
+                    crate::render::footer_hints(dashboard, crate::actions::FooterGroup::Chord);
+                let functions =
+                    crate::render::footer_hints(dashboard, crate::actions::FooterGroup::Function);
+                let chords = chords.iter().map(String::as_str).collect::<Vec<_>>();
+                let functions = functions.iter().map(String::as_str).collect::<Vec<_>>();
                 chat.draw_in(
                     frame,
                     ChatRegions {
                         transcript: transcript_area,
                         prompt: prompt_area,
-                        footer: prompt_focused.then_some(footer_area),
+                        footer: prompt_focused.then_some(ChatFooter {
+                            area: footer_area,
+                            chords: &chords,
+                            functions: &functions,
+                        }),
                         overlay: area,
                     },
                     prompt_focused,

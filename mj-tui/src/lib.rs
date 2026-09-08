@@ -1801,7 +1801,7 @@ mod tests {
             DashboardAction::OpenWorkspacePicker
         );
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::F(7))),
+            dashboard.handle_key(key(KeyCode::F(4))),
             DashboardAction::LoadWebAccess
         );
         dashboard.cancel_modal();
