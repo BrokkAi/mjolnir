@@ -2765,8 +2765,13 @@ pub(super) fn render_in(
             vec![Line::from(Span::styled(
                 if chat.phase == WorkerPhase::Running {
                     "Add a follow-up while the agent works…"
-                } else {
+                } else if chat.entries.is_empty()
+                    && chat.unconverted_prefix == 0
+                    && !chat.transcript_loading
+                {
                     "What would you like to build?"
+                } else {
+                    ""
                 },
                 theme::muted(),
             ))]
@@ -3447,6 +3452,38 @@ mod tests {
             connected: true,
             error: None,
         }
+    }
+
+    #[test]
+    fn build_prompt_only_appears_without_session_history() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.phase = WorkerPhase::Idle;
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+        let mut rendered = |chat: &mut ChatState| {
+            terminal
+                .draw(|frame| render_full_frame(frame, chat, false))
+                .expect("draw chat");
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+
+        assert!(rendered(&mut chat).contains("What would you like to build?"));
+        chat.transcript_loading = true;
+        assert!(!rendered(&mut chat).contains("What would you like to build?"));
+        chat.transcript_loading = false;
+        chat.unconverted_prefix = 1;
+        assert!(!rendered(&mut chat).contains("What would you like to build?"));
+        chat.unconverted_prefix = 0;
+        chat.entries
+            .push(ChatEntry::plain(1, ChatRole::User, "Hello"));
+        assert!(!rendered(&mut chat).contains("What would you like to build?"));
+        chat.phase = WorkerPhase::Running;
+        assert!(rendered(&mut chat).contains("Add a follow-up while the agent works…"));
     }
 
     #[test]
