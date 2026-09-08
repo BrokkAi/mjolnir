@@ -261,7 +261,7 @@ pub(super) fn render_config_picker(
         .split(inner);
     let label = Paragraph::new(Line::from(Span::styled(
         "filter:",
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::palette().muted),
     )));
     frame.render_widget(label, chunks[0]);
     let filter_area = chunks[1];
@@ -306,7 +306,7 @@ pub(super) fn render_config_picker(
     );
     frame.render_widget(
         Paragraph::new("↑/↓ choose · type to filter · Tab controls · Enter apply · Esc cancel")
-            .style(Style::default().fg(theme::MUTED)),
+            .style(Style::default().fg(theme::palette().muted)),
         chunks[4],
     );
     picker.form.end_frame(ConfigControl::Filter);

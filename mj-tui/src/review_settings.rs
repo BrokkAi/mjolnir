@@ -699,34 +699,34 @@ pub(crate) fn render_review_settings(
         Line::styled(
             status,
             Style::default().fg(if dialog.choices_loading {
-                theme::ACCENT
+                theme::palette().accent
             } else {
-                theme::MUTED
+                theme::palette().muted
             }),
         ),
     ];
     if let Some(warning) = &dialog.cleanup_warning {
         notes.push(Line::styled(
             format!("Cleanup warning: {warning}"),
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ));
     }
     if let Some(error) = &dialog.discovery_error {
         notes.push(Line::styled(
             format!("Discovery: {error}"),
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ));
     }
     if let Some(reason) = &dialog.read_only_reason {
         notes.push(Line::styled(
             reason.clone(),
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ));
     }
     if let Some(error) = &dialog.save_error {
         notes.push(Line::styled(
             format!("Save failed: {error}"),
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ));
     }
     if dialog.review.profile.is_none() && dialog.review.enabled {
@@ -763,7 +763,7 @@ pub(crate) fn render_review_settings(
         ReviewTier::Quick => "One general reviewer; a validator checks any findings.",
         ReviewTier::Extended => "A supervisor selects specialist reviewers for deeper coverage.",
     })
-    .style(Style::default().fg(theme::MUTED))
+    .style(Style::default().fg(theme::palette().muted))
     .wrap(Wrap { trim: true });
     let description_width = centered_rect(86, 1, area).width.saturating_sub(12);
     let description_height =
@@ -868,7 +868,7 @@ pub(crate) fn render_review_settings(
         frame.render_widget(
             Line::styled(
                 "Tab moves · arrows select · Space toggles · Esc closes",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::palette().muted),
             ),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
         );

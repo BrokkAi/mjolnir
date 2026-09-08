@@ -759,7 +759,7 @@ pub(crate) fn render_picker(
     frame.render_widget(
         Paragraph::new(
             help.iter()
-                .map(|line| Line::styled(*line, Style::default().fg(theme::MUTED)))
+                .map(|line| Line::styled(*line, Style::default().fg(theme::palette().muted)))
                 .collect::<Vec<_>>(),
         ),
         help_area,
@@ -927,7 +927,7 @@ pub(crate) fn render_new_wizard(
         if let Some(error) = &wizard.project_directory_error {
             lines.push(Line::styled(
                 format!("Error: {error}"),
-                Style::default().fg(theme::ERROR),
+                Style::default().fg(theme::palette().error),
             ));
             lines.push(Line::raw(""));
         }
@@ -935,7 +935,7 @@ pub(crate) fn render_new_wizard(
             lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "Recent on this host (↑/↓ selects):",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::palette().muted),
             ));
             lines.extend(wizard.project_history.iter().take(5).enumerate().map(
                 |(index, directory)| {
@@ -950,9 +950,9 @@ pub(crate) fn render_new_wizard(
                             directory.display()
                         ),
                         if index == wizard.project_history_index {
-                            Style::default().fg(theme::TEXT)
+                            Style::default().fg(theme::palette().text)
                         } else {
-                            Style::default().fg(theme::MUTED)
+                            Style::default().fg(theme::palette().muted)
                         },
                     )
                 },
@@ -960,7 +960,7 @@ pub(crate) fn render_new_wizard(
         }
         lines.push(Line::styled(
             "Enter validates · Backspace on empty goes back · Esc cancels",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ));
         let popup = centered_modal(
             frame,
@@ -1060,7 +1060,7 @@ pub(crate) fn render_new_wizard(
             frame.render_widget(
                 Paragraph::new(Line::styled(
                     "No repositories added yet.",
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::palette().muted),
                 )),
                 list_area,
             );
@@ -1126,7 +1126,7 @@ pub(crate) fn render_new_wizard(
                 } else {
                     "Enter adds · Delete removes · Tab moves focus · Esc cancels"
                 },
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::palette().muted),
             )),
             Rect::new(content.x, help_y, content.width, 1.min(content.height)),
         );
@@ -1331,7 +1331,7 @@ fn render_review_wizard(
             Span::styled(
                 profile_id,
                 Style::default()
-                    .fg(theme::SECONDARY)
+                    .fg(theme::palette().secondary)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -1340,14 +1340,14 @@ fn render_review_wizard(
             Span::styled(
                 project,
                 Style::default()
-                    .fg(theme::TEXT)
+                    .fg(theme::palette().text)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(project_note, theme::muted()),
         ]),
         Line::from(vec![
             Span::styled("Target: ", theme::muted()),
-            Span::styled(target_id, Style::default().fg(theme::ACCENT)),
+            Span::styled(target_id, Style::default().fg(theme::palette().accent)),
             Span::styled(format!(" ({})", target_label(target)), theme::muted()),
         ]),
         Line::from(vec![
@@ -1358,12 +1358,12 @@ fn render_review_wizard(
     if moving && active_interruption {
         lines.push(Line::styled(
             "Active work will be interrupted; the session is restored into a fresh environment.",
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ));
         if clear_resource_allocation {
             lines.push(Line::styled(
                 "Fixed/default destination resources will replace the source sizing.",
-                Style::default().fg(theme::WARNING),
+                Style::default().fg(theme::palette().warning),
             ));
         }
     }
@@ -1371,16 +1371,16 @@ fn render_review_wizard(
         if preparing {
             lines.push(Line::styled(
                 "Checking move destination…",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::palette().muted),
             ));
         } else if let Some(error) = preparation_error {
             lines.push(Line::styled(
                 format!("Move preparation failed: {error}"),
-                Style::default().fg(theme::ERROR),
+                Style::default().fg(theme::palette().error),
             ));
             lines.push(Line::styled(
                 "Press Retry to check the destination again.",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::palette().muted),
             ));
         }
     }
@@ -1402,7 +1402,7 @@ fn render_review_wizard(
         lines.push(Line::styled(
             format!("⚠ {warning}"),
             Style::default()
-                .fg(theme::ERROR)
+                .fg(theme::palette().error)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -1419,7 +1419,7 @@ fn render_review_wizard(
         } else {
             "Tab moves focus · Enter activates"
         },
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::palette().muted),
     ));
     let summary_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let list_height = if can_attach {
@@ -1529,7 +1529,7 @@ fn render_review_wizard(
             frame.render_widget(
                 Paragraph::new(Line::styled(
                     format!("  {}. {text}{attachment_note}", index + 1),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::palette().muted),
                 )),
                 viewport.row(
                     summary_height
@@ -1560,7 +1560,7 @@ fn render_review_wizard(
             frame.render_widget(
                 Paragraph::new(Line::styled(
                     format!("  {}. {text}", row + 1),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::palette().muted),
                 )),
                 viewport.row(
                     summary_height
@@ -1636,7 +1636,7 @@ fn render_mount_wizard(
     };
     let mut lines = vec![
         Line::raw(format!("Target: {target_id} ({})", target_label(target))),
-        Line::styled(protection, Style::default().fg(theme::WARNING)),
+        Line::styled(protection, Style::default().fg(theme::palette().warning)),
     ];
     if !mounts.mounts.is_empty() {
         lines.push(Line::raw(""));
@@ -1655,7 +1655,7 @@ fn render_mount_wizard(
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Recent sources (↑/↓ when Source is empty):",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ));
         lines.extend(
             mounts
@@ -1677,7 +1677,7 @@ fn render_mount_wizard(
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Matches (↑/↓ select · Enter choose):",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ));
         lines.extend(mounts.completion_candidates.iter().take(5).enumerate().map(
             |(index, candidate)| {
@@ -1695,11 +1695,14 @@ fn render_mount_wizard(
     }
     if let Some(error) = &mounts.error {
         lines.push(Line::raw(""));
-        lines.push(Line::styled(error, Style::default().fg(theme::ERROR)));
+        lines.push(Line::styled(
+            error,
+            Style::default().fg(theme::palette().error),
+        ));
     }
     lines.push(Line::styled(
         "Ctrl-Space completes · Tab moves focus · Space toggles read-only · Enter continues/adds",
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::palette().muted),
     ));
     let info_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let total_height = info_height.saturating_add(3);

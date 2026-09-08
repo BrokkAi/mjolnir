@@ -188,7 +188,7 @@ to build your own.
    to set `profile = "your-profile"`, `target = "your-target"`, or
    `enabled = false`. Explicit targets are honored even when unavailable, so
    their launch errors remain visible. Use `mj setup` for guided configuration
-   of additional execution environments, and `Alt+N` for a custom session.
+   of additional execution environments, and **New…** or `Alt+W` for a custom session.
 4. If launch reports a prerequisite failure, run `mj doctor` and use
    `mj login --profile <id>` when authentication is needed. Detach with `Alt+Q`;
    running sessions continue. Reattach with `mj` or use the daemon-owned web
@@ -208,6 +208,12 @@ stopped sessions. Select one and press Enter to switch to its conversation.
 Click the **Workspace** switcher above Sessions, or press `F3`, to choose the
 workspace where new sessions will be created. It shows the workspace you opened,
 even when you view a session from another workspace.
+
+Use **New…** below the switcher to choose session options, or **Quick new** to
+create with saved defaults. **Commands** opens the command palette; select an
+action and click **Run**. Each session's **⋯** button opens its actions. The
+workspace picker provides clickable Open, New, Rename, Recover, Delete, and
+Back controls, and displayed dashboard shortcut hints are clickable too.
 Click **Show stopped** at the bottom of Sessions, or press `h` in that panel,
 to hide or show stopped sessions. The choice is remembered.
 
@@ -222,6 +228,9 @@ confirmation. `d` deletes it after a Yes/No choice; no identifier typing is requ
 `F7` opens Setup for accounts, targets, projects, new-session defaults, sidebar
 placement, display, review, and web access. Choose Left or Right for the sidebar,
 and turn off **Focus prompt after creating** to keep focus in Sessions.
+Choose **Theme** for Midnight (the default), Light, or Dracula. Press `Enter` to
+apply the choice to your draft, then `Ctrl+S` to save and update the terminal
+colors immediately. The preference is kept across restarts.
 
 `Tab` moves the keyboard through the layout — Sessions, Prompt, Targets, Quota —
 and `Shift+Tab` reverses it. Every pane remains in that ring at every size. The

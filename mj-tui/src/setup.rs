@@ -702,6 +702,92 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Enter));
     }
 
+    fn choose_light_theme(dashboard: &mut DashboardState) {
+        dashboard.handle_key(key(KeyCode::F(7)));
+        choose(dashboard, "theme");
+        dashboard.handle_key(key(KeyCode::Down));
+        dashboard.handle_key(key(KeyCode::Enter));
+    }
+
+    fn assert_rendered_theme(dashboard: &mut DashboardState, selected: theme::UiTheme) {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, dashboard))
+            .unwrap();
+        let colors = theme::palette_for(selected);
+        let buffer = terminal.backend().buffer();
+        let surface = if dashboard.modal_open() {
+            colors.surface_raised
+        } else {
+            colors.surface
+        };
+        assert!(
+            buffer.content.iter().any(|cell| {
+                cell.bg == surface && cell.fg == colors.text && cell.symbol() != " "
+            })
+        );
+        assert!(buffer.content.iter().any(|cell| cell.fg == colors.accent));
+    }
+
+    #[test]
+    fn theme_selection_applies_after_save_and_is_restored_when_setup_reopens() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        choose_light_theme(&mut dashboard);
+        assert_eq!(dashboard.config.theme, theme::UiTheme::Midnight);
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
+        let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        ));
+        let DashboardAction::SaveSetup {
+            generation,
+            updated,
+            ..
+        } = action
+        else {
+            panic!("{action:?}");
+        };
+        let saved: HelConfig = serde_json::from_str(&updated).unwrap();
+        assert_eq!(saved.theme, theme::UiTheme::Light);
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
+        dashboard.setup_saved(generation, Ok(saved));
+        assert!(!dashboard.modal_open());
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Light);
+
+        dashboard.begin_setup();
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Light);
+        choose(&mut dashboard, "theme");
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        let editor = dialog.editor.as_ref().unwrap();
+        assert_eq!(editor.choices[editor.selected], "light");
+    }
+
+    #[test]
+    fn cancelling_or_failing_to_save_a_theme_keeps_the_active_colors() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let original = dashboard.config.clone();
+        choose_light_theme(&mut dashboard);
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(!dashboard.modal_open());
+        assert_eq!(dashboard.config, original);
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
+
+        choose_light_theme(&mut dashboard);
+        let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        ));
+        let DashboardAction::SaveSetup { generation, .. } = action else {
+            panic!("{action:?}");
+        };
+        dashboard.setup_saved(generation, Err("disk full".into()));
+        assert_eq!(dashboard.config, original);
+        assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.draft["theme"], "light");
+        assert!(dialog.notice.as_ref().unwrap().contains("disk full"));
+    }
+
     #[test]
     fn results_from_a_closed_setup_do_not_change_the_new_draft() {
         let mut dashboard = dashboard_with_session(stopped_session());

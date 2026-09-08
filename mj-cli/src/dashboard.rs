@@ -1741,6 +1741,7 @@ impl DashboardContext {
             target: session_record
                 .project_target(&self.controller.config, &session_record.target_template_id),
             profile: session_record.last_profile.clone(),
+            title: session_record.display_title().to_owned(),
             harness_kind: Some(session_record.harness_kind),
         };
         let sessions = self.worker_commands_tx.clone();
@@ -2668,29 +2669,32 @@ fn dispatch_event(
         && context
             .visible_chat()
             .is_some_and(|chat| chat.component_modal_open());
-    let to_chat = chat_modal
-        || match &event {
-            Event::Mouse(mouse) if !context.dashboard.modal_open() => {
-                let over_chat = context
-                    .dashboard
-                    .chat_region_contains(mouse.column, mouse.row);
-                if over_chat && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                    context.dashboard.focus_prompt();
+    let dashboard_pointer = !chat_modal
+        && matches!(&event, Event::Mouse(mouse) if context.dashboard.component_handles_mouse(*mouse));
+    let to_chat = !dashboard_pointer
+        && (chat_modal
+            || match &event {
+                Event::Mouse(mouse) if !context.dashboard.modal_open() => {
+                    let over_chat = context
+                        .dashboard
+                        .chat_region_contains(mouse.column, mouse.row);
+                    if over_chat && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        context.dashboard.focus_prompt();
+                    }
+                    over_chat
+                        || context
+                            .visible_chat()
+                            .is_some_and(|chat| chat.component_handles_mouse(*mouse))
+                        || (matches!(
+                            mouse.kind,
+                            MouseEventKind::Drag(MouseButton::Left)
+                                | MouseEventKind::Up(MouseButton::Left)
+                        ) && context
+                            .visible_chat()
+                            .is_some_and(|chat| chat.transcript_scrollbar_dragging()))
                 }
-                over_chat
-                    || context
-                        .visible_chat()
-                        .is_some_and(|chat| chat.component_handles_mouse(*mouse))
-                    || (matches!(
-                        mouse.kind,
-                        MouseEventKind::Drag(MouseButton::Left)
-                            | MouseEventKind::Up(MouseButton::Left)
-                    ) && context
-                        .visible_chat()
-                        .is_some_and(|chat| chat.transcript_scrollbar_dragging()))
-            }
-            _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
-        };
+                _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
+            });
     match context.visible_chat().filter(|_| to_chat) {
         Some(chat) => {
             *chat_outcome = chat.handle_event(event);
@@ -3165,7 +3169,7 @@ mod tests {
             .frame_surfaces()
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized sessions list registered");
-        assert_eq!(surface.rect.height, 14);
+        assert_eq!(surface.rect.height, 12);
 
         let start = (surface.rect.x, surface.rect.y);
         let end = (surface.rect.right() - 1, surface.rect.bottom() - 1);

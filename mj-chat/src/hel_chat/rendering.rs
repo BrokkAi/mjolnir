@@ -39,16 +39,18 @@ pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
 pub(super) fn voice_button_line(voice_available: bool, voice_active: bool) -> Line<'static> {
     let style = if voice_active {
         Style::default()
-            .fg(theme::BACKGROUND)
-            .bg(theme::ERROR)
+            .fg(theme::palette().background)
+            .bg(theme::palette().error)
             .add_modifier(Modifier::BOLD)
     } else if voice_available {
         Style::default()
-            .fg(theme::BACKGROUND)
-            .bg(theme::ACCENT)
+            .fg(theme::palette().background)
+            .bg(theme::palette().accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::MUTED).bg(theme::SURFACE_RAISED)
+        Style::default()
+            .fg(theme::palette().muted)
+            .bg(theme::palette().surface_raised)
     };
     Line::from(Span::styled(format!(" {VOICE_BUTTON_GLYPH} "), style)).left_aligned()
 }
@@ -134,10 +136,16 @@ impl MarkdownWriter {
         let continuation_indent = display_width(&quote) + display_width(&item);
         let mut spans = Vec::with_capacity(self.spans.len() + 2);
         if !quote.is_empty() {
-            spans.push(Span::styled(quote, Style::default().fg(theme::MUTED)));
+            spans.push(Span::styled(
+                quote,
+                Style::default().fg(theme::palette().muted),
+            ));
         }
         if !item.is_empty() {
-            spans.push(Span::styled(item, Style::default().fg(theme::MUTED)));
+            spans.push(Span::styled(
+                item,
+                Style::default().fg(theme::palette().muted),
+            ));
         }
         spans.append(&mut self.spans);
         self.lines.push(LogicalLine {
@@ -244,7 +252,10 @@ impl MarkdownWriter {
                 .collect::<Vec<_>>()
                 .join(&" ".repeat(COLUMN_GAP));
             self.lines.push(LogicalLine {
-                line: Line::from(Span::styled(separator, Style::default().fg(theme::MUTED))),
+                line: Line::from(Span::styled(
+                    separator,
+                    Style::default().fg(theme::palette().muted),
+                )),
                 continuation_indent: 0,
             });
             for row in rows.iter().skip(1) {
@@ -256,7 +267,7 @@ impl MarkdownWriter {
                     self.lines.push(LogicalLine {
                         line: Line::from(Span::styled(
                             "────────────────────",
-                            Style::default().fg(theme::MUTED),
+                            Style::default().fg(theme::palette().muted),
                         )),
                         continuation_indent: 0,
                     });
@@ -362,7 +373,7 @@ pub(super) fn markdown_lines(
                     };
                     writer.spans.push(Span::styled(
                         format!("{} ", "#".repeat(count)),
-                        Style::default().fg(theme::MUTED),
+                        Style::default().fg(theme::palette().muted),
                     ));
                     style_stack.push(writer.style);
                     writer.style = accent_style.add_modifier(Modifier::BOLD);
@@ -380,13 +391,15 @@ pub(super) fn markdown_lines(
                         line: Line::from(Span::styled(
                             language,
                             Style::default()
-                                .fg(theme::MUTED)
+                                .fg(theme::palette().muted)
                                 .add_modifier(Modifier::BOLD),
                         )),
                         continuation_indent: 0,
                     });
                     style_stack.push(writer.style);
-                    writer.style = Style::default().fg(theme::TEXT).bg(theme::SURFACE_RAISED);
+                    writer.style = Style::default()
+                        .fg(theme::palette().text)
+                        .bg(theme::palette().surface_raised);
                 }
                 Tag::List(start) => writer.lists.push(ListState { next: start }),
                 Tag::Item => {
@@ -421,7 +434,7 @@ pub(super) fn markdown_lines(
                     style_stack.push(writer.style);
                     writer.style = writer
                         .style
-                        .fg(theme::ACCENT)
+                        .fg(theme::palette().accent)
                         .add_modifier(Modifier::UNDERLINED);
                 }
                 Tag::Table(alignments) => {
@@ -483,7 +496,10 @@ pub(super) fn markdown_lines(
                 } else {
                     writer.spans.push(Span::styled(
                         code.into_string(),
-                        writer.style.fg(theme::SECONDARY).bg(theme::SURFACE_RAISED),
+                        writer
+                            .style
+                            .fg(theme::palette().secondary)
+                            .bg(theme::palette().surface_raised),
                     ));
                 }
             }
@@ -493,7 +509,7 @@ pub(super) fn markdown_lines(
                 writer.lines.push(LogicalLine {
                     line: Line::from(Span::styled(
                         "────────────────────",
-                        Style::default().fg(theme::MUTED),
+                        Style::default().fg(theme::palette().muted),
                     )),
                     continuation_indent: 0,
                 });
@@ -893,7 +909,7 @@ mod tests {
         let lines = markdown_lines(
             "# Heading\n\n- **bold** and `code`\n\n```rust\nfn main() {}",
             Style::default(),
-            Style::default().fg(theme::SUCCESS),
+            Style::default().fg(theme::palette().success),
             40,
         );
         let rendered = lines.into_iter().map(|line| line.line).collect::<Vec<_>>();
@@ -945,7 +961,7 @@ mod tests {
         assert_eq!(truncate_to_width("alpha, beta", 7), "alpha…");
 
         let line = Line::from(vec![
-            Span::styled("alpha,", Style::default().fg(theme::ERROR)),
+            Span::styled("alpha,", Style::default().fg(theme::palette().error)),
             Span::styled(" beta", Style::default().fg(Color::Blue)),
         ]);
         let truncated = truncate_line_to_width(line, 7);

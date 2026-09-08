@@ -37,7 +37,9 @@ use super::remote::{
     ChatRemoteOperation, ChatRemoteResult, ChatRemoteSupervisor, apply_chat_remote_result,
     queue_chat_remote_operation, restore_unsent_input, restore_unsent_prompt,
 };
-use super::rendering::{display_width, truncate_to_width, voice_button_area, voice_button_line};
+use super::rendering::{
+    display_width, truncate_line_to_width, truncate_to_width, voice_button_area, voice_button_line,
+};
 use super::second_opinion::{
     CapturedProposal, ReviewerPane, SecondOpinion, SecondOpinionIntent, render_reviewer,
     render_setup, render_split_actions, review_role_session_id, reviewer_session_id,
@@ -662,7 +664,7 @@ impl ActiveChat {
             (state, pending)
         };
         state.set_history_context(&bundle_id);
-        state.set_header_summary(header.target, header.profile);
+        state.set_header_summary(header.target, header.profile, header.title);
         state.restore_draft(draft);
         state.notices = notices;
         let (chat_io_tx, chat_io_rx) = tokio::sync::mpsc::unbounded_channel::<ChatIoUpdate>();
@@ -925,8 +927,9 @@ impl ActiveChat {
             .session
             .project_target(config, &context.session.target_template_id);
         let profile = context.session.last_profile.clone();
+        let title = context.session.display_title().to_owned();
         let harness_kind = context.session.harness_kind;
-        self.state.set_header_summary(target, profile);
+        self.state.set_header_summary(target, profile, title);
         self.state.set_harness_kind(harness_kind);
         self.state.set_review_config(config.review.clone());
         self.state.set_spinner_style(config.spinner);
@@ -2418,6 +2421,11 @@ impl ActiveChat {
         );
     }
 
+    /// Visible host footer commands, indexed through the supplied chords then functions.
+    pub fn footer_command_areas(&self) -> Vec<(usize, Rect)> {
+        self.state.footer_command_areas.borrow().clone()
+    }
+
     /// Whether the last frame's surfaces stand alone, because a modal owned
     /// the frame.
     pub fn frame_surfaces_exclusive(&self) -> bool {
@@ -2570,6 +2578,7 @@ pub(super) fn render_in(
     prompt_focused: bool,
     transcript_selected: bool,
 ) {
+    chat.footer_command_areas.borrow_mut().clear();
     chat.voice_form.begin_frame();
     if chat.component_modal_open() || chat.second_opinion_split() || chat.turn_review_split() {
         chat.voice_form.cancel_pointer();
@@ -2579,9 +2588,19 @@ pub(super) fn render_in(
     // Modals and the completion popup are centred in the whole frame, not
     // in the band the transcript happens to have been given.
     let inner = regions.overlay;
-    let transcript_area = regions.transcript;
+    let mut transcript_area = regions.transcript;
     let prompt_area = regions.prompt;
     let prompt_width = prompt_content_width(prompt_area.width);
+    // Keep activity next to the composer without taking space from its input.
+    let activity_area = (chat.needs_animation() && transcript_area.height > 3).then(|| {
+        transcript_area.height -= 1;
+        Rect::new(
+            transcript_area.x,
+            transcript_area.bottom(),
+            transcript_area.width,
+            1,
+        )
+    });
     // The button lives on the prompt's bottom border, so it is not part of
     // the selectable prompt interior. Clear the hitbox first because a split
     // view or modal may replace the composer for this frame.
@@ -2662,7 +2681,11 @@ pub(super) fn render_in(
         chat.split_action_areas.clear();
         chat.turn_review_action_areas.clear();
         let queued = chat.queued_prompts.len();
-        let prompt_title = prompt_title(chat, queued);
+        let prompt_title = if activity_area.is_some() {
+            " Prompt ".to_owned()
+        } else {
+            prompt_title(chat, queued)
+        };
         let mut prompt_block = theme::panel(prompt_focused)
             .padding(Padding::horizontal(1))
             .title(prompt_title);
@@ -2697,7 +2720,7 @@ pub(super) fn render_in(
                         ),
                         usize::from(prompt_inner.width),
                     ),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::palette().muted),
                 ))
             })
             .collect::<Vec<_>>();
@@ -2726,7 +2749,7 @@ pub(super) fn render_in(
         let input_scroll = cursor_row.saturating_add(1).saturating_sub(content_height);
         frame.render_widget(
             Paragraph::new(prompt_lines)
-                .style(Style::default().fg(theme::TEXT))
+                .style(Style::default().fg(theme::palette().text))
                 .wrap(Wrap { trim: false })
                 .scroll((input_scroll as u16, 0))
                 .block(prompt_block),
@@ -2759,6 +2782,30 @@ pub(super) fn render_in(
                 input_scroll,
             );
         }
+    }
+    if let Some(area) = activity_area {
+        let mut activity = if area.width >= 48 {
+            chat.activity_spinner()
+        } else {
+            Line::from(crate::spinner::compact_span(
+                chat.spinner_style,
+                crate::spinner::elapsed_ms(),
+            ))
+        };
+        activity.spans.insert(0, Span::raw("  "));
+        let status = chat
+            .turn_review()
+            .and_then(|review| review.view.activity_label())
+            .map_or_else(
+                || prompt_title(chat, chat.queued_prompts.len()),
+                |label| format!(" {label} "),
+            );
+        activity.spans.push(Span::styled(status, theme::muted()));
+        frame.render_widget(
+            Paragraph::new(truncate_line_to_width(activity, usize::from(area.width)))
+                .style(theme::base()),
+            area,
+        );
     }
     if let Some(footer) = regions.footer {
         render_chat_footer(frame, footer, chat, prompt_focused);
@@ -2850,23 +2897,63 @@ pub(super) fn render_chat_footer(
     } else {
         "Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Alt-T rendering · Shift-Enter newline"
     };
-    let default_footer = fit_footer(
-        composer_keys,
-        footer.chords,
-        footer.functions,
+    let groups = theme::fit_footer_items(
+        [
+            composer_keys
+                .split(theme::FOOTER_SEPARATOR)
+                .map(|text| (None, text))
+                .collect(),
+            footer
+                .chords
+                .iter()
+                .enumerate()
+                .map(|(index, text)| (Some(index), *text))
+                .collect(),
+            footer
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(index, text)| (Some(footer.chords.len() + index), *text))
+                .collect(),
+        ],
         footer_area.width,
+        |(_, text)| *text,
     );
+    let default_footer = theme::footer_items_text(&groups, |(_, text)| *text);
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
     let notice = chat.notices.current();
     let footer = search_footer
         .as_deref()
         .or(notice.as_deref())
         .unwrap_or(&default_footer);
+    let mut command_areas = chat.footer_command_areas.borrow_mut();
+    command_areas.clear();
+    if search_footer.is_none() && notice.is_none() {
+        let mut x = footer_area.x;
+        for group in groups.iter().filter(|group| !group.is_empty()) {
+            if x > footer_area.x {
+                x += display_width(theme::FOOTER_GROUP_SEPARATOR) as u16;
+            }
+            for (index, (command, text)) in group.iter().enumerate() {
+                if index > 0 {
+                    x += display_width(theme::FOOTER_SEPARATOR) as u16;
+                }
+                let width = display_width(text) as u16;
+                if let Some(command) = command {
+                    command_areas.push((
+                        *command,
+                        Rect::new(x, footer_area.y, width, footer_area.height),
+                    ));
+                }
+                x += width;
+            }
+        }
+    }
     // Notices keep a warm accent; navigation hints remain quiet.
     let footer_color = if search_footer.is_none() && notice.is_some() {
-        theme::WARNING
+        theme::palette().warning
     } else {
-        theme::MUTED
+        theme::palette().muted
     };
     let line = if search_footer.is_none() && notice.is_none() {
         theme::hints(footer)
@@ -2888,18 +2975,6 @@ pub(super) fn render_chat_footer(
             footer_area.y,
         ));
     }
-}
-
-/// Fit the composer's hints with the dashboard's shared priority rules.
-fn fit_footer(composer_keys: &str, chords: &[&str], functions: &[&str], width: u16) -> String {
-    theme::fit_footer(
-        &composer_keys
-            .split(theme::FOOTER_SEPARATOR)
-            .collect::<Vec<_>>(),
-        chords,
-        functions,
-        width,
-    )
 }
 
 #[cfg(test)]
@@ -3082,7 +3157,7 @@ mod tests {
         let columns = dimension("MJ_CHAT_CAPTURE_COLUMNS", 110);
         let rows = dimension("MJ_CHAT_CAPTURE_ROWS", 40);
         let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_header_summary("local / mjolnir", "Claude · Sonnet");
+        chat.set_header_summary("local / mjolnir", "Claude · Sonnet", "");
         chat.mark_prompt_submitted("Make the terminal feel beautifully crafted.");
         chat.turn_started_at_epoch_seconds = Some(hel::clock::epoch_seconds().saturating_sub(42));
         chat.set_current_step_start(Some(hel::clock::epoch_millis().saturating_sub(7_000)));
@@ -3979,6 +4054,7 @@ mod tests {
             SessionHeaderIdentity {
                 target: "localhost".into(),
                 profile: "codex-1".into(),
+                title: "Original session title".into(),
                 harness_kind: Some(HarnessKind::Codex),
             },
             "keep this draft".into(),
@@ -3998,6 +4074,8 @@ mod tests {
         moved.target_template_id = "podman".into();
         moved.last_profile = "claude-2".into();
         moved.harness_kind = HarnessKind::Claude;
+        moved.acp_session_title = Some("Harness session title".into());
+        moved.session_title_override = Some("Renamed session".into());
         chat.refresh_context(&reloaded, Some(&moved));
 
         assert_eq!(chat.draft(), "keep this draft");
@@ -4020,10 +4098,12 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            rendered.contains("podman  [idle]  claude-2"),
-            "the refreshed target/profile must be visible in the conversation header: {rendered:?}"
+            rendered.contains("podman  [idle]  claude-2  Renamed session"),
+            "the refreshed session identity must be visible in the conversation header: {rendered:?}"
         );
         assert!(!rendered.contains("localhost  [idle]  codex-1"));
+        assert!(!rendered.contains("Original session title"));
+        assert!(!rendered.contains("Harness session title"));
     }
 
     #[tokio::test]
@@ -4185,7 +4265,10 @@ mod tests {
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
         assert!(footer_text.contains("Background import finished"));
-        assert_eq!(buffer[(buffer.area.x, footer_row)].fg, theme::WARNING);
+        assert_eq!(
+            buffer[(buffer.area.x, footer_row)].fg,
+            theme::palette().warning
+        );
 
         shared.clear();
         terminal
@@ -4196,7 +4279,10 @@ mod tests {
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
         assert!(footer_text.contains("Tab pane"), "{footer_text:?}");
-        assert_eq!(buffer[(buffer.area.x, footer_row)].fg, theme::TEXT);
+        assert_eq!(
+            buffer[(buffer.area.x, footer_row)].fg,
+            theme::palette().text
+        );
     }
 
     /// The composer's own row is where a user typing in it learns the keys,
@@ -4494,7 +4580,7 @@ mod tests {
             let column = u16::try_from(title_start + offset).unwrap();
             assert_eq!(
                 buffer[(column, 0)].fg,
-                theme::TEXT,
+                theme::palette().text,
                 "the title draws bright white: {}",
                 cells.concat()
             );
@@ -4505,7 +4591,7 @@ mod tests {
             .expect("the rule follows the title");
         assert_eq!(
             buffer[(u16::try_from(rule).unwrap(), 0)].fg,
-            theme::BORDER,
+            theme::palette().border,
             "the rule stays chrome"
         );
     }
@@ -4562,6 +4648,55 @@ mod tests {
                 "",
                 "row {y} sits below the prompt region and must stay untouched"
             );
+        }
+    }
+
+    #[test]
+    fn activity_stays_above_the_prompt_without_moving_the_input() {
+        for width in [32, 48, 80] {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.set_input("my follow-up".into());
+            let idle = drawn_transcript(&mut chat, width, 24);
+            let input = chat
+                .frame_surfaces()
+                .surface(SurfaceId::PromptInput)
+                .unwrap()
+                .rect;
+
+            chat.mark_prompt_submitted("continue");
+            let running = drawn_transcript(&mut chat, width, 24);
+            let activity_row = usize::from(input.y - 2);
+            let activity = &running[activity_row];
+            let status = activity.find("Running").expect("running status by prompt");
+            assert_eq!(
+                display_width(&activity[..status]),
+                2 + if width >= 48 {
+                    crate::spinner::SPINNER_WIDTH
+                } else {
+                    1
+                } + 1,
+                "the spinner leads the status at the left: {activity}"
+            );
+            assert_eq!(running[0], idle[0], "activity leaves the header alone");
+            assert_eq!(
+                &running[activity_row + 1..],
+                &idle[activity_row + 1..],
+                "the prompt, draft, and footer keep their positions"
+            );
+            assert!(
+                chat.frame_surfaces()
+                    .surface(SurfaceId::Transcript)
+                    .unwrap()
+                    .rect
+                    .bottom()
+                    <= activity_row as u16,
+                "activity is outside the selectable transcript"
+            );
+
+            chat.phase = WorkerPhase::Idle;
+            chat.prompt_in_flight = false;
+            chat.turn_started_at_epoch_seconds = None;
+            assert_eq!(drawn_transcript(&mut chat, width, 24), idle);
         }
     }
 

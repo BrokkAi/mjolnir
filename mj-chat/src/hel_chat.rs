@@ -23,6 +23,7 @@ mod turn_review;
 #[cfg(test)]
 mod test_support;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -138,7 +139,8 @@ pub fn review_status_line(review: &hel::hel_config::ReviewConfig, open: bool) ->
 /// Where a host surface has told the chat to draw itself.
 ///
 /// `transcript` and `prompt` are the *outer* rectangles including each block's
-/// border. `footer` is `Some` only when the host wants the chat to own the
+/// border. While busy, the transcript's last row holds activity above the
+/// prompt. `footer` is `Some` only when the host wants the chat to own the
 /// footer row, which it does while the composer has focus. `overlay` is the
 /// whole frame: modals and the autocomplete popup are centred and clamped
 /// inside it rather than inside the bands above.
@@ -379,6 +381,8 @@ pub struct SessionHeaderIdentity {
     pub target: String,
     /// Profile column from the session list's live-session summary.
     pub profile: String,
+    /// Display title from the session list, including any user override.
+    pub title: String,
     /// Harness the session runs, so the chat can answer harness-specific
     /// questions (like whether Codex exposes plan mode) without a recovery
     /// context, which the daemon now owns.
@@ -524,6 +528,7 @@ pub struct ChatState {
     /// Session-list identity snapshotted when the chat opened.
     header_target: String,
     header_profile: String,
+    header_title: String,
     spinner_style: hel::hel_config::SpinnerStyle,
     turn_started_at_epoch_seconds: Option<u64>,
     /// Whether a prompt of ours is in flight. `phase` also goes Running for a
@@ -538,6 +543,8 @@ pub struct ChatState {
     /// Selectable surfaces, rebuilt by every frame in render order so the
     /// selection engine can hit-test the screen the user is looking at.
     pub(super) frame_surfaces: FrameSurfaces,
+    /// Visible host shortcuts, indexed through chords followed by function keys.
+    footer_command_areas: RefCell<Vec<(usize, Rect)>>,
     /// Whether the last frame's surfaces replace everything behind them. The
     /// host uses this only for chat-local modals that truly own the frame;
     /// questions stay in the session content area and remain mergeable with
@@ -631,12 +638,14 @@ impl ChatState {
             voice_form: voice_form(),
             header_target: String::new(),
             header_profile: String::new(),
+            header_title: String::new(),
             spinner_style: hel::hel_config::SpinnerStyle::default(),
             turn_started_at_epoch_seconds: None,
             prompt_in_flight: snapshot.active_prompt.is_some(),
             session_activity: crate::usage_format::SessionActivity::default(),
             current_step_started_at_ms: None,
             frame_surfaces: FrameSurfaces::new(),
+            footer_command_areas: RefCell::new(Vec::new()),
             frame_surfaces_exclusive: false,
             transcript_selection: None,
             transcript_selection_invalid: false,
@@ -1139,9 +1148,15 @@ impl ChatState {
     }
 
     /// Installs the stable session-list columns used by the conversation title.
-    pub fn set_header_summary(&mut self, target: impl Into<String>, profile: impl Into<String>) {
+    pub fn set_header_summary(
+        &mut self,
+        target: impl Into<String>,
+        profile: impl Into<String>,
+        title: impl Into<String>,
+    ) {
         self.header_target = target.into();
         self.header_profile = profile.into();
+        self.header_title = title.into();
     }
 
     /// Records whether the session has a prompt of ours in flight, which is
@@ -2437,6 +2452,9 @@ impl ChatState {
     /// scrollback repaints whole TUI frames and is unusably slow on long
     /// sessions.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> ChatAction {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.notices.dismiss(std::time::Instant::now());
+        }
         // The topmost form receives the gesture before selection, scrollbars,
         // or a review pane. This also lets reviewer elicitations stay above
         // their split while a stale scrollbar is being redrawn.
@@ -2949,9 +2967,9 @@ impl Notices {
 /// Active work and ready sessions share the terminal's semantic palette.
 pub fn turn_band_color(turn_in_flight: bool) -> Color {
     if turn_in_flight {
-        crate::theme::ACCENT
+        crate::theme::palette().accent
     } else {
-        crate::theme::SUCCESS
+        crate::theme::palette().success
     }
 }
 

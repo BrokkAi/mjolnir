@@ -8,7 +8,7 @@
 //! It deliberately has no provisioning or persistence side effects. Input is
 //! reduced to [`DashboardAction`] values for the controller to run.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,7 @@ mod render;
 mod resume;
 mod review_settings;
 mod setup;
+mod surface_controls;
 mod widgets;
 mod wizards;
 
@@ -581,6 +582,8 @@ pub struct DashboardState {
     /// Selectable surfaces, rebuilt by every frame in render order so the
     /// selection engine can hit-test the screen the user is looking at.
     pub(crate) frame_surfaces: FrameSurfaces,
+    pub(crate) surface_form: RefCell<mj_chat::components::Form<surface_controls::SurfaceControl>>,
+    pub(crate) session_menu_ids: Vec<String>,
     /// Native sessions the resume dialog hides, loaded from Hel's database.
     pub(crate) hidden_native_sessions: BTreeSet<(HarnessKind, String)>,
     /// The rows the open resume dialog shows, derived from the records, the
@@ -665,6 +668,8 @@ impl DashboardState {
             chat_prompt_area: None,
             resume_sessions_area: None,
             frame_surfaces: FrameSurfaces::new(),
+            surface_form: RefCell::new(mj_chat::components::Form::default()),
+            session_menu_ids: Vec::new(),
             hidden_native_sessions: BTreeSet::new(),
             resume_rows: Vec::new(),
             session_row_areas: Vec::new(),
@@ -1066,11 +1071,20 @@ impl DashboardState {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.notices.dismiss(Instant::now());
+        }
+        if matches!(self.mode, Mode::Help(_)) {
+            return self.handle_help_mouse(mouse);
+        }
         if self.component_modal_open() {
             return self.handle_component_event(crossterm::event::Event::Mouse(mouse));
         }
         if !matches!(self.mode, Mode::Dashboard) {
             return DashboardAction::None;
+        }
+        if let Some(action) = self.handle_surface_mouse(mouse) {
+            return action;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             if self

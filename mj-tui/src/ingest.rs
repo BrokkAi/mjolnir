@@ -1309,7 +1309,7 @@ mod tests {
         assert_eq!(
             badge.spans[0].style,
             Style::default()
-                .fg(mj_chat::theme::WARNING)
+                .fg(mj_chat::theme::palette().warning)
                 .add_modifier(Modifier::BOLD)
         );
 

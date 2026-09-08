@@ -262,12 +262,12 @@ mod tests {
                     assert_eq!(cell.symbol(), " ", "cell ({x}, {y}) was not blank");
                     assert_eq!(
                         cell.fg,
-                        crate::theme::TEXT,
+                        crate::theme::palette().text,
                         "cell ({x}, {y}) kept its foreground"
                     );
                     assert_eq!(
                         cell.bg,
-                        crate::theme::BACKGROUND,
+                        crate::theme::palette().background,
                         "cell ({x}, {y}) kept its background"
                     );
                 } else {
