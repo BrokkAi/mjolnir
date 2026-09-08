@@ -31,22 +31,26 @@ Mjolnir appends `config.toml` to it.
 Every current file starts with the required schema version:
 
 ```toml
-version = 2
+version = 4
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `2`. |
+| `version` | integer | yes | none | Configuration schema version; use `4`. |
+| `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
+| `show_stopped_sessions` | boolean | no | `true` | Show stopped sessions in the Sessions panel; also toggled by its checkbox or `h`. |
+| `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
-| `startup` | table | no | automatic Codex session and target selection | First-session defaults for empty terminal workspaces. |
+| `startup` | table | no | automatic Codex session and target selection | Defaults for New and the first session in an empty terminal workspace. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
 | `targets` | table of named tables | no | empty | Named places where sessions run. |
 
-A missing or empty file is treated as an empty version 2 configuration. Unknown
+A missing or empty file is treated as an empty version 4 configuration. Older
+versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
 understands, Mjolnir salvages the sections it can read but treats the file as
@@ -60,7 +64,8 @@ the TOML table names, for example `work` in `[profiles.work]`.
 
 When a terminal workspace has no live sessions, Mjolnir automatically starts
 one using the launch directory as its project source and focuses the prompt.
-Existing workspace selection and live-session startup are unchanged. This runs
+Only sessions in the opened workspace participate in automatic startup selection;
+other workspaces' sessions remain visible for explicit switching. This runs
 once when the dashboard opens; stopping the last session does not immediately
 create a replacement.
 
@@ -69,11 +74,13 @@ create a replacement.
 # profile = "my-codex"
 # target = "my-podman"
 enabled = true
+prompt = true
 ```
 
 | Field | TOML type | Default | Behavior |
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Set `false` to create sessions manually. |
+| `prompt` | boolean | `true` | Focus the normal composer after creation. Set `false` to keep focus in Sessions. New always creates immediately without a task-entry dialog. |
 | `profile` | string | first configured Codex profile, otherwise first profile by ID | Must name a configured profile. |
 | `target` | string | usable Podman, then Docker, then local directory | Must name a configured target; an explicit selection never silently switches targets. |
 
@@ -89,7 +96,7 @@ its setup flow and requires a supported target.
 A completely unconfigured Linux or macOS installation gets a `codex` profile
 using `CODEX_HOME` or `~/.codex`, and a `localhost` target. Existing configuration
 is preserved. Authentication or provisioning failures appear on the dashboard;
-use `mj doctor`, `mj login`, or `Alt+N` to resolve them.
+use `mj doctor`, `mj login`, or Setup (`F7`) to resolve them.
 
 ## Web viewer `[phone]`
 
@@ -454,7 +461,7 @@ This example contains the sections most installations need. Add other target
 kinds from the examples above rather than mixing fields between variants.
 
 ```toml
-version = 2
+version = 4
 
 [phone]
 enabled = true

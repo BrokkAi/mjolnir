@@ -71,10 +71,10 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ("Alt-Q", "detach"),
     ("F2", "command palette"),
     ("F3", "workspaces"),
-    ("F4", "setup"),
-    ("F7", "web viewer"),
+    ("F4", "web viewer"),
     ("Alt-W", "new session with options"),
     ("F5", "refresh targets and quotas"),
+    ("F7", "setup"),
 ];
 
 impl DashboardState {

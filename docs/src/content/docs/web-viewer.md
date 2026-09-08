@@ -75,7 +75,7 @@ state.
 
 ## Recover a port conflict
 
-Press **F7** in the terminal to open **Web viewer**. If its port is occupied,
+Press **F4** in the terminal to open **Web viewer**. If its port is occupied,
 the dialog shows the address and offers **Use another port**, **Retry**, and
 **Inspect port**. Startup status updates automatically while the dialog is open.
 

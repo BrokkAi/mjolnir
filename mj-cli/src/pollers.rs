@@ -2186,7 +2186,6 @@ fn queued_prompt_entries(
 
 pub(crate) enum LifecycleSuccess {
     Created,
-    CreatedWithPromptFailure(String),
     Resumed {
         profile_id: String,
         target_id: String,

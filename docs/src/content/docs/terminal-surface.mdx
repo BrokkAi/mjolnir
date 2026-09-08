@@ -7,7 +7,6 @@ import { Image } from 'astro:assets';
 import shotDashboard from '../../assets/screenshots/dashboard.svg';
 import shotCommandPalette from '../../assets/screenshots/command-palette.svg';
 import shotSetup from '../../assets/screenshots/setup.svg';
-import shotQuickNew from '../../assets/screenshots/quick-new.svg';
 
 The Mjolnir TUI is a single control surface for conversations and the infrastructure behind them. It stays responsive while sessions launch, resume, stop, or run work in the background.
 
@@ -15,10 +14,14 @@ The Mjolnir TUI is a single control surface for conversations and the infrastruc
   <a class="shot__zoom" href={shotDashboard.src} aria-label="Open the full-size screenshot: Mjolnir terminal dashboard">
     <Image src={shotDashboard} alt="Mjolnir terminal dashboard with a full-height Sessions sidebar beside Conversation, Prompt, Targets, and Quota" />
   </a>
-  <figcaption>Sessions stays beside the conversation, prompt, targets, and quota. Setup lets you place the sidebar on either side.</figcaption>
+  <figcaption>The Workspace switcher sits above Sessions, beside the conversation, prompt, targets, and quota. Setup lets you place the sidebar on either side.</figcaption>
 </figure>
 
-At startup, Mjolnir opens the session whose agent spoke most recently and puts the cursor in Prompt. Sessions shows every workspace and includes stopped sessions; opening a row switches to that conversation without changing its workspace ownership.
+At startup, Mjolnir opens the session in your opened workspace whose agent spoke most recently and puts the cursor in Prompt. An empty workspace creates a session in the directory where you launched Mjolnir. Sessions shows every workspace and includes stopped sessions; opening a row switches to that conversation without changing its workspace ownership or where New creates sessions.
+
+The **Workspace** switcher above Sessions shows the workspace you opened. Click it, or press `F3`, to open the workspace picker and choose where new sessions will belong. The switcher stays above the list on either side and at every sidebar size.
+
+Click **Show stopped** at the bottom of the Sessions panel, or press `h` while Sessions has focus, to hide or show stopped sessions. The preference is saved and also appears in Setup. Stopped sessions remain available through Resume when hidden from the panel.
 
 ## Focus and scrolling
 
@@ -39,7 +42,8 @@ Pane-specific actions are deliberately small:
 | Focus | Key | Action |
 | --- | --- | --- |
 | Sessions | `Enter` | Open the selected session |
-| Sessions | `n` | New session with a fresh task prompt and saved defaults |
+| Sessions | `n` | Immediately create a session with saved defaults |
+| Sessions | `h` | Toggle stopped-session visibility |
 | Sessions | `N` | New session with the full options wizard |
 | Sessions | `s` | Stop immediately, without confirmation |
 | Sessions | `r` | Restart with the same settings, without confirmation |
@@ -69,9 +73,9 @@ Function keys and `Alt` chords work no matter which dashboard pane has focus:
 | `F1` | Open help; `?` also opens it when a non-Prompt pane has focus |
 | `F2` | Open the command palette |
 | `F3` | Switch workspace |
-| `F4` | Open Setup |
-| `F7` | Show the web viewer address and access code |
+| `F4` | Show the web viewer address and access code |
 | `F5` | Refresh all target capacity and profile quota data |
+| `F7` | Open Setup |
 | `Alt+N` | Open quick New with saved defaults |
 | `Alt+W` | Open the full session creation wizard |
 | `Alt+S` | Resume any non-live session through the resume picker |
@@ -98,16 +102,11 @@ Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it,
 
 ## New session and Setup
 
-Press `n` in Sessions or `Alt+N` from any pane. Type the task into the fresh prompt and press Enter. Shift+Enter adds a line, pasted multiline text is preserved, and an empty prompt starts a session without sending a task. The task belongs to the newly created session and is saved before provisioning starts.
+Press `n` in Sessions or `Alt+N` from any pane to create immediately. The new session uses the directory where you launched Mjolnir and belongs to the workspace you opened, even if you are viewing a session from another workspace. Its normal Prompt receives focus when it is ready; no task-entry dialog or confirmation is required.
 
-<figure class="shot">
-  <Image src={shotQuickNew} alt="A new session task prompt with multiline input and Start session and Cancel buttons" />
-  <figcaption>Enter a task and start with your saved defaults.</figcaption>
-</figure>
+Quick New uses the saved agent and target defaults. With automatic defaults, it prefers a configured Codex account, usable local Podman, then Docker, then a local worktree. Plain directories use local execution. Set another account or target in Setup, or turn off **Focus prompt after creating** to keep focus in Sessions. Use `N` or `Alt+W` for the existing wizard when you want to choose all launch options.
 
-Quick New uses the current project directory and the saved agent and target defaults. With automatic defaults, it prefers a configured Codex account, usable local Podman, then Docker, then a local worktree. Plain directories use local execution. Set another account or target in Setup, or turn off **Ask for a task when creating** to launch immediately. Use `N` or `Alt+W` for the existing wizard when you want to choose all launch options.
-
-Press `F4` to edit all configuration in Setup: accounts, targets and remote machines, projects, creation defaults, sidebar position, activity animation, review, and web access. Enter opens a section or edits a value. **Add** and **Remove** manage entries; **Detect machine** discovers installed accounts and usable local runtimes. **Save** or Ctrl+S validates and saves the draft. Errors keep your edits in place. Escape goes back, and Cancel discards unsaved edits. Web listener changes take effect on its next start.
+Press `F7` to edit all configuration in Setup: accounts, targets and remote machines, projects, creation defaults, sidebar position, activity animation, review, and web access. Enter opens a section or edits a value. **Add** and **Remove** manage entries; **Detect machine** discovers installed accounts and usable local runtimes. **Save** or Ctrl+S validates and saves the draft. Errors keep your edits in place. Escape goes back, and Cancel discards unsaved edits. Web listener changes take effect on its next start.
 
 <figure class="shot">
   <Image src={shotSetup} alt="Setup modal with all configuration sections and Save, Cancel, and Detect machine controls" />

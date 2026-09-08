@@ -1779,6 +1779,7 @@ mod tests {
         HelConfig {
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
+            show_stopped_sessions: true,
             newer_config_version: None,
             spinner: Default::default(),
             phone: Default::default(),

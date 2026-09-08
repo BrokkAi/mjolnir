@@ -196,25 +196,32 @@ to build your own.
 
 ## The terminal surface
 
-Mjolnir's TUI is one screen. From top to bottom: **Sessions**, the **transcript**
-of the conversation you are in, the **Prompt** composer, **Targets**, **Quota**,
-and a footer that names the keys that apply right now. Nothing is behind a
-navigation step, so you can read an agent's output while seeing what your other
+Mjolnir's TUI is one screen. The **Workspace** switcher and **Sessions** list
+sit in a sidebar beside the **transcript**, **Prompt** composer, **Targets**,
+and **Quota**, with a footer that names the keys that apply right now. Nothing
+is behind a navigation step, so you can read an agent's output while seeing what your other
 agents are doing and how loaded your machines are.
 
-Mjolnir opens on the session whose agent spoke most recently, with the cursor in
-Prompt. The Sessions sidebar shows every session across all workspaces, including
+Mjolnir opens on the session in your opened workspace whose agent spoke most
+recently, with the cursor in Prompt. The Sessions sidebar shows every session across all workspaces, including
 stopped sessions. Select one and press Enter to switch to its conversation.
+Click the **Workspace** switcher above Sessions, or press `F3`, to choose the
+workspace where new sessions will be created. It shows the workspace you opened,
+even when you view a session from another workspace.
+Click **Show stopped** at the bottom of Sessions, or press `h` in that panel,
+to hide or show stopped sessions. The choice is remembered.
 
-In Sessions, `n` opens a fresh task prompt. Enter starts a session using your
+In Sessions, `n` immediately creates a session using your
 saved defaults: Codex when configured, a usable local Podman or Docker runtime,
-then a local worktree when neither runtime is available. `N` opens the full
+then a local worktree when neither runtime is available. The session uses the
+directory you launched Mjolnir in and belongs to the workspace you opened.
+Its normal Prompt receives focus when ready. `N` opens the full
 creation wizard. `s` stops and `r` restarts the selected session without
 confirmation. `d` deletes it after a Yes/No choice; no identifier typing is required.
 
-`F4` opens Setup for accounts, targets, projects, new-session defaults, sidebar
+`F7` opens Setup for accounts, targets, projects, new-session defaults, sidebar
 placement, display, review, and web access. Choose Left or Right for the sidebar,
-and disable the task prompt if you prefer immediate creation.
+and turn off **Focus prompt after creating** to keep focus in Sessions.
 
 `Tab` moves the keyboard through the layout — Sessions, Prompt, Targets, Quota —
 and `Shift+Tab` reverses it. Every pane remains in that ring at every size. The
@@ -234,8 +241,8 @@ Targets, and Quota to leave more room for the conversation; from any customized
 layout it restores all three panes to standard. Tab leaves every chosen size alone.
 
 A few keys answer from everywhere, including while you are typing in Prompt:
-`F2` opens the command palette, `F3` the workspace picker, `F4` Setup,
-`F7` the web viewer, `F5` refreshes Targets and Quota, `Alt+N` opens quick New,
+`F2` opens the command palette, `F3` the workspace picker, `F4` the web viewer,
+`F5` refreshes Targets and Quota, `F7` opens Setup, `Alt+N` opens quick New,
 `Alt+W` opens the full creation wizard,
 `Alt+S` resumes one, `Alt+A` marks everything read, `Alt+X` cancels whatever
 the selected session is in the middle of, `Alt+Z` sizes the focused support

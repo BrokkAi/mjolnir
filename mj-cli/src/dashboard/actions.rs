@@ -35,6 +35,13 @@ pub(crate) async fn apply_dashboard_action(
 ) -> Result<()> {
     match action {
         DashboardAction::None => {}
+        DashboardAction::SaveStoppedSessionVisibility { show } => {
+            super::io::spawn_stopped_sessions_visibility_save(
+                show,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
         DashboardAction::SaveSpinnerStyle { style } => {
             super::io::spawn_spinner_style_save(
                 style,
@@ -463,31 +470,13 @@ pub(crate) async fn apply_dashboard_action(
         }
         action @ (DashboardAction::CreateSession { .. }
         | DashboardAction::CreateStartupSession { .. }) => start_session_launch(context, action),
-        DashboardAction::QuickNewSession {
-            generation,
-            initial_prompt,
-        } => {
+        DashboardAction::QuickNewSession => {
             match context
                 .dashboard
                 .quick_session_action(context.launch_directory.clone())
             {
-                Ok(DashboardAction::CreateStartupSession {
-                    profile_id,
-                    target_template_id,
-                    project_directory,
-                    ..
-                }) => start_session_launch(
-                    context,
-                    DashboardAction::CreateStartupSession {
-                        generation,
-                        profile_id,
-                        target_template_id,
-                        project_directory,
-                        initial_prompt,
-                    },
-                ),
-                Ok(_) => unreachable!("quick session resolves startup options"),
-                Err(error) => context.dashboard.quick_new_failed(generation, error),
+                Ok(action) => start_session_launch(context, action),
+                Err(error) => context.dashboard.set_failure_notice(error),
             }
         }
         DashboardAction::RestartSession { session_id } => {

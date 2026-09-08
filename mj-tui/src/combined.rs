@@ -6,7 +6,7 @@
 //! to switch to, so nothing is ever hidden behind a navigation step.
 
 use hel::hel_state::SessionTransitionKind;
-use mj_chat::hel_chat::{ActiveChat, ChatRegions};
+use mj_chat::hel_chat::{ActiveChat, ChatFooter, ChatRegions};
 use mj_chat::hel_selection::{SurfaceFrame, SurfaceId};
 use mj_chat::{spinner, theme};
 use ratatui::Frame;
@@ -28,6 +28,8 @@ use crate::{DashboardState, Focus, Mode, PaneSize, SupportPane};
 
 /// Rows the footer always keeps.
 const FOOTER_HEIGHT: u16 = 1;
+/// The workspace selector above the Sessions pane.
+const WORKSPACE_SWITCHER_HEIGHT: u16 = 3;
 /// The fewest rows the transcript is worth drawing in.
 const TRANSCRIPT_MINIMUM: u16 = 3;
 /// A bordered composer with one row of text.
@@ -279,7 +281,42 @@ fn sized_band(size: PaneSize, minimized_height: u16, full: u16, standard_cap: u1
     }
 }
 
-/// Draws the whole combined surface: Sessions, the conversation, Prompt,
+fn render_workspace_switcher(frame: &mut Frame, area: Rect, workspace_name: &str) {
+    let block = theme::panel(false)
+        .title(if area.width < 17 {
+            "Workspace"
+        } else {
+            " Workspace "
+        })
+        .title(Line::styled(" F3 ", theme::muted()).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let name_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width.saturating_sub(2),
+        inner.height,
+    );
+    let name = if workspace_name.is_empty() {
+        "Choose workspace"
+    } else {
+        workspace_name
+    };
+    frame.render_widget(
+        Paragraph::new(crate::widgets::truncate_text(
+            name,
+            usize::from(name_area.width),
+        ))
+        .style(Style::default().fg(theme::ACCENT)),
+        name_area,
+    );
+    frame.render_widget(
+        Paragraph::new(" ▾").style(Style::default().fg(theme::ACCENT)),
+        Rect::new(name_area.right(), inner.y, inner.width.min(2), inner.height),
+    );
+}
+
+/// Draws the workspace switcher, Sessions, the conversation, Prompt,
 /// Targets, Quota, the footer, and any modal over the top.
 ///
 /// `chat` is the conversation on screen, or `None` when the workspace has no
@@ -299,6 +336,8 @@ pub fn render_combined(
     dashboard.pane_areas = None;
     dashboard.session_row_areas.clear();
     dashboard.project_heading_areas.clear();
+    dashboard.stopped_sessions_toggle_area = None;
+    dashboard.workspace_switcher_area = None;
     dashboard.pane_size_control_areas.clear();
     dashboard.frame_surfaces.clear();
     dashboard.chat_transcript_area = None;
@@ -333,7 +372,7 @@ pub fn render_combined(
         area.width.saturating_sub(sidebar_width),
         area.height,
     );
-    let sessions_area = Rect::new(
+    let sidebar_area = Rect::new(
         if sidebar_right {
             content_area.right()
         } else {
@@ -342,6 +381,18 @@ pub fn render_combined(
         area.y,
         sidebar_width,
         area.height.saturating_sub(FOOTER_HEIGHT),
+    );
+    let workspace_area = Rect::new(
+        sidebar_area.x,
+        sidebar_area.y,
+        sidebar_area.width,
+        WORKSPACE_SWITCHER_HEIGHT.min(sidebar_area.height),
+    );
+    let sessions_area = Rect::new(
+        sidebar_area.x,
+        workspace_area.bottom(),
+        sidebar_area.width,
+        sidebar_area.height.saturating_sub(workspace_area.height),
     );
     let selected_transition = dashboard.selected_session().and_then(|session| {
         dashboard
@@ -466,9 +517,12 @@ pub fn render_combined(
             .extend(pane_size_control_areas(pane_area, pane));
     }
 
+    render_workspace_switcher(frame, workspace_area, &dashboard.workspace_name);
+    dashboard.workspace_switcher_area = Some(workspace_area);
     let rendered = render_sessions(frame, sessions_area, dashboard);
     dashboard.session_row_areas = rendered.session_row_areas;
     dashboard.project_heading_areas = rendered.project_heading_areas;
+    dashboard.stopped_sessions_toggle_area = rendered.stopped_toggle_area;
     let sessions_content = bordered_content(sessions_area);
     dashboard.frame_surfaces.push(SurfaceFrame::fixed(
         SurfaceId::DashboardPane(0),
@@ -492,12 +546,22 @@ pub fn render_combined(
     } else {
         match chat {
             Some(chat) => {
+                let chords =
+                    crate::render::footer_hints(dashboard, crate::actions::FooterGroup::Chord);
+                let functions =
+                    crate::render::footer_hints(dashboard, crate::actions::FooterGroup::Function);
+                let chords = chords.iter().map(String::as_str).collect::<Vec<_>>();
+                let functions = functions.iter().map(String::as_str).collect::<Vec<_>>();
                 chat.draw_in(
                     frame,
                     ChatRegions {
                         transcript: transcript_area,
                         prompt: prompt_area,
-                        footer: prompt_focused.then_some(footer_area),
+                        footer: prompt_focused.then_some(ChatFooter {
+                            area: footer_area,
+                            chords: &chords,
+                            functions: &functions,
+                        }),
                         overlay: area,
                     },
                     prompt_focused,

@@ -933,7 +933,7 @@ impl DashboardContext {
         for (session_id, queued) in projected_queued_prompts(&controller)? {
             dashboard.apply_queued_prompts(&session_id, queued);
         }
-        dashboard.set_workspace_name(workspace_name);
+        dashboard.set_workspace(workspace_id.to_owned(), workspace_name);
         let terminal = TerminalGuard::enter()?;
         if configuration_needs_setup(&controller.config) {
             dashboard.begin_setup();
@@ -1178,10 +1178,12 @@ impl DashboardContext {
         // The startup pick compares recorded activity, which is exactly what
         // these summaries carry, so it waits for them.
         self.startup = StartupSession::begin(
-            sessions.iter().map(|(id, _)| id.clone()),
+            self.dashboard
+                .startup_sessions()
+                .map(|session| session.id.clone()),
             std::time::Instant::now(),
         );
-        if sessions.is_empty() {
+        if self.dashboard.startup_sessions().next().is_none() {
             let action = self
                 .dashboard
                 .begin_startup_session(self.launch_directory.clone());
@@ -1284,9 +1286,8 @@ impl DashboardContext {
             return;
         }
         let Some(session_id) = startup_session_choice(
-            self.controller.state.sessions.values().filter(|session| {
-                session.state.is_active()
-                    && self.dashboard.transition_kind(&session.id).is_none()
+            self.dashboard.startup_sessions().filter(|session| {
+                self.dashboard.transition_kind(&session.id).is_none()
                     && self
                         .dashboard
                         .transition_failure_kind(&session.id)
@@ -1297,7 +1298,9 @@ impl DashboardContext {
             self.dashboard.focus_sessions();
             return;
         };
-        self.dashboard.focus_prompt();
+        if self.controller.config.startup.prompt {
+            self.dashboard.focus_prompt();
+        }
         self.open_chat_session(&session_id);
     }
 
@@ -3162,7 +3165,7 @@ mod tests {
             .frame_surfaces()
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized sessions list registered");
-        assert_eq!(surface.rect.height, 17);
+        assert_eq!(surface.rect.height, 14);
 
         let start = (surface.rect.x, surface.rect.y);
         let end = (surface.rect.right() - 1, surface.rect.bottom() - 1);
@@ -3503,17 +3506,13 @@ mod tests {
 
         let command = chord(&dashboard, alt('n')).expect("Alt-N is a global chord");
         assert_eq!(command, CommandId::NewSession);
-        assert!(matches!(
+        assert_eq!(
             dashboard.dispatch_command(command),
-            DashboardAction::None
-        ));
-        assert!(
-            dashboard.modal_open(),
-            "quick New opens a fresh task prompt"
+            DashboardAction::QuickNewSession
         );
-        dashboard.handle_paste("Task for the new session");
         assert!(
-            matches!(dashboard.handle_key(plain_key(crossterm::event::KeyCode::Enter)), DashboardAction::QuickNewSession { initial_prompt: Some(prompt), .. } if prompt == "Task for the new session")
+            !dashboard.modal_open(),
+            "New requires no dialog or submission"
         );
     }
 
@@ -3595,17 +3594,70 @@ mod tests {
         assert_eq!(chord(&dashboard, alt('n')), None);
     }
 
-    #[test]
-    fn f7_opens_the_web_dialog_from_the_composer() {
-        let mut dashboard = populated_dashboard();
-        dashboard.focus_prompt();
+    #[tokio::test]
+    async fn advertised_web_and_setup_shortcuts_open_their_dialogs_from_every_pane() {
+        for focus in [
+            hel_tui::Focus::Prompt,
+            hel_tui::Focus::Sessions,
+            hel_tui::Focus::Targets,
+            hel_tui::Focus::Quota,
+        ] {
+            let mut dashboard = populated_dashboard();
+            focus_on(&mut dashboard, focus);
+            let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+                "session-1",
+                1,
+            );
+            let notices = Notices::default();
+            let mut chat = ActiveChat::open(
+                fixture.stopped,
+                "bundle-1",
+                None,
+                fixture.control,
+                SessionHeaderIdentity::default(),
+                String::new(),
+                notices.clone(),
+            );
+            // The fixture has no database to restore a review from; expose
+            // the hints rather than the resulting startup notice.
+            notices.clear();
+            let mut terminal = Terminal::new(TestBackend::new(240, 40)).expect("terminal");
+            terminal
+                .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
+                .expect("draw combined surface");
+            let buffer = terminal.backend().buffer();
+            let footer = (0..buffer.area.width)
+                .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
+                .collect::<String>();
+            assert!(footer.contains("F4 web"), "{focus:?}: {footer}");
+            assert!(footer.contains("F7 setup"), "{focus:?}: {footer}");
 
-        let command = chord(&dashboard, function_key(7)).expect("F7 is a global chord");
-        assert_eq!(command, CommandId::WebViewer);
-        assert!(matches!(
-            dashboard.dispatch_command(command),
-            DashboardAction::LoadWebAccess
-        ));
+            let web = chord(&dashboard, function_key(4)).expect("F4 is global");
+            assert_eq!(
+                dashboard.dispatch_command(web),
+                DashboardAction::LoadWebAccess
+            );
+            assert!(dashboard.modal_open());
+            assert_eq!(chord(&dashboard, function_key(7)), None);
+            dashboard.cancel_modal();
+
+            let setup = chord(&dashboard, function_key(7)).expect("F7 is global");
+            assert_eq!(dashboard.dispatch_command(setup), DashboardAction::None);
+            assert!(dashboard.modal_open());
+            terminal
+                .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
+                .expect("draw Setup");
+            let screen = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(screen.contains("Setup"), "{focus:?}: {screen}");
+            assert!(screen.contains("Detect machine"), "{focus:?}: {screen}");
+            assert_eq!(chord(&dashboard, function_key(4)), None);
+        }
     }
 
     #[test]
@@ -3764,6 +3816,24 @@ mod tests {
         assert_eq!(
             startup_session_choice(sessions.iter(), activity),
             Some("session-b".into())
+        );
+    }
+
+    #[test]
+    fn startup_activity_in_another_workspace_cannot_replace_the_opened_workspace() {
+        let local = live_session("local", "2026-08-01T00:00:00Z");
+        let mut foreign = live_session("foreign", "2026-08-03T00:00:00Z");
+        foreign.workspace_id = "another-workspace".into();
+        let mut state = hel::hel_state::HelState::default();
+        state.sessions.insert(local.id.clone(), local.clone());
+        state.sessions.insert(foreign.id.clone(), foreign);
+        let mut dashboard = DashboardState::new(Default::default(), state, Default::default());
+        dashboard.set_workspace(local.workspace_id.clone(), "Opened workspace".into());
+        assert_eq!(
+            startup_session_choice(dashboard.startup_sessions(), |id| {
+                Some(if id == "foreign" { 10_000 } else { 1 })
+            }),
+            Some(local.id)
         );
     }
 

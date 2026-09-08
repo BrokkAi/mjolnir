@@ -481,7 +481,26 @@ impl DashboardState {
         self.workspace_name = workspace_name;
     }
 
-    pub fn set_config(&mut self, config: HelConfig) {
+    pub fn set_workspace(&mut self, workspace_id: String, workspace_name: String) {
+        self.workspace_id = Some(workspace_id);
+        self.set_workspace_name(workspace_name);
+        self.selected_session_id = None;
+        self.clamp_selections();
+    }
+
+    pub fn finish_stopped_sessions_save(&mut self, succeeded: bool) {
+        if let Some(show) = self.stopped_sessions_save_pending.take()
+            && !succeeded
+        {
+            self.config.show_stopped_sessions = !show;
+            self.clamp_selections();
+        }
+    }
+
+    pub fn set_config(&mut self, mut config: HelConfig) {
+        if let Some(show) = self.stopped_sessions_save_pending {
+            config.show_stopped_sessions = show;
+        }
         // Background saves return a fresh snapshot even when configuration
         // did not change. They must not close a dialog opened after submission.
         if self.config == config {

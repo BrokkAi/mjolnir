@@ -17,6 +17,99 @@ use crate::render::render;
 use crate::{DashboardAction, DashboardState, Mode, nth_key};
 
 #[test]
+fn new_session_key_creates_without_a_dialog_and_focuses_its_normal_prompt() {
+    for focus_prompt in [true, false] {
+        let mut old = running_session();
+        old.project_directory = Some(PathBuf::from("/some-other-project"));
+        old.draft_input = "Keep the old conversation draft".into();
+        let mut dashboard = dashboard_with_session(old.clone());
+        dashboard.config.startup.prompt = focus_prompt;
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('n'))),
+            DashboardAction::QuickNewSession
+        );
+        assert!(!dashboard.modal_open());
+
+        let launch_directory = std::env::current_dir().unwrap().join("launched here");
+        assert_eq!(
+            dashboard
+                .quick_session_action(launch_directory.clone())
+                .unwrap(),
+            DashboardAction::CreateStartupSession {
+                profile_id: "codex-1".into(),
+                target_template_id: None,
+                project_directory: launch_directory,
+            }
+        );
+        let mut created = running_session();
+        created.id = "new-session".into();
+        let mut state = dashboard.state.clone();
+        state.sessions.insert(created.id.clone(), created.clone());
+        dashboard.set_state(state);
+        dashboard.finish_new_session(&created.id);
+        assert_eq!(dashboard.selected_session_id(), Some(created.id.as_str()));
+        assert_eq!(dashboard.prompt_has_focus(), focus_prompt);
+        assert!(!dashboard.modal_open());
+        assert_eq!(
+            dashboard.state.sessions[&old.id].draft_input,
+            old.draft_input
+        );
+        assert!(dashboard.state.sessions[&created.id].draft_input.is_empty());
+    }
+}
+
+#[test]
+fn detailed_new_session_keeps_its_separate_shortcut() {
+    let mut dashboard = dashboard_with_session(running_session());
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('N'))),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::New(_)));
+}
+
+#[test]
+fn sessions_in_other_workspaces_remain_visible_without_taking_over_startup() {
+    let mut foreign = running_session();
+    foreign.workspace_id = "other-workspace".into();
+    let mut dashboard = dashboard_with_session(foreign.clone());
+    dashboard.set_workspace("opened-workspace".into(), "Opened workspace".into());
+    assert_eq!(dashboard.ordered_sessions().len(), 1);
+    assert_eq!(dashboard.selected_session_id(), None);
+    assert_eq!(dashboard.startup_sessions().count(), 0);
+    let directory = std::env::current_dir().unwrap().join("opened project");
+    assert!(matches!(
+        dashboard.begin_startup_session(directory.clone()).unwrap(),
+        DashboardAction::CreateStartupSession { project_directory, .. }
+            if project_directory == directory
+    ));
+
+    let mut local = running_session();
+    local.id = "opened-session".into();
+    local.workspace_id = "opened-workspace".into();
+    let mut state = dashboard.state.clone();
+    state.sessions.insert(local.id.clone(), local.clone());
+    dashboard.set_state(state.clone());
+    assert_eq!(dashboard.selected_session_id(), Some(local.id.as_str()));
+    assert_eq!(
+        dashboard
+            .startup_sessions()
+            .map(|s| &s.id)
+            .collect::<Vec<_>>(),
+        vec![&local.id]
+    );
+    assert_eq!(dashboard.ordered_sessions().len(), 2);
+    assert_eq!(
+        dashboard.begin_startup_session(directory).unwrap(),
+        DashboardAction::None
+    );
+
+    dashboard.select_active_session(&foreign.id);
+    dashboard.set_state(state);
+    assert_eq!(dashboard.selected_session_id(), Some(foreign.id.as_str()));
+}
+
+#[test]
 fn empty_workspace_prepares_codex_before_focusing_the_new_session_prompt() {
     let mut config = config();
     config
@@ -27,8 +120,6 @@ fn empty_workspace_prepares_codex_before_focusing_the_new_session_prompt() {
     assert_eq!(
         dashboard.begin_startup_session(directory.clone()).unwrap(),
         DashboardAction::CreateStartupSession {
-            generation: None,
-            initial_prompt: None,
             profile_id: "codex-1".into(),
             project_directory: directory,
             target_template_id: None,
@@ -150,7 +241,7 @@ fn startup_reports_missing_agent_profiles() {
         dashboard
             .begin_startup_session(directory)
             .unwrap_err()
-            .contains("F4")
+            .contains("F7")
     );
 }
 

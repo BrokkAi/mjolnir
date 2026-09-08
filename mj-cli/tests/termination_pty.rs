@@ -374,7 +374,7 @@ image = "ubuntu:24.04"
 }
 
 #[test]
-fn first_launch_creates_a_workspace_and_local_session_without_terminal_input() {
+fn first_launch_and_new_key_create_in_the_launch_context_without_task_input() {
     let DashboardPty {
         _storage: storage,
         mut master,
@@ -417,6 +417,31 @@ fn first_launch_creates_a_workspace_and_local_session_without_terminal_input() {
     let rendered = String::from_utf8_lossy(&output);
     assert!(!rendered.contains("Welcome to Mjolnir setup"));
     assert!(!rendered.contains("Workspaces"));
+
+    // New requires only the shortcut, even while the first launch is pending.
+    master.write_all(b"\x1bn").unwrap();
+    let deadline = Instant::now() + TIMEOUT;
+    let created = loop {
+        drain(&mut master, &mut output);
+        let state = hel::hel_database::load_state_from(&database).unwrap();
+        if let Some(created) = state.sessions.values().find(|other| other.id != session.id) {
+            assert_eq!(state.sessions.len(), 2);
+            break created.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "one New key did not create a session: {}",
+            String::from_utf8_lossy(&output)
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(created.workspace_id, session.workspace_id);
+    assert_eq!(created.project_directory, session.project_directory);
+    assert_eq!(created.last_profile, "codex");
+    assert_eq!(created.target_template_id, "localhost");
+    assert!(created.draft_input.is_empty());
+    assert!(!String::from_utf8_lossy(&output).contains("What would you like to do?"));
+
     // This fake profile cannot launch a real agent. Quitting during its
     // background launch must still release the terminal promptly.
     master.write_all(QUIT_KEY).unwrap();
@@ -587,8 +612,9 @@ fn live_workspace_preview_terminates_without_reopening_the_fallback_dashboard() 
     wait_for_output(
         &mut master,
         &mut output,
-        // The settled preview has its final geometry after the loading row.
-        b"No sessions",
+        // The live feed starts before the first picker frame. Its controls
+        // mark readiness; preview text can arrive as incremental cell updates.
+        b"PgUp/PgDn preview",
         Instant::now() + TIMEOUT,
     );
     // PageDown and End are harmless even when there is no session to scroll.

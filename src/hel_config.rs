@@ -156,7 +156,7 @@ impl ReviewConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 3;
+pub const CONFIG_VERSION: u32 = 4;
 pub const PRODUCT_DIR: &str = "mjolnir";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -995,10 +995,11 @@ fn validate_environment(owner: &str, environment: &BTreeMap<String, String>) -> 
     Ok(())
 }
 
-/// The first session opened when a terminal workspace has no live sessions.
+/// Defaults for new sessions and an empty terminal workspace's first session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartupConfig {
+    /// Focus the normal composer when the new session is ready.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub prompt: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -1143,6 +1144,8 @@ impl SessionsSide {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelConfig {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub show_stopped_sessions: bool,
     #[serde(default, skip_serializing_if = "SessionsSide::is_default")]
     pub sessions_side: SessionsSide,
     pub version: u32,
@@ -1173,6 +1176,7 @@ impl Default for HelConfig {
     fn default() -> Self {
         Self {
             sessions_side: SessionsSide::default(),
+            show_stopped_sessions: true,
             version: CONFIG_VERSION,
             newer_config_version: None,
             spinner: SpinnerStyle::default(),
@@ -1251,9 +1255,10 @@ impl HelConfig {
         let mut config: Self = toml::from_str(&contents)
             .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         // Version 2 adds Podman workspace storage; version 3 restores the
-        // spinner preference. Earlier configs acquire defaults in memory and
+        // spinner preference; version 4 adds stopped-session visibility.
+        // Earlier configs acquire defaults in memory and
         // upgrade on the next ordinary save.
-        if matches!(config.version, 1 | 2) {
+        if matches!(config.version, 1..=3) {
             config.version = CONFIG_VERSION;
         }
         config.validate()?;
@@ -1283,6 +1288,9 @@ impl HelConfig {
     /// written in a future shape costs only that target.
     fn salvage(document: &toml::Value) -> Self {
         let mut config = Self::default();
+        if let Some(show) = salvage_section::<bool>(document, "show_stopped_sessions") {
+            config.show_stopped_sessions = show;
+        }
         if let Some(side) = salvage_section::<SessionsSide>(document, "sessions_side") {
             config.sessions_side = side;
         }
@@ -1797,6 +1805,24 @@ mod tests {
     }
 
     #[test]
+    fn stopped_session_visibility_defaults_on_and_is_remembered_when_disabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "version = 3\n").unwrap();
+        let config = HelConfig::load_from(&path).unwrap();
+        assert!(config.show_stopped_sessions);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "version = 3\n");
+        let (saved, ()) = HelConfig::update_to(&path, |config| {
+            config.show_stopped_sessions = false;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(HelConfig::load_from(&path).unwrap(), saved);
+        assert!(!saved.show_stopped_sessions);
+        assert_eq!(saved.version, CONFIG_VERSION);
+    }
+
+    #[test]
     fn muse_home_mapping_keeps_config_credentials_and_session_data_together() {
         let home = Path::new("/private/session/muse");
         let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
@@ -1843,6 +1869,7 @@ mod tests {
         HelConfig {
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
+            show_stopped_sessions: true,
             newer_config_version: None,
             spinner: SpinnerStyle::default(),
             phone: PhoneConfig::default(),

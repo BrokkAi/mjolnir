@@ -2618,13 +2618,7 @@ impl DashboardState {
         &mut self,
         project_directory: std::path::PathBuf,
     ) -> Result<DashboardAction, String> {
-        if !self.config.startup.enabled
-            || self
-                .state
-                .sessions
-                .values()
-                .any(|session| session.state.is_active())
-        {
+        if !self.config.startup.enabled || self.startup_sessions().next().is_some() {
             return Ok(DashboardAction::None);
         }
         self.quick_session_action(project_directory)
@@ -2648,13 +2642,11 @@ impl DashboardState {
                     .map(|(id, _)| id)
             })
             .or_else(|| self.config.profiles.keys().next())
-            .ok_or("No agent account is configured. Press F4 to add one in Setup.")?;
+            .ok_or("No agent account is configured. Press F7 to add one in Setup.")?;
         if !self.config.profiles.contains_key(profile_id) {
             return Err(format!("Startup profile {profile_id:?} is not configured."));
         }
         let action = DashboardAction::CreateStartupSession {
-            generation: None,
-            initial_prompt: None,
             profile_id: profile_id.clone(),
             target_template_id: self.config.startup.target.clone(),
             project_directory,
