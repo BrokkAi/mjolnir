@@ -372,6 +372,7 @@ mod tests {
                 session_ids
                     .iter()
                     .map(|session_id| RelaySessionTarget {
+                        git_broker: None,
                         session_id: (*session_id).to_owned(),
                         spec: CommandSpec::new("true", Vec::<String>::new()),
                         worker_recovery: None,

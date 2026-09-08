@@ -95,6 +95,9 @@ pub struct RepositoryMetadata {
     pub base_commit: String,
     pub head_commit: String,
     pub branch: Option<String>,
+    /// Initial managed branch; retained even after the user selects another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2214,7 +2217,8 @@ pub use git::{
     GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV, NON_INTERACTIVE_GIT_SSH_COMMAND,
     REVIEW_BASELINE_REF, REVIEW_CAPTURE_REF, SystemGit, capture_worktree_tree,
     collect_git_metadata_snapshot, collect_git_snapshot, collect_git_snapshot_with_progress,
-    diff_between_trees, empty_tree_id, has_origin_refs, pin_review_tree, restore_git_snapshot,
+    diff_between_trees, empty_tree_id, has_origin_refs, has_remote_refs, pin_review_tree,
+    restore_git_snapshot,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

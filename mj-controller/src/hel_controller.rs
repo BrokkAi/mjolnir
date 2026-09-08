@@ -6,6 +6,7 @@ mod git_cache;
 mod lifecycle;
 pub mod move_session;
 mod provisioning;
+pub(crate) use provisioning::ensure_git_broker_spec;
 mod readiness;
 mod recovery_scan;
 mod resume;

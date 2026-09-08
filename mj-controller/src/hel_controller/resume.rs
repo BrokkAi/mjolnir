@@ -1198,6 +1198,7 @@ impl Controller {
                         None => LocalBootstrap::Seed,
                     },
                 )?;
+                self.initialize_session_branches(session_id, &backend, syncing)?;
             }
             match projection_build {
                 Some(build) => {
@@ -2121,6 +2122,7 @@ mod tests {
                             "b".repeat(40)
                         },
                         branch: Some("main".into()),
+                        session_branch: None,
                     },
                     committed_bundle: Vec::new(),
                 })
@@ -2182,6 +2184,7 @@ mod tests {
                 base_commit: prerequisite.clone(),
                 head_commit: head.clone(),
                 branch: Some("main".into()),
+                session_branch: None,
             },
             committed_bundle: format!(
                 "# v2 git bundle\n-{prerequisite} base\n{head} HEAD\n\nPACKnot-read"

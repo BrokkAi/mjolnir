@@ -1784,6 +1784,7 @@ mod tests {
             base_commit: String::new(),
             head_commit: head_commit.into(),
             branch: branch.map(str::to_owned),
+            session_branch: None,
         }
     }
     #[test]

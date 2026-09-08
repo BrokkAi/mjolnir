@@ -73,6 +73,8 @@ fn reconnect_delay(failures: u32) -> Duration {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelaySessionTarget {
+    /// Read-only host bridge required before any live-session connection.
+    pub git_broker: Option<hel::hel_git_proxy::GitBrokerSpec>,
     pub session_id: String,
     pub spec: CommandSpec,
     /// Prove the exact worker is absent before restarting it in place. Direct
@@ -80,6 +82,20 @@ pub struct RelaySessionTarget {
     /// without turning a shared transport outage into destructive restarts.
     pub worker_recovery: Option<WorkerRecoveryPlan>,
     pub project_memory: Option<ProjectMemorySyncTarget>,
+}
+
+impl RelaySessionTarget {
+    async fn prepare_local_git(&self) -> Result<()> {
+        if let Some(spec) = self.git_broker.clone() {
+            tokio::task::spawn_blocking(move || {
+                crate::hel_controller::ensure_git_broker_spec(spec)
+            })
+            .await
+            .context("local Git broker preparation task failed")?
+            .context("secure the session's local Git source")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2429,7 +2445,10 @@ async fn run_reviewer_operation(
             // available for the next request to misinterpret.
             let mut client = match cache.take() {
                 Some(client) => client,
-                None => RelayClient::connect(&target.spec, &target.session_id).await?,
+                None => {
+                    target.prepare_local_git().await?;
+                    RelayClient::connect(&target.spec, &target.session_id).await?
+                },
             };
             let result = drive_reviewer(&mut client, role, action).await;
             if keep_connection && (result.is_ok() || result.as_ref().is_err_and(is_final_rejection)) {
@@ -2615,6 +2634,7 @@ impl StandaloneSession {
     }
 
     pub async fn connect(target: &RelaySessionTarget) -> Result<Self> {
+        target.prepare_local_git().await?;
         // Reach the worker before reading the projection. A stored session can
         // be tens of megabytes, and the reconnect loop would otherwise pay that
         // whole synchronous read on every attempt against a worker that is down.
@@ -2634,6 +2654,7 @@ impl StandaloneSession {
 
     pub async fn connect_command(spec: &CommandSpec, session_id: &str) -> Result<Self> {
         Self::connect(&RelaySessionTarget {
+            git_broker: None,
             session_id: session_id.to_owned(),
             spec: spec.clone(),
             worker_recovery: None,
@@ -3919,6 +3940,7 @@ mod tests {
 
     fn target(program: &str) -> RelaySessionTarget {
         RelaySessionTarget {
+            git_broker: None,
             session_id: "session-1".to_owned(),
             spec: CommandSpec::new(program, std::iter::empty::<&str>()),
             worker_recovery: None,
@@ -4664,6 +4686,7 @@ mod tests {
             },
         };
         let target = RelaySessionTarget {
+            git_broker: None,
             session_id: LEASED_RELAY_SESSION.to_owned(),
             spec,
             worker_recovery: Some(worker_recovery),
@@ -4735,6 +4758,7 @@ mod tests {
             relay_root.to_string_lossy().into_owned(),
         );
         RelaySessionTarget {
+            git_broker: None,
             session_id: LEASED_RELAY_SESSION.to_owned(),
             spec,
             worker_recovery: None,

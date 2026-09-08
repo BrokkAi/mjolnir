@@ -156,32 +156,43 @@ with their containers.
 
 ## Local repositories and the Git bridge
 
-A `local` bundle member is not mounted writable into a target. Instead, Mjolnir
-starts a per-session Git protocol bridge over the session's existing transport.
-The target sees that bridge as its `origin`.
+A `local` bundle member is copied into an independent workspace. Mjolnir serves
+its committed history through a **read-only** Git bridge named `mj-source`.
+Cloning and fetching work normally; all pushes through that bridge are rejected,
+including pushes to new branches. A session cannot update the host checkout's
+files or Git branches through this connection.
 
-This design provides:
+Each new managed workspace starts on its own `mj/<session-id>` branch. When the
+local repository has a network `origin`, Mjolnir configures that same upstream in
+the session, including a separate network push URL when configured. Normal
+`git push` publishes the session branch there, so you can use your usual review
+and merge workflow. GitHub SSH URLs use HTTPS with Mjolnir's existing token
+handling. Other SSH remotes require authentication available in the target;
+Mjolnir does not copy host SSH keys or credential helpers.
 
-- normal `git fetch` from the controller-side repository;
-- fast-forward `git push origin` back to it;
-- no inbound listening port;
-- no SSH-key copy; and
-- no general writable mount of your source checkout.
+Repositories without a network upstream remain usable for local work and
+checkpoints. Configure a network origin inside the session when you want to
+publish; filesystem paths are never used as a writable fallback. GitHub branch
+permissions still govern explicit pushes to other upstream branches.
 
-Force pushes, ref deletion, and receive hooks are disabled. A push to the
-controller repository's currently checked-out branch is rejected while that
-checkout is dirty. Git LFS is not supported through the bridge.
+Session branches and any later user-selected branch survive checkpoint and
+resume. On a controlled resume, older sessions without this branch setup are
+migrated without changing their commits or working files. An active Git operation
+must finish before branch migration. Updating Mjolnir replaces incompatible Git
+brokers when the session connects; already running older controllers must be
+restarted before they can enforce the new policy. Git LFS remains unsupported
+through the source bridge.
 
 At initial launch Mjolnir can seed the target from the local repository's
-current branch and uncommitted state. Because this copies work the agent can
+current commit and uncommitted state. Because this copies work the agent can
 change independently, the new-session flow requires explicit acknowledgment
 when a local repository is dirty. The session's checkpoint then becomes the
 durable source for later resumes rather than reseeding the user's checkout.
 
 Managed targets inherit a small allowlist of useful controller Git settings,
-including identity, pull/rebase behavior, conflict style, rerere, pruning, and
-push defaults. They do not inherit arbitrary Git configuration or credential
-helpers.
+including identity, pull/rebase behavior, conflict style, rerere, and pruning.
+Managed workspaces set safe push defaults for their own branches. They do not
+inherit arbitrary Git configuration or credential helpers.
 
 ## Multi-root behavior
 

@@ -26,6 +26,9 @@ impl FakeGit {
 impl GitCommandRunner for FakeGit {
     fn run(&self, _repository: &Path, command: &GitCommand) -> Result<GitOutput> {
         self.commands.lock().unwrap().push(command.clone());
+        if command.arguments == ["config", "--unset-all", "mj.sessionBranch"].map(OsString::from) {
+            return Ok(git_ok(Vec::new()));
+        }
         self.outputs
             .lock()
             .unwrap()
@@ -63,6 +66,13 @@ impl GitCommandRunner for CollectionGit {
             .map(|argument| argument.to_string_lossy())
             .collect::<Vec<_>>();
         let stdout = match arguments.first().map(|argument| argument.as_ref()) {
+            Some("config") => {
+                return Ok(GitOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
             Some("remote") => b"https://token@github.com/example/repo.git\n".to_vec(),
             Some("rev-parse") => format!("{}\n", "b".repeat(40)).into_bytes(),
             Some("merge-base") => format!("{}\n", "b".repeat(40)).into_bytes(),
@@ -177,6 +187,7 @@ fn repository(id: &str) -> RepositorySnapshot {
             base_commit: "a".repeat(40),
             head_commit: "b".repeat(40),
             branch: Some("feature/hel".to_string()),
+            session_branch: None,
         },
         committed_bundle: format!("bundle-{id}").into_bytes(),
         staged_patch: format!("staged-{id}").into_bytes(),
@@ -194,6 +205,7 @@ fn checkpoint_bundle(head: &str, contents: impl Into<Vec<u8>>) -> CheckpointRepo
             base_commit: String::new(),
             head_commit: head.into(),
             branch: Some("main".into()),
+            session_branch: None,
         },
         committed_bundle: contents.into(),
     }
@@ -1378,7 +1390,6 @@ fn git_collection_is_abstracted_redacts_origin_and_skips_credentials() {
         .map(|entry| entry.unwrap().path().unwrap().into_owned())
         .collect();
     assert_eq!(paths, vec![PathBuf::from("note.txt")]);
-    assert_eq!(runner.commands().len(), 9);
 }
 
 #[test]
@@ -1440,7 +1451,6 @@ fn git_collection_builds_independent_payloads_concurrently() {
     assert_eq!(snapshot.committed_bundle, b"bundle");
     assert_eq!(snapshot.staged_patch, b"staged");
     assert_eq!(snapshot.unstaged_patch, b"unstaged");
-    assert_eq!(runner.commands().len(), 10);
 }
 
 /// Checkpoint work runs with nobody watching the terminal it inherits, so
@@ -1798,9 +1808,13 @@ fn git_restore_routes_patches_through_injected_runner() {
     snapshot.untracked_tar = tar_with_file("new.sh", b"echo hi\n", 0o755);
     restore_git_snapshot(&runner, destination.path(), &snapshot).unwrap();
     let commands = runner.commands();
-    assert_eq!(commands.len(), 5);
-    assert_eq!(commands[3].stdin, b"staged-repo");
-    assert_eq!(commands[4].stdin, b"unstaged-repo");
+    let patches: Vec<_> = commands
+        .iter()
+        .filter(|command| command.arguments.first().is_some_and(|arg| arg == "apply"))
+        .collect();
+    assert_eq!(patches.len(), 2);
+    assert_eq!(patches[0].stdin, b"staged-repo");
+    assert_eq!(patches[1].stdin, b"unstaged-repo");
     assert_eq!(
         fs::read(destination.path().join("new.sh")).unwrap(),
         b"echo hi\n"

@@ -5324,6 +5324,7 @@ mod tests {
             let channels = spawn_remote_session_manager().expect("remote manager");
             let session_id = "session-1";
             channels.targets.send_replace(vec![RelaySessionTarget {
+                git_broker: None,
                 session_id: session_id.to_owned(),
                 spec: CommandSpec::new("true", Vec::<String>::new()),
                 worker_recovery: None,

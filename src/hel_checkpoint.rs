@@ -21,7 +21,7 @@ use crate::hel_archive::{
     ArchiveInput, BundleManifest, CanonicalSessionSnapshot, CanonicalTranscriptBody,
     GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, NativeArtifact, PayloadRole,
     RepositorySnapshot, SessionManifest, SystemGit, TargetManifest, collect_git_metadata_snapshot,
-    collect_git_snapshot, ensure_no_symlink_ancestors, has_origin_refs, is_secret_like_path,
+    collect_git_snapshot, ensure_no_symlink_ancestors, has_remote_refs, is_secret_like_path,
     read_archive_verified, restore_git_snapshot, validate_component, verify_archive_streaming,
     write_archive_hashed, write_archive_hashed_borrowed,
 };
@@ -33,9 +33,9 @@ use crate::hel_targets::{
 const MAX_NATIVE_FILE: u64 = 1024 * 1024 * 1024;
 const MAX_NATIVE_TOTAL: u64 = 8 * 1024 * 1024 * 1024;
 /// Version of the controller-to-exporter checkpoint specification contract.
-pub const CHECKPOINT_EXPORT_PROTOCOL_VERSION: u32 = 1;
+pub const CHECKPOINT_EXPORT_PROTOCOL_VERSION: u32 = 2;
 /// Version of the two-phase capture/pack contract used by ordinary checkpoints.
-pub const CHECKPOINT_STAGING_PROTOCOL_VERSION: u32 = 1;
+pub const CHECKPOINT_STAGING_PROTOCOL_VERSION: u32 = 2;
 /// Clock-skew slack subtracted from a Codex session's own creation time before
 /// it is used as an mtime floor for content probes.
 const CODEX_PROBE_FLOOR_SLACK_MS: i64 = 48 * 3600 * 1000;
@@ -48,6 +48,9 @@ pub struct CheckpointRepositorySpec {
     pub relative_destination: PathBuf,
     pub capture: CheckpointRepositoryCapture,
     pub origin_override: Option<String>,
+    /// Omitted in older specifications, which measure history against origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_remote: Option<String>,
 }
 
 /// Required repository capture semantics for the checkpoint protocol floor.
@@ -921,7 +924,7 @@ pub fn capture_checkpoint(
     git: &dyn GitCommandRunner,
 ) -> Result<CapturedCheckpoint> {
     ensure!(
-        spec.protocol_version == CHECKPOINT_STAGING_PROTOCOL_VERSION,
+        (1..=CHECKPOINT_STAGING_PROTOCOL_VERSION).contains(&spec.protocol_version),
         "unsupported checkpoint staging protocol version {}; worker supports {}",
         spec.protocol_version,
         CHECKPOINT_STAGING_PROTOCOL_VERSION
@@ -1033,7 +1036,7 @@ fn refresh_checkpoint_stage(
     let mut manifest: CheckpointStageManifest =
         serde_json::from_slice(&manifest_body).context("parse checkpoint stage manifest")?;
     ensure!(
-        manifest.protocol_version == CHECKPOINT_STAGING_PROTOCOL_VERSION,
+        (1..=CHECKPOINT_STAGING_PROTOCOL_VERSION).contains(&manifest.protocol_version),
         "unsupported sealed checkpoint stage version {}",
         manifest.protocol_version
     );
@@ -1196,7 +1199,7 @@ fn fingerprint_tree(root: &Path, path: &Path, digest: &mut Sha256) -> Result<()>
 pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
     let started = std::time::Instant::now();
     ensure!(
-        spec.protocol_version == CHECKPOINT_STAGING_PROTOCOL_VERSION,
+        (1..=CHECKPOINT_STAGING_PROTOCOL_VERSION).contains(&spec.protocol_version),
         "unsupported checkpoint staging protocol version {}; worker supports {}",
         spec.protocol_version,
         CHECKPOINT_STAGING_PROTOCOL_VERSION
@@ -1218,7 +1221,7 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
         let manifest: CheckpointStageManifest =
             serde_json::from_slice(&manifest_body).context("parse checkpoint stage manifest")?;
         ensure!(
-            manifest.protocol_version == CHECKPOINT_STAGING_PROTOCOL_VERSION,
+            (1..=CHECKPOINT_STAGING_PROTOCOL_VERSION).contains(&manifest.protocol_version),
             "unsupported sealed checkpoint stage version {}",
             manifest.protocol_version
         );
@@ -1365,7 +1368,7 @@ pub fn export_checkpoint_with_git(
 ) -> Result<TargetCheckpoint> {
     let started = std::time::Instant::now();
     ensure!(
-        spec.protocol_version == CHECKPOINT_EXPORT_PROTOCOL_VERSION,
+        (1..=CHECKPOINT_EXPORT_PROTOCOL_VERSION).contains(&spec.protocol_version),
         "unsupported checkpoint export protocol version {}; worker supports {}",
         spec.protocol_version,
         CHECKPOINT_EXPORT_PROTOCOL_VERSION
@@ -1452,8 +1455,9 @@ fn collect_checkpoint_repositories(
                     .with_context(|| format!("repository '{}'", repository.id));
                 }
                 CheckpointRepositoryCapture::SessionDelta => {
-                    repair_origin_refs(git, &path, &repository.id)?;
-                    GitHistoryMode::SessionDelta
+                    let remote = repository.baseline_remote.as_deref().unwrap_or("origin");
+                    repair_remote_refs(git, &path, &repository.id, remote)?;
+                    GitHistoryMode::SessionDeltaFromRemote(remote.to_owned())
                 }
                 CheckpointRepositoryCapture::DeltaFrom { base_commit } => {
                     GitHistoryMode::DeltaFrom(base_commit.clone())
@@ -1561,15 +1565,21 @@ fn read_project_memory_checkpoint_endpoint(path: &Path) -> Result<ProjectMemoryC
 /// This is the one network call in an export. It cannot stop on a prompt:
 /// [`SystemGit`] runs every child with
 /// [`NON_INTERACTIVE_GIT_ENV`](crate::hel_archive::NON_INTERACTIVE_GIT_ENV).
-fn repair_origin_refs(git: &dyn GitCommandRunner, path: &Path, id: &str) -> Result<()> {
-    let listed = || has_origin_refs(git, path).with_context(|| format!("repository '{id}'"));
+fn repair_remote_refs(
+    git: &dyn GitCommandRunner,
+    path: &Path,
+    id: &str,
+    remote: &str,
+) -> Result<()> {
+    let listed =
+        || has_remote_refs(git, path, remote).with_context(|| format!("repository '{id}'"));
     if listed()? {
         return Ok(());
     }
     let fetch = git.run(
         path,
         &GitCommand {
-            arguments: vec!["fetch".into(), "origin".into()],
+            arguments: vec!["fetch".into(), remote.into()],
             stdin: Vec::new(),
             env: Vec::new(),
         },
@@ -1578,7 +1588,7 @@ fn repair_origin_refs(git: &dyn GitCommandRunner, path: &Path, id: &str) -> Resu
         return Ok(());
     }
     let outcome = if fetch.status == 0 {
-        "repair fetch produced no origin refs".to_owned()
+        format!("repair fetch produced no {remote} refs")
     } else {
         format!(
             "repair fetch failed with status {}: {}",
@@ -1587,7 +1597,7 @@ fn repair_origin_refs(git: &dyn GitCommandRunner, path: &Path, id: &str) -> Resu
         )
     };
     bail!(
-        "repository '{id}' has no origin refs to delta against; refusing to bundle full history ({outcome})"
+        "repository '{id}' has no {remote} refs to delta against; refusing to bundle full history ({outcome})"
     )
 }
 
@@ -1619,6 +1629,9 @@ fn validate_checkpoint_source(
     let mut destinations = BTreeSet::new();
     for repository in repositories {
         validate_component(&repository.id, "repository ID")?;
+        if let Some(remote) = &repository.baseline_remote {
+            crate::hel_config::validate_id("Git baseline remote", remote)?;
+        }
         validate_relative_path(&repository.relative_destination)?;
         if let CheckpointRepositoryCapture::DeltaFrom { base_commit } = &repository.capture {
             ensure!(!base_commit.trim().is_empty(), "base commit is empty");
@@ -3401,6 +3414,7 @@ mod tests {
                 base_commit: "a".repeat(40),
                 head_commit: "a".repeat(40),
                 branch: Some("main".into()),
+                session_branch: None,
             },
             committed_bundle_path: "repositories/app/committed.bundle".into(),
             staged_patch_path: "repositories/app/staged.patch".into(),
@@ -3635,6 +3649,7 @@ mod tests {
                 base_commit: "a".repeat(40),
                 head_commit: "a".repeat(40),
                 branch: Some("main".into()),
+                session_branch: None,
             },
             committed_bundle_path: "repositories/app/committed.bundle".into(),
             staged_patch_path: "repositories/app/staged.patch".into(),
@@ -3672,6 +3687,7 @@ mod tests {
                 base_commit: "a".repeat(40),
                 head_commit: "a".repeat(40),
                 branch: Some("main".into()),
+                session_branch: None,
             },
             committed_bundle_path: "repositories/app/committed.bundle".into(),
             staged_patch_path: "repositories/app/staged.patch".into(),
@@ -3807,6 +3823,7 @@ mod tests {
                 harness_home,
                 workspace_root: workspace,
                 repositories: vec![CheckpointRepositorySpec {
+                    baseline_remote: None,
                     id: "app".into(),
                     relative_destination: "app".into(),
                     capture: CheckpointRepositoryCapture::DeltaFrom { base_commit: base },
@@ -4117,6 +4134,7 @@ mod tests {
             harness_home,
             workspace_root,
             repositories: vec![CheckpointRepositorySpec {
+                baseline_remote: None,
                 id: "app".into(),
                 relative_destination: "app".into(),
                 capture: CheckpointRepositoryCapture::MetadataOnly,
@@ -5038,6 +5056,89 @@ mod tests {
     }
 
     #[test]
+    fn local_checkpoint_repairs_source_refs_and_round_trips_published_and_dirty_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut spec, _) = fixture(temp.path());
+        let repository = spec.workspace_root.join("app");
+        let source = temp.path().join("source.git");
+        git(
+            &spec.workspace_root,
+            &["clone", "-q", "--bare", "app", source.to_str().unwrap()],
+        );
+        git(
+            &repository,
+            &["remote", "add", "mj-source", source.to_str().unwrap()],
+        );
+        git(&repository, &["config", "mj.sessionBranch", "mj/session"]);
+        git(&repository, &["checkout", "-qb", "user-branch"]);
+        fs::write(
+            repository.join("published.txt"),
+            b"published session change",
+        )
+        .unwrap();
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-qm", "published"]);
+        let head = git(&repository, &["rev-parse", "HEAD"]);
+        git(
+            &repository,
+            &["update-ref", "refs/remotes/origin/user-branch", &head],
+        );
+        fs::write(repository.join("README.md"), b"staged").unwrap();
+        git(&repository, &["add", "README.md"]);
+        fs::write(repository.join("README.md"), b"unstaged").unwrap();
+        fs::write(repository.join("untracked.bin"), vec![b'x'; 192 * 1024]).unwrap();
+        spec.repositories[0].capture = CheckpointRepositoryCapture::SessionDelta;
+        spec.repositories[0].baseline_remote = Some("mj-source".into());
+        spec.repositories[0].origin_override = Some("mj-local:app".into());
+        let runner = RecordingGit::forwarding();
+        export_checkpoint_with_git(&spec, &runner).unwrap();
+        assert_eq!(
+            runner.fetches(),
+            1,
+            "missing refs must be repaired from the local source"
+        );
+        let archive = read_archive_verified(&spec.output_path).unwrap();
+        assert!(
+            !archive
+                .payload_by_role(&PayloadRole::GitBundle {
+                    repository_id: "app".into()
+                })
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            archive.manifest.repositories[0]
+                .metadata
+                .session_branch
+                .as_deref(),
+            Some("mj/session")
+        );
+        let restored_root = temp.path().join("restored");
+        fs::create_dir(&restored_root).unwrap();
+        git(
+            &restored_root,
+            &["clone", "-q", source.to_str().unwrap(), "app"],
+        );
+        restore_repositories(&spec.output_path, &restored_root, &SystemGit).unwrap();
+        let restored = restored_root.join("app");
+        assert_eq!(git(&restored, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(&restored, &["branch", "--show-current"]), "user-branch");
+        assert_eq!(
+            git(&restored, &["config", "--get", "mj.sessionBranch"]),
+            "mj/session"
+        );
+        assert_eq!(
+            git(&restored, &["diff", "--cached"]),
+            git(&repository, &["diff", "--cached"])
+        );
+        assert_eq!(git(&restored, &["diff"]), git(&repository, &["diff"]));
+        assert_eq!(
+            fs::read(restored.join("untracked.bin")).unwrap().len(),
+            192 * 1024
+        );
+    }
+
+    #[test]
     fn raw_project_without_git_metadata_fails_checkpoint_export() {
         let temp = tempfile::tempdir().unwrap();
         let (mut spec, _) = fixture(temp.path());
@@ -5193,7 +5294,11 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unsupported checkpoint export protocol version 2; worker supports 1"
+            format!(
+                "unsupported checkpoint export protocol version {}; worker supports {}",
+                CHECKPOINT_EXPORT_PROTOCOL_VERSION + 1,
+                CHECKPOINT_EXPORT_PROTOCOL_VERSION
+            )
         );
     }
 
@@ -5689,6 +5794,7 @@ mod tests {
         let worker = spec.workspace_root.join("worker");
         let base = git(&worker, &["rev-parse", "HEAD"]);
         spec.repositories.push(CheckpointRepositorySpec {
+            baseline_remote: None,
             id: "worker".into(),
             relative_destination: "worker".into(),
             capture: CheckpointRepositoryCapture::DeltaFrom { base_commit: base },

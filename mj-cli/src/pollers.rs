@@ -617,7 +617,15 @@ pub(crate) fn dashboard_worker_targets(controller: &Controller) -> Vec<WorkerPol
                     return None;
                 }
             };
+            let git_broker = match controller.git_broker_spec(&session.id) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, "could not secure worker Git target: {error:#}");
+                    return None;
+                }
+            };
             Some(WorkerPollTarget {
+                git_broker,
                 session_id: session.id.clone(),
                 spec,
                 worker_recovery: match controller.worker_recovery_plan(&session.id) {
@@ -2374,6 +2382,19 @@ mod tests {
                     environment: std::collections::BTreeMap::new(),
                     workspace_storage: Default::default(),
                 },
+            },
+        );
+        config.bundles.insert(
+            "project".into(),
+            hel::hel_config::ProjectBundle {
+                primary_repo: "project".into(),
+                repositories: vec![hel::hel_config::ProjectRepository {
+                    id: "project".into(),
+                    github: Some("example/project".into()),
+                    local: None,
+                    destination: "project".into(),
+                    git_ref: None,
+                }],
             },
         );
         let mut hel_state = HelState::default();

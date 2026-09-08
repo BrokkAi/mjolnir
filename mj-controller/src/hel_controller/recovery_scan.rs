@@ -176,6 +176,11 @@ impl Controller {
         spec: &CommandSpec,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
+        if let Some(broker) = self.git_broker_spec(session_id)? {
+            tokio::task::spawn_blocking(move || super::ensure_git_broker_spec(broker))
+                .await
+                .context("orphan Git broker preparation task failed")??;
+        }
         let mut relay = StandaloneSession::connect_command(spec, session_id)
             .await
             .context("orphan relay did not complete the v1 handshake")?;

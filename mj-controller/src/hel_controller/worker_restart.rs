@@ -221,6 +221,14 @@ impl Controller {
             replace_installed_worker_launch_config(executor, backend, session_id, launch)
                 .context("install the current Mjolnir worker launch configuration")?;
         }
+        self.connect_local_repositories(
+            session_id,
+            backend,
+            worker_root,
+            executor,
+            super::provisioning::LocalBootstrap::Skip,
+        )?;
+        self.initialize_session_branches(session_id, backend, executor)?;
         start_worker(executor, backend, worker_root).context(messages.start)?;
         // Journal recovery runs before the daemon binds control.sock. A long
         // kimi session can take well over the ordinary 30s startup window.

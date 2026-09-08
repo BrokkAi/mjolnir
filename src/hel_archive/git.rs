@@ -71,6 +71,8 @@ pub enum GitHistoryMode {
     /// Bundle commits reachable from HEAD but from no `refs/remotes/origin/*`
     /// ref. Errors when the repository has no origin refs at all.
     SessionDelta,
+    /// Exclude only history supplied by this named source remote.
+    SessionDeltaFromRemote(String),
     /// Bundle commits since `merge-base(HEAD, rev)`. Errors when the revision
     /// or the merge base cannot be resolved.
     DeltaFrom(String),
@@ -145,6 +147,7 @@ pub fn collect_git_metadata_snapshot(
             base_commit: identity.head_commit.clone(),
             head_commit: identity.head_commit,
             branch: identity.branch,
+            session_branch: identity.session_branch,
         },
         committed_bundle: Vec::new(),
         staged_patch: Vec::new(),
@@ -157,6 +160,7 @@ struct CollectedGitIdentity {
     origin: String,
     head_commit: String,
     branch: Option<String>,
+    session_branch: Option<String>,
 }
 
 fn collect_git_identity(
@@ -189,10 +193,22 @@ fn collect_git_identity(
     } else {
         return Err(git_failure("read Git branch", &branch_output));
     };
+    let policy = run_git(
+        runner,
+        repository,
+        ["config", "--get", "mj.sessionBranch"],
+        &[],
+    )?;
+    let session_branch = match policy.status {
+        0 => Some(trim_output(&policy.stdout, "read session branch policy")?),
+        1 => None,
+        _ => return Err(git_failure("read session branch policy", &policy)),
+    };
     Ok(CollectedGitIdentity {
         origin,
         head_commit,
         branch,
+        session_branch,
     })
 }
 
@@ -228,16 +244,25 @@ fn merge_base(
 /// True when the repository has at least one `refs/remotes/origin/*` ref, the
 /// exclusion set every session delta is measured against.
 pub fn has_origin_refs(runner: &dyn GitCommandRunner, repository: &Path) -> Result<bool> {
+    has_remote_refs(runner, repository, "origin")
+}
+
+pub fn has_remote_refs(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    remote: &str,
+) -> Result<bool> {
+    crate::hel_config::validate_id("Git baseline remote", remote)?;
     let refs = git_text(
         runner,
         repository,
         [
             "for-each-ref",
             "--format=%(objectname)",
-            "refs/remotes/origin",
+            &format!("refs/remotes/{remote}/"),
         ],
     )
-    .context("list origin refs")?;
+    .context("list remote refs")?;
     Ok(!refs.is_empty())
 }
 
@@ -384,24 +409,29 @@ fn select_git_history(
     head_commit: &str,
 ) -> Result<GitHistorySelection> {
     match mode {
-        GitHistoryMode::SessionDelta => {
+        GitHistoryMode::SessionDelta | GitHistoryMode::SessionDeltaFromRemote(_) => {
+            let remote = match mode {
+                GitHistoryMode::SessionDeltaFromRemote(remote) => remote.as_str(),
+                _ => "origin",
+            };
+            let excluded = format!("--remotes={remote}");
             // Collection stays side-effect free; callers repair missing origin
             // refs before asking for a session delta.
             ensure!(
-                has_origin_refs(runner, repository)?,
-                "repository has no origin refs to delta against"
+                has_remote_refs(runner, repository, remote)?,
+                "repository has no {remote} refs to delta against"
             );
             let count = git_text(
                 runner,
                 repository,
-                ["rev-list", "--count", "HEAD", "--not", "--remotes=origin"],
+                ["rev-list", "--count", "HEAD", "--not", &excluded],
             )?
             .parse::<u64>()
             .context("parse committed delta count")?;
             Ok(GitHistorySelection {
                 base_commit: String::new(),
                 bundle_arguments: (count > 0).then(|| {
-                    ["bundle", "create", "-", "HEAD", "--not", "--remotes=origin"]
+                    ["bundle", "create", "-", "HEAD", "--not", &excluded]
                         .map(String::from)
                         .to_vec()
                 }),
@@ -517,6 +547,7 @@ fn collect_git_contents(
             base_commit,
             head_commit: identity.head_commit,
             branch: identity.branch,
+            session_branch: identity.session_branch,
         },
         committed_bundle,
         staged_patch,
@@ -582,6 +613,26 @@ pub fn restore_git_snapshot(
             "restore detached commit",
         )
         .with_context(|| checkout_advice(snapshot))?;
+    }
+    if let Some(branch) = &snapshot.metadata.session_branch {
+        git_bytes(
+            runner,
+            repository,
+            ["config", "mj.sessionBranch", branch],
+            &[],
+            "restore session branch policy",
+        )?;
+    } else {
+        let cleared = run_git(
+            runner,
+            repository,
+            ["config", "--unset-all", "mj.sessionBranch"],
+            &[],
+        )?;
+        ensure!(
+            matches!(cleared.status, 0 | 5),
+            "clear session branch policy failed"
+        );
     }
     if !snapshot.staged_patch.is_empty() {
         git_bytes(

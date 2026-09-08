@@ -2726,6 +2726,7 @@ mod tests {
             // The target is never dialled: this manager forwards every
             // request to the test instead of to a worker.
             channels.targets.send_replace(vec![RelaySessionTarget {
+                git_broker: None,
                 session_id: session.to_owned(),
                 spec: hel::hel_targets::CommandSpec::new("true", Vec::<String>::new()),
                 worker_recovery: None,

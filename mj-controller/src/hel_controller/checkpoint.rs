@@ -667,6 +667,7 @@ impl Controller {
                     parent.to_string_lossy().into_owned(),
                     "project".to_owned(),
                     vec![CheckpointRepositorySpec {
+                        baseline_remote: None,
                         id: "project".into(),
                         relative_destination: PathBuf::from(destination),
                         // Managed worktrees are retired on Stop, so their
@@ -706,6 +707,9 @@ impl Controller {
                     .repositories
                     .iter()
                     .map(|repository| CheckpointRepositorySpec {
+                        baseline_remote: repository
+                            .is_local()
+                            .then(|| hel::hel_git_proxy::LOCAL_SOURCE_REMOTE.to_owned()),
                         id: repository.id.clone(),
                         relative_destination: repository.destination.clone(),
                         capture: CheckpointRepositoryCapture::SessionDelta,
@@ -1307,6 +1311,7 @@ async fn connect_checkpoint_relay(
         })
     } else {
         let target = crate::hel_session_manager::RelaySessionTarget {
+            git_broker: None,
             session_id: session_id.to_owned(),
             spec: reconnect.clone(),
             worker_recovery: None,
@@ -3218,6 +3223,7 @@ mod tests {
                 .insert(LATCH_RELAY_RUNNING.to_owned(), "1".to_owned());
         }
         crate::hel_session_manager::RelaySessionTarget {
+            git_broker: None,
             session_id: LATCH_RELAY_SESSION.to_owned(),
             spec,
             worker_recovery: None,

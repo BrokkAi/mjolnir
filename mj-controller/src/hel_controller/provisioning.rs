@@ -13,7 +13,9 @@ use hel::hel_archive::{
 };
 use hel::hel_checkpoint::RepositoryRestoreSpec;
 use hel::hel_config::{ProjectBundle, TargetTemplate, atomic_write, data_dir};
-use hel::hel_git_proxy::{GitBrokerSpec, broker_is_alive, running_broker_pid};
+use hel::hel_git_proxy::{
+    GIT_BROKER_POLICY_VERSION, GIT_BROKER_READY, GitBrokerSpec, broker_is_alive, running_broker_pid,
+};
 use hel::hel_local_git::canonical_repository;
 use hel::hel_projection::canonical_session_from_materialized;
 use hel::hel_state::{HelState, SessionRecord, SessionState, TargetLocator};
@@ -32,6 +34,8 @@ use super::git_cache;
 use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
 use super::worker_binary::{bridge_readiness_stage, start_worker, worker_probe_diagnosis};
 use super::{Controller, execute_checked, now, target_kind};
+
+mod git;
 
 const INHERITED_GIT_SETTINGS: &[&str] = &[
     "diff.algorithm",
@@ -524,6 +528,7 @@ impl Controller {
                 syncing,
                 LocalBootstrap::Seed,
             )?;
+            self.initialize_session_branches(session_id, backend, syncing)?;
         }
         let session = self
             .state
@@ -576,14 +581,9 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
-        if session.project_directory.is_some() {
+        let Some(bundle) = self.workspace_git_bundle(session)? else {
             return Ok(());
-        }
-        let bundle = self
-            .config
-            .bundles
-            .get(&session.bundle_id)
-            .context("session bundle is missing")?;
+        };
         let local = bundle
             .repositories
             .iter()
@@ -595,110 +595,26 @@ impl Controller {
 
         let absolute_worker_root =
             absolute_target_path(executor, backend, session_id, worker_root)?;
-        let repositories = local
-            .iter()
-            .map(|(repository, path)| Ok((repository.id.clone(), canonical_repository(path)?)))
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        ensure_git_broker(session_id, backend, repositories)?;
+        if let Some(spec) = self.git_broker_spec(session_id)? {
+            ensure_git_broker_spec(spec)?;
+        }
 
-        let workspace_root = match backend {
-            hel_targets::TargetLocator::LocalPodman { .. }
-            | hel_targets::TargetLocator::LocalDocker { .. }
-            | hel_targets::TargetLocator::AppleContainer { .. }
-            | hel_targets::TargetLocator::SshPodman { .. }
-            | hel_targets::TargetLocator::SshDocker { .. } => "/workspace".to_owned(),
-            hel_targets::TargetLocator::AwsEc2 { workspace, .. }
-            | hel_targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
-            hel_targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
-        };
+        let workspace_root = git::workspace_root(backend);
         let mut missing = Vec::new();
         for &(repository, source) in &local {
-            local_branch(source)?;
-            let destination = format!(
-                "{workspace_root}/{}",
-                repository.destination.to_string_lossy()
-            );
-            let origin = local_origin_url(&absolute_worker_root, &repository.id);
-            for (args, purpose) in [
-                (
-                    vec![
-                        "git".into(),
-                        "-C".into(),
-                        destination.clone(),
-                        "config".into(),
-                        "protocol.ext.allow".into(),
-                        "always".into(),
-                    ],
-                    "enable the confined local Git transport",
-                ),
-                (
-                    vec![
-                        "git".into(),
-                        "-C".into(),
-                        destination.clone(),
-                        "config".into(),
-                        "remote.origin.url".into(),
-                        origin,
-                    ],
-                    "configure local Git origin",
-                ),
-                (
-                    vec![
-                        "git".into(),
-                        "-C".into(),
-                        destination.clone(),
-                        "config".into(),
-                        "remote.origin.fetch".into(),
-                        "+refs/heads/*:refs/remotes/origin/*".into(),
-                    ],
-                    "configure local Git fetch refspec",
-                ),
-            ] {
-                execute_checked(
-                    executor,
-                    hel_targets::command_on_locator(backend, session_id, args, purpose)?,
-                )?;
-            }
-            let has_head = executor.execute(&hel_targets::command_on_locator(
+            let workspace = git::WorkspaceGit {
+                executor,
                 backend,
                 session_id,
-                vec![
-                    "git".into(),
-                    "-C".into(),
-                    destination.clone(),
-                    "rev-parse".into(),
-                    "--verify".into(),
-                    "HEAD".into(),
-                ],
-                "inspect local Git bootstrap state",
-            )?)?;
-            if has_head.status != 0 {
+                directory: workspace_root.join(&repository.destination),
+            };
+            workspace.connect_source(
+                source,
+                &local_origin_url(&absolute_worker_root, &repository.id),
+            )?;
+            if !workspace.has_head()? {
                 missing.push((repository, source));
             }
-        }
-        // Fetch before bootstrapping: the proxy delivers every branch, so the
-        // bootstrap archive only has to carry identity and dirty state, and
-        // the commit it checks out is already present.
-        for (repository, _) in &local {
-            let destination = format!(
-                "{workspace_root}/{}",
-                repository.destination.to_string_lossy()
-            );
-            execute_checked(
-                executor,
-                hel_targets::command_on_locator(
-                    backend,
-                    session_id,
-                    vec![
-                        "git".into(),
-                        "-C".into(),
-                        destination.clone(),
-                        "fetch".into(),
-                        "origin".into(),
-                    ],
-                    "fetch local Git origin",
-                )?,
-            )?;
         }
         if let Some(sources) = seed_sources(&missing, &bootstrap)
             && !sources.is_empty()
@@ -708,10 +624,89 @@ impl Controller {
                 backend,
                 session,
                 bundle,
-                &workspace_root,
+                &workspace_root.to_string_lossy(),
                 worker_root,
                 &sources,
             )?;
+        }
+        Ok(())
+    }
+
+    fn workspace_git_bundle(&self, session: &SessionRecord) -> Result<Option<&ProjectBundle>> {
+        if session.project_directory.is_some()
+            || self
+                .config
+                .targets
+                .get(&session.target_template_id)
+                .is_some_and(hel::hel_config::is_bare_project_target)
+        {
+            return Ok(None);
+        }
+        self.config
+            .bundles
+            .get(&session.bundle_id)
+            .context("session bundle is missing")
+            .map(Some)
+    }
+
+    /// Build a reconnect prerequisite without filesystem or target I/O.
+    pub fn git_broker_spec(&self, session_id: &str) -> Result<Option<GitBrokerSpec>> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("unknown session")?;
+        let Some(bundle) = self.workspace_git_bundle(session)? else {
+            return Ok(None);
+        };
+        let repositories = bundle
+            .repositories
+            .iter()
+            .filter_map(|repository| {
+                repository
+                    .local
+                    .as_ref()
+                    .map(|path| (repository.id.clone(), path.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        if repositories.is_empty() {
+            return Ok(None);
+        }
+        let (backend, _) = self.worker_placement(session_id)?;
+        let files = BrokerFiles::in_directory(&broker_directory(), session_id);
+        Ok(Some(GitBrokerSpec {
+            policy_version: GIT_BROKER_POLICY_VERSION,
+            session_id: session_id.to_owned(),
+            bridge: hel_targets::git_bridge_command(&backend, session_id)?,
+            repositories,
+            ready_path: files.ready,
+            pid_path: files.pid,
+        }))
+    }
+
+    pub(super) fn initialize_session_branches(
+        &self,
+        session_id: &str,
+        backend: &hel_targets::TargetLocator,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("unknown session")?;
+        let Some(bundle) = self.workspace_git_bundle(session)? else {
+            return Ok(());
+        };
+        let root = git::workspace_root(backend);
+        for repository in &bundle.repositories {
+            git::WorkspaceGit {
+                executor,
+                backend,
+                session_id,
+                directory: root.join(&repository.destination),
+            }
+            .initialize_branch()?;
         }
         Ok(())
     }
@@ -1101,26 +1096,6 @@ fn provisioned_locator(
     })
 }
 
-fn local_branch(repository: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .current_dir(repository)
-        .output()
-        .with_context(|| format!("read current branch in {}", repository.display()))?;
-    if !output.status.success() {
-        bail!(
-            "local repository {} must have a branch checked out before Hel can expose it as origin",
-            repository.display()
-        );
-    }
-    let branch = String::from_utf8(output.stdout).context("decode local Git branch")?;
-    let branch = branch.trim().to_owned();
-    if branch.is_empty() {
-        bail!("local repository has an empty current branch");
-    }
-    Ok(branch)
-}
-
 fn local_origin_url(worker_root: &str, repository_id: &str) -> String {
     fn ext_argument(value: &str) -> String {
         value.replace('%', "%%").replace(' ', "% ")
@@ -1298,28 +1273,22 @@ fn broker_directory() -> PathBuf {
     data_dir().join("git-brokers")
 }
 
-fn ensure_git_broker(
-    session_id: &str,
-    locator: &hel_targets::TargetLocator,
-    repositories: BTreeMap<String, PathBuf>,
-) -> Result<()> {
+pub(crate) fn ensure_git_broker_spec(mut spec: GitBrokerSpec) -> Result<()> {
+    ensure!(
+        spec.policy_version == GIT_BROKER_POLICY_VERSION,
+        "unsupported Git broker policy"
+    );
+    spec.repositories = spec
+        .repositories
+        .iter()
+        .map(|(id, path)| Ok((id.clone(), canonical_repository(path)?)))
+        .collect::<Result<_>>()?;
+    let session_id = spec.session_id.clone();
     let directory = broker_directory();
     std::fs::create_dir_all(&directory)?;
-    let files = BrokerFiles::in_directory(&directory, session_id);
-    let spec = GitBrokerSpec {
-        session_id: session_id.to_owned(),
-        bridge: hel_targets::git_bridge_command(locator, session_id)?,
-        repositories,
-        ready_path: files.ready.clone(),
-        pid_path: files.pid.clone(),
-    };
-    if broker_is_alive(&files.pid) {
-        if broker_serves(&files, &spec) {
-            return Ok(());
-        }
-        bail!(
-            "a different local Git broker is still active for session {session_id}; close its target before reconnecting"
-        );
+    let files = BrokerFiles::in_directory(&directory, &session_id);
+    if prepare_broker_policy(&files, &spec)? {
+        return Ok(());
     }
     spec.write(&files.spec)?;
     let child = match start_git_broker(&files) {
@@ -1344,10 +1313,30 @@ fn ensure_git_broker(
     Ok(())
 }
 
+/// Reuse only a broker whose process has acknowledged the read-only policy.
+fn prepare_broker_policy(files: &BrokerFiles, spec: &GitBrokerSpec) -> Result<bool> {
+    if broker_is_alive(&files.pid) {
+        if broker_serves(files, spec) {
+            return Ok(true);
+        }
+        let mut previous = GitBrokerSpec::read(&files.spec)?;
+        previous.policy_version = GIT_BROKER_POLICY_VERSION;
+        ensure!(
+            &previous == spec,
+            "a different local Git broker is still active for session {}; close its target before reconnecting",
+            spec.session_id
+        );
+        // Removing the old spec stops its supervisor from restarting it. The
+        // new version field also makes old executables reject the replacement.
+        retire_broker_files(files).context("retire writable local Git broker")?;
+    }
+    Ok(false)
+}
+
 /// Whether a broker is already serving exactly this session and spec.
 fn broker_serves(files: &BrokerFiles, spec: &GitBrokerSpec) -> bool {
     broker_is_alive(&files.pid)
-        && files.ready.exists()
+        && std::fs::read(&files.ready).is_ok_and(|ready| ready == GIT_BROKER_READY)
         && GitBrokerSpec::read(&files.spec).is_ok_and(|existing| &existing == spec)
 }
 
@@ -1388,7 +1377,9 @@ fn start_git_broker(files: &BrokerFiles) -> Result<std::process::Child> {
     let mut child = command.spawn().context("start local Git broker")?;
     let deadline = Instant::now() + BROKER_READY_TIMEOUT;
     loop {
-        if files.ready.exists() && broker_is_alive(&files.pid) {
+        if std::fs::read(&files.ready).is_ok_and(|ready| ready == GIT_BROKER_READY)
+            && broker_is_alive(&files.pid)
+        {
             return Ok(child);
         }
         if let Some(status) = child.try_wait().context("poll local Git broker")? {
@@ -1451,7 +1442,9 @@ fn retire_broker_files(files: &BrokerFiles) -> Result<()> {
 /// special handling; a retired session's spec is gone, and a broker another
 /// controller already has running belongs to that controller.
 fn broker_needs_restart(files: &BrokerFiles) -> bool {
-    files.spec.exists() && !broker_is_alive(&files.pid)
+    GitBrokerSpec::read(&files.spec)
+        .is_ok_and(|spec| spec.policy_version == GIT_BROKER_POLICY_VERSION)
+        && !broker_is_alive(&files.pid)
 }
 
 fn remove_broker_file(path: &Path) -> Result<()> {
@@ -2697,6 +2690,7 @@ mod tests {
     fn retirable_broker_files(directory: &Path) -> BrokerFiles {
         let files = BrokerFiles::in_directory(directory, PROVISIONED_SESSION);
         GitBrokerSpec {
+            policy_version: GIT_BROKER_POLICY_VERSION,
             session_id: PROVISIONED_SESSION.into(),
             bridge: CommandSpec::new("true", Vec::<String>::new()),
             repositories: BTreeMap::new(),
@@ -2705,27 +2699,13 @@ mod tests {
         }
         .write(&files.spec)
         .unwrap();
-        std::fs::write(&files.ready, "ready\n").unwrap();
+        std::fs::write(&files.ready, GIT_BROKER_READY).unwrap();
         std::fs::write(&files.log, "broker log\n").unwrap();
         files
     }
 
-    /// A closing session stops its broker on purpose: the process goes, the
-    /// supervisor that was keeping it alive returns quietly, and the log keeps
-    /// what it had without a word about a lost origin.
     #[cfg(unix)]
-    #[test]
-    fn retiring_a_session_stops_its_running_broker_and_reports_nothing() {
-        if let Some(pid_path) = std::env::var_os(BROKER_STAND_IN_PID_PATH) {
-            let _slot = hel::hel_git_proxy::claim_broker_pid_file(Path::new(&pid_path)).unwrap();
-            // Retirement is what ends this process; the sleep only bounds the
-            // damage when it fails to.
-            std::thread::sleep(Duration::from_secs(60));
-            return;
-        }
-
-        let directory = tempfile::tempdir().unwrap();
-        let files = retirable_broker_files(directory.path());
+    fn running_broker_stand_in(files: &BrokerFiles) -> std::process::Child {
         let test_name = format!(
             "{}::retiring_a_session_stops_its_running_broker_and_reports_nothing",
             module_path!()
@@ -2754,6 +2734,53 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+
+        child
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_upgrade_retires_a_legacy_process_before_reusing_the_session_slot() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = retirable_broker_files(directory.path());
+        let desired = GitBrokerSpec::read(&files.spec).unwrap();
+        let mut legacy = serde_json::to_value(&desired).unwrap();
+        legacy.as_object_mut().unwrap().remove("policy_version");
+        std::fs::write(&files.spec, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        std::fs::write(&files.ready, "ready\n").unwrap();
+        let mut child = running_broker_stand_in(&files);
+        assert!(!broker_serves(&files, &desired));
+        assert!(!prepare_broker_policy(&files, &desired).unwrap());
+        assert!(!child.wait().unwrap().success());
+        assert!(!broker_needs_restart(&files));
+        assert!(!files.spec.exists());
+        desired.write(&files.spec).unwrap();
+        std::fs::write(&files.ready, GIT_BROKER_READY).unwrap();
+        let slot = hel::hel_git_proxy::claim_broker_pid_file(&files.pid).unwrap();
+        assert!(prepare_broker_policy(&files, &desired).unwrap());
+        drop(slot);
+        // A dead legacy policy must not get a restart, even with leftover spec.
+        std::fs::write(&files.spec, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(!broker_needs_restart(&files));
+    }
+
+    /// A closing session stops its broker on purpose: the process goes, the
+    /// supervisor that was keeping it alive returns quietly, and the log keeps
+    /// what it had without a word about a lost origin.
+    #[cfg(unix)]
+    #[test]
+    fn retiring_a_session_stops_its_running_broker_and_reports_nothing() {
+        if let Some(pid_path) = std::env::var_os(BROKER_STAND_IN_PID_PATH) {
+            let _slot = hel::hel_git_proxy::claim_broker_pid_file(Path::new(&pid_path)).unwrap();
+            // Retirement is what ends this process; the sleep only bounds the
+            // damage when it fails to.
+            std::thread::sleep(Duration::from_secs(60));
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let files = retirable_broker_files(directory.path());
+        let child = running_broker_stand_in(&files);
 
         let (finished, supervised) = std::sync::mpsc::channel();
         let supervisor = {

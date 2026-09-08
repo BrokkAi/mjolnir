@@ -1,4 +1,4 @@
-//! Authenticated, path-confined Git smart-protocol bridge for local bundles.
+//! Read-only, path-confined Git smart-protocol bridge for local bundles.
 
 #[cfg(feature = "controller")]
 use std::collections::BTreeMap;
@@ -30,6 +30,10 @@ use crate::hel_targets::CommandSpec;
 const BRIDGE_MAGIC: &[u8] = b"HEL-GIT-BRIDGE-2\n";
 const MAX_FRAME: usize = 1024 * 1024;
 const MAX_OPEN: usize = 16 * 1024;
+pub const GIT_BROKER_POLICY_VERSION: u32 = 1;
+pub const GIT_BROKER_READY: &[u8] = b"read-only-v1\n";
+pub const LOCAL_SOURCE_REMOTE: &str = "mj-source";
+const READ_ONLY_ERROR: &str = "Mjolnir's local Git source is read-only; push your session branch to its upstream origin instead";
 /// How long a broker waits for its target bridge to exit once the frame
 /// stream between them has closed.
 #[cfg(feature = "controller")]
@@ -58,6 +62,9 @@ const EXCHANGE_IDLE_DEADLINE: Duration = Duration::from_secs(300);
 #[serde(deny_unknown_fields)]
 #[cfg(feature = "controller")]
 pub struct GitBrokerSpec {
+    /// Zero identifies legacy writable brokers; they may be read, but never run.
+    #[serde(default)]
+    pub policy_version: u32,
     pub session_id: String,
     pub bridge: CommandSpec,
     pub repositories: BTreeMap<String, PathBuf>,
@@ -188,6 +195,10 @@ pub fn claim_broker_pid_file(pid_path: &Path) -> Result<File> {
 #[cfg(feature = "controller")]
 pub async fn run_broker(spec_path: &Path) -> Result<()> {
     let spec = GitBrokerSpec::read(spec_path)?;
+    ensure!(
+        spec.policy_version == GIT_BROKER_POLICY_VERSION,
+        "local Git broker policy is obsolete; reconnect with an updated controller"
+    );
     let repositories = spec
         .repositories
         .iter()
@@ -238,7 +249,7 @@ async fn run_bridge_process(
         .await
         .context("read Git bridge greeting")?;
     ensure!(magic == BRIDGE_MAGIC, "target Git bridge version mismatch");
-    crate::hel_config::atomic_write(&spec.ready_path, b"ready\n")?;
+    crate::hel_config::atomic_write(&spec.ready_path, GIT_BROKER_READY)?;
 
     let outcome = serve_bridge(
         &mut input,
@@ -440,16 +451,22 @@ async fn serve_exchange(
     };
     let command = match git_service(&request.service) {
         Ok(command) => command,
-        Err(error) => return refuse_exchange(input, output, error).await,
+        Err(error) => {
+            // Git understands ERR packets before either service advertises refs.
+            // Older workers pass these through without a framing upgrade.
+            let message = format!("ERR {error}\n");
+            let packet = format!("{:04x}{message}", message.len() + 4);
+            write_frame(input, packet.as_bytes()).await?;
+            return refuse_exchange(input, output, error).await;
+        }
     };
     serve_git(input, output, repository, command, idle).await
 }
 
-#[cfg(feature = "controller")]
 fn git_service(service: &str) -> Result<&'static str> {
     match service {
         "git-upload-pack" => Ok("upload-pack"),
-        "git-receive-pack" => Ok("receive-pack"),
+        "git-receive-pack" => bail!(READ_ONLY_ERROR),
         _ => bail!("unsupported Git service {service:?}"),
     }
 }
@@ -492,17 +509,7 @@ where
     R: AsyncRead + Unpin,
 {
     let mut git = Command::new("git");
-    git.args([
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "receive.denyCurrentBranch=updateInstead",
-        "-c",
-        "receive.denyNonFastForwards=true",
-        "-c",
-        "receive.denyDeletes=true",
-        command,
-    ]);
+    git.args(["-c", "core.hooksPath=/dev/null", command]);
     git.arg(repository)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -818,10 +825,7 @@ pub async fn run_worker_proxy(root: &Path, repository: &str, service: &str) -> R
     use tokio::net::UnixStream;
 
     crate::hel_config::validate_id("repository", repository)?;
-    ensure!(
-        matches!(service, "git-upload-pack" | "git-receive-pack"),
-        "unsupported Git service"
-    );
+    git_service(service)?;
     let mut socket = UnixStream::connect(root.join("git.sock"))
         .await
         .with_context(|| format!("connect Git bridge at {}", root.display()))?;
@@ -884,6 +888,119 @@ pub async fn run_worker_proxy(_root: &Path, _repository: &str, _service: &str) -
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn broker_rejects_pushes_without_changing_any_source_state_and_still_fetches() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = repository_with_large_advertisement(directory.path());
+        let repositories = BTreeMap::from([("main".to_owned(), repository.clone())]);
+        let (broker_end, target_end) = tokio::io::duplex(16 * 1024);
+        let (mut broker_read, mut broker_write) = tokio::io::split(broker_end);
+        let (mut target_read, mut target_write) = tokio::io::split(target_end);
+        let serving = tokio::spawn(async move {
+            serve_bridge(
+                &mut broker_write,
+                &mut broker_read,
+                &repositories,
+                "test",
+                Duration::from_secs(5),
+            )
+            .await
+        });
+        for state in ["clean", "dirty", "detached", "rebasing"] {
+            if state == "dirty" {
+                std::fs::write(repository.join("tracked"), "staged").unwrap();
+                git(&repository, &["add", "tracked"]);
+                std::fs::write(repository.join("tracked"), "unstaged").unwrap();
+            } else if state == "detached" {
+                git(&repository, &["checkout", "--detach", "-q"]);
+            } else if state == "rebasing" {
+                std::fs::create_dir(repository.join(".git/rebase-merge")).unwrap();
+            }
+            let index = std::fs::read(repository.join(".git/index")).unwrap();
+            let head = std::fs::read(repository.join(".git/HEAD")).unwrap();
+            let tracked = std::fs::read(repository.join("tracked")).unwrap();
+            let refs = git(&repository, &["for-each-ref"]);
+            let request = serde_json::to_vec(&GitOpen {
+                repository: "main".into(),
+                service: "git-receive-pack".into(),
+            })
+            .unwrap();
+            write_frame(&mut target_write, &request).await.unwrap();
+            // Even an old/misbehaving proxy feeding a full pipe is drained.
+            let payload = vec![b'x'; 192 * 1024];
+            let sending = write_all_framed(&mut target_write, &payload);
+            let receiving = read_exchange(&mut target_read);
+            let ((), denied) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(sending, receiving)
+            })
+            .await
+            .unwrap();
+            assert!(String::from_utf8_lossy(&denied).contains(READ_ONLY_ERROR));
+            // A real Git sender recognizes the refusal before writing a ref.
+            for arguments in [
+                vec!["HEAD:refs/heads/main"],
+                vec!["--force", "HEAD:refs/heads/main"],
+                vec![":refs/heads/main"],
+                vec!["HEAD:refs/tags/session"],
+                vec!["HEAD:refs/heads/another-session"],
+            ] {
+                let mut command = std::process::Command::new("git");
+                command
+                    .current_dir(&repository)
+                    .args(["send-pack", "--stateless-rpc", "source"]);
+                command.args(arguments);
+                let result = crate::hel_subprocess::run_with_input(&mut command, &denied).unwrap();
+                assert!(!result.status.success());
+                assert!(
+                    String::from_utf8_lossy(&result.stderr).contains("read-only"),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
+            assert_eq!(std::fs::read(repository.join(".git/index")).unwrap(), index);
+            assert_eq!(std::fs::read(repository.join(".git/HEAD")).unwrap(), head);
+            assert_eq!(std::fs::read(repository.join("tracked")).unwrap(), tracked);
+            assert_eq!(git(&repository, &["for-each-ref"]), refs);
+        }
+        write_frame(&mut target_write, &open_frame("main"))
+            .await
+            .unwrap();
+        write_frame(&mut target_write, b"0000").await.unwrap();
+        write_frame(&mut target_write, &[]).await.unwrap();
+        let fetched =
+            tokio::time::timeout(Duration::from_secs(10), read_exchange(&mut target_read))
+                .await
+                .unwrap();
+        assert!(fetched.len() > 64 * 1024);
+        assert!(String::from_utf8_lossy(&fetched).contains("refs/heads/main"));
+        drop((target_read, target_write));
+        serving.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_broker_specs_cannot_start_a_writable_service() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broker.json");
+        let legacy = serde_json::json!({
+            "session_id": "legacy",
+            "bridge": CommandSpec::new("must-not-start", Vec::<String>::new()),
+            "repositories": {},
+            "ready_path": directory.path().join("ready"),
+            "pid_path": directory.path().join("pid"),
+        });
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(GitBrokerSpec::read(&path).unwrap().policy_version, 0);
+        assert!(
+            run_broker(&path)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("policy is obsolete")
+        );
+        assert!(!directory.path().join("pid").exists());
+        assert!(!directory.path().join("ready").exists());
+    }
+
     /// Read one exchange's frames through the peer's end frame.
     async fn read_exchange(reader: &mut (impl AsyncRead + Unpin)) -> Vec<u8> {
         let mut received = Vec::new();
@@ -928,13 +1045,16 @@ mod tests {
         .unwrap()
     }
 
-    fn git(directory: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(directory)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?} failed");
+    fn git(directory: &Path, args: &[&str]) -> Vec<u8> {
+        let mut command = std::process::Command::new("git");
+        command.args(args).current_dir(directory);
+        let output = crate::hel_subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
     }
 
     /// A repository whose ref advertisement is far larger than one pipe
@@ -948,12 +1068,10 @@ mod tests {
         std::fs::write(repository.join("tracked"), "content").unwrap();
         git(&repository, &["add", "."]);
         git(&repository, &["commit", "-qm", "base"]);
-        let head = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&repository)
-            .output()
-            .unwrap();
-        let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+        let head = String::from_utf8(git(&repository, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
         let mut packed = String::from("# pack-refs with: peeled fully-peeled sorted \n");
         packed.push_str(&format!("{head} refs/heads/main\n"));
         for index in 0..3000 {
