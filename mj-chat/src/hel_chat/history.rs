@@ -459,6 +459,7 @@ mod tests {
         chat.handle_clipboard_content(ClipboardContent::Image(ClipboardImage {
             data_base64: "synthetic-png".into(),
             mime_type: "image/png".into(),
+            reference: None,
         }));
         assert!(!chat.input_images.is_empty());
         chat.input_images.clone()

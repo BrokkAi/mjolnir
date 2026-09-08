@@ -676,6 +676,19 @@ pre.entry-body {
   padding: 6px 8px;
 }
 
+.attachment-processing {
+  border-style: dashed;
+}
+
+.attachment-failed {
+  border-color: var(--failed);
+}
+
+.attachment > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .attachment img {
   width: 44px;
   height: 44px;

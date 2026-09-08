@@ -126,6 +126,34 @@ async function request(url, options = {}) {
   return response.json();
 }
 
+/// Upload one image as raw bytes. JSON action requests have a deliberately
+/// different content type and body limit, so keeping this path separate makes
+/// it impossible to accidentally base64 an image back into the prompt.
+async function uploadAttachment(sessionId, file, signal) {
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/attachments`,
+    {
+      method: 'POST',
+      body: file,
+      signal,
+      headers: { 'content-type': file.type || 'application/octet-stream' },
+    },
+  );
+  if (response.status === 401) {
+    showLogin();
+    throw new Error('unauthorized');
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || 'the image upload failed');
+  }
+  const image = await response.json();
+  if (!image.attachment || image.data_base64) {
+    throw new Error('the server returned an invalid image attachment');
+  }
+  return image;
+}
+
 /// Say something once, for a screen reader.
 function announce(message) {
   announcer.textContent = message;
@@ -2293,7 +2321,7 @@ function showLogin() {
   entryNodes.clear();
   elicitationCards.clear();
   sentElicitations.clear();
-  promptImages = [];
+  clearPromptImages();
   login.classList.remove('hidden');
   app.classList.add('hidden');
   menuButton.classList.add('hidden');
@@ -2820,9 +2848,16 @@ async function submitElicitation(sessionId, elicitationId, response) {
 // its content without a layout read on every keystroke. Rich content is
 // refused at beforeinput, which keeps the box plain text however it arrives.
 const MAX_PROMPT_REQUEST_BYTES = 32 * 1024 * 1024;
+const MAX_PROMPT_IMAGES = 10;
+const MAX_IMAGE_UPLOAD_BYTES = 64 * 1024 * 1024;
+const MAX_IMAGE_UPLOADS_IN_FLIGHT = 2;
+const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 let composerRevision = 0,
   composerPreserveEmptyBreak = false,
-  promptImages = [];
+  promptImages = [],
+  imageUploadQueue = [],
+  imageUploadsInFlight = 0,
+  nextPromptImageId = 1;
 function composerText() {
   let text = '';
   const blocks = new Set(['DIV', 'P']);
@@ -2931,16 +2966,6 @@ function composerInputChanged() {
   if (!composerPreserveEmptyBreak && !promptText.textContent && promptText.childNodes.length)
     promptText.replaceChildren();
 }
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener('load', () => resolve(String(reader.result || '')), { once: true });
-    reader.addEventListener('error', () => reject(reader.error || new Error('file read failed')), {
-      once: true,
-    });
-    reader.readAsDataURL(file);
-  });
-}
 function imageDimensions(file) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
@@ -2965,38 +2990,125 @@ function imageDimensions(file) {
     image.src = url;
   });
 }
-async function promptImageFromFile(file) {
-  if (!file.type.startsWith('image/'))
-    throw new Error(`${file.name || 'That file'} is not an image`);
-  if (file.size >= MAX_PROMPT_REQUEST_BYTES)
-    throw new Error(`${file.name || 'That image'} is too large for the 32 MiB request limit`);
-  const [dataUrl, size] = await Promise.all([readFileAsDataUrl(file), imageDimensions(file)]);
-  const comma = dataUrl.indexOf(',');
-  if (comma < 0 || !dataUrl.slice(comma + 1))
-    throw new Error(`Could not read ${file.name || 'that image'}`);
-  return {
-    data_base64: dataUrl.slice(comma + 1),
-    mime_type: file.type,
-    width: size.width,
-    height: size.height,
-    name: file.name || 'Pasted image',
-  };
+
+function imageFileError(file) {
+  const name = file.name || 'That file';
+  if (!file.type.startsWith('image/')) return `${name} is not an image`;
+  if (!SUPPORTED_IMAGE_TYPES.has(file.type))
+    return `${name} is not a supported image; use JPEG, PNG, or WebP`;
+  if (file.size > MAX_IMAGE_UPLOAD_BYTES)
+    return `${name} is too large; images must be 64 MiB or smaller`;
+  return null;
 }
+
+function revokePromptImage(image) {
+  if (image.controller) image.controller.abort();
+  if (image.preview_url) {
+    URL.revokeObjectURL(image.preview_url);
+    image.preview_url = null;
+  }
+  image.cancelled = true;
+}
+
+function clearPromptImages() {
+  imageUploadQueue = [];
+  for (const image of promptImages) revokePromptImage(image);
+  promptImages = [];
+  renderAttachments();
+}
+
+function imageIsCurrent(image, sessionId) {
+  return currentSession === sessionId && !image.cancelled && promptImages.includes(image);
+}
+
+async function processImageUpload(image, sessionId) {
+  try {
+    const size = await imageDimensions(image.file);
+    if (!size.width || !size.height) throw new Error('the image has no usable dimensions');
+    if (!imageIsCurrent(image, sessionId)) return;
+    const uploaded = await uploadAttachment(sessionId, image.file, image.controller.signal);
+    if (!imageIsCurrent(image, sessionId)) return;
+    image.state = 'ready';
+    image.error = '';
+    image.attachment = uploaded.attachment;
+    image.mime_type = uploaded.mime_type;
+    image.width = uploaded.width || size.width;
+    image.height = uploaded.height || size.height;
+    image.file = null;
+  } catch (error) {
+    if (!imageIsCurrent(image, sessionId)) return;
+    if (error.name === 'AbortError') return;
+    image.state = 'failed';
+    image.error = error.message || 'the image could not be uploaded';
+    image.file = null;
+  } finally {
+    if (imageIsCurrent(image, sessionId)) renderAttachments();
+  }
+}
+
+function pumpImageUploads() {
+  while (imageUploadsInFlight < MAX_IMAGE_UPLOADS_IN_FLIGHT && imageUploadQueue.length) {
+    const job = imageUploadQueue.shift();
+    if (!imageIsCurrent(job.image, job.sessionId)) continue;
+    imageUploadsInFlight += 1;
+    processImageUpload(job.image, job.sessionId).finally(() => {
+      imageUploadsInFlight -= 1;
+      pumpImageUploads();
+    });
+  }
+}
+
 async function attachImageFiles(files) {
   const session = snapshot?.sessions.find(x => x.id === currentSession);
   if (!currentSession || !session?.prompt_images_supported || !files.length) return;
   const sessionId = currentSession;
-  try {
-    const added = [];
-    for (const file of files) added.push(await promptImageFromFile(file));
-    if (currentSession !== sessionId) return;
-    promptImages = promptImages.concat(added);
-    renderAttachments();
-    document.querySelector('#conversation-error').textContent = '';
-  } catch (err) {
-    document.querySelector('#conversation-error').textContent = err.message;
+  const remaining = MAX_PROMPT_IMAGES - promptImages.length;
+  const selected = files.slice(0, Math.max(0, remaining));
+  const error = document.querySelector('#conversation-error');
+  if (files.length > selected.length) {
+    error.textContent = 'A prompt may contain at most 10 images.';
+  } else {
+    error.textContent = '';
   }
+  for (const file of selected) {
+    const image = {
+      id: nextPromptImageId++,
+      name: file.name || 'Pasted image',
+      file,
+      preview_url: URL.createObjectURL(file),
+      mime_type: file.type,
+      width: 0,
+      height: 0,
+      attachment: null,
+      state: 'processing',
+      error: '',
+      controller: new AbortController(),
+      cancelled: false,
+    };
+    const invalid = imageFileError(file);
+    if (invalid) {
+      image.state = 'failed';
+      image.error = invalid;
+      image.file = null;
+    } else {
+      imageUploadQueue.push({ image, sessionId });
+    }
+    promptImages.push(image);
+  }
+  renderAttachments();
+  pumpImageUploads();
 }
+
+function removePromptImage(image) {
+  const index = promptImages.indexOf(image);
+  if (index < 0) return;
+  promptImages.splice(index, 1);
+  revokePromptImage(image);
+  imageUploadQueue = imageUploadQueue.filter(job => job.image !== image);
+  renderAttachments();
+  pumpImageUploads();
+}
+
 function renderAttachments() {
   // The draft the daemon keeps is text. An attachment lives in this browser
   // only, and a photograph that quietly disappears on reload is worse than one
@@ -3009,26 +3121,29 @@ function renderAttachments() {
       el('p', 'dim', 'Images stay on this device until sent; a draft keeps only the text.'),
     );
   }
-  for (const [index, image] of promptImages.entries()) {
+  for (const image of promptImages) {
     const chip = document.createElement('div');
-    chip.className = 'attachment';
+    chip.className = `attachment attachment-${image.state}`;
+    chip.setAttribute('aria-busy', String(image.state === 'processing'));
     const thumb = document.createElement('img');
     thumb.alt = '';
-    thumb.src = `data:${image.mime_type};base64,${image.data_base64}`;
+    thumb.src = image.preview_url;
     const caption = document.createElement('span');
-    caption.textContent = `${image.name} \u00b7 ${image.width}\u00d7${image.height}`;
+    caption.textContent = image.state === 'processing'
+      ? `${image.name} \u00b7 Uploading…`
+      : image.state === 'failed'
+        ? `${image.name} \u00b7 ${image.error}`
+        : `${image.name} \u00b7 ${image.width}\u00d7${image.height}`;
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'danger';
     remove.setAttribute('aria-label', `Remove ${image.name}`);
     remove.textContent = '\u00d7';
-    remove.onclick = () => {
-      promptImages.splice(index, 1);
-      renderAttachments();
-    };
+    remove.onclick = () => removePromptImage(image);
     chip.append(thumb, caption, remove);
     attachments.append(chip);
   }
+  sendButton.disabled = promptImages.some(image => image.state !== 'ready') || promptInFlight;
 }
 // ---------------------------------------------------------------------------
 // Drafts and history
@@ -3441,6 +3556,11 @@ async function submitPrompt() {
   const images = promptImages;
   if (!value.trim() && !images.length) return;
   const error = document.querySelector('#conversation-error');
+  if (images.some(image => image.state !== 'ready' || !image.attachment)) {
+    error.textContent = 'Wait for every image to finish uploading, or remove failed images.';
+    renderAttachments();
+    return;
+  }
 
   promptInFlight = true;
   sendButton.disabled = true;
@@ -3458,10 +3578,11 @@ async function submitPrompt() {
           session_id: currentSession,
           text: value,
           images: images.map(image => ({
-            data_base64: image.data_base64,
+            data_base64: '',
             mime_type: image.mime_type,
             width: image.width,
             height: image.height,
+            attachment: image.attachment,
           })),
         };
     const payload = JSON.stringify(body);
@@ -3473,8 +3594,7 @@ async function submitPrompt() {
     // The composer is cleared only once the daemon has taken the prompt, so a
     // refusal leaves the text where it can be edited and sent again.
     setComposerText('');
-    promptImages = [];
-    renderAttachments();
+    clearPromptImages();
     updateCommandPalette();
     // The stored copy goes with the one on screen, so reopening does not put
     // back a prompt that has already run.
@@ -3486,6 +3606,7 @@ async function submitPrompt() {
   } finally {
     promptInFlight = false;
     sendButton.disabled = false;
+    renderAttachments();
   }
 }
 
@@ -3759,8 +3880,7 @@ async function openConversation(id) {
   renderElicitations(session);
   renderTurnReview(session);
   renderConversationHeader(session);
-  promptImages = [];
-  renderAttachments();
+  clearPromptImages();
   restoreDraft(id, conversationGeneration);
   if (!isTransitioningSession(session)) await loadConversation(false);
 }
@@ -3805,7 +3925,8 @@ function renderConversationHeader(session) {
   }
   const canPrompt = session.capabilities?.prompt !== false && !reviewing;
   promptText.setAttribute('contenteditable', String(canPrompt));
-  sendButton.disabled = !canPrompt || promptInFlight;
+  sendButton.disabled =
+    !canPrompt || promptInFlight || promptImages.some(image => image.state !== 'ready');
   if (session.plan_mode_active) {
     state.textContent = `${sessionLifecycleLabel(session)} · plan`;
   }
@@ -3823,8 +3944,7 @@ function leaveConversation() {
   cursor = 0;
   acknowledged = 0;
   clearConversationContents();
-  promptImages = [];
-  renderAttachments();
+  clearPromptImages();
 }
 
 document.querySelector('#login-form').onsubmit = async e => {

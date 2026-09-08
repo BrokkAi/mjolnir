@@ -2787,11 +2787,10 @@ fn phone_prompt_blocks(
     if !text.is_empty() {
         prompt.push(ContentBlock::Text(TextContent::new(text)));
     }
-    prompt.extend(
-        images.into_iter().map(|image| {
-            ContentBlock::Image(ImageContent::new(image.data_base64, image.mime_type))
-        }),
-    );
+    prompt.extend(images.into_iter().map(|image| match image.attachment {
+        Some(reference) => reference.content_block(),
+        None => ContentBlock::Image(ImageContent::new(image.data_base64, image.mime_type)),
+    }));
     prompt
 }
 
@@ -3424,6 +3423,7 @@ mod tests {
         use agent_client_protocol::schema::v1::ContentBlock;
 
         let image = |data: &str| mj_controller::hel_server::ViewerPromptImage {
+            attachment: None,
             data_base64: data.into(),
             mime_type: "image/png".into(),
             width: 32,

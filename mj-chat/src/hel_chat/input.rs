@@ -20,6 +20,7 @@ impl ChatState {
         let (cursor, removed) =
             attachments::replace_range(&mut self.input, &mut self.input_images, range, inserted);
         self.input_cursor = cursor;
+        self.input_generation = self.input_generation.wrapping_add(1);
         self.next_image_number = self.next_image_number.max(
             self.input_images
                 .iter()

@@ -33,6 +33,8 @@ pub const ARCHIVE_SCHEMA_VERSION: u32 = 2;
 /// reject sharded archives with an explicit version error instead of
 /// misreading part entries.
 pub const ARCHIVE_SCHEMA_VERSION_SHARDED: u32 = 3;
+/// Separate image blobs must be restored into the relay, not the harness home.
+pub const ARCHIVE_SCHEMA_VERSION_ATTACHMENTS: u32 = 4;
 pub const ARCHIVE_FORMAT: &str = "hel-session";
 pub const EVENT_FRONTIER_GENESIS_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -1010,24 +1012,18 @@ fn prepare_archive_view_with_part_size(
             payload.descriptor.path
         );
     }
-    let sharded = payloads
+    let descriptors: Vec<_> = payloads
         .iter()
-        .any(|payload| !payload.descriptor.parts.is_empty());
+        .map(|payload| payload.descriptor.clone())
+        .collect();
     let manifest = ArchiveManifest {
-        schema_version: if sharded {
-            ARCHIVE_SCHEMA_VERSION_SHARDED
-        } else {
-            ARCHIVE_SCHEMA_VERSION
-        },
+        schema_version: expected_schema_version(&descriptors),
         format: ARCHIVE_FORMAT.to_string(),
         session: (*input.session).clone(),
         target: (*input.target).clone(),
         bundle: (*input.bundle).clone(),
         repositories,
-        payloads: payloads
-            .iter()
-            .map(|payload| payload.descriptor.clone())
-            .collect(),
+        payloads: descriptors,
     };
     validate_manifest(&manifest)?;
     Ok((manifest, payloads))
@@ -1588,7 +1584,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
     );
     ensure!(
         header.schema_version == ARCHIVE_SCHEMA_VERSION
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_SHARDED,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_SHARDED
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_ATTACHMENTS,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -1600,10 +1597,12 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
 }
 
 /// The schema an archive must declare for the payload layout it carries.
-/// Sharded payloads are exactly what schema 3 adds, so declaring the wrong
-/// version is a manifest error either way round.
+/// Schema 3 adds sharding; schema 4 adds relay-owned attachments. Older
+/// readers must reject either extension instead of silently restoring it wrong.
 fn expected_schema_version(payloads: &[PayloadDescriptor]) -> u32 {
-    if payloads.iter().any(|payload| !payload.parts.is_empty()) {
+    if payloads.iter().any(|payload| matches!(&payload.role, PayloadRole::NativeArtifact { relative_path } if relative_path.starts_with(crate::hel_attachment::ARCHIVE_ATTACHMENT_DIR))) {
+        ARCHIVE_SCHEMA_VERSION_ATTACHMENTS
+    } else if payloads.iter().any(|payload| !payload.parts.is_empty()) {
         ARCHIVE_SCHEMA_VERSION_SHARDED
     } else {
         ARCHIVE_SCHEMA_VERSION

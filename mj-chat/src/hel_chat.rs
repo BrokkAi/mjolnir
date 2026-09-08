@@ -24,6 +24,7 @@ mod turn_review;
 mod test_support;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
@@ -45,6 +46,7 @@ pub use hel::hel_acp::PlanControl;
 use hel::hel_acp::SessionConfigChoice;
 use hel::hel_acp::surface::{AcpSessionSurface, PlanControlError};
 use hel::hel_acp::{RuntimeEvent, plan_review_carries_native_feedback};
+use hel::hel_attachment::MAX_IMAGES;
 use hel::hel_config::{HarnessKind, HelConfig};
 use hel::hel_elicitation::ElicitationValue;
 use hel::hel_elicitation::{ElicitationRequest, ElicitationResponse};
@@ -249,6 +251,10 @@ pub enum ChatAction {
         response: ElicitationResponse,
     },
     PasteFromClipboard,
+    Attach {
+        path: PathBuf,
+        command: String,
+    },
     ToggleVoice,
     /// Tab or Shift-Tab with no completion popup open.
     CycleFocus {
@@ -411,6 +417,13 @@ pub struct ChatState {
     /// Moved out of `input_images` while the remote submit is in flight, so a
     /// failed submission can restore the images alongside their text.
     submitting_images: Vec<PromptImage>,
+    /// Sequence numbers map background jobs to their tracked marker. If the
+    /// user removes a pending marker, the late result has nowhere to land.
+    pending_attachment_markers: BTreeMap<u64, u64>,
+    /// Changes whenever the composer text or tracked images change. Clipboard
+    /// reads capture this value so a slow native read cannot paste into a new
+    /// draft after the user has continued editing.
+    input_generation: u64,
     /// Stored prompts from other sessions in this project, oldest-first.
     project_history: Vec<String>,
     /// Stored prompts from this session, oldest-first.
@@ -552,6 +565,8 @@ impl ChatState {
             input_images: Vec::new(),
             next_image_number: 1,
             submitting_images: Vec::new(),
+            pending_attachment_markers: BTreeMap::new(),
+            input_generation: 0,
             project_history: Vec::new(),
             session_history: Vec::new(),
             project_history_error: None,
@@ -1324,6 +1339,8 @@ impl ChatState {
         self.notices.clear();
         self.voice_active = false;
         self.submitting_images.clear();
+        self.pending_attachment_markers.clear();
+        self.input_generation = self.input_generation.wrapping_add(1);
     }
 
     fn set_input(&mut self, input: String) {
@@ -1331,6 +1348,13 @@ impl ChatState {
     }
 
     fn set_input_payload(&mut self, payload: PromptPayload) {
+        self.pending_attachment_markers.clear();
+        let mut payload = payload;
+        for image in &mut payload.images {
+            if image.image.is_pending() {
+                image.image = ClipboardImage::failed();
+            }
+        }
         self.next_image_number = self.next_image_number.max(
             payload
                 .images
@@ -1342,6 +1366,7 @@ impl ChatState {
         self.input = payload.text;
         self.input_images = payload.images;
         self.input_cursor = self.input.len();
+        self.input_generation = self.input_generation.wrapping_add(1);
         self.history_index = None;
         self.preferred_column = None;
         self.update_autocomplete();
@@ -1409,6 +1434,10 @@ impl ChatState {
         match content {
             ClipboardContent::Text(text) => self.handle_paste(&text),
             ClipboardContent::Image(image) => {
+                if self.input_images.len() >= MAX_IMAGES {
+                    self.set_notice(format!("A prompt can contain at most {MAX_IMAGES} images"));
+                    return;
+                }
                 self.input_cursor = attachments::insert_image(
                     &mut self.input,
                     &mut self.input_images,
@@ -1417,10 +1446,74 @@ impl ChatState {
                     image,
                 );
                 self.next_image_number += 1;
+                self.input_generation = self.input_generation.wrapping_add(1);
                 self.history_index = None;
                 self.preferred_column = None;
                 self.update_autocomplete();
                 self.set_notice("Image pasted · Backspace removes its marker");
+            }
+        }
+    }
+
+    pub(super) fn reserve_attachment(&mut self, sequence: u64) -> bool {
+        if self.input_images.len() >= MAX_IMAGES {
+            self.set_notice(format!("A prompt can contain at most {MAX_IMAGES} images"));
+            return false;
+        }
+        let number = self.next_image_number;
+        self.input_cursor = attachments::insert_image(
+            &mut self.input,
+            &mut self.input_images,
+            self.input_cursor,
+            number,
+            ClipboardImage::pending(),
+        );
+        self.next_image_number = self.next_image_number.saturating_add(1);
+        self.pending_attachment_markers.insert(sequence, number);
+        self.input_generation = self.input_generation.wrapping_add(1);
+        self.set_notice("Processing image attachment…");
+        true
+    }
+
+    pub(super) fn finish_attachment(
+        &mut self,
+        sequence: u64,
+        result: Result<ClipboardImage, String>,
+        command: Option<String>,
+    ) {
+        let Some(number) = self.pending_attachment_markers.remove(&sequence) else {
+            // The marker was deleted or the draft was replaced while the
+            // blocking task ran. Its result is intentionally discarded.
+            return;
+        };
+        let Some(index) = self
+            .input_images
+            .iter()
+            .position(|image| image.number == number && image.image.is_pending())
+        else {
+            return;
+        };
+        match result {
+            Ok(ready) => {
+                self.input_images[index].image = ready;
+                self.input_generation = self.input_generation.wrapping_add(1);
+                self.set_notice("Image attached · Backspace removes its marker");
+            }
+            Err(error) => {
+                if let Some(command) = command {
+                    let range = self.input_images[index].range.clone();
+                    let only_placeholder = self.input_images.len() == 1
+                        && range.start == 0
+                        && range.end == self.input.len();
+                    self.replace_input_range(range, &PromptPayload::text(""));
+                    if only_placeholder {
+                        self.set_input(command);
+                    }
+                } else {
+                    self.input_images[index].image = ClipboardImage::failed();
+                    self.input_generation = self.input_generation.wrapping_add(1);
+                }
+                self.set_notice(format!("Attachment failed: {error}"));
             }
         }
     }
@@ -1438,6 +1531,10 @@ impl ChatState {
             text: self.input.clone(),
             images: self.input_images.clone(),
         }
+    }
+
+    pub(super) fn input_generation(&self) -> u64 {
+        self.input_generation
     }
 
     fn encoded_draft(&self) -> String {
@@ -1554,6 +1651,14 @@ impl ChatState {
 
     fn submit_input(&mut self) -> ChatAction {
         let prompt = self.input.trim().to_owned();
+        let command_input = if self.input_images.is_empty() {
+            prompt.clone()
+        } else {
+            attachments::text_without_images(&self.input, &self.input_images)
+                .trim()
+                .to_owned()
+        };
+        let parsed_command = parse_local_command(&command_input);
         if prompt.is_empty() && self.input_images.is_empty() {
             return ChatAction::None;
         }
@@ -1562,7 +1667,8 @@ impl ChatState {
             return ChatAction::None;
         }
         if !self.input_images.is_empty()
-            && (prompt.starts_with('!') || parse_local_command(&prompt).is_some())
+            && (command_input.starts_with('!')
+                || parsed_command.is_some_and(|(command, _)| command != LocalCommand::Attach))
         {
             self.set_notice(
                 "Send the image with a message, or delete its marker before using a command",
@@ -1582,7 +1688,7 @@ impl ChatState {
             self.clear_input();
             return ChatAction::RunShell(command.to_owned());
         }
-        if let Some((command, args)) = parse_local_command(&prompt) {
+        if let Some((command, args)) = parsed_command {
             return match command {
                 LocalCommand::Help => {
                     self.clear_input();
@@ -1733,6 +1839,51 @@ impl ChatState {
                         }
                     };
                 }
+                LocalCommand::Attach => {
+                    if args.is_empty() {
+                        self.set_notice("usage: /attach <path>");
+                        return ChatAction::None;
+                    }
+                    if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
+                        self.set_notice("The worker is closing; this attachment was not processed");
+                        return ChatAction::None;
+                    }
+                    if self.input_images.len() >= MAX_IMAGES {
+                        self.set_notice(format!(
+                            "A prompt can contain at most {MAX_IMAGES} images"
+                        ));
+                        return ChatAction::None;
+                    }
+                    let path = PathBuf::from(args);
+                    let command = command_input.clone();
+                    self.record_prompt_history(&command);
+                    if self.input_images.is_empty() {
+                        self.clear_input();
+                    } else if let Some(slash_start) =
+                        attachments::untracked_ranges(&self.input, &self.input_images)
+                            .into_iter()
+                            .find_map(|range| {
+                                self.input[range.clone()]
+                                    .char_indices()
+                                    .find(|(_, character)| !character.is_whitespace())
+                                    .map(|(offset, _)| range.start + offset)
+                            })
+                    {
+                        for range in attachments::untracked_ranges(&self.input, &self.input_images)
+                            .into_iter()
+                            .rev()
+                        {
+                            let start = range.start.max(slash_start);
+                            if start < range.end {
+                                self.replace_input_range(
+                                    start..range.end,
+                                    &PromptPayload::text(""),
+                                );
+                            }
+                        }
+                    }
+                    ChatAction::Attach { path, command }
+                }
                 LocalCommand::Implement => {
                     if let Err(message) = self.plan_control(false) {
                         self.set_notice(message);
@@ -1797,6 +1948,14 @@ impl ChatState {
         } else {
             self.draft_payload().trimmed()
         };
+        if payload
+            .images
+            .iter()
+            .any(|image| image.image.is_placeholder())
+        {
+            self.set_notice("Remove failed images or wait for attachments to finish");
+            return ChatAction::None;
+        }
         self.submitting_images = payload.images;
         self.clear_input();
         ChatAction::Prompt(payload.text)
@@ -2605,7 +2764,12 @@ fn materialized_content_prompt(content: &[serde_json::Value]) -> (PromptPayload,
     for value in content {
         match serde_json::from_value::<ContentBlock>(value.clone()) {
             Ok(ContentBlock::Image(content)) => {
-                match ClipboardImage::from_base64(content.data, content.mime_type) {
+                let image = match hel::hel_attachment::image_reference(&content) {
+                    Ok(Some(reference)) => ClipboardImage::from_reference(reference),
+                    Ok(None) => ClipboardImage::from_base64(content.data, content.mime_type),
+                    Err(error) => Err(error),
+                };
+                match image {
                     Ok(image) => {
                         let number = payload.images.len() as u64 + 1;
                         let end = payload.text.len();
@@ -3021,6 +3185,51 @@ mod tests {
             assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
             assert_eq!(chat.draft_payload(), before);
         }
+    }
+
+    #[test]
+    fn attach_command_accumulates_after_existing_image_markers() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        chat.handle_paste("/attach /tmp/second.png");
+
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::Attach {
+                path: "/tmp/second.png".into(),
+                command: "/attach /tmp/second.png".into(),
+            }
+        );
+        assert_eq!(chat.input, "[image 1]");
+        assert_eq!(chat.input_images.len(), 1);
+
+        assert!(chat.reserve_attachment(0));
+        assert_eq!(chat.input, "[image 1][image 2]");
+        assert_eq!(chat.input_images.len(), 2);
+    }
+
+    #[test]
+    fn pending_attachment_is_failed_when_a_saved_draft_is_restored() {
+        let payload = PromptPayload::with_image("inspect ", ClipboardImage::pending());
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.restore_draft(payload.encode_draft());
+
+        assert_eq!(chat.input, "inspect [image 1]");
+        assert!(chat.input_images[0].image.is_placeholder());
+        assert!(!chat.input_images[0].image.is_pending());
+    }
+
+    #[test]
+    fn removed_pending_attachment_releases_visible_capacity() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        for sequence in 0..MAX_IMAGES as u64 {
+            assert!(chat.reserve_attachment(sequence));
+        }
+        assert!(!chat.reserve_attachment(MAX_IMAGES as u64));
+
+        chat.handle_key(key(KeyCode::Backspace));
+        assert!(chat.reserve_attachment(MAX_IMAGES as u64 + 1));
+        assert_eq!(chat.input_images.len(), MAX_IMAGES);
     }
 
     #[test]

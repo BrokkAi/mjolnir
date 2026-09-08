@@ -9,6 +9,7 @@ use hel::hel_worker::RelayCommand;
 use mj_controller::hel_session_manager::{ManagedSessionHandle, SessionManagerControl};
 
 use super::PromptImage;
+use super::attachments;
 use super::{
     ChatState, PlanControl, PlanReviewFollowup, PromptPayload, UnsentKind, queued_prompt_preview,
 };
@@ -331,9 +332,42 @@ async fn enqueue_chat_remote_operation(
             text,
             images,
         } => {
+            let original_images = images.clone();
+            let session_id = session.session_id().to_owned();
+            let normalized = match tokio::task::spawn_blocking(move || {
+                normalize_prompt_images(&session_id, images)
+            })
+            .await
+            {
+                Ok(Ok(images)) => images,
+                Ok(Err(error)) => {
+                    publish_chat_remote_result(
+                        results,
+                        attached,
+                        ChatRemoteResult::Prompt {
+                            text,
+                            images: original_images,
+                            result: Err(format!("prepare image attachments: {error:#}")),
+                        },
+                    );
+                    return;
+                }
+                Err(error) => {
+                    publish_chat_remote_result(
+                        results,
+                        attached,
+                        ChatRemoteResult::Prompt {
+                            text,
+                            images: original_images,
+                            result: Err(format!("image preparation task failed: {error}")),
+                        },
+                    );
+                    return;
+                }
+            };
             let prompt = PromptPayload {
                 text: text.clone(),
-                images: images.clone(),
+                images: normalized.clone(),
             }
             .content_blocks();
             let command = RelayCommand::Prompt { prompt };
@@ -345,8 +379,10 @@ async fn enqueue_chat_remote_operation(
                     attached,
                     ChatRemoteResult::Prompt {
                         text,
-                        images,
-                        result: Err("Prompt exceeds the 1 MiB limit; shorten the text or use a smaller image".into()),
+                        images: normalized.clone(),
+                        result: Err(
+                            "Prompt exceeds the relay command budget; shorten the text".into()
+                        ),
                     },
                 );
                 return;
@@ -365,7 +401,7 @@ async fn enqueue_chat_remote_operation(
                                     &attached,
                                     ChatRemoteResult::Prompt {
                                         text,
-                                        images,
+                                        images: normalized.clone(),
                                         result: Err(format!("{error:#}")),
                                     },
                                 );
@@ -377,7 +413,7 @@ async fn enqueue_chat_remote_operation(
                             &attached,
                             ChatRemoteResult::Prompt {
                                 text: text.clone(),
-                                images: images.clone(),
+                                images: normalized.clone(),
                                 result: Ok(ordinal),
                             },
                         );
@@ -389,7 +425,7 @@ async fn enqueue_chat_remote_operation(
                         attached,
                         ChatRemoteResult::Prompt {
                             text,
-                            images,
+                            images: normalized,
                             result: Err(format!("{error:#}")),
                         },
                     );
@@ -696,6 +732,23 @@ async fn enqueue_chat_remote_operation(
     }
 }
 
+/// Convert legacy inline images to session references before the relay command
+/// is serialized. Every image must be decoded, optimized, and installed; a
+/// stale or unreadable attachment must be reported before the command leaves
+/// the controller.
+fn normalize_prompt_images(
+    session_id: &str,
+    images: Vec<PromptImage>,
+) -> anyhow::Result<Vec<PromptImage>> {
+    images
+        .into_iter()
+        .map(|mut image| {
+            image.image = attachments::install_clipboard_image(session_id, image.image)?;
+            Ok(image)
+        })
+        .collect()
+}
+
 pub(super) fn restore_unsent_input(chat: &mut ChatState, input: &str) {
     restore_unsent_prompt(chat, input.to_owned(), Vec::new());
 }
@@ -896,7 +949,25 @@ pub(super) fn queue_chat_remote_operation(
 mod tests {
     use super::*;
     use crate::hel_chat::test_support::{snapshot, transcript_text};
+    use base64::Engine as _;
     use hel::hel_state::MaterializedSession;
+
+    fn valid_image() -> ClipboardImage {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&[
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+                ])
+                .unwrap();
+        }
+        ClipboardImage::from_png_base64(base64::engine::general_purpose::STANDARD.encode(bytes))
+            .unwrap()
+    }
 
     /// Whether any transcript row contains `text`, at a width wide enough that
     /// nothing under test wraps.
@@ -945,12 +1016,8 @@ mod tests {
             19,
         );
         let mut remote = ChatRemoteSupervisor::spawn(fixture.stopped, fixture.control);
-        // A payload larger than pipe buffers also proves this path does not
-        // replace embedded bytes with a host-local file name or preview.
-        let image = ClipboardImage {
-            data_base64: "A".repeat(96 * 1024).into(),
-            mime_type: "image/png".into(),
-        };
+        let image = valid_image();
+        let mut normalized_image = None;
         for text in ["", "inspect this"] {
             let payload = PromptPayload::with_image(text, image.clone());
             remote
@@ -967,16 +1034,34 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-            assert_eq!(
-                command,
-                RelayCommand::Prompt {
-                    prompt: PromptPayload::with_image(text, image.clone()).content_blocks()
-                }
-            );
-            assert!(matches!(
-                remote.recv().await,
-                Some(ChatRemoteResult::Prompt { result: Ok(19), .. })
-            ));
+            let RelayCommand::Prompt { prompt } = command else {
+                panic!("expected image prompt command");
+            };
+            let image_block = prompt
+                .iter()
+                .find_map(|block| match block {
+                    ContentBlock::Image(image) => Some(image),
+                    ContentBlock::Text(_) => None,
+                    _ => None,
+                })
+                .expect("image prompt contains an image block");
+            assert!(image_block.data.is_empty());
+            let reference = hel::hel_attachment::image_reference(image_block)
+                .unwrap()
+                .expect("image prompt contains an attachment reference");
+            assert_eq!((reference.width, reference.height), (2, 2));
+
+            let Some(ChatRemoteResult::Prompt {
+                images,
+                result: Ok(19),
+                ..
+            }) = remote.recv().await
+            else {
+                panic!("expected successful image prompt result");
+            };
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].image.reference.as_ref(), Some(&reference));
+            normalized_image = Some(images[0].image.clone());
         }
         let huge = PromptPayload::with_image(
             "x".repeat(hel::hel_worker::RELAY_COMMAND_BYTE_BUDGET),
@@ -995,12 +1080,61 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(
-            matches!(result, ChatRemoteResult::Prompt { text, images, result: Err(_) } if text == huge.text && images == huge.images)
-        );
+        let mut expected_images = huge.images.clone();
+        expected_images[0].image = normalized_image.expect("successful image was normalized");
+        assert!(matches!(
+            result,
+            ChatRemoteResult::Prompt {
+                text,
+                images,
+                result: Err(_)
+            } if text == huge.text && images == expected_images
+        ));
         assert!(
             fixture.submitted.try_recv().is_err(),
             "oversized input must not reach the actor"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_inline_image_is_refused_before_actor_dispatch() {
+        let mut fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+            "malformed-image-session",
+            23,
+        );
+        let mut remote = ChatRemoteSupervisor::spawn(fixture.stopped, fixture.control);
+        let image = ClipboardImage {
+            data_base64: "not-base64".into(),
+            mime_type: "image/png".into(),
+            reference: None,
+        };
+        let payload = PromptPayload::with_image("inspect", image);
+
+        remote
+            .operations()
+            .send(ChatRemoteOperation::Prompt {
+                command_id: "malformed-image".into(),
+                text: payload.text.clone(),
+                images: payload.images.clone(),
+            })
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), remote.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            result,
+            ChatRemoteResult::Prompt {
+                text,
+                images,
+                result: Err(_)
+            } if text == payload.text && images == payload.images
+        ));
+        assert!(
+            fixture.submitted.try_recv().is_err(),
+            "malformed image must not reach the actor"
         );
     }
 
@@ -1009,6 +1143,7 @@ mod tests {
         let image = ClipboardImage {
             data_base64: "encoded-png".into(),
             mime_type: "image/png".into(),
+            reference: None,
         };
         let image_only = PromptPayload::with_image("", image.clone()).content_blocks();
         assert!(matches!(

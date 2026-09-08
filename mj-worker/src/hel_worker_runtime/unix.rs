@@ -1062,6 +1062,41 @@ fn dispatch_pending(
                 )?;
             continue;
         };
+        let command = match command {
+            CommandRequest::Prompt { request_id, prompt }
+                if hel::hel_attachment::has_references(&prompt) =>
+            {
+                let root = relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .root()
+                    .to_path_buf();
+                CommandRequest::PromptAttachments {
+                    request_id,
+                    prompt,
+                    root,
+                }
+            }
+            CommandRequest::Cancel {
+                request_id,
+                mut steering_prompt,
+            } => {
+                if let Some(steering) = &mut steering_prompt {
+                    steering.attachment_root = Some(
+                        relay
+                            .lock()
+                            .expect("relay state lock poisoned")
+                            .root()
+                            .to_path_buf(),
+                    );
+                }
+                CommandRequest::Cancel {
+                    request_id,
+                    steering_prompt,
+                }
+            }
+            command => command,
+        };
         permits
             .next()
             .expect("every claimed command holds a reserved ACP command permit")
@@ -1418,6 +1453,75 @@ pub(super) async fn serve_client_with_memory(
                     continue;
                 }
             };
+            if matches!(
+                &envelope.request,
+                RelayRequest::AttachmentPresent { .. }
+                    | RelayRequest::InstallAttachment { .. }
+                    | RelayRequest::ReadAttachment { .. }
+            ) {
+                let operation = envelope.request.method_name();
+                let request_id = envelope.request_id.clone();
+                let protocol_version = envelope.protocol_version;
+                let store = hel::hel_attachment::AttachmentStore::worker(&relay_root);
+                let body = if protocol_version < 8
+                    || protocol_version > hel::hel_worker::RELAY_PROTOCOL_VERSION
+                {
+                    compaction_error(
+                        RelayErrorCode::InvalidRequest,
+                        "image attachments require worker protocol 8; upgrade the worker",
+                    )
+                } else {
+                    match tokio::task::spawn_blocking(move || -> Result<RelayResponsePayload> {
+                        use base64::Engine as _;
+                        let base64 = base64::engine::general_purpose::STANDARD;
+                        match envelope.request {
+                            RelayRequest::AttachmentPresent { reference } => {
+                                Ok(RelayResponsePayload::AttachmentPresent {
+                                    present: store.contains(&reference)?,
+                                })
+                            }
+                            RelayRequest::InstallAttachment { reference, data } => {
+                                anyhow::ensure!(
+                                    data.len()
+                                        <= hel::hel_attachment::MAX_IMAGE_BYTES.div_ceil(3) * 4,
+                                    "image upload exceeds 700 KiB"
+                                );
+                                store.install(&reference, &base64.decode(data)?)?;
+                                Ok(RelayResponsePayload::AttachmentInstalled)
+                            }
+                            RelayRequest::ReadAttachment { reference } => {
+                                Ok(RelayResponsePayload::AttachmentData {
+                                    data: base64.encode(store.read(&reference)?),
+                                })
+                            }
+                            _ => unreachable!(),
+                        }
+                    })
+                    .await
+                    {
+                        Ok(Ok(payload)) => RelayResponseBody::Ok { payload },
+                        Ok(Err(error)) => {
+                            compaction_error(RelayErrorCode::InvalidRequest, &format!("{error:#}"))
+                        }
+                        Err(error) => compaction_error(
+                            RelayErrorCode::Internal,
+                            &format!("image attachment task failed: {error}"),
+                        ),
+                    }
+                };
+                write_logged_response(
+                    &mut writer,
+                    &RelayResponseEnvelope {
+                        request_id,
+                        protocol_version,
+                        body,
+                    },
+                    &session_id,
+                    operation,
+                )
+                .await?;
+                continue;
+            }
             if matches!(
                 &envelope.request,
                 RelayRequest::CredentialState

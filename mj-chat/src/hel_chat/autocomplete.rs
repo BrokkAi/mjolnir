@@ -24,6 +24,7 @@ pub(super) enum LocalCommand {
     Plan,
     Implement,
     Review,
+    Attach,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +316,11 @@ pub(super) fn builtin_command_choices() -> Vec<CommandChoice> {
             "review the finished turn now, or report how review is configured",
             Some("status"),
         ),
+        (
+            "attach",
+            "add an image file to the current prompt",
+            Some("path"),
+        ),
     ]
     .into_iter()
     .map(|(name, description, input_hint)| CommandChoice {
@@ -337,6 +343,7 @@ pub(super) fn parse_local_command(prompt: &str) -> Option<(LocalCommand, &str)> 
         "plan" => LocalCommand::Plan,
         "implement" => LocalCommand::Implement,
         "review" => LocalCommand::Review,
+        "attach" => LocalCommand::Attach,
         _ => return None,
     };
     Some((command, args))
@@ -461,6 +468,20 @@ mod tests {
         assert!(prompt_invokes_command("/goal finish it", "goal"));
         assert!(!prompt_invokes_command("/Goal finish it", "goal"));
         assert!(!prompt_invokes_command("/goalkeeper", "goal"));
+    }
+
+    #[test]
+    fn attach_command_preserves_the_path_for_background_processing() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("/attach photos/one.png".into());
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::Attach {
+                path: std::path::PathBuf::from("photos/one.png"),
+                command: "/attach photos/one.png".into(),
+            }
+        );
+        assert!(chat.input.is_empty());
     }
 
     /// Tab has two jobs now: finish a completion, and hand the keyboard to

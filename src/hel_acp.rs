@@ -147,6 +147,9 @@ fn session_update_is_relay_visible(
     session_id: &str,
 ) -> bool {
     match update {
+        // The accepted command is the authoritative user message. Agent echoes
+        // have no projection and must not put image bytes back into the journal.
+        SessionUpdate::UserMessageChunk(_) => false,
         SessionUpdate::ToolCall(call) => {
             live_tool_calls
                 .lock()
@@ -448,6 +451,11 @@ fn resume_session_request(spec: &LaunchSpec, session_id: SessionId) -> ResumeSes
 
 #[derive(Debug)]
 pub enum CommandRequest {
+    PromptAttachments {
+        request_id: String,
+        prompt: Vec<ContentBlock>,
+        root: PathBuf,
+    },
     Prompt {
         request_id: String,
         prompt: Vec<ContentBlock>,
@@ -2115,18 +2123,36 @@ fn start_steer(
     request_id: String,
     steering_prompt: ClaimedSteeringPrompt,
 ) -> PendingSteer {
-    let request = UntypedMessage {
-        method: SESSION_STEERING_METHOD.to_owned(),
-        params: serde_json::json!({
-            "sessionId": session_id,
-            "prompt": steering_prompt.prompt,
-            "_meta": { "steering": { "idleBehavior": "promptRequired" } },
-        }),
-    };
+    let connection = connection.clone();
+    let session_id = session_id.clone();
+    let queued_command_id = steering_prompt.queued_command_id.clone();
+    let response = Box::pin(async move {
+        let mut prompt = steering_prompt.prompt;
+        if let Some(root) = steering_prompt.attachment_root {
+            prompt = tokio::task::spawn_blocking(move || -> Result<Vec<ContentBlock>> {
+                crate::hel_attachment::AttachmentStore::worker(&root).resolve(&mut prompt)?;
+                Ok(prompt)
+            })
+            .await
+            .map_err(|error| {
+                agent_client_protocol::Error::internal_error()
+                    .data(serde_json::Value::String(error.to_string()))
+            })?
+            .map_err(|error| {
+                agent_client_protocol::Error::internal_error()
+                    .data(serde_json::Value::String(error.to_string()))
+            })?;
+        }
+        let request = UntypedMessage {
+            method: SESSION_STEERING_METHOD.to_owned(),
+            params: serde_json::json!({ "sessionId": session_id, "prompt": prompt, "_meta": { "steering": { "idleBehavior": "promptRequired" } } }),
+        };
+        connection.send_request(request).block_task().await
+    });
     PendingSteer {
         request_id,
-        queued_command_id: steering_prompt.queued_command_id,
-        response: Box::pin(connection.send_request(request).block_task()),
+        queued_command_id,
+        response,
     }
 }
 
@@ -2187,7 +2213,8 @@ async fn settle_steer(
 fn drain_requests_from_the_previous_bridge(requests: &mut mpsc::Receiver<CommandRequest>) {
     while let Ok(request) = requests.try_recv() {
         let (variant, request_id) = match request {
-            CommandRequest::Prompt { request_id, .. } => ("Prompt", Some(request_id)),
+            CommandRequest::Prompt { request_id, .. }
+            | CommandRequest::PromptAttachments { request_id, .. } => ("Prompt", Some(request_id)),
             CommandRequest::SetConfig { request_id, .. } => ("SetConfig", Some(request_id)),
             CommandRequest::SetSessionMode { request_id, .. } => {
                 ("SetSessionMode", Some(request_id))
@@ -2420,7 +2447,43 @@ async fn serve_session(
     .await?;
 
     while let Some(request) = requests.recv().await {
+        let request = match request {
+            CommandRequest::PromptAttachments {
+                request_id,
+                mut prompt,
+                root,
+            } => {
+                match tokio::task::spawn_blocking(move || -> Result<Vec<ContentBlock>> {
+                    crate::hel_attachment::AttachmentStore::worker(&root).resolve(&mut prompt)?;
+                    Ok(prompt)
+                })
+                .await
+                {
+                    Ok(Ok(prompt)) => CommandRequest::Prompt { request_id, prompt },
+                    result => {
+                        let message = match result {
+                            Ok(Err(error)) => format!("could not load attached images: {error:#}"),
+                            Err(error) => format!("image loading task failed: {error}"),
+                            Ok(Ok(_)) => unreachable!(),
+                        };
+                        emit_runtime_event(
+                            events,
+                            RuntimeEvent::CommandRejected {
+                                request_id,
+                                message,
+                            },
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+            }
+            request => request,
+        };
         match request {
+            CommandRequest::PromptAttachments { .. } => {
+                unreachable!("resolved before ACP dispatch")
+            }
             CommandRequest::Prompt { request_id, prompt } => {
                 if prompt.is_empty() {
                     emit_runtime_event(
@@ -2712,7 +2775,7 @@ async fn serve_session(
                                 cancellation.context("cancel ACP prompt during runtime shutdown")?;
                                 return Ok(None);
                             }
-                            Some(CommandRequest::Prompt { request_id, .. }) => {
+                            Some(CommandRequest::Prompt { request_id, .. } | CommandRequest::PromptAttachments { request_id, .. }) => {
                                 emit_runtime_event(
                                     events,
                                     RuntimeEvent::CommandRejected {

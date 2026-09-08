@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result as AnyResult};
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_SECURITY_POLICY as CONTENT_SECURITY_POLICY_HEADER, CONTENT_TYPE, COOKIE,
@@ -32,6 +32,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
+use hel::hel_attachment::{AttachmentRef, AttachmentStore, MAX_IMAGE_BYTES, MAX_IMAGES};
 use hel::hel_config::{HelConfig, TargetTemplate, project_history_host, validate_id};
 use hel::hel_elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITATION_BYTES};
 use hel::hel_state::{
@@ -39,6 +40,8 @@ use hel::hel_state::{
     ProjectSourceIdentity, SessionResourceAllocation, SessionState, SessionTransitionKind,
 };
 use hel::hel_targets::AdditionalMount;
+
+use crate::hel_image::optimize_image;
 
 // Keep all control surfaces on the same queue vocabulary. The resume flow
 // used to define a private copy here, which made a move request impossible to
@@ -80,6 +83,12 @@ pub const MAX_HISTORY_MATCHES: usize = 40;
 /// general body limit even when each one fits it. The larger bound therefore
 /// stays scoped to the action route that carries prompts.
 const MAX_PROMPT_BODY_BYTES: usize = 32 * 1024 * 1024;
+/// A browser uploads one source image at a time. The image optimizer has its
+/// own decoded-allocation bound; this is the HTTP envelope bound before that
+/// work starts.
+const MAX_ATTACHMENT_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+/// Keep this in sync with the prompt admission bound and the browser composer.
+pub const MAX_PROMPT_IMAGES: usize = MAX_IMAGES;
 const COOKIE_KEY_BYTES: usize = 32;
 const COOKIE_KEY_FILE: &str = "phone-cookie-key";
 
@@ -1376,15 +1385,22 @@ pub enum ControllerAction {
     },
 }
 
-/// One image a phone attached to a prompt, still base64-encoded as the browser
-/// read it.
+/// One image a phone attached to a prompt. Legacy callers may send inline
+/// base64 data; the server normalizes it into an attachment before dispatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerPromptImage {
+    /// Legacy inline image bytes. New browser uploads and normalized inline
+    /// prompts carry an attachment reference and leave this empty.
+    #[serde(default)]
     pub data_base64: String,
     pub mime_type: String,
     pub width: u32,
     pub height: u32,
+    /// Session-scoped, immutable image bytes. The worker resolves this just
+    /// before dispatch, keeping browser actions and durable commands small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<AttachmentRef>,
 }
 
 /// The controller's answer to one phone action.
@@ -1670,6 +1686,10 @@ fn router(options: ServerOptions) -> Router {
         .route("/api/moves/prepare", post(prepare_move))
         .route("/api/sessions/{session_id}/client-state", get(client_state))
         .route(
+            "/api/sessions/{session_id}/attachments",
+            post(upload_attachment).layer(DefaultBodyLimit::max(MAX_ATTACHMENT_UPLOAD_BYTES)),
+        )
+        .route(
             "/api/sessions/{session_id}/draft",
             put(save_draft).layer(DefaultBodyLimit::max(MAX_DRAFT_BYTES)),
         )
@@ -1818,6 +1838,82 @@ async fn snapshot(State(state): State<ServerState>) -> Response<Body> {
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+/// Optimize and install one browser image off the async request task. The
+/// request body is deliberately raw bytes: base64 would inflate the upload,
+/// and the response contains only the small immutable reference the prompt
+/// needs.
+async fn upload_attachment(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<ViewerPromptImage>, ApiError> {
+    validate_public_id(&session_id)?;
+    let prompt_images_supported = {
+        let snapshot = state.snapshot_rx.borrow();
+        require_session_record(&snapshot, &session_id)?.prompt_images_supported
+    };
+    if !prompt_images_supported {
+        return Err(ApiError::bad_request(
+            "this session does not support image prompts",
+        ));
+    }
+    if body.is_empty() {
+        return Err(ApiError::bad_request("image upload must not be empty"));
+    }
+
+    let result = tokio::task::spawn_blocking(move || {
+        let optimized = optimize_image(&body).map_err(|_| {
+            ApiError::bad_request("unsupported image format or image could not be decoded")
+        })?;
+        if optimized.bytes.is_empty() || optimized.bytes.len() > MAX_IMAGE_BYTES {
+            return Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the image optimizer returned an invalid image size",
+            ));
+        }
+        let reference = AttachmentRef::new(
+            &optimized.bytes,
+            optimized.mime_type.clone(),
+            optimized.width,
+            optimized.height,
+        )
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not create image attachment",
+            )
+        })?;
+        let store = AttachmentStore::controller(&session_id).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not open the image attachment store",
+            )
+        })?;
+        store.install(&reference, &optimized.bytes).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not store the image attachment",
+            )
+        })?;
+        Ok(ViewerPromptImage {
+            data_base64: String::new(),
+            mime_type: reference.mime_type.clone(),
+            width: reference.width,
+            height: reference.height,
+            attachment: Some(reference),
+        })
+    })
+    .await
+    .map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the server could not process the image upload",
+        )
+    })??;
+
+    Ok(Json(result))
 }
 
 /// Hand one validated action to the controller and answer as soon as the
@@ -2268,10 +2364,64 @@ async fn decode_prompt_images_off_task(
         return Ok(action);
     }
     tokio::task::spawn_blocking(move || {
-        let ControllerAction::Prompt { images, .. } = &action else {
+        let mut action = action;
+        let ControllerAction::Prompt {
+            session_id, images, ..
+        } = &action
+        else {
             unreachable!("only prompt actions carry images")
         };
         validate_prompt_images(images)?;
+        let store = AttachmentStore::controller(session_id).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not open the image attachment store",
+            )
+        })?;
+        let ControllerAction::Prompt { images, .. } = &mut action else {
+            unreachable!("only prompt actions carry images")
+        };
+        for image in images {
+            if let Some(reference) = image.attachment.clone() {
+                // Reading through this session's store both verifies the
+                // digest and prevents a reference from another session being
+                // smuggled into a prompt.
+                store
+                    .read(&reference)
+                    .map_err(|_| ApiError::bad_request("the image attachment is unavailable"))?;
+                image.data_base64.clear();
+                image.mime_type = reference.mime_type;
+                image.width = reference.width;
+                image.height = reference.height;
+            } else {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&image.data_base64)
+                    .map_err(|_| ApiError::bad_request("image data must be valid base64"))?;
+                let optimized = optimize_image(&bytes).map_err(|_| {
+                    ApiError::bad_request("unsupported image format or image could not be decoded")
+                })?;
+                let reference = AttachmentRef::new(
+                    &optimized.bytes,
+                    optimized.mime_type.clone(),
+                    optimized.width,
+                    optimized.height,
+                )
+                .map_err(|_| {
+                    ApiError::bad_request("the inline image could not become an attachment")
+                })?;
+                store.install(&reference, &optimized.bytes).map_err(|_| {
+                    ApiError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "could not store the image attachment",
+                    )
+                })?;
+                image.data_base64.clear();
+                image.attachment = Some(reference);
+                image.mime_type = optimized.mime_type;
+                image.width = optimized.width;
+                image.height = optimized.height;
+            }
+        }
         Ok(action)
     })
     .await
@@ -2284,6 +2434,11 @@ async fn decode_prompt_images_off_task(
 }
 
 fn validate_prompt_images(images: &[ViewerPromptImage]) -> Result<(), ApiError> {
+    if images.len() > MAX_PROMPT_IMAGES {
+        return Err(ApiError::bad_request(
+            "a prompt may contain at most 10 images",
+        ));
+    }
     for image in images {
         if !image.mime_type.starts_with("image/") {
             return Err(ApiError::bad_request(
@@ -2294,6 +2449,22 @@ fn validate_prompt_images(images: &[ViewerPromptImage]) -> Result<(), ApiError> 
             return Err(ApiError::bad_request(
                 "image dimensions must be greater than zero",
             ));
+        }
+        if let Some(reference) = &image.attachment {
+            if !image.data_base64.is_empty() {
+                return Err(ApiError::bad_request(
+                    "an image cannot contain both inline data and an attachment",
+                ));
+            }
+            if reference.mime_type != image.mime_type
+                || reference.width != image.width
+                || reference.height != image.height
+            {
+                return Err(ApiError::bad_request(
+                    "image attachment metadata does not match the prompt",
+                ));
+            }
+            continue;
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&image.data_base64)
@@ -2612,6 +2783,11 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
         } => {
             validate_public_id(session_id)?;
             let session = require_session_record(snapshot, session_id)?;
+            if images.len() > MAX_PROMPT_IMAGES {
+                return Err(ApiError::bad_request(
+                    "a prompt may contain at most 10 images",
+                ));
+            }
             if text.starts_with('!') {
                 return Err(ApiError::bad_request(
                     "leading ! is reserved for shell commands",
@@ -3078,13 +3254,13 @@ const MONO_FONT: &[u8] = include_bytes!("../src/fonts/jetbrains-mono.woff2");
 ///
 /// `default-src 'none'` refuses everything not named below, so a future asset
 /// has to be allowed deliberately. Script and style come only from this
-/// origin, which is why none of either may be inline. `img-src` needs `data:`
-/// because attached images render from data URLs the browser itself just
-/// built from a file the person picked.
+/// origin, which is why none of either may be inline. `img-src` allows `blob:`
+/// for browser-local attachment previews and keeps `data:` for legacy image
+/// content rendered in a transcript.
 const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; \
 script-src 'self'; \
 style-src 'self'; \
-img-src 'self' data:; \
+img-src 'self' data: blob:; \
 font-src 'self'; \
 connect-src 'self'; \
 manifest-src 'self'; \
@@ -5081,6 +5257,18 @@ if (sentElicitations.size !== 0) {
             mime_type: "image/png".into(),
             width: 32,
             height: 24,
+            attachment: None,
+        }
+    }
+
+    fn sample_valid_image() -> ViewerPromptImage {
+        ViewerPromptImage {
+            data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                .into(),
+            mime_type: "image/png".into(),
+            width: 1,
+            height: 1,
+            attachment: None,
         }
     }
 
@@ -5104,7 +5292,7 @@ if (sentElicitations.size !== 0) {
     async fn image_prompt_reaches_the_controller_with_its_images() {
         let (app, mut actions, _, _, _) = app_with_snapshot(image_capable);
         let cookie = login_cookie(&app).await;
-        let image = sample_image(8);
+        let image = sample_valid_image();
         let body = serde_json::to_string(&ControllerAction::Prompt {
             session_id: "session-1".into(),
             text: String::new(),
@@ -5112,17 +5300,54 @@ if (sentElicitations.size !== 0) {
         })
         .unwrap();
         let response = tokio::spawn(post_action(app, cookie, body));
-        let action = actions.recv().await.unwrap();
-        assert_eq!(
-            action.action,
-            ControllerAction::Prompt {
-                session_id: "session-1".into(),
-                text: String::new(),
-                images: vec![image.clone(), image],
-            }
+        let request = actions.recv().await.unwrap();
+        let ControllerRequest { action, reply } = request;
+        let ControllerAction::Prompt {
+            session_id,
+            text,
+            images,
+        } = action
+        else {
+            panic!("expected a prompt action")
+        };
+        assert_eq!(session_id, "session-1");
+        assert!(text.is_empty());
+        assert_eq!(images.len(), 2);
+        assert!(
+            images
+                .iter()
+                .all(|image| { image.data_base64.is_empty() && image.attachment.is_some() })
         );
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        reply.send(ActionOutcome::Accepted).unwrap();
         assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn browser_attachment_upload_returns_a_stored_reference_without_inline_bytes() {
+        let (app, _, _, _, _) = app_with_snapshot(image_capable);
+        let cookie = login_cookie(&app).await;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap();
+        let response = app
+            .oneshot(
+                Request::post("/api/sessions/session-1/attachments")
+                    .header(COOKIE, cookie)
+                    .header(CONTENT_TYPE, "image/png")
+                    .body(Body::from(bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let image: ViewerPromptImage = serde_json::from_slice(&body).unwrap();
+        assert!(image.data_base64.is_empty());
+        let reference = image.attachment.expect("upload should return a reference");
+        assert_eq!(reference.mime_type, "image/png");
+        assert_eq!(reference.width, 1);
+        assert_eq!(reference.height, 1);
+        assert!(reference.size <= 700 * 1024);
     }
 
     /// Base64 inflates an upload by a third, so two ordinary photographs pass
@@ -5132,13 +5357,14 @@ if (sentElicitations.size !== 0) {
     async fn multi_image_prompts_are_accepted_over_the_general_body_limit() {
         let (app, mut actions, _, _, _) = app_with_snapshot(image_capable);
         let cookie = login_cookie(&app).await;
-        let image = sample_image(MAX_BODY_BYTES / 2);
-        let body = serde_json::to_string(&ControllerAction::Prompt {
+        let image = sample_valid_image();
+        let mut body = serde_json::to_string(&ControllerAction::Prompt {
             session_id: "session-1".into(),
             text: "look at these".into(),
             images: vec![image.clone(), image],
         })
         .unwrap();
+        body.push_str(&" ".repeat(MAX_BODY_BYTES));
         assert!(body.len() > MAX_BODY_BYTES);
         assert!(body.len() < MAX_PROMPT_BODY_BYTES);
         let response = tokio::spawn(post_action(app, cookie, body));
@@ -5182,6 +5408,7 @@ if (sentElicitations.size !== 0) {
                     mime_type: mime.into(),
                     width,
                     height,
+                    attachment: None,
                 }],
             })
             .unwrap();
@@ -5212,6 +5439,13 @@ if (sentElicitations.size !== 0) {
         image_capable(&mut snapshot);
         // An image is a prompt on its own; nothing at all is not.
         assert!(validate_action(&prompt("", vec![sample_image(8)]), &snapshot).is_ok());
+        assert!(
+            validate_action(
+                &prompt("", vec![sample_image(8); MAX_PROMPT_IMAGES + 1]),
+                &snapshot,
+            )
+            .is_err()
+        );
         assert!(validate_action(&prompt("   ", Vec::new()), &snapshot).is_err());
         assert!(validate_action(&prompt("", Vec::new()), &snapshot).is_err());
         // A shell command is still a shell command.

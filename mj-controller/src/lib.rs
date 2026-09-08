@@ -9,6 +9,7 @@ pub mod hel_compaction;
 pub mod hel_controller;
 pub mod hel_desktop;
 pub mod hel_doctor;
+pub mod hel_image;
 pub mod hel_import;
 pub use hel::hel_git_proxy;
 pub mod hel_quota;

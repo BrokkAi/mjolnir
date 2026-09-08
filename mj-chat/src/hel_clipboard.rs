@@ -16,11 +16,15 @@ use base64::Engine;
 use hel::hel_targets::CommandExecutor;
 use serde::{Deserialize, Serialize};
 
+use hel::hel_attachment::AttachmentRef;
+
 /// Keep one image comfortably below the one-megabyte durable relay command
 /// budget after PNG base64 encoding and JSON framing are added.
-pub const MAX_IMAGE_BYTES: usize = 700 * 1024;
+pub const MAX_IMAGE_BYTES: usize = hel::hel_attachment::MAX_IMAGE_BYTES;
 const MAX_IMAGE_BASE64_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
-const MAX_DECODED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DECODED_IMAGE_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const PENDING_IMAGE_MIME_TYPE: &str = "application/x-mjolnir-pending";
+pub(crate) const FAILED_IMAGE_MIME_TYPE: &str = "application/x-mjolnir-failed";
 #[cfg(target_os = "linux")]
 const WSL_CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
@@ -192,16 +196,56 @@ for ($attempt = 0; $attempt -lt 3; $attempt++) {
 }
 "#;
 
-/// A clipboard image is embedded in an ACP prompt, so it carries its bytes
-/// instead of a host path that a worker container could not access.
+fn arc_str_is_empty(value: &Arc<str>) -> bool {
+    value.is_empty()
+}
+
+/// A clipboard image is either a legacy inline ACP image or a native,
+/// session-scoped attachment reference. Inline bytes are retained while an
+/// image is being normalized; durable prompts and drafts use `reference`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClipboardImage {
     /// Base64-encoded PNG bytes.
+    #[serde(default, skip_serializing_if = "arc_str_is_empty")]
     pub data_base64: Arc<str>,
     pub mime_type: String,
+    /// An immutable image installed in the session attachment store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<AttachmentRef>,
 }
 
 impl ClipboardImage {
+    /// A marker used while a background attachment task is still running.
+    pub(crate) fn pending() -> Self {
+        Self {
+            data_base64: Arc::from(""),
+            mime_type: PENDING_IMAGE_MIME_TYPE.to_owned(),
+            reference: None,
+        }
+    }
+
+    /// A removable marker left when an attachment task failed.
+    pub(crate) fn failed() -> Self {
+        Self {
+            data_base64: Arc::from(""),
+            mime_type: FAILED_IMAGE_MIME_TYPE.to_owned(),
+            reference: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn is_placeholder(&self) -> bool {
+        self.reference.is_none()
+            && self.data_base64.is_empty()
+            && (self.mime_type == PENDING_IMAGE_MIME_TYPE
+                || self.mime_type == FAILED_IMAGE_MIME_TYPE)
+    }
+
+    #[must_use]
+    pub(crate) fn is_pending(&self) -> bool {
+        self.mime_type == PENDING_IMAGE_MIME_TYPE
+    }
+
     /// Construct and validate an image from encoded PNG bytes.
     pub fn from_png_base64(data_base64: impl Into<Arc<str>>) -> Result<Self> {
         Self::from_base64(data_base64, "image/png".to_owned())
@@ -222,7 +266,23 @@ impl ClipboardImage {
         Ok(Self {
             data_base64,
             mime_type,
+            reference: None,
         })
+    }
+
+    /// Construct an image that carries only its session-scoped reference.
+    pub fn from_reference(reference: AttachmentRef) -> Result<Self> {
+        reference.validate()?;
+        Ok(Self {
+            data_base64: Arc::from(""),
+            mime_type: reference.mime_type.clone(),
+            reference: Some(reference),
+        })
+    }
+
+    #[must_use]
+    pub fn is_reference(&self) -> bool {
+        self.reference.is_some()
     }
 }
 
@@ -325,24 +385,14 @@ fn encode_native_image(image: arboard::ImageData<'_>) -> Result<ClipboardImage> 
     if image.bytes.len() != expected {
         bail!("clipboard image has invalid RGBA data");
     }
-    let mut png = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut png, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder
-            .write_header()
-            .context("start PNG encoding for clipboard image")?;
-        writer
-            .write_image_data(image.bytes.as_ref())
-            .context("encode clipboard image as PNG")?;
-    }
-    if png.len() > MAX_IMAGE_BYTES {
-        bail!("clipboard image is too large (maximum {MAX_IMAGE_BYTES} bytes)");
-    }
+    let optimized = mj_controller::hel_image::optimize_rgba(width, height, image.bytes.as_ref())
+        .context("optimize clipboard image")?;
     Ok(ClipboardImage {
-        data_base64: base64::engine::general_purpose::STANDARD.encode(png).into(),
-        mime_type: "image/png".to_owned(),
+        data_base64: base64::engine::general_purpose::STANDARD
+            .encode(optimized.bytes)
+            .into(),
+        mime_type: optimized.mime_type,
+        reference: None,
     })
 }
 
@@ -394,7 +444,31 @@ fn read_wsl_clipboard_with_script(script: &str) -> Result<ClipboardContent> {
         }
         bail!("Windows clipboard helper failed: {detail}");
     }
-    parse_wsl_clipboard_output(&output.stdout)
+    let content = parse_wsl_clipboard_output(&output.stdout)?;
+    match content {
+        ClipboardContent::Image(image) => Ok(ClipboardContent::Image(normalize_image(image)?)),
+        content => Ok(content),
+    }
+}
+
+/// Normalize an encoded clipboard image through the controller's shared image
+/// optimizer. The PowerShell WSL helper already applies a conservative resize,
+/// but running the common optimizer here keeps its MIME type, dimensions, and
+/// byte bound identical to native clipboard images.
+pub fn normalize_image(image: ClipboardImage) -> Result<ClipboardImage> {
+    if image.reference.is_some() {
+        return Ok(image);
+    }
+    let bytes = decode_base64(&image.data_base64)?;
+    let optimized =
+        mj_controller::hel_image::optimize_image(&bytes).context("optimize clipboard image")?;
+    Ok(ClipboardImage {
+        data_base64: base64::engine::general_purpose::STANDARD
+            .encode(optimized.bytes)
+            .into(),
+        mime_type: optimized.mime_type,
+        reference: None,
+    })
 }
 
 #[cfg(target_os = "linux")]

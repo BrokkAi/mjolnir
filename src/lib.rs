@@ -6,6 +6,7 @@ pub mod termination;
 
 pub mod hel_acp;
 pub mod hel_archive;
+pub mod hel_attachment;
 pub mod hel_checkpoint;
 pub mod hel_config;
 pub mod hel_credentials;

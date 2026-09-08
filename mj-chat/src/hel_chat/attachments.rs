@@ -5,13 +5,18 @@
 //! meaning; arbitrary occurrences of `[image N]` remain ordinary text.
 
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::Read;
 use std::ops::Range;
+use std::path::Path;
 
 use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::hel_clipboard::ClipboardImage;
+use hel::hel_attachment::{AttachmentRef, AttachmentStore, MAX_IMAGES};
 
 /// Prefix used for drafts whose payload is encoded as JSON.
 pub const CHAT_DRAFT_PREFIX: &str = "mjolnir-chat-draft-v1:";
@@ -97,10 +102,20 @@ impl PromptPayload {
                     self.text[cursor..image.range.start].to_owned(),
                 )));
             }
-            blocks.push(ContentBlock::Image(ImageContent::new(
-                image.image.data_base64.to_string(),
-                image.image.mime_type.clone(),
-            )));
+            if image.image.is_placeholder() {
+                blocks.push(ContentBlock::Text(TextContent::new(
+                    self.text[image.range.clone()].to_owned(),
+                )));
+                cursor = image.range.end;
+                continue;
+            }
+            blocks.push(match &image.image.reference {
+                Some(reference) => reference.content_block(),
+                None => ContentBlock::Image(ImageContent::new(
+                    image.image.data_base64.to_string(),
+                    image.image.mime_type.clone(),
+                )),
+            });
             cursor = image.range.end;
         }
 
@@ -177,7 +192,7 @@ fn decode_wire(wire: PromptPayloadWire) -> std::result::Result<PromptPayload, St
         (Some(_), Some(_)) => Err("chat draft contains both images and image fields".to_owned()),
         (Some(images), None) => validate_images(wire.text, images),
         (None, Some(image)) => {
-            let image = ClipboardImage::from_base64(image.data_base64, image.mime_type)
+            let image = validate_image(image)
                 .map_err(|error| format!("validate image in chat draft: {error}"))?;
             Ok(PromptPayload::with_image(wire.text, image))
         }
@@ -189,6 +204,9 @@ fn validate_images(
     text: String,
     images: Vec<PromptImage>,
 ) -> std::result::Result<PromptPayload, String> {
+    if images.len() > MAX_IMAGES {
+        return Err(format!("a message can contain at most {MAX_IMAGES} images"));
+    }
     let mut previous_end = 0;
     let mut numbers = BTreeSet::new();
     let mut validated = Vec::with_capacity(images.len());
@@ -220,11 +238,8 @@ fn validate_images(
                 image.number
             ));
         }
-        let image_bytes = ClipboardImage::from_base64(
-            image.image.data_base64.clone(),
-            image.image.mime_type.clone(),
-        )
-        .map_err(|error| format!("validate image {} in chat draft: {error}", image.number))?;
+        let image_bytes = validate_image(image.image)
+            .map_err(|error| format!("validate image {} in chat draft: {error}", image.number))?;
         previous_end = image.range.end;
         validated.push(PromptImage {
             range: image.range,
@@ -239,8 +254,104 @@ fn validate_images(
     })
 }
 
+fn validate_image(image: ClipboardImage) -> Result<ClipboardImage> {
+    if image.is_placeholder() {
+        return Ok(image);
+    }
+    if let Some(reference) = &image.reference {
+        reference.validate()?;
+        if !image.data_base64.is_empty() {
+            bail!("attachment references must not carry inline image bytes");
+        }
+        if image.mime_type != reference.mime_type {
+            bail!("attachment reference MIME type does not match image MIME type");
+        }
+        return Ok(image);
+    }
+    ClipboardImage::from_base64(image.data_base64, image.mime_type)
+}
+
+/// Normalize one encoded image and install its immutable bytes before a prompt
+/// is allowed to leave the controller. All filesystem and codec work belongs in
+/// the caller's blocking task.
+pub(super) fn install_clipboard_image(
+    session_id: &str,
+    image: ClipboardImage,
+) -> Result<ClipboardImage> {
+    if image.is_placeholder() {
+        bail!("image attachment is still processing or has failed");
+    }
+    if image.reference.is_some() {
+        return validate_image(image);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image.data_base64.as_bytes())
+        .context("decode clipboard image")?;
+    install_image_bytes(session_id, &bytes)
+}
+
+/// Read, optimize, and install an image selected by `/attach`.
+pub(super) fn install_path(session_id: &str, path: &Path) -> Result<ClipboardImage> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect attachment {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("attachment {} is not a regular file", path.display());
+    }
+    let file = File::open(path).with_context(|| format!("read attachment {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((64 * 1024 * 1024 + 1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read attachment {}", path.display()))?;
+    if bytes.len() > 64 * 1024 * 1024 {
+        bail!("image attachment exceeds the 64 MiB input limit");
+    }
+    install_image_bytes(session_id, &bytes)
+}
+
+fn install_image_bytes(session_id: &str, bytes: &[u8]) -> Result<ClipboardImage> {
+    let optimized =
+        mj_controller::hel_image::optimize_image(bytes).context("optimize image attachment")?;
+    let reference = AttachmentRef::new(
+        &optimized.bytes,
+        optimized.mime_type,
+        optimized.width,
+        optimized.height,
+    )?;
+    AttachmentStore::controller(session_id)?.install(&reference, &optimized.bytes)?;
+    ClipboardImage::from_reference(reference)
+}
+
 fn marker(number: u64) -> String {
     format!("[image {number}]")
+}
+
+/// Return the composer text after removing the marker ranges that carry image
+/// meaning. This is used only for recognizing a command typed beside existing
+/// attachments; the original text and image ranges remain untouched.
+pub(super) fn text_without_images(text: &str, images: &[PromptImage]) -> String {
+    let mut plain = String::new();
+    for range in untracked_ranges(text, images) {
+        plain.push_str(&text[range]);
+    }
+    plain
+}
+
+/// Return the portions of a composer that are ordinary text rather than
+/// tracked image markers. Ranges are in the input's original coordinates and
+/// are therefore safe to remove from the end toward the beginning.
+pub(super) fn untracked_ranges(text: &str, images: &[PromptImage]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::with_capacity(images.len() + 1);
+    let mut cursor = 0;
+    for image in images {
+        if cursor < image.range.start {
+            ranges.push(cursor..image.range.start);
+        }
+        cursor = image.range.end;
+    }
+    if cursor < text.len() {
+        ranges.push(cursor..text.len());
+    }
+    ranges
 }
 
 /// Replace a byte range in a composer, treating tracked markers as atomic.
@@ -471,6 +582,7 @@ mod tests {
         ClipboardImage {
             data_base64: tag.to_owned().into(),
             mime_type: "image/png".to_owned(),
+            reference: None,
         }
     }
 
@@ -641,5 +753,42 @@ mod tests {
             PromptPayload::decode_draft(&literal.encode_draft()).unwrap(),
             literal
         );
+    }
+
+    #[test]
+    fn reference_images_use_reserved_uri_and_drafts_carry_no_bytes() {
+        let inline = valid_image();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(inline.data_base64.as_bytes())
+            .unwrap();
+        let reference = AttachmentRef::new(&bytes, "image/png".into(), 1, 1).unwrap();
+        let image = ClipboardImage::from_reference(reference.clone()).unwrap();
+        let payload = PromptPayload::with_image("look", image);
+        let blocks = payload.content_blocks();
+        let [ContentBlock::Text(text), ContentBlock::Image(content)] = blocks.as_slice() else {
+            panic!("expected mixed text and reference image blocks");
+        };
+        assert_eq!(text.text, "look");
+        assert!(content.data.is_empty());
+        assert_eq!(content.uri.as_deref(), Some(reference.uri().as_str()));
+        let encoded = payload.encode_draft();
+        assert!(!encoded.contains(&base64::engine::general_purpose::STANDARD.encode(bytes)));
+        assert_eq!(PromptPayload::decode_draft(&encoded).unwrap(), payload);
+    }
+
+    #[test]
+    fn drafts_reject_more_than_ten_images() {
+        let image = valid_image();
+        let mut payload = PromptPayload::text("");
+        for number in 1..=11 {
+            let end = payload.text.len();
+            payload.text.push_str(&marker(number));
+            payload.images.push(PromptImage {
+                range: end..payload.text.len(),
+                number,
+                image: image.clone(),
+            });
+        }
+        assert!(PromptPayload::decode_draft(&payload.encode_draft()).is_err());
     }
 }
