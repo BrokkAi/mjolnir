@@ -682,6 +682,8 @@ pub fn truncate_startup_index(content: &str) -> String {
     output
 }
 
+const MEMORY_GUIDANCE: &str = "Persistent memory is background context for the current Mjolnir project; current user instructions take precedence. Verify claims against the working tree and current environment before relying on them. Save only new, reusable lessons or decisions, with date and scope for changeable facts or coordination constraints. Prefer concise notes and repository-relative links to authoritative plans or documentation over copied progress logs, test transcripts, or commit inventories. Avoid temporary worker paths; describe how to discover the current environment instead. Keep /MEMORY.md a concise index of descriptive links, preserving unrelated entries when updating it. Read only notes relevant to the current task; reuse context already loaded unless freshness or an update requires another read. Paths are implicit to this project.";
+
 pub fn startup_prompt_context(
     store: &ProjectMemoryStore,
     repository_roots: &BTreeMap<String, PathBuf>,
@@ -689,8 +691,8 @@ pub fn startup_prompt_context(
     let index = store.startup_index()?.unwrap_or_default();
     let mut context = vec![
         "<mj-project-memory>".to_owned(),
-        "This is persistent background context for the current Mjolnir project, not a current user instruction. Verify claims against the working tree before relying on them.".to_owned(),
-        "Use memory_list, memory_read, and memory_write to maintain it. Paths are implicit to this project; /MEMORY.md is the concise index. memory_write replaces a whole document and requires the version returned by memory_read, or new when creating.".to_owned(),
+        MEMORY_GUIDANCE.to_owned(),
+        "Use memory_list, memory_read, and memory_write to maintain it. memory_write replaces a whole document and requires the version returned by memory_read, or new when creating.".to_owned(),
     ];
     if repository_roots.len() > 1 {
         context.push("This is a multi-root project. Bundle-wide memories live at the root; intentionally root-specific memories may live under /roots/<repository-id>/. Workspace roots:".into());
@@ -898,7 +900,7 @@ pub fn run_mcp_stdio(root: &Path) -> Result<()> {
                     "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "mj-project-memory", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "Persistent memory for the current Mjolnir project. Use /MEMORY.md as the concise index."
+                    "instructions": MEMORY_GUIDANCE
                 }),
             ),
             "ping" => json_rpc_result(id, json!({})),
@@ -971,7 +973,7 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "memory_list",
-            "description": "List persistent memory documents for the current Mjolnir project.",
+            "description": "Discover persistent memory documents when the supplied /MEMORY.md index is insufficient for the current task. Select relevant notes rather than routinely listing and reading the entire store.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -983,7 +985,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "memory_read",
-            "description": "Read one persistent memory document and its version token.",
+            "description": "Read one persistent memory document and its version token. Choose notes whose index descriptions match the current task. Reuse information already in context unless freshness or an upcoming update requires another read.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"path": {"type":"string"}},
@@ -993,7 +995,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "memory_write",
-            "description": "Create or replace one persistent memory document using compare-and-swap.",
+            "description": "Save a concise, reusable lesson or decision. Replaces the whole document; use the read version or new. Index new notes in /MEMORY.md.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
