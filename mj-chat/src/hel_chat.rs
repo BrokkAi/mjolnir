@@ -285,6 +285,50 @@ struct QueuedPrompt {
     attachments_unsupported: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnControlIntent {
+    Cancel,
+    Steer,
+    /// A queued prompt can still be applied when an older worker does not
+    /// report whether it will steer or cancel and start the next turn.
+    ApplyQueued,
+}
+
+impl TurnControlIntent {
+    fn escape_hint(self) -> &'static str {
+        match self {
+            Self::Cancel => "Esc cancels",
+            Self::Steer => "Esc steers next",
+            Self::ApplyQueued => "Esc applies next",
+        }
+    }
+
+    fn sending_notice(self) -> &'static str {
+        match self {
+            Self::Cancel => "Sending cancellation request…",
+            Self::Steer => "Sending steering request…",
+            Self::ApplyQueued => "Requesting queued prompt…",
+        }
+    }
+
+    fn requested_notice(self) -> &'static str {
+        match self {
+            Self::Cancel => "Cancellation requested",
+            Self::Steer => "Steering requested",
+            Self::ApplyQueued => "Queued prompt requested",
+        }
+    }
+
+    fn failure_notice(self, error: &str) -> String {
+        let action = match self {
+            Self::Cancel => "Cancellation",
+            Self::Steer => "Steering request",
+            Self::ApplyQueued => "Queued prompt request",
+        };
+        format!("{action} failed: {error}")
+    }
+}
+
 /// A submit the relay refused. The relay never saw it, so it is never
 /// journaled; the chat keeps the record beside the projected entries and
 /// draws it at the end of the transcript. The notice that reports the same
@@ -535,6 +579,7 @@ pub struct ChatState {
     /// turn the harness started on its own, which the relay refuses to cancel,
     /// so cancellation and the composer's cancel hint key on this instead.
     prompt_in_flight: bool,
+    steering_supported: Option<bool>,
     /// What the session is doing beyond `phase`: the turn the harness started
     /// on its own, and the commands the agent left running.
     session_activity: crate::usage_format::SessionActivity,
@@ -642,6 +687,7 @@ impl ChatState {
             spinner_style: hel::hel_config::SpinnerStyle::default(),
             turn_started_at_epoch_seconds: None,
             prompt_in_flight: snapshot.active_prompt.is_some(),
+            steering_supported: None,
             session_activity: crate::usage_format::SessionActivity::default(),
             current_step_started_at_ms: None,
             frame_surfaces: FrameSurfaces::new(),
@@ -1168,6 +1214,23 @@ impl ChatState {
     #[must_use]
     pub(super) fn prompt_in_flight(&self) -> bool {
         self.prompt_in_flight
+    }
+
+    fn turn_control_intent(&self) -> TurnControlIntent {
+        if self.prompt_in_flight
+            && self
+                .queued_prompts
+                .front()
+                .is_some_and(|queued| queued.kind.is_prompt())
+        {
+            match self.steering_supported {
+                Some(true) => TurnControlIntent::Steer,
+                Some(false) => TurnControlIntent::Cancel,
+                None => TurnControlIntent::ApplyQueued,
+            }
+        } else {
+            TurnControlIntent::Cancel
+        }
     }
 
     /// Records what the session is doing beyond its phase, so the pane title

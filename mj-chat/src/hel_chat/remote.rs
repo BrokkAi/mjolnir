@@ -11,7 +11,8 @@ use mj_controller::hel_session_manager::{ManagedSessionHandle, SessionManagerCon
 use super::PromptImage;
 use super::attachments;
 use super::{
-    ChatState, PlanControl, PlanReviewFollowup, PromptPayload, UnsentKind, queued_prompt_preview,
+    ChatState, PlanControl, PlanReviewFollowup, PromptPayload, TurnControlIntent, UnsentKind,
+    queued_prompt_preview,
 };
 #[cfg(test)]
 use crate::hel_clipboard::ClipboardImage;
@@ -51,6 +52,7 @@ pub(super) enum ChatRemoteOperation {
     },
     Cancel {
         command_id: String,
+        intent: TurnControlIntent,
         cancel_agent: bool,
         shell_command_ids: Vec<String>,
     },
@@ -90,7 +92,10 @@ pub(super) enum ChatRemoteResult {
         control_applied: bool,
         result: std::result::Result<Option<u64>, String>,
     },
-    Cancel(std::result::Result<(), String>),
+    Cancel {
+        intent: TurnControlIntent,
+        result: std::result::Result<(), String>,
+    },
     RespondElicitation {
         request: ElicitationRequest,
         desired_plan_active: Option<bool>,
@@ -119,7 +124,9 @@ impl ChatRemoteResult {
             | Self::PlanCommand {
                 result: Err(error), ..
             }
-            | Self::Cancel(Err(error))
+            | Self::Cancel {
+                result: Err(error), ..
+            }
             | Self::RespondElicitation {
                 result: Err(error), ..
             }
@@ -622,6 +629,7 @@ async fn enqueue_chat_remote_operation(
         }
         ChatRemoteOperation::Cancel {
             command_id,
+            intent,
             cancel_agent,
             shell_command_ids,
         } => {
@@ -651,11 +659,14 @@ async fn enqueue_chat_remote_operation(
                 publish_chat_remote_result(
                     &results,
                     &attached,
-                    ChatRemoteResult::Cancel(if failures.is_empty() {
-                        Ok(())
-                    } else {
-                        Err(failures.join("; "))
-                    }),
+                    ChatRemoteResult::Cancel {
+                        intent,
+                        result: if failures.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(failures.join("; "))
+                        },
+                    },
                 );
             });
         }
@@ -872,10 +883,10 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
             restore_unsent_input(chat, &original);
             chat.set_notice(format!("Plan command was not completed: {error}"));
         }
-        ChatRemoteResult::Cancel(Ok(())) => chat.set_notice("Cancellation requested"),
-        ChatRemoteResult::Cancel(Err(error)) => {
-            chat.set_notice(format!("Cancellation failed: {error}"))
-        }
+        ChatRemoteResult::Cancel { intent, result } => match result {
+            Ok(()) => chat.set_notice(intent.requested_notice()),
+            Err(error) => chat.set_notice(intent.failure_notice(&error)),
+        },
         ChatRemoteResult::RespondElicitation {
             desired_plan_active,
             result: Ok(()),
@@ -975,6 +986,22 @@ mod tests {
         transcript_text(chat, 100)
             .iter()
             .any(|line| line.contains(text))
+    }
+
+    #[test]
+    fn rejected_steering_is_not_reported_as_failed_cancellation() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::Cancel {
+                intent: TurnControlIntent::Steer,
+                result: Err("session disconnected".into()),
+            },
+        );
+        assert_eq!(
+            chat.notice().as_deref(),
+            Some("Steering request failed: session disconnected"),
+        );
     }
 
     #[tokio::test]
