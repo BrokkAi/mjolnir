@@ -478,6 +478,7 @@ fn drawn_session_rows_with_options(
                 };
                 let mut lines = Vec::new();
                 lines.extend(heading_line);
+                let spacing = u16::from(expanded && !options.summary_only);
                 if let Some(transition) = dashboard.transition_kind(&session.id) {
                     lines.push(session_transition_line(
                         prefix,
@@ -494,7 +495,7 @@ fn drawn_session_rows_with_options(
                         session: Some(index),
                         heading: heading_key,
                         lines,
-                        spacing: 0,
+                        spacing,
                     });
                     continue;
                 }
@@ -514,7 +515,7 @@ fn drawn_session_rows_with_options(
                         session: Some(index),
                         heading: heading_key,
                         lines,
-                        spacing: 0,
+                        spacing,
                     });
                     continue;
                 }
@@ -557,7 +558,6 @@ fn drawn_session_rows_with_options(
                         spinner,
                     ));
                 }
-                let spacing = u16::from(expanded && !options.summary_only);
                 if selected {
                     for line in lines.iter_mut().skip(usize::from(heading_key.is_some())) {
                         line.style = line.style.bg(theme::SURFACE_RAISED);
@@ -3113,6 +3113,59 @@ mod tests {
             (buffer.area.x + 1..buffer.area.right() - 1)
                 .all(|x| buffer[(x, first_y + 4)].symbol().trim().is_empty())
         );
+    }
+
+    #[test]
+    fn session_transitions_preserve_the_blank_row_before_the_next_session() {
+        let mut first = running_session();
+        first.project_directory = Some("/projects/shared".into());
+        first.session_title_override = Some("First session".into());
+        let mut second = first.clone();
+        second.id = "session-second".into();
+        second.session_title_override = Some("Second session".into());
+        second.created_at = "2026-08-10T00:00:00Z".into();
+        let mut dashboard = dashboard_with_session(first.clone());
+        dashboard.state.sessions.insert(second.id.clone(), second);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+
+        for kind in [
+            Some(SessionOperationKind::Launching),
+            Some(SessionOperationKind::Resuming),
+            Some(SessionOperationKind::Moving),
+            Some(SessionOperationKind::Stopping),
+            Some(SessionOperationKind::Destroying),
+            None,
+        ] {
+            dashboard.session_operations.clear();
+            if let Some(kind) = kind {
+                dashboard
+                    .session_operations
+                    .insert(first.id.clone(), operation(kind, None));
+            } else {
+                let session = dashboard.state.sessions.get_mut(&first.id).unwrap();
+                session.state = SessionState::Closing;
+                session.last_error = Some("checkpoint failed".into());
+            }
+            terminal
+                .draw(|frame| render(frame, &mut dashboard))
+                .expect("draw session transition");
+            let buffer = terminal.backend().buffer();
+            let lines = buffer_lines(buffer);
+            let first_y = lines
+                .iter()
+                .position(|line| line.contains("First session"))
+                .expect("transition row");
+            let second_y = lines
+                .iter()
+                .position(|line| line.contains("Second session"))
+                .expect("following session row");
+            assert_eq!(second_y, first_y + 2, "{kind:?}: {lines:#?}");
+            assert!(
+                (buffer.area.x + 1..buffer.area.right() - 1)
+                    .all(|x| { buffer[(x, (first_y + 1) as u16)].symbol().trim().is_empty() }),
+                "{kind:?}: the separator must be blank"
+            );
+        }
     }
 
     #[test]
