@@ -44,6 +44,7 @@ pub enum CommandId {
     Palette,
     ReviewSettings,
     CycleSpinner,
+    ToggleStoppedSessions,
     Help,
 }
 
@@ -223,6 +224,16 @@ fn spinner_available(dashboard: &DashboardState) -> Availability {
     }
 }
 
+fn stopped_sessions_toggle_available(dashboard: &DashboardState) -> Availability {
+    if dashboard.stopped_sessions_save_pending.is_some() {
+        Availability::Blocked("The session visibility preference is being saved")
+    } else if dashboard.config.newer_config_version.is_some() {
+        Availability::Blocked("This configuration belongs to a newer Mjolnir")
+    } else {
+        Availability::Ready
+    }
+}
+
 fn selected_session_ready(dashboard: &DashboardState) -> Availability {
     if dashboard.selected_session().is_some() {
         Availability::Ready
@@ -369,7 +380,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::NewSession,
         label: "New session",
-        description: "Start with a fresh task prompt and saved defaults.",
+        description: "Create immediately with saved defaults and open the normal prompt.",
         scope: Scope::Sessions,
         keys: &[
             KeyHint::alt(KeyCode::Char('n'), "Alt-N"),
@@ -393,6 +404,17 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 1,
         available: config_present,
+    },
+    CommandSpec {
+        id: CommandId::ToggleStoppedSessions,
+        label: "Show/hide stopped sessions",
+        description: "Toggle stopped sessions in the Sessions panel and remember the choice.",
+        scope: Scope::Sessions,
+        keys: &[KeyHint::plain(KeyCode::Char('h'), "h")],
+        footer: footer_word!("stopped"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 3,
+        available: stopped_sessions_toggle_available,
     },
     CommandSpec {
         id: CommandId::RestartSession,
@@ -837,7 +859,10 @@ impl DashboardState {
         }
         match id {
             CommandId::OpenSession => self.open_selected_session(),
-            CommandId::NewSession => self.begin_quick_new(),
+            CommandId::NewSession => {
+                self.focus_sessions();
+                DashboardAction::QuickNewSession
+            }
             CommandId::NewSessionWizard => self.begin_new(),
             CommandId::RestartSession => self
                 .selected_session()
@@ -851,6 +876,20 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::ReviewSettings => self.begin_review_settings(),
+            CommandId::ToggleStoppedSessions => {
+                if self.stopped_sessions_save_pending.is_some() {
+                    return DashboardAction::None;
+                }
+                if let Some(notice) = self.config.newer_build_notice() {
+                    self.set_notice(notice);
+                    return DashboardAction::None;
+                }
+                let show = !self.config.show_stopped_sessions;
+                self.config.show_stopped_sessions = show;
+                self.stopped_sessions_save_pending = Some(show);
+                self.clamp_selections();
+                DashboardAction::SaveStoppedSessionVisibility { show }
+            }
             CommandId::CycleSpinner => {
                 if self.spinner_save_pending {
                     return DashboardAction::None;

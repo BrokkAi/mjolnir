@@ -2316,6 +2316,7 @@ mod tests {
             hel::hel_config::HelConfig {
                 version: hel::hel_config::CONFIG_VERSION,
                 sessions_side: Default::default(),
+                show_stopped_sessions: true,
                 newer_config_version: None,
                 spinner: Default::default(),
                 phone: Default::default(),

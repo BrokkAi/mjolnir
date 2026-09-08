@@ -832,7 +832,7 @@ mod tests {
                 .draw(|frame| crate::render::render(frame, &mut dashboard))
                 .unwrap();
             let text = buffer_lines(terminal.backend().buffer()).join("\n");
-            for label in ["Ask for a task", "Save (Ctrl-S)", "Cancel"] {
+            for label in ["Focus prompt", "Save (Ctrl-S)", "Cancel"] {
                 assert!(text.contains(label), "{text}");
             }
             dashboard.handle_key(key(KeyCode::Esc));

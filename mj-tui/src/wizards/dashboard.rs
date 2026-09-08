@@ -2465,13 +2465,7 @@ impl DashboardState {
         &mut self,
         project_directory: std::path::PathBuf,
     ) -> Result<DashboardAction, String> {
-        if !self.config.startup.enabled
-            || self
-                .state
-                .sessions
-                .values()
-                .any(|session| session.state.is_active())
-        {
+        if !self.config.startup.enabled || self.startup_sessions().next().is_some() {
             return Ok(DashboardAction::None);
         }
         self.quick_session_action(project_directory)
@@ -2500,8 +2494,6 @@ impl DashboardState {
             return Err(format!("Startup profile {profile_id:?} is not configured."));
         }
         let action = DashboardAction::CreateStartupSession {
-            generation: None,
-            initial_prompt: None,
             profile_id: profile_id.clone(),
             target_template_id: self.config.startup.target.clone(),
             project_directory,

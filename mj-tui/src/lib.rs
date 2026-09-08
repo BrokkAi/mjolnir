@@ -46,7 +46,6 @@ mod dialogs;
 mod help;
 mod ingest;
 mod palette;
-mod quick_new;
 mod render;
 mod resume;
 mod review_settings;
@@ -161,16 +160,11 @@ pub enum DashboardAction {
         session_id: String,
     },
     /// Resolve available local runtimes and the current project off the UI loop.
-    QuickNewSession {
-        generation: Option<u64>,
-        initial_prompt: Option<String>,
-    },
+    QuickNewSession,
     RestartSession {
         session_id: String,
     },
     CreateStartupSession {
-        generation: Option<u64>,
-        initial_prompt: Option<String>,
         profile_id: String,
         target_template_id: Option<String>,
         project_directory: std::path::PathBuf,
@@ -343,6 +337,9 @@ pub enum DashboardAction {
     SaveSpinnerStyle {
         style: hel::hel_config::SpinnerStyle,
     },
+    SaveStoppedSessionVisibility {
+        show: bool,
+    },
     /// Per-session container provisioning inputs, taking effect the next time
     /// the container is created.
     SaveContainerSettings {
@@ -497,7 +494,6 @@ pub(crate) enum Mode {
     /// The global `[review]` configuration editor, opened from the F2 palette.
     ReviewSettings(ReviewSettingsDialog),
     Setup(setup::SetupDialog),
-    QuickNew(quick_new::QuickNewDialog),
 }
 
 fn mode_contains_review_settings(mode: &Mode) -> bool {
@@ -599,6 +595,7 @@ pub struct DashboardState {
     pub(crate) project_heading_areas: Vec<(String, Rect)>,
     /// Click targets for the three size controls in each support-pane title.
     pub(crate) pane_size_control_areas: Vec<(SupportPane, PaneSize, Rect)>,
+    pub(crate) stopped_sessions_toggle_area: Option<Rect>,
     /// Whether the current frame gives each pane a larger allocation when its
     /// size changes from Standard to the exclusive Maximized state.
     pane_maximize_enabled: [bool; DASHBOARD_PANE_COUNT],
@@ -615,6 +612,7 @@ pub struct DashboardState {
     /// matching a newly opened dialog with the same values.
     pub(crate) review_settings_generation: u64,
     pub(crate) spinner_save_pending: bool,
+    pub(crate) stopped_sessions_save_pending: Option<bool>,
     /// Successful reviewer selector discoveries, retained after the dialog
     /// closes. The key is the profile definition's id and the optional model
     /// whose effort choices were discovered.
@@ -626,6 +624,7 @@ pub struct DashboardState {
     pub(crate) notices: Notices,
     /// The attached workspace name, used by the first-run screen.
     pub(crate) workspace_name: String,
+    pub(crate) workspace_id: Option<String>,
     pub(crate) workspace_names: BTreeMap<String, String>,
 }
 
@@ -670,17 +669,20 @@ impl DashboardState {
             session_row_areas: Vec::new(),
             project_heading_areas: Vec::new(),
             pane_size_control_areas: Vec::new(),
+            stopped_sessions_toggle_area: None,
             pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
             collapsed_project_keys: BTreeSet::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
             review_settings_generation: 0,
             spinner_save_pending: false,
+            stopped_sessions_save_pending: None,
             review_settings_choices: BTreeMap::new(),
             session_preflight_generation: 0,
             next_move_preparation_request_id: 0,
             notices: Notices::default(),
             workspace_name: String::new(),
+            workspace_id: None,
             workspace_names: BTreeMap::new(),
         };
         dashboard.session_details = dashboard
@@ -698,6 +700,27 @@ impl DashboardState {
         if self.state.sessions.contains_key(session_id) {
             self.selected_session_id = Some(session_id.to_owned());
         }
+    }
+
+    /// Select the newly created session and use the ordinary composer.
+    pub fn finish_new_session(&mut self, session_id: &str) {
+        self.select_active_session(session_id);
+        if self.config.startup.prompt {
+            self.focus_prompt();
+        } else {
+            self.focus_sessions();
+        }
+    }
+
+    /// Global visibility must not change which workspace opens automatically.
+    pub fn startup_sessions(&self) -> impl Iterator<Item = &SessionRecord> {
+        self.state.sessions.values().filter(|session| {
+            session.state.is_active()
+                && self
+                    .workspace_id
+                    .as_ref()
+                    .is_none_or(|workspace_id| session.workspace_id == *workspace_id)
+        })
     }
 
     /// The part of the combined surface that owns the keyboard.
@@ -1025,7 +1048,6 @@ impl DashboardState {
             Mode::New(wizard) => wizard.text_input_focused(),
             Mode::Resume(wizard) => wizard.text_input_focused(),
             Mode::Setup(dialog) => dialog.form.borrow().is_focused(setup::SetupControl::Field),
-            Mode::QuickNew(dialog) => !dialog.preparing,
             _ => false,
         }
     }
@@ -1049,6 +1071,12 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if self
+                .stopped_sessions_toggle_area
+                .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
+            {
+                return self.dispatch_command(CommandId::ToggleStoppedSessions);
+            }
             if let Some(&(pane, size, _)) = self
                 .pane_size_control_areas
                 .iter()
@@ -1380,7 +1408,16 @@ impl DashboardState {
 
     /// Every session across workspaces, grouped by project and ordered by creation.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
-        let mut active = self.state.sessions.values().collect::<Vec<_>>();
+        let mut active = self
+            .state
+            .sessions
+            .values()
+            .filter(|session| {
+                self.config.show_stopped_sessions
+                    || session.state != SessionState::Stopped
+                    || self.transition_kind(&session.id).is_some()
+            })
+            .collect::<Vec<_>>();
         active.sort_by(|left, right| left.compare_by_creation(right));
         let mut groups = BTreeMap::<String, Vec<&SessionRecord>>::new();
         for session in active {
@@ -1625,7 +1662,11 @@ impl DashboardState {
             .as_ref()
             .is_some_and(|id| visible.contains(id))
         {
-            self.selected_session_id = visible.first().cloned();
+            self.selected_session_id = visible.into_iter().find(|id| {
+                self.workspace_id.as_ref().is_none_or(|workspace_id| {
+                    self.state.sessions[id].workspace_id == *workspace_id
+                })
+            });
         }
         let project_keys = self.project_keys();
         self.collapsed_project_keys
@@ -2474,6 +2515,42 @@ mod tests {
         let state = dashboard.state.clone();
         dashboard.set_state(state);
         assert_eq!(dashboard.ordered_sessions().len(), 2);
+    }
+
+    #[test]
+    fn stopped_session_toggle_changes_visibility_without_removing_history() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let mut live = running_session();
+        live.id = "live-in-another-workspace".into();
+        live.workspace_id = "other-workspace".into();
+        dashboard
+            .state
+            .sessions
+            .insert(live.id.clone(), live.clone());
+        assert_eq!(dashboard.ordered_sessions().len(), 2);
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('h'))),
+            DashboardAction::SaveStoppedSessionVisibility { show: false }
+        );
+        assert_eq!(dashboard.ordered_sessions(), vec![&live]);
+        assert_eq!(dashboard.selected_session_id(), Some(live.id.as_str()));
+        assert_eq!(dashboard.state.sessions.len(), 2);
+
+        // An older config refresh must not flicker the pending preference.
+        dashboard.set_config(config());
+        assert_eq!(dashboard.ordered_sessions(), vec![&live]);
+        dashboard.finish_stopped_sessions_save(true);
+        let saved = dashboard.config.clone();
+        let restored = DashboardState::new(saved, dashboard.state.clone(), BTreeMap::new());
+        assert_eq!(restored.ordered_sessions(), vec![&live]);
+
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('h'))),
+            DashboardAction::SaveStoppedSessionVisibility { show: true }
+        );
+        assert_eq!(dashboard.ordered_sessions().len(), 2);
+        dashboard.finish_stopped_sessions_save(false);
+        assert_eq!(dashboard.ordered_sessions(), vec![&live]);
     }
 
     #[test]

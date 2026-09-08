@@ -55,7 +55,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 14;
+pub(crate) const PROTOCOL_VERSION: u32 = 15;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -6096,6 +6096,15 @@ mod tests {
                 responses: [
                     r#"{"protocol_version":14,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.1.4","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
                     r#"{"protocol_version":14,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+                ],
+            },
+            ProtocolTranscript {
+                protocol_version: 15,
+                daemon_build: "2.2.0",
+                expected_requests: requests(15),
+                responses: [
+                    r#"{"protocol_version":15,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.2.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                    r#"{"protocol_version":15,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
                 ],
             },
         ]

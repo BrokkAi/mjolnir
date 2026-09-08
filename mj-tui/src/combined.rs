@@ -299,6 +299,7 @@ pub fn render_combined(
     dashboard.pane_areas = None;
     dashboard.session_row_areas.clear();
     dashboard.project_heading_areas.clear();
+    dashboard.stopped_sessions_toggle_area = None;
     dashboard.pane_size_control_areas.clear();
     dashboard.frame_surfaces.clear();
     dashboard.chat_transcript_area = None;
@@ -469,6 +470,7 @@ pub fn render_combined(
     let rendered = render_sessions(frame, sessions_area, dashboard);
     dashboard.session_row_areas = rendered.session_row_areas;
     dashboard.project_heading_areas = rendered.project_heading_areas;
+    dashboard.stopped_sessions_toggle_area = rendered.stopped_toggle_area;
     let sessions_content = bordered_content(sessions_area);
     dashboard.frame_surfaces.push(SurfaceFrame::fixed(
         SurfaceId::DashboardPane(0),

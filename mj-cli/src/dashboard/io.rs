@@ -129,6 +129,9 @@ pub(crate) enum DashboardIoUpdate {
     SpinnerStyleSaved {
         result: std::result::Result<HelConfig, String>,
     },
+    StoppedSessionVisibilitySaved {
+        result: std::result::Result<HelConfig, String>,
+    },
     DetachedSessionState {
         session_id: String,
         result: std::result::Result<(), String>,
@@ -246,7 +249,6 @@ pub(crate) struct ActiveLifecycleOperation {
 }
 
 pub(crate) struct RegisteredDashboardSession {
-    generation: Option<u64>,
     session: SessionRecord,
     remembered_container_size: Option<(String, hel::hel_state::HostContainerSize)>,
     cancelled: Arc<AtomicBool>,
@@ -259,7 +261,6 @@ pub(crate) enum DashboardCreateSessionUpdate {
     },
     Registered(Box<RegisteredDashboardSession>),
     Failed {
-        generation: Option<u64>,
         error: String,
     },
 }
@@ -636,6 +637,26 @@ pub(crate) fn spawn_spinner_style_save(
             .map(|(config, ())| config)
         },
         |result| DashboardIoUpdate::SpinnerStyleSaved { result },
+    )
+}
+
+pub(crate) fn spawn_stopped_sessions_visibility_save(
+    show: bool,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_critical_io(
+        tracker,
+        "saving stopped-session visibility",
+        updates,
+        move || {
+            HelConfig::update(|config| {
+                config.show_stopped_sessions = show;
+                Ok(())
+            })
+            .map(|(config, ())| config)
+        },
+        |result| DashboardIoUpdate::StoppedSessionVisibilitySaved { result },
     )
 }
 
@@ -1194,14 +1215,6 @@ pub(crate) fn spawn_dashboard_create_session(
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = tracker.begin_cancellable("creating session", cancelled.clone());
     tokio::task::spawn_blocking(move || {
-        let generation = match &action {
-            DashboardAction::CreateStartupSession { generation, .. } => *generation,
-            _ => None,
-        };
-        let initial_prompt = match &action {
-            DashboardAction::CreateStartupSession { initial_prompt, .. } => initial_prompt.clone(),
-            _ => None,
-        };
         let prepared = match action {
             DashboardAction::CreateStartupSession {
                 profile_id,
@@ -1227,7 +1240,6 @@ pub(crate) fn spawn_dashboard_create_session(
             Err(error) => {
                 if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
                     DashboardCreateSessionUpdate::Failed {
-                        generation,
                         error: format!("{error:#}"),
                     },
                 ))) {
@@ -1289,7 +1301,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
-                        initial_prompt: initial_prompt.clone(),
+                        initial_prompt: None,
                         workspace_id: workspace_id.clone(),
                         profile_id,
                         bundle_id,
@@ -1304,7 +1316,6 @@ pub(crate) fn spawn_dashboard_create_session(
                     .await
             })?;
             Ok(Some(RegisteredDashboardSession {
-                generation,
                 session: registered.session,
                 remembered_container_size: registered.remembered_container_size,
                 cancelled: cancelled.clone(),
@@ -1315,7 +1326,6 @@ pub(crate) fn spawn_dashboard_create_session(
             Err(error) => {
                 if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
                     DashboardCreateSessionUpdate::Failed {
-                        generation,
                         error: format!("{error:#}"),
                     },
                 ))) {
@@ -1336,33 +1346,6 @@ pub(crate) fn spawn_dashboard_create_session(
             .block_on(async {
                 let mut daemon = daemon::connect_or_start().await?;
                 daemon.wait_create_session(session_id.clone()).await?;
-                if let Some(prompt) = initial_prompt {
-                    let result = async {
-                        daemon
-                            .submit_session_command(
-                                session_id.clone(),
-                                mj_controller::hel_session_manager::new_command_id(
-                                    "initial-prompt",
-                                )?,
-                                hel::hel_worker::RelayCommand::Prompt {
-                                    prompt: vec![
-                                        agent_client_protocol::schema::v1::ContentBlock::from(
-                                            prompt.as_str(),
-                                        ),
-                                    ],
-                                },
-                                Some(prompt),
-                            )
-                            .await
-                            .map(|_| ())
-                    }
-                    .await;
-                    if let Err(error) = result {
-                        return Ok(LifecycleSuccess::CreatedWithPromptFailure(format!(
-                            "{error:#}"
-                        )));
-                    }
-                }
                 Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
             })
             .map_err(|error| format!("{error:#}"));
@@ -1714,6 +1697,18 @@ impl DashboardContext {
                     self.review_discovery_cancel = None;
                 }
             }
+            DashboardIoUpdate::StoppedSessionVisibilitySaved { result } => {
+                self.dashboard.finish_stopped_sessions_save(result.is_ok());
+                match result {
+                    Ok(config) => {
+                        self.controller.config = config.clone();
+                        self.dashboard.set_config(config);
+                    }
+                    Err(error) => self.dashboard.set_failure_notice(format!(
+                        "Could not save stopped-session visibility: {error}"
+                    )),
+                }
+            }
             DashboardIoUpdate::SpinnerStyleSaved { result } => match result {
                 Ok(config) => {
                     let style = config.spinner;
@@ -1985,7 +1980,6 @@ impl DashboardContext {
                 .show_dirty_local_confirmation(action, repositories),
             DashboardCreateSessionUpdate::Registered(registered) => {
                 let registered = *registered;
-                self.dashboard.finish_quick_new(registered.generation);
                 let session_id = registered.session.id.clone();
                 if let Some((host, size)) = registered.remembered_container_size {
                     self.controller.state.remember_container_size(&host, size);
@@ -1995,6 +1989,7 @@ impl DashboardContext {
                     .sessions
                     .insert(session_id.clone(), registered.session);
                 self.dashboard.set_state(self.controller.state.clone());
+                self.dashboard.select_active_session(&session_id);
                 self.resolve_project_sources();
                 self.dashboard.begin_session_operation(
                     session_id.clone(),
@@ -2011,9 +2006,9 @@ impl DashboardContext {
                     },
                 );
             }
-            DashboardCreateSessionUpdate::Failed { generation, error } => {
+            DashboardCreateSessionUpdate::Failed { error } => {
                 self.dashboard
-                    .quick_new_failed(generation, format!("Could not create session: {error}"));
+                    .set_failure_notice(format!("Could not create session: {error}"));
             }
         }
     }
@@ -2037,16 +2032,9 @@ impl DashboardContext {
         }
         match update.result {
             Ok(LifecycleSuccess::Created) => {
-                self.dashboard.select_active_session(&session_id);
-                self.dashboard.focus_prompt();
+                self.dashboard.finish_new_session(&session_id);
                 self.dashboard
                     .set_notice(format!("Session {} is ready", short_id(&session_id)));
-                self.request_quota_refresh();
-            }
-            Ok(LifecycleSuccess::CreatedWithPromptFailure(error)) => {
-                self.dashboard.select_active_session(&session_id);
-                self.dashboard.focus_prompt();
-                self.dashboard.set_failure_notice(format!("Session is ready, but its initial task could not be completed: {error}. Check the transcript before retrying the saved draft."));
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Resumed {

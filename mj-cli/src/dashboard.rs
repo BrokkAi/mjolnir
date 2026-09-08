@@ -933,7 +933,7 @@ impl DashboardContext {
         for (session_id, queued) in projected_queued_prompts(&controller)? {
             dashboard.apply_queued_prompts(&session_id, queued);
         }
-        dashboard.set_workspace_name(workspace_name);
+        dashboard.set_workspace(workspace_id.to_owned(), workspace_name);
         let terminal = TerminalGuard::enter()?;
         if configuration_needs_setup(&controller.config) {
             dashboard.begin_setup();
@@ -1178,10 +1178,12 @@ impl DashboardContext {
         // The startup pick compares recorded activity, which is exactly what
         // these summaries carry, so it waits for them.
         self.startup = StartupSession::begin(
-            sessions.iter().map(|(id, _)| id.clone()),
+            self.dashboard
+                .startup_sessions()
+                .map(|session| session.id.clone()),
             std::time::Instant::now(),
         );
-        if sessions.is_empty() {
+        if self.dashboard.startup_sessions().next().is_none() {
             let action = self
                 .dashboard
                 .begin_startup_session(self.launch_directory.clone());
@@ -1284,9 +1286,8 @@ impl DashboardContext {
             return;
         }
         let Some(session_id) = startup_session_choice(
-            self.controller.state.sessions.values().filter(|session| {
-                session.state.is_active()
-                    && self.dashboard.transition_kind(&session.id).is_none()
+            self.dashboard.startup_sessions().filter(|session| {
+                self.dashboard.transition_kind(&session.id).is_none()
                     && self
                         .dashboard
                         .transition_failure_kind(&session.id)
@@ -1297,7 +1298,9 @@ impl DashboardContext {
             self.dashboard.focus_sessions();
             return;
         };
-        self.dashboard.focus_prompt();
+        if self.controller.config.startup.prompt {
+            self.dashboard.focus_prompt();
+        }
         self.open_chat_session(&session_id);
     }
 
@@ -3503,17 +3506,13 @@ mod tests {
 
         let command = chord(&dashboard, alt('n')).expect("Alt-N is a global chord");
         assert_eq!(command, CommandId::NewSession);
-        assert!(matches!(
+        assert_eq!(
             dashboard.dispatch_command(command),
-            DashboardAction::None
-        ));
-        assert!(
-            dashboard.modal_open(),
-            "quick New opens a fresh task prompt"
+            DashboardAction::QuickNewSession
         );
-        dashboard.handle_paste("Task for the new session");
         assert!(
-            matches!(dashboard.handle_key(plain_key(crossterm::event::KeyCode::Enter)), DashboardAction::QuickNewSession { initial_prompt: Some(prompt), .. } if prompt == "Task for the new session")
+            !dashboard.modal_open(),
+            "New requires no dialog or submission"
         );
     }
 
@@ -3764,6 +3763,24 @@ mod tests {
         assert_eq!(
             startup_session_choice(sessions.iter(), activity),
             Some("session-b".into())
+        );
+    }
+
+    #[test]
+    fn startup_activity_in_another_workspace_cannot_replace_the_opened_workspace() {
+        let local = live_session("local", "2026-08-01T00:00:00Z");
+        let mut foreign = live_session("foreign", "2026-08-03T00:00:00Z");
+        foreign.workspace_id = "another-workspace".into();
+        let mut state = hel::hel_state::HelState::default();
+        state.sessions.insert(local.id.clone(), local.clone());
+        state.sessions.insert(foreign.id.clone(), foreign);
+        let mut dashboard = DashboardState::new(Default::default(), state, Default::default());
+        dashboard.set_workspace(local.workspace_id.clone(), "Opened workspace".into());
+        assert_eq!(
+            startup_session_choice(dashboard.startup_sessions(), |id| {
+                Some(if id == "foreign" { 10_000 } else { 1 })
+            }),
+            Some(local.id)
         );
     }
 

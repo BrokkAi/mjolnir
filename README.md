@@ -198,19 +198,23 @@ and a footer that names the keys that apply right now. Nothing is behind a
 navigation step, so you can read an agent's output while seeing what your other
 agents are doing and how loaded your machines are.
 
-Mjolnir opens on the session whose agent spoke most recently, with the cursor in
-Prompt. The Sessions sidebar shows every session across all workspaces, including
+Mjolnir opens on the session in your opened workspace whose agent spoke most
+recently, with the cursor in Prompt. The Sessions sidebar shows every session across all workspaces, including
 stopped sessions. Select one and press Enter to switch to its conversation.
+Click **Show stopped** at the bottom of Sessions, or press `h` in that panel,
+to hide or show stopped sessions. The choice is remembered.
 
-In Sessions, `n` opens a fresh task prompt. Enter starts a session using your
+In Sessions, `n` immediately creates a session using your
 saved defaults: Codex when configured, a usable local Podman or Docker runtime,
-then a local worktree when neither runtime is available. `N` opens the full
+then a local worktree when neither runtime is available. The session uses the
+directory you launched Mjolnir in and belongs to the workspace you opened.
+Its normal Prompt receives focus when ready. `N` opens the full
 creation wizard. `s` stops and `r` restarts the selected session without
 confirmation. `d` deletes it after a Yes/No choice; no identifier typing is required.
 
 `F4` opens Setup for accounts, targets, projects, new-session defaults, sidebar
 placement, display, review, and web access. Choose Left or Right for the sidebar,
-and disable the task prompt if you prefer immediate creation.
+and turn off **Focus prompt after creating** to keep focus in Sessions.
 
 `Tab` moves the keyboard through the layout — Sessions, Prompt, Targets, Quota —
 and `Shift+Tab` reverses it. Every pane remains in that ring at every size. The

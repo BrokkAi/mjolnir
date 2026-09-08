@@ -176,9 +176,6 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
         }
         Mode::ReviewSettings(dialog) => render_review_settings(frame, area, dialog, &mut surfaces),
         Mode::Setup(dialog) => crate::setup::render_setup(frame, area, dialog, &mut surfaces),
-        Mode::QuickNew(dialog) => {
-            crate::quick_new::render_quick_new(frame, area, dialog, &mut surfaces)
-        }
         Mode::Dashboard => {}
     }
     dashboard.frame_surfaces = surfaces;
@@ -269,6 +266,7 @@ fn render_onboarding(frame: &mut Frame, area: Rect, dashboard: &DashboardState) 
 pub(crate) struct SessionRowsRendered {
     pub(crate) session_row_areas: Vec<(usize, Rect)>,
     pub(crate) project_heading_areas: Vec<(String, Rect)>,
+    pub(crate) stopped_toggle_area: Option<Rect>,
 }
 
 const PANE_SIZE_CONTROLS_WIDTH: u16 = 11;
@@ -986,9 +984,28 @@ pub(crate) fn render_sessions(
     }
     render_session_scrollbar(frame, area, drawn.len(), offset, visible);
 
+    let stopped_toggle_area = (area.height >= 2 && area.width >= 7).then(|| {
+        let checked = if dashboard.config.show_stopped_sessions {
+            'x'
+        } else {
+            ' '
+        };
+        let label = if area.width >= 24 {
+            format!(" [{checked}] Show stopped (h) ")
+        } else if area.width >= 15 {
+            format!(" [{checked}] Stopped ")
+        } else {
+            format!("[{checked}] h")
+        };
+        let toggle = Rect::new(area.x + 1, area.bottom() - 1, label.len() as u16, 1);
+        frame.render_widget(Paragraph::new(label).style(theme::muted()), toggle);
+        toggle
+    });
+
     SessionRowsRendered {
         session_row_areas,
         project_heading_areas,
+        stopped_toggle_area,
     }
 }
 
@@ -2969,6 +2986,48 @@ mod tests {
             PaneSize::Minimized
         );
         assert_eq!(dashboard.focus(), Focus::Sessions);
+    }
+
+    #[test]
+    fn stopped_session_checkbox_is_visible_and_clickable_on_either_sidebar() {
+        use crossterm::event::{KeyModifiers, MouseEvent};
+        for side in [
+            hel::hel_config::SessionsSide::Left,
+            hel::hel_config::SessionsSide::Right,
+        ] {
+            let mut dashboard = dashboard_with_session(stopped_session());
+            dashboard.config.sessions_side = side;
+            let mut terminal = Terminal::new(TestBackend::new(140, 32)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &mut dashboard))
+                .unwrap();
+            let toggle = dashboard
+                .stopped_sessions_toggle_area
+                .expect("checkbox in panel");
+            assert!(
+                buffer_lines(terminal.backend().buffer())
+                    .join("\n")
+                    .contains("[x] Show stopped")
+            );
+            assert_eq!(
+                dashboard.handle_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: toggle.x + 2,
+                    row: toggle.y,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                DashboardAction::SaveStoppedSessionVisibility { show: false }
+            );
+            terminal
+                .draw(|frame| render(frame, &mut dashboard))
+                .unwrap();
+            assert!(
+                buffer_lines(terminal.backend().buffer())
+                    .join("\n")
+                    .contains("[ ] Show stopped")
+            );
+            assert!(dashboard.ordered_sessions().is_empty());
+        }
     }
 
     #[test]

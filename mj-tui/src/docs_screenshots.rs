@@ -49,16 +49,6 @@ fn generate_documentation_screenshots() {
         &mut dashboard,
     );
 
-    let mut quick = documentation_dashboard();
-    quick.handle_key(alt_key('n'));
-    quick.handle_paste("Add keyboard navigation to the project picker.\nKeep the current selection visible while scrolling.");
-    capture(
-        &output.join("quick-new.svg"),
-        "Mjolnir quick New",
-        "A fresh task prompt before creating a session with saved defaults.",
-        &mut quick,
-    );
-
     let mut wizard = documentation_dashboard();
     wizard.handle_key(alt_key('w'));
     capture(

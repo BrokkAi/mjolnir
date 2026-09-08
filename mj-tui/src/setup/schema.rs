@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "startup":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "show_stopped_sessions":true, "spinner":"scan", "startup":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
         }
         "startup" => json!({"enabled":true,"prompt":true,"profile":null,"target":null}),
         "phone" => {
@@ -95,6 +95,7 @@ pub(super) fn label(key: &str) -> String {
     match key {
         "startup" => "New session defaults",
         "sessions_side" => "Session sidebar position",
+        "show_stopped_sessions" => "Show stopped sessions",
         "spinner" => "Activity animation",
         "phone" => "Web access",
         "review" => "Code review",
@@ -102,7 +103,7 @@ pub(super) fn label(key: &str) -> String {
         "targets" => "Machines and runtimes",
         "bundles" => "Projects",
         "enabled" => "Enabled",
-        "prompt" => "Ask for a task when creating",
+        "prompt" => "Focus prompt after creating",
         "profile" => "Agent account",
         "target" => "Machine / runtime",
         "kind" => "Type",
