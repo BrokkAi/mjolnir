@@ -14,7 +14,6 @@ pub mod hel_credentials;
 pub mod hel_database;
 pub mod hel_diff;
 pub mod hel_elicitation;
-pub mod hel_git_proxy;
 pub mod hel_harness_runtime;
 #[cfg(feature = "controller")]
 pub mod hel_local_git;
@@ -22,6 +21,7 @@ pub mod hel_native;
 pub mod hel_project_memory;
 #[cfg(feature = "controller")]
 pub mod hel_projection;
+pub mod hel_remote_git;
 pub mod hel_resources;
 pub mod hel_review;
 pub mod hel_second_opinion;

@@ -97,8 +97,10 @@ fn prepare_session_launch_at(
             bundle_id,
             project_directory: bare.then_some(directory),
             additional_mounts: Vec::new(),
-            // Starting in a working directory means using its current contents.
-            allow_dirty_local: true,
+            // Isolated creation resolves the repository's network remote and
+            // starts from its default branch; local unpublished work is not
+            // part of the session.
+            allow_dirty_local: false,
             resource_allocation: None,
         },
     ))
@@ -170,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_container_startup_prepares_the_current_dirty_repository_and_reuses_its_bundle() {
+    fn explicit_container_startup_records_the_source_for_network_preflight() {
         use hel::hel_targets::{CommandExecutor, CommandSpec, ProcessExecutor};
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("current project");
@@ -208,7 +210,7 @@ mod tests {
             };
             assert_eq!(target_template_id, "custom-container");
             assert!(project_directory.is_none());
-            assert!(allow_dirty_local);
+            assert!(!allow_dirty_local);
             assert_eq!(config.bundles.len(), 1);
             assert_eq!(
                 config.bundles[&bundle_id].repositories[0].local,

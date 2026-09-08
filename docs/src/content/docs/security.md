@@ -1,6 +1,6 @@
 ---
 title: Security boundaries
-description: Understand execution policies, copied credentials and data, local Git bridging, attachments, and web-viewer authentication.
+description: Understand execution policies, copied credentials and data, network Git clones, attachments, and web-viewer authentication.
 ---
 
 Mjolnir gives coding agents the ability to execute commands. Its security model
@@ -122,27 +122,18 @@ profile home, and is passed to new and resumed Claude sessions as
 `CLAUDE_CODE_OAUTH_TOKEN`. It authorizes model requests; it does not enable
 Claude Remote Control or claude.ai connectors.
 
-## Local repositories use a confined Git bridge
+## Isolated sessions use independent network clones
 
-A bundle repository declared with `local = "/absolute/path"` is not exposed to
-an isolated target as a writable host mount. Mjolnir serves it through an
-authenticated, per-session Git protocol bridge carried over the session's
-existing transport. No inbound listener is opened on the controller.
+A bundle repository declared with `local = "/absolute/path"` supplies its
+configured default network fetch and push destinations. Mjolnir clones the
+fetch remote's default branch into the target and creates `mj/<session-id>`.
+The target has no Git connection back to the controller checkout.
 
-The bridge is confined to the exact repositories named by that session. It
-allows Git's upload and receive services so the target can fetch and perform a
-normal fast-forward push back to the local checkout. It also:
-
-- disables receive hooks;
-- rejects non-fast-forward updates and ref deletion;
-- rejects an update to a checked-out branch while the local checkout is dirty;
-  and
-- rejects Git LFS repositories, which the bridge does not support.
-
-This is a deliberately bounded write path, not a read-only mirror: a successful
-fast-forward push can update your local branch and working tree. Review the
-agent's branch before accepting that boundary. For repository shapes and dirty
-worktree handling, see [Workspaces and bundles](/workspaces-bundles/).
+Local unpublished commits and staged, unstaged, or untracked files are not
+copied. Normal Git pushes go to the configured network push destination(s).
+Stopping saves a checkpoint without publishing a branch into the host
+repository. Only raw local sessions support repositories without network
+remotes. See [Workspaces and bundles](/workspaces-bundles/).
 
 ## Directory and image attachments
 

@@ -5,6 +5,7 @@ mod checkpoint;
 mod git_cache;
 mod lifecycle;
 pub mod move_session;
+mod network_git;
 mod provisioning;
 mod readiness;
 mod recovery_scan;
@@ -50,7 +51,6 @@ struct ConfigRenameJournal {
     old_id: String,
     new_id: String,
 }
-use hel::hel_local_git::dirty_local_repositories;
 use hel::hel_state::{
     HelState, HostContainerSize, SessionRecord, SessionResourceAllocation, SessionState,
     new_session_id, normalize_session_title,
@@ -660,7 +660,7 @@ impl Controller {
             initial_prompt,
             workspace_id,
             additional_mounts,
-            allow_dirty_local,
+            allow_dirty_local: _,
             resource_allocation,
             project_directory,
             session_title_override,
@@ -710,19 +710,16 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        let dirty = bundle
-            .map(dirty_local_repositories)
-            .transpose()?
-            .unwrap_or_default();
-        if !allow_dirty_local && !dirty.is_empty() {
-            let repositories = dirty
-                .iter()
-                .map(|repository| format!("{} ({})", repository.path.display(), repository.summary))
-                .collect::<Vec<_>>()
-                .join(", ");
-            bail!(
-                "local repositories have uncommitted changes: {repositories}; explicit confirmation is required"
-            );
+        if let Some(bundle) = bundle {
+            for repository in &bundle.repositories {
+                hel::hel_remote_git::resolve_repository(
+                    repository,
+                    &hel_targets::CancellableProcessExecutor::with_timeout(
+                        std::time::Duration::from_secs(15),
+                    ),
+                )
+                .with_context(|| format!("repository {:?}", repository.id))?;
+            }
         }
         validate_resource_allocation(template, resource_allocation.as_ref())?;
         let selected_container_size =
@@ -1449,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_creation_reuses_only_an_exact_unpinned_source_set() {
+    fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
         let mut config = HelConfig::default();
         config.bundles.insert(
             "all".into(),
@@ -1490,14 +1487,10 @@ mod tests {
         );
         assert_eq!(config.bundles.len(), 2);
         config.bundles.get_mut("all").unwrap().repositories[0].git_ref = Some("release".into());
-        let unpinned = create_bundle_from_sources_in_config(&mut config, &exact_sources).unwrap();
-        assert_ne!(unpinned, "all");
-        assert!(
-            config.bundles[&unpinned]
-                .repositories
-                .iter()
-                .all(|repo| repo.git_ref.is_none())
-        );
+        let before = config.clone();
+        let error = create_bundle_from_sources_in_config(&mut config, &exact_sources).unwrap_err();
+        assert!(format!("{error:#}").contains("git_ref is no longer supported"));
+        assert_eq!(config, before);
     }
 
     fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {

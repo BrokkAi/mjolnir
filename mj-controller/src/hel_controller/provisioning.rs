@@ -7,31 +7,22 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use hel::hel_archive::{
-    ArchiveInput, BundleManifest, GitCollectionSpec, GitHistoryMode, SessionManifest, SystemGit,
-    TargetManifest, collect_git_snapshot, write_archive_atomic,
-};
-use hel::hel_checkpoint::RepositoryRestoreSpec;
-use hel::hel_config::{ProjectBundle, TargetTemplate, atomic_write, data_dir};
-use hel::hel_git_proxy::{GitBrokerSpec, broker_is_alive, running_broker_pid};
-use hel::hel_local_git::canonical_repository;
-use hel::hel_projection::canonical_session_from_materialized;
-use hel::hel_state::{HelState, SessionRecord, SessionState, TargetLocator};
+use hel::hel_config::{TargetTemplate, atomic_write, data_dir};
+use hel::hel_state::{HelState, SessionState, TargetLocator};
 use hel::hel_targets::{
     self, CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, ProvisionStage,
     ProvisionStageGuard,
 };
 
 use super::backend::{
-    ContainerOverrides, absolute_target_path, backend_bundle, backend_locator, backend_target,
+    ContainerOverrides, backend_bundle, backend_locator, backend_target,
     configure_github_token_environment, controller_github_token, locator_after_provision,
     preflight_target, use_github_https_urls,
 };
-use super::checkpoint::upload_checkpoint_spec;
 use super::git_cache;
 use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
 use super::worker_binary::{bridge_readiness_stage, start_worker, worker_probe_diagnosis};
-use super::{Controller, execute_checked, now, target_kind};
+use super::{Controller, execute_checked, now};
 
 const INHERITED_GIT_SETTINGS: &[&str] = &[
     "diff.algorithm",
@@ -49,22 +40,6 @@ const INHERITED_GIT_SETTINGS: &[&str] = &[
     "user.email",
     "user.name",
 ];
-
-/// Whether connecting local repositories may also carry the user's current
-/// uncommitted changes into a still-empty target checkout.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum LocalBootstrap {
-    /// A fresh target starts from `git init`, so seed its branch and dirty
-    /// state from the local repository.
-    Seed,
-    /// Seed from this checkout instead of the bundle's configured path. A
-    /// resume that moves a raw session into a target carries the session's own
-    /// worktree, not the user's primary checkout.
-    SeedFrom(PathBuf),
-    /// Resume restores the session's own dirty state from the checkpoint
-    /// archive; seeding the local repository's would collide with it.
-    Skip,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProvisioningFailureDisposition {
@@ -133,10 +108,6 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        // The broker bridges into the target, so it is stopped before the
-        // target goes away. A launch this rollback discards is over: nothing
-        // will connect to its local origin again.
-        let broker_cleanup = retire_git_broker(session_id);
         let target_cleanup = match session.target.as_ref() {
             Some(locator) => (|| -> Result<()> {
                 let backend = backend_locator(locator, &session, &self.config)?;
@@ -152,7 +123,7 @@ impl Controller {
         };
         let worktree_cleanup =
             self.cleanup_new_session_worktree_after_failure(session_id, executor);
-        let cleanup_error = [broker_cleanup, target_cleanup, worktree_cleanup]
+        let cleanup_error = [target_cleanup, worktree_cleanup]
             .into_iter()
             .filter_map(Result::err)
             .map(|error| format!("{error:#}"))
@@ -293,13 +264,19 @@ impl Controller {
             for notice in enforce_overlay_capable_mounts(&target, &mut runtime_mounts, executor) {
                 executor.notify_notice(&notice);
             }
-            let mut bundle = session
-                .project_directory
-                .is_none()
-                .then(|| self.config.bundles.get(&session.bundle_id))
-                .flatten()
-                .map(backend_bundle)
-                .transpose()?;
+            let mut bundle = if session.project_directory.is_some() {
+                None
+            } else if failure_disposition == ProvisioningFailureDisposition::Preserve {
+                Some(super::network_git::checkpoint_bundle(&session)?)
+            } else {
+                Some(backend_bundle(
+                    self.config
+                        .bundles
+                        .get(&session.bundle_id)
+                        .context("session bundle is missing")?,
+                    executor,
+                )?)
+            };
             let container_github_token =
                 github_token.filter(|_| configure_github_token_environment(&mut target));
             if container_github_token.is_some()
@@ -512,19 +489,9 @@ impl Controller {
         backend: &hel_targets::TargetLocator,
         worker_root: &str,
     ) -> Result<Option<String>> {
-        // A local-origin fetch needs both the checkout from the clone lane and
-        // the worker binary from the sync lane, so it joins them here.
-        {
-            let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-            install_inherited_git_settings(executor, backend, session_id)?;
-            self.connect_local_repositories(
-                session_id,
-                backend,
-                worker_root,
-                syncing,
-                LocalBootstrap::Seed,
-            )?;
-        }
+        let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+        install_inherited_git_settings(executor, backend, session_id)?;
+        self.initialize_network_workspaces(session_id, backend, syncing)?;
         let session = self
             .state
             .sessions
@@ -558,162 +525,6 @@ impl Controller {
                 error,
             )),
         }
-    }
-
-    /// Point the target's checkouts at the `hel-local` Git proxy and fetch the
-    /// committed history it serves. `bootstrap` decides whether a still-empty
-    /// checkout is also seeded with the local repository's uncommitted changes.
-    pub(super) fn connect_local_repositories(
-        &self,
-        session_id: &str,
-        backend: &hel_targets::TargetLocator,
-        worker_root: &str,
-        executor: &impl CommandExecutor,
-        bootstrap: LocalBootstrap,
-    ) -> Result<()> {
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        if session.project_directory.is_some() {
-            return Ok(());
-        }
-        let bundle = self
-            .config
-            .bundles
-            .get(&session.bundle_id)
-            .context("session bundle is missing")?;
-        let local = bundle
-            .repositories
-            .iter()
-            .filter_map(|repository| repository.local.as_ref().map(|path| (repository, path)))
-            .collect::<Vec<_>>();
-        if local.is_empty() {
-            return Ok(());
-        }
-
-        let absolute_worker_root =
-            absolute_target_path(executor, backend, session_id, worker_root)?;
-        let repositories = local
-            .iter()
-            .map(|(repository, path)| Ok((repository.id.clone(), canonical_repository(path)?)))
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        ensure_git_broker(session_id, backend, repositories)?;
-
-        let workspace_root = match backend {
-            hel_targets::TargetLocator::LocalPodman { .. }
-            | hel_targets::TargetLocator::LocalDocker { .. }
-            | hel_targets::TargetLocator::AppleContainer { .. }
-            | hel_targets::TargetLocator::SshPodman { .. }
-            | hel_targets::TargetLocator::SshDocker { .. } => "/workspace".to_owned(),
-            hel_targets::TargetLocator::AwsEc2 { workspace, .. }
-            | hel_targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
-            hel_targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
-        };
-        let mut missing = Vec::new();
-        for &(repository, source) in &local {
-            local_branch(source)?;
-            let destination = format!(
-                "{workspace_root}/{}",
-                repository.destination.to_string_lossy()
-            );
-            let origin = local_origin_url(&absolute_worker_root, &repository.id);
-            for (args, purpose) in [
-                (
-                    vec![
-                        "git".into(),
-                        "-C".into(),
-                        destination.clone(),
-                        "config".into(),
-                        "protocol.ext.allow".into(),
-                        "always".into(),
-                    ],
-                    "enable the confined local Git transport",
-                ),
-                (
-                    vec![
-                        "git".into(),
-                        "-C".into(),
-                        destination.clone(),
-                        "config".into(),
-                        "remote.origin.url".into(),
-                        origin,
-                    ],
-                    "configure local Git origin",
-                ),
-                (
-                    vec![
-                        "git".into(),
-                        "-C".into(),
-                        destination.clone(),
-                        "config".into(),
-                        "remote.origin.fetch".into(),
-                        "+refs/heads/*:refs/remotes/origin/*".into(),
-                    ],
-                    "configure local Git fetch refspec",
-                ),
-            ] {
-                execute_checked(
-                    executor,
-                    hel_targets::command_on_locator(backend, session_id, args, purpose)?,
-                )?;
-            }
-            let has_head = executor.execute(&hel_targets::command_on_locator(
-                backend,
-                session_id,
-                vec![
-                    "git".into(),
-                    "-C".into(),
-                    destination.clone(),
-                    "rev-parse".into(),
-                    "--verify".into(),
-                    "HEAD".into(),
-                ],
-                "inspect local Git bootstrap state",
-            )?)?;
-            if has_head.status != 0 {
-                missing.push((repository, source));
-            }
-        }
-        // Fetch before bootstrapping: the proxy delivers every branch, so the
-        // bootstrap archive only has to carry identity and dirty state, and
-        // the commit it checks out is already present.
-        for (repository, _) in &local {
-            let destination = format!(
-                "{workspace_root}/{}",
-                repository.destination.to_string_lossy()
-            );
-            execute_checked(
-                executor,
-                hel_targets::command_on_locator(
-                    backend,
-                    session_id,
-                    vec![
-                        "git".into(),
-                        "-C".into(),
-                        destination.clone(),
-                        "fetch".into(),
-                        "origin".into(),
-                    ],
-                    "fetch local Git origin",
-                )?,
-            )?;
-        }
-        if let Some(sources) = seed_sources(&missing, &bootstrap)
-            && !sources.is_empty()
-        {
-            bootstrap_local_repositories(
-                executor,
-                backend,
-                session,
-                bundle,
-                &workspace_root,
-                worker_root,
-                &sources,
-            )?;
-        }
-        Ok(())
     }
 }
 
@@ -1101,485 +912,6 @@ fn provisioned_locator(
     })
 }
 
-fn local_branch(repository: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .current_dir(repository)
-        .output()
-        .with_context(|| format!("read current branch in {}", repository.display()))?;
-    if !output.status.success() {
-        bail!(
-            "local repository {} must have a branch checked out before Hel can expose it as origin",
-            repository.display()
-        );
-    }
-    let branch = String::from_utf8(output.stdout).context("decode local Git branch")?;
-    let branch = branch.trim().to_owned();
-    if branch.is_empty() {
-        bail!("local repository has an empty current branch");
-    }
-    Ok(branch)
-}
-
-fn local_origin_url(worker_root: &str, repository_id: &str) -> String {
-    fn ext_argument(value: &str) -> String {
-        value.replace('%', "%%").replace(' ', "% ")
-    }
-    format!(
-        "ext::{}/hel worker git-proxy --root {} --repository {} %S",
-        ext_argument(worker_root),
-        ext_argument(worker_root),
-        repository_id,
-    )
-}
-
-fn seed_sources<'a>(
-    missing: &[(&'a hel::hel_config::ProjectRepository, &'a PathBuf)],
-    bootstrap: &'a LocalBootstrap,
-) -> Option<Vec<(&'a hel::hel_config::ProjectRepository, &'a PathBuf)>> {
-    let checkout = match bootstrap {
-        LocalBootstrap::Skip => return None,
-        LocalBootstrap::Seed => None,
-        LocalBootstrap::SeedFrom(checkout) => Some(checkout),
-    };
-    Some(
-        missing
-            .iter()
-            .map(|(repository, source)| (*repository, checkout.unwrap_or(source)))
-            .collect(),
-    )
-}
-
-/// Carry a local repository's identity and uncommitted changes into a freshly
-/// initialized target checkout. Committed history is never bundled here: the
-/// caller fetches it through the `hel-local` proxy first.
-fn bootstrap_local_repositories(
-    executor: &impl CommandExecutor,
-    locator: &hel_targets::TargetLocator,
-    session: &SessionRecord,
-    bundle: &ProjectBundle,
-    workspace_root: &str,
-    worker_root: &str,
-    repositories: &[(&hel::hel_config::ProjectRepository, &PathBuf)],
-) -> Result<()> {
-    let snapshots = repositories
-        .iter()
-        .map(|(repository, source)| {
-            collect_git_snapshot(
-                &SystemGit,
-                source,
-                &GitCollectionSpec {
-                    id: repository.id.clone(),
-                    relative_destination: repository.destination.clone(),
-                    history: GitHistoryMode::NoBundle,
-                    origin_override: Some(format!("mj-local:{}", repository.id)),
-                },
-            )
-            .with_context(|| format!("snapshot local repository {:?}", repository.id))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let staging = data_dir().join("git-seeds");
-    std::fs::create_dir_all(&staging)?;
-    let archive_path = staging.join(format!("{}.hel.zip", session.id));
-    write_archive_atomic(
-        &archive_path,
-        &ArchiveInput {
-            session: SessionManifest {
-                id: session.id.clone(),
-                title: session.title.clone(),
-                harness_kind: session.harness_kind,
-                profile_id: session.last_profile.clone(),
-                native_session_id: session.native_session_id.clone().unwrap_or_default(),
-                created_at: session.created_at.clone(),
-                checkpointed_at: now(),
-                hel_version: env!("CARGO_PKG_VERSION").into(),
-                relay_version: env!("CARGO_PKG_VERSION").into(),
-                adapter_version: "acp-v1".into(),
-            },
-            target: TargetManifest {
-                template_id: session.target_template_id.clone(),
-                target_kind: target_kind(locator).into(),
-                details: Default::default(),
-            },
-            bundle: BundleManifest {
-                id: session.bundle_id.clone(),
-                primary_repository: bundle.primary_repo.clone(),
-            },
-            canonical_session: canonical_session_from_materialized(
-                &hel::hel_state::MaterializedSession::empty(session.id.clone()),
-            )?,
-            native_artifacts: Vec::new(),
-            repositories: snapshots,
-        },
-    )?;
-
-    let remote_archive = format!("{worker_root}/local-seed.hel.zip");
-    let remote_spec = format!("{worker_root}/local-seed.json");
-    let target_path = |path: &str| match locator {
-        hel_targets::TargetLocator::AwsEc2 { .. } | hel_targets::TargetLocator::SshBare { .. } => {
-            PathBuf::from(format!("~/{path}"))
-        }
-        _ => PathBuf::from(path),
-    };
-    let spec = RepositoryRestoreSpec {
-        archive_path: target_path(&remote_archive),
-        workspace_root: target_path(workspace_root),
-    };
-    let local_spec = staging.join(format!("{}.json", session.id));
-    hel::hel_config::atomic_write(&local_spec, &serde_json::to_vec_pretty(&spec)?)?;
-    upload_checkpoint_spec(
-        executor,
-        locator,
-        &session.id,
-        &archive_path,
-        &remote_archive,
-    )?;
-    upload_checkpoint_spec(executor, locator, &session.id, &local_spec, &remote_spec)?;
-    execute_checked(
-        executor,
-        hel_targets::command_on_locator(
-            locator,
-            &session.id,
-            vec![
-                format!("{worker_root}/hel"),
-                "worker".into(),
-                "restore-repositories".into(),
-                "--spec".into(),
-                remote_spec,
-            ],
-            "restore local repository bootstrap",
-        )?,
-    )?;
-    Ok(())
-}
-
-/// The files one session's local Git broker is identified by.
-#[derive(Debug, Clone)]
-struct BrokerFiles {
-    spec: PathBuf,
-    ready: PathBuf,
-    pid: PathBuf,
-    log: PathBuf,
-}
-
-impl BrokerFiles {
-    fn in_directory(directory: &Path, session_id: &str) -> Self {
-        Self {
-            spec: directory.join(format!("{session_id}.json")),
-            ready: directory.join(format!("{session_id}.ready")),
-            pid: directory.join(format!("{session_id}.pid")),
-            log: directory.join(format!("{session_id}.log")),
-        }
-    }
-}
-
-/// How long a starting broker has to publish its ready marker.
-const BROKER_READY_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Consecutive restarts a supervisor attempts before it reports the session's
-/// local origin as unserved.
-const BROKER_RESTART_ATTEMPTS: u32 = 5;
-
-/// Delay before the first restart; later attempts wait a multiple of it.
-const BROKER_RESTART_BACKOFF: Duration = Duration::from_millis(250);
-
-/// A run at least this long counts as healthy, so its ending starts a fresh
-/// restart budget instead of continuing a restart storm.
-const BROKER_HEALTHY_RUN: Duration = Duration::from_secs(30);
-
-/// How long a retired broker has to exit after being asked, and again after
-/// being killed, before the stop is reported as failed.
-const BROKER_STOP_GRACE: Duration = Duration::from_secs(2);
-
-/// How often a stopping broker's lock is re-tested.
-const BROKER_STOP_POLL: Duration = Duration::from_millis(25);
-
-fn broker_directory() -> PathBuf {
-    data_dir().join("git-brokers")
-}
-
-fn ensure_git_broker(
-    session_id: &str,
-    locator: &hel_targets::TargetLocator,
-    repositories: BTreeMap<String, PathBuf>,
-) -> Result<()> {
-    let directory = broker_directory();
-    std::fs::create_dir_all(&directory)?;
-    let files = BrokerFiles::in_directory(&directory, session_id);
-    let spec = GitBrokerSpec {
-        session_id: session_id.to_owned(),
-        bridge: hel_targets::git_bridge_command(locator, session_id)?,
-        repositories,
-        ready_path: files.ready.clone(),
-        pid_path: files.pid.clone(),
-    };
-    if broker_is_alive(&files.pid) {
-        if broker_serves(&files, &spec) {
-            return Ok(());
-        }
-        bail!(
-            "a different local Git broker is still active for session {session_id}; close its target before reconnecting"
-        );
-    }
-    spec.write(&files.spec)?;
-    let child = match start_git_broker(&files) {
-        Ok(child) => child,
-        // A supervisor may have restarted this session's broker from the same
-        // spec while this one was starting. That broker serves the session,
-        // and only one of them can hold the session's broker lock.
-        Err(error) if broker_serves(&files, &spec) => {
-            tracing::debug!(
-                session_id,
-                error = format!("{error:#}"),
-                "reused a concurrently started local Git broker"
-            );
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    // A broker that dies later takes the session's `origin` remote with it,
-    // so it is supervised rather than merely reaped.
-    let session_id = session_id.to_owned();
-    std::thread::spawn(move || supervise_git_broker(&session_id, &files, child));
-    Ok(())
-}
-
-/// Whether a broker is already serving exactly this session and spec.
-fn broker_serves(files: &BrokerFiles, spec: &GitBrokerSpec) -> bool {
-    broker_is_alive(&files.pid)
-        && files.ready.exists()
-        && GitBrokerSpec::read(&files.spec).is_ok_and(|existing| &existing == spec)
-}
-
-/// Start the broker process and wait for it to publish its ready marker.
-fn start_git_broker(files: &BrokerFiles) -> Result<std::process::Child> {
-    // A broker killed outright leaves its marker behind, and the new one has
-    // to publish its own before it counts as ready. A marker a live broker
-    // owns is never touched.
-    if !broker_is_alive(&files.pid)
-        && let Err(error) = std::fs::remove_file(&files.ready)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(
-            path = %files.ready.display(),
-            %error,
-            "could not remove stale Git broker ready marker"
-        );
-    }
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&files.log)
-        .with_context(|| format!("open Git broker log {}", files.log.display()))?;
-    let stderr = log.try_clone()?;
-    let executable = std::env::current_exe().context("locate Hel controller executable")?;
-    let mut command = Command::new(executable);
-    command
-        .args(["broker", "--spec"])
-        .arg(&files.spec)
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(stderr);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command.spawn().context("start local Git broker")?;
-    let deadline = Instant::now() + BROKER_READY_TIMEOUT;
-    loop {
-        if files.ready.exists() && broker_is_alive(&files.pid) {
-            return Ok(child);
-        }
-        if let Some(status) = child.try_wait().context("poll local Git broker")? {
-            bail!(
-                "local Git broker exited with {status}; see {}",
-                files.log.display()
-            );
-        }
-        if Instant::now() >= deadline {
-            // Leave no half-started broker behind holding the session slot.
-            if let Err(error) = child.kill() {
-                tracing::warn!(%error, "could not terminate timed-out Git broker");
-            }
-            if let Err(error) = child.wait() {
-                tracing::warn!(%error, "could not reap timed-out Git broker");
-            }
-            bail!(
-                "timed out starting local Git broker; see {}",
-                files.log.display()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-/// Stop this session's local Git broker for good and clear the state that
-/// would invite any controller to start another one.
-///
-/// Closing, deleting, or abandoning a session all end its local origin: the
-/// target the broker bridges into is about to disappear, so a broker left
-/// running would be restarted against nothing and finally reported as a
-/// failure the user never caused.
-pub(super) fn retire_git_broker(session_id: &str) -> Result<()> {
-    retire_broker_files(&BrokerFiles::in_directory(&broker_directory(), session_id))
-}
-
-/// Retire one broker: signal the intent, stop the process, then remove the
-/// files it left behind.
-///
-/// The spec is removed *first*, and that ordering is the whole design. Every
-/// supervisor consults the spec before restarting, so its absence is how a
-/// deliberate stop is told apart from a broker that died. Removing it after
-/// the kill would race the supervisor into restarting a broker for a session
-/// that is being torn down. The process is then stopped before its remaining
-/// files go, so nothing is ever deleted under a live writer.
-fn retire_broker_files(files: &BrokerFiles) -> Result<()> {
-    remove_broker_file(&files.spec)?;
-    stop_running_broker(&files.pid)?;
-    remove_broker_file(&files.ready)?;
-    remove_broker_file(&files.pid)?;
-    // The log stays: it is where this session's Git failures were reported,
-    // and reading it after the session ends is the point of keeping it.
-    Ok(())
-}
-
-/// Whether this session still wants a broker that has stopped to be started
-/// again.
-///
-/// A restart always spawns from the spec on disk, so a rewritten one needs no
-/// special handling; a retired session's spec is gone, and a broker another
-/// controller already has running belongs to that controller.
-fn broker_needs_restart(files: &BrokerFiles) -> bool {
-    files.spec.exists() && !broker_is_alive(&files.pid)
-}
-
-fn remove_broker_file(path: &Path) -> Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => {
-            Err(error).with_context(|| format!("remove Git broker file {}", path.display()))
-        }
-    }
-}
-
-/// Terminate whatever broker still holds this session's slot, and wait for it
-/// to let go of the lock.
-///
-/// The PID is re-read on every pass: a restart that was already in flight
-/// when the session was retired claims the slot a moment later, and it has to
-/// be stopped too.
-fn stop_running_broker(pid_path: &Path) -> Result<()> {
-    for escalate in [false, true] {
-        let deadline = Instant::now() + BROKER_STOP_GRACE;
-        loop {
-            if !broker_is_alive(pid_path) {
-                return Ok(());
-            }
-            if let Some(pid) = running_broker_pid(pid_path) {
-                stop_broker_process_group(pid, escalate);
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(BROKER_STOP_POLL);
-        }
-    }
-    bail!(
-        "the local Git broker holding {} did not stop",
-        pid_path.display()
-    )
-}
-
-/// Signal the process group a broker leads. Brokers are started as their own
-/// group leader, so this stops the target-side bridge with the broker instead
-/// of leaving it attached to a target that is going away.
-#[cfg(unix)]
-fn stop_broker_process_group(pid: i32, escalate: bool) {
-    hel::hel_subprocess::terminate_process_group(
-        pid,
-        if escalate {
-            libc::SIGKILL
-        } else {
-            libc::SIGTERM
-        },
-    );
-}
-
-#[cfg(not(unix))]
-fn stop_broker_process_group(_pid: i32, _escalate: bool) {}
-
-/// Keep this session's Git broker running until another controller takes it
-/// over, until the session retires it, or until restarting it stops helping.
-fn supervise_git_broker(session_id: &str, files: &BrokerFiles, child: std::process::Child) {
-    let mut started = Some(child);
-    let outcome = supervise_broker_restarts(
-        BROKER_RESTART_ATTEMPTS,
-        || broker_needs_restart(files),
-        || {
-            let running = Instant::now();
-            let mut child = match started.take() {
-                Some(child) => child,
-                None => start_git_broker(files)?,
-            };
-            let status = child.wait().context("wait for the local Git broker")?;
-            Ok((running.elapsed(), format!("{status}")))
-        },
-        std::thread::sleep,
-    );
-    let Err(error) = outcome else {
-        return;
-    };
-    tracing::error!(
-        session_id,
-        error = format!("{error:#}"),
-        "the session's local Git origin is no longer served"
-    );
-    // Every broker error the user sees names this log, so the last word on
-    // the broker belongs in it too.
-    use std::io::Write as _;
-    if let Ok(mut log) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&files.log)
-    {
-        let _ = writeln!(log, "[hel {}] local Git origin lost: {error:#}", now());
-    }
-}
-
-/// Restart the broker whenever it stops, until stopping is no longer this
-/// supervisor's business or a run of restarts has failed to fix anything.
-fn supervise_broker_restarts(
-    attempts: u32,
-    mut needs_restart: impl FnMut() -> bool,
-    mut run: impl FnMut() -> Result<(Duration, String)>,
-    mut back_off: impl FnMut(Duration),
-) -> Result<()> {
-    let mut consecutive = 0;
-    loop {
-        let failure = match run() {
-            Ok((ran_for, status)) => {
-                if ran_for >= BROKER_HEALTHY_RUN {
-                    consecutive = 0;
-                }
-                anyhow::anyhow!("the local Git broker exited with {status}")
-            }
-            Err(error) => error,
-        };
-        if !needs_restart() {
-            return Ok(());
-        }
-        consecutive += 1;
-        if consecutive > attempts {
-            return Err(failure.context(format!(
-                "the local Git broker stopped {consecutive} times in a row and was not restarted again"
-            )));
-        }
-        back_off(BROKER_RESTART_BACKOFF * consecutive);
-    }
-}
-
 /// Attach read-only whatever the selected container overlay cannot hold, and
 /// say so.
 ///
@@ -1812,7 +1144,7 @@ mod tests {
 
     use hel::hel_config::{
         ContainerTemplate as ConfigContainer, HarnessKind, HarnessProfile, HelConfig,
-        ProjectRepository, SshConnection,
+        ProjectBundle, ProjectRepository, SshConnection,
     };
     use hel::hel_state::{HelState, SessionRecord, SessionState, TargetLocator};
     use hel::hel_targets::{
@@ -1882,6 +1214,7 @@ mod tests {
             primary: "app".into(),
             repositories: vec![hel::hel_targets::RepositorySpec {
                 url: Some("https://github.com/example/app.git".into()),
+                push_urls: Vec::new(),
                 destination: "app".into(),
                 git_ref: None,
                 reference: None,
@@ -2616,247 +1949,5 @@ mod tests {
 
         assert!(!format!("{error:#}").contains("cleanup"));
         assert!(executor.commands().is_empty());
-    }
-
-    #[test]
-    fn a_broker_that_keeps_stopping_is_restarted_a_bounded_number_of_times() {
-        let mut runs = 0;
-        let mut waits = Vec::new();
-
-        let error = supervise_broker_restarts(
-            3,
-            || true,
-            || {
-                runs += 1;
-                Ok((Duration::from_millis(1), "signal: 9".into()))
-            },
-            |delay| waits.push(delay),
-        )
-        .unwrap_err();
-
-        // The first run, then one restart per attempt.
-        assert_eq!(runs, 4);
-        assert_eq!(waits.len(), 3);
-        assert!(waits[0] < waits[2], "{waits:?}");
-        assert!(
-            format!("{error:#}").contains("stopped 4 times in a row"),
-            "{error:#}"
-        );
-    }
-
-    #[test]
-    fn a_broker_another_controller_took_over_is_left_alone() {
-        let mut runs = 0;
-
-        supervise_broker_restarts(
-            3,
-            || false,
-            || {
-                runs += 1;
-                Ok((Duration::from_millis(1), "exit status: 0".into()))
-            },
-            |_| unreachable!("a broker that needs no restart must not be waited on"),
-        )
-        .unwrap();
-
-        assert_eq!(runs, 1);
-    }
-
-    /// A broker that served the session for a while before dying starts a
-    /// fresh restart budget, so one bad hour never exhausts a session.
-    #[test]
-    fn a_broker_that_ran_healthily_earns_a_fresh_restart_budget() {
-        let mut runs = 0;
-
-        let error = supervise_broker_restarts(
-            2,
-            || true,
-            || {
-                runs += 1;
-                Ok(if runs <= 4 {
-                    (BROKER_HEALTHY_RUN, "signal: 9".into())
-                } else {
-                    (Duration::from_millis(1), "signal: 9".into())
-                })
-            },
-            |_| (),
-        )
-        .unwrap_err();
-
-        assert_eq!(runs, 6);
-        assert!(format!("{error:#}").contains("stopped 3 times in a row"));
-    }
-
-    /// Turns a re-executed copy of the stop test into a stand-in for a running
-    /// broker. Holding the slot's lock is exactly what makes a process this
-    /// session's broker, so a stand-in that holds it is indistinguishable from
-    /// the real thing to everything that has to stop one.
-    #[cfg(unix)]
-    const BROKER_STAND_IN_PID_PATH: &str = "MJ_TEST_BROKER_STAND_IN_PID_PATH";
-
-    fn retirable_broker_files(directory: &Path) -> BrokerFiles {
-        let files = BrokerFiles::in_directory(directory, PROVISIONED_SESSION);
-        GitBrokerSpec {
-            session_id: PROVISIONED_SESSION.into(),
-            bridge: CommandSpec::new("true", Vec::<String>::new()),
-            repositories: BTreeMap::new(),
-            ready_path: files.ready.clone(),
-            pid_path: files.pid.clone(),
-        }
-        .write(&files.spec)
-        .unwrap();
-        std::fs::write(&files.ready, "ready\n").unwrap();
-        std::fs::write(&files.log, "broker log\n").unwrap();
-        files
-    }
-
-    /// A closing session stops its broker on purpose: the process goes, the
-    /// supervisor that was keeping it alive returns quietly, and the log keeps
-    /// what it had without a word about a lost origin.
-    #[cfg(unix)]
-    #[test]
-    fn retiring_a_session_stops_its_running_broker_and_reports_nothing() {
-        if let Some(pid_path) = std::env::var_os(BROKER_STAND_IN_PID_PATH) {
-            let _slot = hel::hel_git_proxy::claim_broker_pid_file(Path::new(&pid_path)).unwrap();
-            // Retirement is what ends this process; the sleep only bounds the
-            // damage when it fails to.
-            std::thread::sleep(Duration::from_secs(60));
-            return;
-        }
-
-        let directory = tempfile::tempdir().unwrap();
-        let files = retirable_broker_files(directory.path());
-        let test_name = format!(
-            "{}::retiring_a_session_stops_its_running_broker_and_reports_nothing",
-            module_path!()
-                .strip_prefix("mj_controller::")
-                .unwrap_or(module_path!())
-        );
-        let mut command = Command::new(std::env::current_exe().unwrap());
-        command
-            .args(["--exact", &test_name, "--nocapture"])
-            .env(BROKER_STAND_IN_PID_PATH, &files.pid)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
-        {
-            use std::os::unix::process::CommandExt;
-            // Brokers lead their own process group, and stopping one signals
-            // that group.
-            command.process_group(0);
-        }
-        let child = command.spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !broker_is_alive(&files.pid) {
-            assert!(
-                Instant::now() < deadline,
-                "the stand-in broker never claimed its slot"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        let (finished, supervised) = std::sync::mpsc::channel();
-        let supervisor = {
-            let files = files.clone();
-            std::thread::spawn(move || {
-                supervise_git_broker(PROVISIONED_SESSION, &files, child);
-                let _ = finished.send(());
-            })
-        };
-
-        retire_broker_files(&files).unwrap();
-
-        supervised
-            .recv_timeout(Duration::from_secs(30))
-            .expect("the retired broker's supervisor never finished");
-        supervisor.join().unwrap();
-        assert!(!broker_is_alive(&files.pid));
-        assert!(!files.spec.exists());
-        assert!(!files.pid.exists());
-        assert!(!files.ready.exists());
-        assert_eq!(std::fs::read_to_string(&files.log).unwrap(), "broker log\n");
-    }
-
-    /// The same stop that ends a broker also ends its restarts: a broker that
-    /// died is started again, a broker its session retired is not.
-    #[test]
-    fn a_retired_broker_is_never_restarted_where_a_dead_one_is() {
-        let directory = tempfile::tempdir().unwrap();
-        let files = retirable_broker_files(directory.path());
-        // A PID file whose broker is gone: the death was unexpected.
-        std::fs::write(&files.pid, "424242").unwrap();
-        assert!(broker_needs_restart(&files));
-
-        retire_broker_files(&files).unwrap();
-
-        assert!(!broker_needs_restart(&files));
-        let mut runs = 0;
-        supervise_broker_restarts(
-            BROKER_RESTART_ATTEMPTS,
-            || broker_needs_restart(&files),
-            || {
-                runs += 1;
-                Ok((Duration::from_millis(1), "signal: 15".into()))
-            },
-            |_| unreachable!("a retired broker must never be waited on for a restart"),
-        )
-        .unwrap();
-
-        // The broker that was already running, and not one restart after it.
-        assert_eq!(runs, 1);
-        assert!(!files.spec.exists());
-        assert!(!files.pid.exists());
-        assert!(!files.ready.exists());
-        assert_eq!(std::fs::read_to_string(&files.log).unwrap(), "broker log\n");
-    }
-
-    /// A session with no local repositories never had a broker, so retiring it
-    /// touches nothing at all.
-    #[test]
-    fn retiring_a_session_that_never_had_a_broker_creates_nothing() {
-        let directory = tempfile::tempdir().unwrap();
-        let brokers = directory.path().join("git-brokers");
-
-        retire_broker_files(&BrokerFiles::in_directory(&brokers, PROVISIONED_SESSION)).unwrap();
-
-        assert!(!brokers.exists());
-        assert!(
-            std::fs::read_dir(directory.path())
-                .unwrap()
-                .next()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn a_converting_resume_seeds_from_its_own_checkout() {
-        let repository = ProjectRepository {
-            id: "project".into(),
-            github: None,
-            local: Some(PathBuf::from("/home/dev/project")),
-            destination: PathBuf::from("project"),
-            git_ref: None,
-        };
-        let configured = PathBuf::from("/home/dev/project");
-        let missing = vec![(&repository, &configured)];
-        let checkout = PathBuf::from("/home/dev/project/.mj/worktrees/session");
-
-        assert_eq!(seed_sources(&missing, &LocalBootstrap::Skip), None);
-        assert_eq!(
-            seed_sources(&missing, &LocalBootstrap::Seed)
-                .unwrap()
-                .into_iter()
-                .map(|(_, source)| source.clone())
-                .collect::<Vec<_>>(),
-            vec![configured.clone()]
-        );
-        assert_eq!(
-            seed_sources(&missing, &LocalBootstrap::SeedFrom(checkout.clone()))
-                .unwrap()
-                .into_iter()
-                .map(|(_, source)| source.clone())
-                .collect::<Vec<_>>(),
-            vec![checkout]
-        );
     }
 }

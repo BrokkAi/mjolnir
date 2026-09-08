@@ -89,8 +89,10 @@ Automatic selection checks local runtime readiness in the background. It reuses
 an existing target of the selected kind, preserving its image and resource
 settings, or adds a standard target if needed. It never selects SSH or AWS
 implicitly. Podman and Docker use a bundle sourced from the current Git
-repository, including uncommitted contents. A plain directory uses a local
-session. Local Git sessions follow the existing managed-worktree behavior.
+repository's configured network remotes. Their isolated clone starts from the
+remote's default branch; local commits and uncommitted files are not copied.
+A plain directory uses a raw local session. Raw local sessions are the only
+sessions that can use a repository without a network remote.
 The local-directory fallback is supported on Linux and macOS; Windows retains
 its setup flow and requires a supported target.
 
@@ -176,10 +178,10 @@ The profile's harness-home variable cannot appear in `environment`; set `home`
 instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
 `KIMI_CODE_HOME`, `GROK_HOME`, and `DSH_HOME` respectively.
 
-Profiles do not select target-side executables. Mjolnir owns the bridge command:
-raw SSH and EC2 workers resolve an exact pinned runtime from their managed cache,
-while local and container targets use their target runtime. `mj login` invokes
-the harness's canonical controller-side command from `PATH`.
+Profiles do not select target-side executables. Raw SSH and EC2 workers resolve
+an exact pinned runtime from their managed cache, while local and container
+targets use their target runtime. `mj login` invokes the harness's canonical
+controller-side command from `PATH`.
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
 inside a session, or configure the harness's own defaults in its home. For
@@ -199,7 +201,6 @@ primary_repo = "app"
 id = "app"
 github = "acme/app"
 destination = "app"
-git_ref = "main"
 
 [[bundles.product.repositories]]
 id = "shared"
@@ -220,19 +221,23 @@ Repository fields:
 | --- | --- | --- | --- |
 | `id` | string | yes | Valid, unique ID within the bundle. |
 | `github` | string | exactly one source | GitHub source in a supported form; cannot be combined with `local`. |
-| `local` | path string | exactly one source | Absolute controller-side path; cannot be combined with `github` or `git_ref`. |
+| `local` | path string | exactly one source | Absolute controller-side Git path used to resolve its network remotes; cannot be combined with `github`. |
 | `destination` | path string | yes | Non-empty relative path below the target workspace; no `.` or `..` components. |
-| `git_ref` | string | no | Non-blank branch, tag, or commit selection for a GitHub source. |
 
 Supported GitHub forms are `owner/repository`,
 `https://github.com/owner/repository`, `git@github.com:owner/repository`, and
 `ssh://git@github.com/owner/repository`, with an optional `.git` suffix. Sources
-cannot contain whitespace or begin with `-`. Repository destinations may not
-be equal, ancestors, or descendants of one another.
+cannot contain whitespace or begin with `-`. At session creation, Mjolnir uses
+the source's default network fetch remote and preserves its configured push
+destination(s). A `local` path is inspected for that configuration; its local
+commits, staged changes, unstaged changes, and untracked files are excluded
+from an isolated clone. Repository destinations may not be equal, ancestors,
+or descendants of one another.
 
 Bundles are used by container and EC2 sessions. New bare sessions select an
-existing Git project directory instead. See [Workspaces and bundles](/workspaces-bundles/)
-for local-repository bridging, dirty-state handling, and project memory.
+existing Git project directory instead. `git_ref` is no longer accepted; remove
+it and use the source remote's default branch. See [Workspaces and bundles](/workspaces-bundles/)
+for network remotes, isolated clones, and project memory.
 
 ## Targets `[targets.<id>]`
 
@@ -272,8 +277,8 @@ same container fields. SSH Podman also requires the SSH fields described below.
 
 The schema checks that `image` is non-blank but leaves CPU, memory, and platform
 syntax to the selected runtime. Profile `environment` and target `environment`
-are different: profile values configure the harness/bridge, while target values
-become container environment variables.
+are different: profile values configure the harness and profile commands, while
+target values become container environment variables.
 
 Pull-policy behavior:
 

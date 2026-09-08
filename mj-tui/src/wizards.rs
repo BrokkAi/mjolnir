@@ -28,7 +28,10 @@ use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 
 use crate::widgets::{centered_modal, format_resource_bytes};
-use crate::{DashboardAction, DashboardState, Mode, cycle_control, move_index, nth_key};
+use crate::{
+    DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, cycle_control, move_index,
+    nth_key,
+};
 
 const BASELINE_CPUS: u64 = 8;
 const BASELINE_MEMORY_BYTES: u64 = 32 * 1024 * 1024 * 1024;
@@ -97,6 +100,11 @@ pub(crate) struct NewWizard {
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
     aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
+    /// Network clone destinations returned by the asynchronous creation
+    /// preflight. A nonempty value is concrete evidence the review is ready.
+    pub(crate) remote_repositories: Option<Vec<RemoteRepositoryPreview>>,
+    pub(crate) remote_preflight_in_flight: bool,
+    pub(crate) remote_preflight_error: Option<String>,
     pub(crate) form: RefCell<Form<WizardControl>>,
 }
 
@@ -121,6 +129,9 @@ impl PartialEq for NewWizard {
             && self.resource_allocation == other.resource_allocation
             && self.aws_options == other.aws_options
             && self.sizing_error == other.sizing_error
+            && self.remote_repositories == other.remote_repositories
+            && self.remote_preflight_in_flight == other.remote_preflight_in_flight
+            && self.remote_preflight_error == other.remote_preflight_error
     }
 }
 
@@ -893,7 +904,11 @@ pub(crate) fn render_new_wizard(
                 allocation: wizard.resource_allocation.as_ref(),
                 mounts: &wizard.mounts,
                 title: " New session · 4/4 review ",
-                submit_label: "Create",
+                submit_label: if wizard.remote_preflight_error.is_some() {
+                    "Retry"
+                } else {
+                    "Create"
+                },
                 moving: false,
                 preparing: false,
                 preparation_error: None,
@@ -903,6 +918,10 @@ pub(crate) fn render_new_wizard(
                 queue: None,
                 queued_entries: &[],
                 prepared_entries: &[],
+                remote_repositories: wizard.remote_repositories.as_deref(),
+                remote_preflight_in_flight: wizard.remote_preflight_in_flight,
+                remote_preflight_error: wizard.remote_preflight_error.as_deref(),
+                local_changes_excluded: !raw_project,
             },
             &mut form,
             surfaces,
@@ -1098,7 +1117,7 @@ pub(crate) fn render_new_wizard(
         }
         let source_label_y = list_y.saturating_add(list_height);
         frame.render_widget(
-            Paragraph::new("Local Git path or GitHub owner/repository:"),
+            Paragraph::new("GitHub source or local Git path with a network remote:"),
             Rect::new(
                 content.x,
                 source_label_y,
@@ -1293,6 +1312,10 @@ struct ReviewWizardView<'a> {
     queue: Option<(usize, bool)>,
     queued_entries: &'a [hel::hel_worker::QueuedPrompt],
     prepared_entries: &'a [MaterializedQueuedPrompt],
+    remote_repositories: Option<&'a [RemoteRepositoryPreview]>,
+    remote_preflight_in_flight: bool,
+    remote_preflight_error: Option<&'a str>,
+    local_changes_excluded: bool,
 }
 
 fn render_review_wizard(
@@ -1322,6 +1345,10 @@ fn render_review_wizard(
         queue,
         queued_entries,
         prepared_entries,
+        remote_repositories,
+        remote_preflight_in_flight,
+        remote_preflight_error,
+        local_changes_excluded,
     } = view;
     let target = &dashboard.config.targets[target_id];
     let can_attach = mount_history_host(target).is_some();
@@ -1382,6 +1409,37 @@ fn render_review_wizard(
                 "Press Retry to check the destination again.",
                 Style::default().fg(theme::palette().muted),
             ));
+        }
+    }
+    if remote_preflight_in_flight {
+        lines.push(Line::styled(
+            "Resolving network repositories…",
+            Style::default().fg(theme::palette().muted),
+        ));
+    } else if let Some(error) = remote_preflight_error {
+        lines.push(Line::styled(
+            format!("Repository preflight failed: {error}"),
+            Style::default().fg(theme::palette().error),
+        ));
+    } else if let Some(repositories) = remote_repositories {
+        lines.push(Line::styled(
+            if local_changes_excluded {
+                "Network clone plan (local commits and dirty files excluded):"
+            } else {
+                "Network clone plan:"
+            },
+            theme::muted(),
+        ));
+        for repository in repositories {
+            let pushes = if repository.push_urls.is_empty() {
+                "none".to_owned()
+            } else {
+                repository.push_urls.join(", ")
+            };
+            lines.push(Line::raw(format!(
+                "  {}: fetch {} @ {}; push {}",
+                repository.repository_id, repository.fetch_url, repository.default_branch, pushes
+            )));
         }
     }
     let queue_label = queue.map(|(count, _)| format!("Queued prompts: {count}"));
@@ -1584,6 +1642,10 @@ fn render_review_wizard(
         WizardControl::Submit,
         submit_label,
         submit_enabled
+            && !remote_preflight_in_flight
+            && (remote_repositories.is_some()
+                || !local_changes_excluded
+                || remote_preflight_error.is_some())
             && (allocation.is_some() || !matches!(target, TargetTemplate::AwsEc2 { .. })),
     ));
     ButtonRow::render(
@@ -1927,6 +1989,10 @@ pub(crate) fn render_resume_wizard(
                 prepared_entries: wizard.preparation.as_ref().map_or(&[][..], |preparation| {
                     preparation.queued_commands.as_slice()
                 }),
+                remote_repositories: None,
+                remote_preflight_in_flight: false,
+                remote_preflight_error: None,
+                local_changes_excluded: false,
             },
             &mut form,
             surfaces,

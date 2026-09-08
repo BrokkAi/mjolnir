@@ -90,8 +90,19 @@ pub struct RepositoryMetadata {
     pub id: String,
     pub relative_destination: PathBuf,
     pub origin: String,
-    /// Informational provenance. Session deltas exclude every origin ref rather
-    /// than a single base, so they record an empty string.
+    /// Explicit push destinations configured for `origin`. An empty list
+    /// means Git's normal push fallback (the fetch URL), and is omitted from
+    /// older archive manifests for compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_urls: Vec<String>,
+    /// Marks a repository cloned for a managed network workspace. The marker
+    /// makes a nonempty `base_commit` unambiguous: raw DeltaFrom snapshots
+    /// also carry a base, but must not inherit managed push configuration.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remote_workspace: bool,
+    /// Immutable launch base for managed network workspaces; raw DeltaFrom
+    /// snapshots record their capture base. Legacy SessionDelta snapshots
+    /// exclude origin refs instead and leave this empty.
     pub base_commit: String,
     pub head_commit: String,
     pub branch: Option<String>,
@@ -940,6 +951,20 @@ fn prepare_archive_view_with_part_size(
             "repository '{}' origin contains credentials",
             repository.metadata.id
         );
+        for push_url in &repository.metadata.push_urls {
+            ensure!(
+                !origin_contains_credentials(push_url),
+                "repository '{}' push URL contains credentials",
+                repository.metadata.id
+            );
+        }
+        if repository.metadata.remote_workspace {
+            ensure!(
+                !repository.metadata.base_commit.is_empty(),
+                "repository '{}' managed workspace has no base commit",
+                repository.metadata.id
+            );
+        }
         validate_untracked_tar(&repository.untracked_tar)?;
 
         let root = format!("repositories/{}", repository.metadata.id);
@@ -1691,6 +1716,20 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
             "repository '{}' origin contains credentials",
             metadata.id
         );
+        for push_url in &metadata.push_urls {
+            ensure!(
+                !origin_contains_credentials(push_url),
+                "repository '{}' push URL contains credentials",
+                metadata.id
+            );
+        }
+        if metadata.remote_workspace {
+            ensure!(
+                !metadata.base_commit.is_empty(),
+                "repository '{}' managed workspace has no base commit",
+                metadata.id
+            );
+        }
         let expected = [
             (
                 repository.committed_bundle_path.as_str(),
@@ -2189,7 +2228,8 @@ fn origin_contains_credentials(origin: &str) -> bool {
         && (!url.username().is_empty() || url.password().is_some())
 }
 
-fn redact_origin_credentials(origin: &str) -> Result<String> {
+/// Remove embedded HTTP credentials before storing Git provenance.
+pub fn redact_origin_credentials(origin: &str) -> Result<String> {
     let Ok(mut url) = url::Url::parse(origin) else {
         return Ok(origin.to_string());
     };
@@ -2214,7 +2254,8 @@ pub use git::{
     GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV, NON_INTERACTIVE_GIT_SSH_COMMAND,
     REVIEW_BASELINE_REF, REVIEW_CAPTURE_REF, SystemGit, capture_worktree_tree,
     collect_git_metadata_snapshot, collect_git_snapshot, collect_git_snapshot_with_progress,
-    diff_between_trees, empty_tree_id, has_origin_refs, pin_review_tree, restore_git_snapshot,
+    diff_between_trees, empty_tree_id, has_origin_refs, pin_review_tree, remote_workspace_base,
+    restore_git_snapshot,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

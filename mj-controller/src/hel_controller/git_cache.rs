@@ -555,6 +555,7 @@ mod tests {
             primary: "app".to_owned(),
             repositories: vec![RepositorySpec {
                 url: Some("https://github.com/example/app.git".to_owned()),
+                push_urls: Vec::new(),
                 destination: "app".to_owned(),
                 git_ref: None,
                 reference: None,

@@ -22,8 +22,8 @@ use crate::hel_archive::{
     GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, NativeArtifact, PayloadRole,
     RepositorySnapshot, SessionManifest, SystemGit, TargetManifest, collect_git_metadata_snapshot,
     collect_git_snapshot, ensure_no_symlink_ancestors, has_origin_refs, is_secret_like_path,
-    read_archive_verified, restore_git_snapshot, validate_component, verify_archive_streaming,
-    write_archive_hashed, write_archive_hashed_borrowed,
+    read_archive_verified, remote_workspace_base, restore_git_snapshot, validate_component,
+    verify_archive_streaming, write_archive_hashed, write_archive_hashed_borrowed,
 };
 use crate::hel_config::HarnessKind;
 use crate::hel_targets::{
@@ -33,9 +33,9 @@ use crate::hel_targets::{
 const MAX_NATIVE_FILE: u64 = 1024 * 1024 * 1024;
 const MAX_NATIVE_TOTAL: u64 = 8 * 1024 * 1024 * 1024;
 /// Version of the controller-to-exporter checkpoint specification contract.
-pub const CHECKPOINT_EXPORT_PROTOCOL_VERSION: u32 = 1;
+pub const CHECKPOINT_EXPORT_PROTOCOL_VERSION: u32 = 2;
 /// Version of the two-phase capture/pack contract used by ordinary checkpoints.
-pub const CHECKPOINT_STAGING_PROTOCOL_VERSION: u32 = 1;
+pub const CHECKPOINT_STAGING_PROTOCOL_VERSION: u32 = 2;
 /// Clock-skew slack subtracted from a Codex session's own creation time before
 /// it is used as an mtime floor for content probes.
 const CODEX_PROBE_FLOOR_SLACK_MS: i64 = 48 * 3600 * 1000;
@@ -58,6 +58,10 @@ pub enum CheckpointRepositoryCapture {
     SessionDelta,
     /// Bundle the repository relative to an explicit commit.
     DeltaFrom { base_commit: String },
+    /// Bundle a managed network workspace relative to its immutable launch
+    /// base recorded in `mj.baseCommit`, even after the workspace has pushed
+    /// and moved its origin-tracking refs.
+    RemoteWorkspace,
     /// Preserve Git provenance only. The existing worktree remains the source.
     MetadataOnly,
 }
@@ -275,23 +279,6 @@ pub struct CheckpointRestoreSpec {
     pub primary_repository_root: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RepositoryRestoreSpec {
-    pub archive_path: PathBuf,
-    pub workspace_root: PathBuf,
-}
-
-pub fn restore_repositories_from_spec_file(path: &Path) -> Result<()> {
-    let body = fs::read(path)
-        .with_context(|| format!("read repository restore spec {}", path.display()))?;
-    let mut spec: RepositoryRestoreSpec = serde_json::from_slice(&body)
-        .with_context(|| format!("parse repository restore spec {}", path.display()))?;
-    spec.archive_path = resolve_target_path(&spec.archive_path)?;
-    spec.workspace_root = resolve_target_path(&spec.workspace_root)?;
-    restore_repositories(&spec.archive_path, &spec.workspace_root, &SystemGit)
-}
-
 pub fn restore_from_spec_file(path: &Path) -> Result<()> {
     let body = fs::read(path)
         .with_context(|| format!("read checkpoint restore spec {}", path.display()))?;
@@ -494,6 +481,10 @@ pub fn restore_single_repository_onto_branch(
     };
     let mut snapshot = archived_repository_snapshot(&archive, repository)?;
     let archived_branch = snapshot.metadata.branch.replace(branch.to_owned());
+    // This explicit host restore uses a linked worktree whose local Git
+    // configuration is shared with the user's main checkout; keep managed
+    // network configuration out of that shared config.
+    snapshot.metadata.remote_workspace = false;
     restore_git_snapshot(git, repository_path, &snapshot)
         .with_context(|| format!("restore repository {:?}", repository.metadata.id))?;
     Ok(archived_branch)
@@ -1437,7 +1428,7 @@ fn collect_checkpoint_repositories(
         .map(|repository| {
             let path = workspace_root.join(&repository.relative_destination);
             ensure!(path.is_dir(), "repository {} is missing", path.display());
-            let history = match &repository.capture {
+            let (history, remote_base) = match &repository.capture {
                 CheckpointRepositoryCapture::MetadataOnly => {
                     return collect_git_metadata_snapshot(
                         git,
@@ -1453,15 +1444,29 @@ fn collect_checkpoint_repositories(
                 }
                 CheckpointRepositoryCapture::SessionDelta => {
                     repair_origin_refs(git, &path, &repository.id)?;
-                    GitHistoryMode::SessionDelta
+                    (GitHistoryMode::SessionDelta, None)
                 }
                 CheckpointRepositoryCapture::DeltaFrom { base_commit } => {
-                    GitHistoryMode::DeltaFrom(base_commit.clone())
+                    (GitHistoryMode::DeltaFrom(base_commit.clone()), None)
+                }
+                CheckpointRepositoryCapture::RemoteWorkspace => {
+                    let base_commit = remote_workspace_base(git, &path)
+                        .with_context(|| format!("repository '{}'", repository.id))?
+                        .with_context(|| {
+                            format!(
+                                "repository '{}' is not marked as a managed remote workspace",
+                                repository.id
+                            )
+                        })?;
+                    (
+                        GitHistoryMode::DeltaFrom(base_commit.clone()),
+                        Some(base_commit),
+                    )
                 }
             };
             reject_dirty_submodules(git, &path)
                 .with_context(|| format!("repository '{}'", repository.id))?;
-            collect_git_snapshot(
+            let mut snapshot = collect_git_snapshot(
                 git,
                 &path,
                 &GitCollectionSpec {
@@ -1471,7 +1476,24 @@ fn collect_checkpoint_repositories(
                     origin_override: repository.origin_override.clone(),
                 },
             )
-            .with_context(|| format!("repository '{}'", repository.id))
+            .with_context(|| format!("repository '{}'", repository.id))?;
+            if let Some(base_commit) = remote_base {
+                // select_git_history records the merge base. Preserve the
+                // immutable launch value exactly so a split/fork checkpoint
+                // can restore the workspace marker after origin moved.
+                ensure!(
+                    !snapshot.metadata.origin.is_empty(),
+                    "repository '{}' managed workspace has no Git origin",
+                    repository.id
+                );
+                crate::hel_remote_git::validate_network_url(&snapshot.metadata.origin)?;
+                for url in &snapshot.metadata.push_urls {
+                    crate::hel_remote_git::validate_network_url(url)?;
+                }
+                snapshot.metadata.base_commit = base_commit;
+                snapshot.metadata.remote_workspace = true;
+            }
+            Ok(snapshot)
         })
         .collect()
 }
@@ -3398,6 +3420,8 @@ mod tests {
                 id: "app".into(),
                 relative_destination: "app".into(),
                 origin: "owner/app".into(),
+                push_urls: Vec::new(),
+                remote_workspace: false,
                 base_commit: "a".repeat(40),
                 head_commit: "a".repeat(40),
                 branch: Some("main".into()),
@@ -3632,6 +3656,8 @@ mod tests {
                 id: "app".into(),
                 relative_destination: "app".into(),
                 origin: "owner/app".into(),
+                push_urls: Vec::new(),
+                remote_workspace: false,
                 base_commit: "a".repeat(40),
                 head_commit: "a".repeat(40),
                 branch: Some("main".into()),
@@ -3669,6 +3695,8 @@ mod tests {
                 id: "app".into(),
                 relative_destination: "app".into(),
                 origin: "owner/app".into(),
+                push_urls: Vec::new(),
+                remote_workspace: false,
                 base_commit: "a".repeat(40),
                 head_commit: "a".repeat(40),
                 branch: Some("main".into()),
@@ -4371,8 +4399,42 @@ mod tests {
     #[test]
     fn a_checkout_restore_lands_on_the_branch_the_caller_names() {
         let temp = tempfile::tempdir().unwrap();
-        let (spec, archive_path) = fixture(temp.path());
+        let (mut spec, archive_path) = fixture(temp.path());
         let repository = spec.workspace_root.join("app");
+        let launch_base = git(&repository, &["rev-parse", "HEAD"]);
+        let archived_origin = "https://archive-fetch.example.test/app.git";
+        let archived_push_url = "https://archive-push.example.test/app.git";
+        git(
+            &repository,
+            &["config", "--local", "remote.origin.url", archived_origin],
+        );
+        git(
+            &repository,
+            &[
+                "config",
+                "--local",
+                "--replace-all",
+                "remote.origin.pushurl",
+                archived_push_url,
+            ],
+        );
+        git(
+            &repository,
+            &["config", "--local", "push.default", "current"],
+        );
+        git(
+            &repository,
+            &["config", "--local", "push.autoSetupRemote", "true"],
+        );
+        git(
+            &repository,
+            &["config", "--local", "mj.remoteWorkspace", "true"],
+        );
+        git(
+            &repository,
+            &["config", "--local", "mj.baseCommit", &launch_base],
+        );
+        spec.repositories[0].capture = CheckpointRepositoryCapture::RemoteWorkspace;
         fs::write(repository.join("feature.txt"), b"session work").unwrap();
         git(&repository, &["add", "."]);
         git(&repository, &["commit", "-m", "session work"]);
@@ -4380,6 +4442,49 @@ mod tests {
         let head = git(&repository, &["rev-parse", "HEAD"]);
         let archived_branch = git(&repository, &["rev-parse", "--abbrev-ref", "HEAD"]);
         export_checkpoint(&spec).unwrap();
+        let archive = verify_archive_streaming(&archive_path).unwrap();
+        assert!(archive.manifest.repositories[0].metadata.remote_workspace);
+        assert_eq!(
+            archive.manifest.repositories[0].metadata.origin,
+            archived_origin
+        );
+        assert_eq!(
+            archive.manifest.repositories[0].metadata.push_urls,
+            vec![archived_push_url]
+        );
+
+        let host_origin = "https://host-fetch.example.test/app.git";
+        let host_push_url = "https://host-push.example.test/app.git";
+        git(
+            &repository,
+            &["config", "--local", "remote.origin.url", host_origin],
+        );
+        git(
+            &repository,
+            &[
+                "config",
+                "--local",
+                "--replace-all",
+                "remote.origin.pushurl",
+                host_push_url,
+            ],
+        );
+        git(
+            &repository,
+            &["config", "--local", "push.default", "simple"],
+        );
+        git(
+            &repository,
+            &["config", "--local", "push.autoSetupRemote", "false"],
+        );
+        git(
+            &repository,
+            &["config", "--local", "--unset-all", "mj.remoteWorkspace"],
+        );
+        git(
+            &repository,
+            &["config", "--local", "--unset-all", "mj.baseCommit"],
+        );
 
         let checkout = temp.path().join("worktrees/session");
         git(
@@ -4413,6 +4518,46 @@ mod tests {
             "edited",
             "the session's uncommitted work comes with it"
         );
+        assert_eq!(
+            git(
+                &repository,
+                &["config", "--local", "--get", "remote.origin.url"]
+            ),
+            host_origin,
+            "host origin is unchanged by the raw restore"
+        );
+        assert_eq!(
+            git(
+                &repository,
+                &["config", "--local", "--get-all", "remote.origin.pushurl"],
+            ),
+            host_push_url,
+            "host push URL is unchanged by the raw restore"
+        );
+        assert_eq!(
+            git(&repository, &["config", "--local", "--get", "push.default"]),
+            "simple",
+            "host push default is unchanged by the raw restore"
+        );
+        assert_eq!(
+            git(
+                &repository,
+                &["config", "--local", "--get", "push.autoSetupRemote"],
+            ),
+            "false",
+            "host automatic push setup is unchanged by the raw restore"
+        );
+        for key in ["mj.remoteWorkspace", "mj.baseCommit"] {
+            let output = Command::new("git")
+                .args(["config", "--local", "--get", key])
+                .current_dir(&repository)
+                .output()
+                .unwrap();
+            assert!(
+                !output.status.success(),
+                "host config unexpectedly has {key}"
+            );
+        }
 
         // Restoring onto the archived branch is exactly what the override
         // avoids: that branch is checked out in the user's own working tree.
@@ -4987,6 +5132,52 @@ mod tests {
     }
 
     #[test]
+    fn remote_workspace_capture_uses_immutable_marker_base_after_origin_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut spec, _) = fixture(temp.path());
+        let repository = spec.workspace_root.join("app");
+        let base = git(&repository, &["rev-parse", "HEAD"]);
+        git(&repository, &["switch", "-q", "-c", "mj/remote-session"]);
+        git(
+            &repository,
+            &["config", "--local", "mj.remoteWorkspace", "true"],
+        );
+        git(&repository, &["config", "--local", "mj.baseCommit", &base]);
+        let push_url = "https://push.example.test/repo.git";
+        git(
+            &repository,
+            &[
+                "config",
+                "--local",
+                "--add",
+                "remote.origin.pushurl",
+                push_url,
+            ],
+        );
+        fs::write(repository.join("session.txt"), b"published session\n").unwrap();
+        git(&repository, &["add", "session.txt"]);
+        git(&repository, &["commit", "-qm", "session work"]);
+        let head = git(&repository, &["rev-parse", "HEAD"]);
+        // Make origin-tracking history appear current. A managed checkpoint
+        // must still carry the commit because it uses mj.baseCommit.
+        git(
+            &repository,
+            &["update-ref", "refs/remotes/origin/main", &head],
+        );
+
+        spec.repositories[0].capture = CheckpointRepositoryCapture::RemoteWorkspace;
+        let repositories =
+            collect_checkpoint_repositories(&spec.workspace_root, &spec.repositories, &SystemGit)
+                .unwrap();
+        let snapshot = &repositories[0];
+        assert!(snapshot.metadata.remote_workspace);
+        assert_eq!(snapshot.metadata.base_commit, base);
+        assert_eq!(snapshot.metadata.head_commit, head);
+        assert_eq!(snapshot.metadata.push_urls, vec![push_url.to_owned()]);
+        assert!(!snapshot.committed_bundle.is_empty());
+    }
+
+    #[test]
     fn invalid_canonical_session_is_rejected_before_repository_repair() {
         let temp = tempfile::tempdir().unwrap();
         let (mut spec, _) = fixture(temp.path());
@@ -5147,13 +5338,6 @@ mod tests {
             .unwrap()
             .insert("worker_root".into(), json!("/legacy"));
         assert!(serde_json::from_value::<CheckpointRestoreSpec>(retired_root).is_err());
-
-        let repository_restore = serde_json::from_value::<RepositoryRestoreSpec>(json!({
-            "archive_path": "/relay/checkpoint.hel.zip",
-            "workspace_root": "/workspace",
-            "legacy": true
-        }));
-        assert!(repository_restore.is_err());
     }
 
     #[test]
@@ -5193,7 +5377,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unsupported checkpoint export protocol version 2; worker supports 1"
+            "unsupported checkpoint export protocol version 3; worker supports 2"
         );
     }
 

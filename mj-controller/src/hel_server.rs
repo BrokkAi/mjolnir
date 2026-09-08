@@ -1499,12 +1499,12 @@ pub enum BundleFailure {
 /// single action slot, intermittently rejecting real actions. A receipt
 /// therefore travels on its own channel and only persists one cursor field.
 /// A phone asking whether a session it is about to create would launch
-/// cleanly, and what it should be warned about first.
+/// cleanly, and which network sources it will use first.
 ///
 /// This is not a `ControllerAction`: it starts nothing, it takes no session
 /// slot, and it must answer before the person has decided anything. It also
-/// needs the controller, because whether a repository has uncommitted changes
-/// is a fact about the disk rather than about the projection.
+/// needs the controller, because resolving a local repository's configured
+/// remotes is a fact about the disk rather than about the projection.
 #[derive(Debug)]
 pub struct PreflightRequest {
     pub bundle_id: String,
@@ -1522,25 +1522,45 @@ pub struct MovePreparationRequest {
     pub reply: tokio::sync::oneshot::Sender<Result<MovePreparation, String>>,
 }
 
-/// A preflight can fail because the requested bare directory is unusable, or
-/// because the controller-side check itself could not complete. The HTTP
-/// surface keeps those outcomes distinct without carrying filesystem, Git, or
-/// SSH details to the phone.
+/// A preflight can fail because the requested bare directory is unusable, an
+/// isolated repository lacks a usable network source, or the controller-side
+/// check itself could not complete. The HTTP surface keeps those outcomes
+/// distinct without carrying filesystem, Git, or SSH details to the phone.
 #[derive(Debug)]
 pub enum PreflightFailure {
     Validation,
+    /// A configured isolated-session repository cannot be used as a network
+    /// source. The detail is safe for the phone and tells the person how to
+    /// choose the supported raw-local path instead.
+    InvalidRepository(String),
     Controller(String),
 }
 
-/// What a preflight found.
-///
-/// The repositories are leaf names. The controller knows them by absolute
-/// path, and a phone is told just enough to recognise the repository it is
-/// about to launch over.
+/// One configured repository's network clone and publication destinations.
+/// URLs have already been passed through the shared display sanitizer before
+/// they reach a phone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightRepository {
+    pub id: String,
+    pub fetch_url: String,
+    pub default_branch: String,
+    pub push_urls: Vec<String>,
+}
+
+/// What a preflight found. Isolated sessions expose their complete network
+/// source plan so the person can review it before creation. Raw-local targets
+/// leave the plan empty because they use the selected checkout directly;
+/// isolated targets set `local_changes_excluded` to make the copy boundary
+/// explicit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreflightNew {
+    #[serde(default)]
     pub dirty_repositories: Vec<String>,
+    #[serde(default)]
+    pub remote_repositories: Vec<PreflightRepository>,
+    pub local_changes_excluded: bool,
 }
 
 /// What a phone asks about, or stores against, its own identity.
@@ -2149,7 +2169,13 @@ async fn preflight_new(
             PreflightFailure::Validation if project_validation => ApiError::bad_request(
                 "project validation failed; check that the directory exists, is accessible, and contains a Git repository with a valid HEAD",
             ),
-            PreflightFailure::Validation | PreflightFailure::Controller(_) => ApiError::new(
+            PreflightFailure::InvalidRepository(_) => ApiError::bad_request(
+                "could not resolve the network repository; check its remote URL, authentication, connectivity, and default branch. Repositories without network remotes require a raw local session",
+            ),
+            PreflightFailure::Validation => ApiError::bad_request(
+                "isolated session repositories need a network Git remote; use a raw local target for a local-only checkout",
+            ),
+            PreflightFailure::Controller(_) => ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "the controller could not check this project",
             ),
@@ -5270,6 +5296,8 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
             .reply
             .send(Ok(PreflightNew {
                 dirty_repositories: Vec::new(),
+                remote_repositories: Vec::new(),
+                local_changes_excluded: false,
             }))
             .unwrap();
         let response = response.await.unwrap().unwrap();
@@ -5339,10 +5367,10 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         assert!(!String::from_utf8_lossy(&body).contains("/source/hel"));
     }
 
-    /// A bundle preflight asks the controller, because whether a working tree
-    /// has uncommitted changes is a fact about the disk.
+    /// An isolated bundle preflight returns the network clone plan so the
+    /// person can review it before creation.
     #[tokio::test]
-    async fn a_bundle_preflight_reports_the_repositories_by_leaf_name() {
+    async fn a_bundle_preflight_reports_network_sources_and_excludes_local_changes() {
         let (app, _, _, mut preflights, _) = app();
         let response = tokio::spawn(
             app.oneshot(
@@ -5362,19 +5390,24 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         request
             .reply
             .send(Ok(PreflightNew {
-                dirty_repositories: vec!["hel".into()],
+                dirty_repositories: Vec::new(),
+                remote_repositories: vec![PreflightRepository {
+                    id: "hel".into(),
+                    fetch_url: "https://github.com/example/hel.git".into(),
+                    default_branch: "main".into(),
+                    push_urls: vec!["ssh://git@example/hel.git".into()],
+                }],
+                local_changes_excluded: true,
             }))
             .unwrap();
         let response = response.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let answer: PreflightNew = serde_json::from_slice(&body).unwrap();
-        assert_eq!(answer.dirty_repositories, vec!["hel".to_owned()]);
-        assert!(
-            !String::from_utf8_lossy(&body).contains('/'),
-            "the preflight published a path: {}",
-            String::from_utf8_lossy(&body)
-        );
+        assert!(answer.dirty_repositories.is_empty());
+        assert!(answer.local_changes_excluded);
+        assert_eq!(answer.remote_repositories[0].default_branch, "main");
+        assert_eq!(answer.remote_repositories[0].push_urls.len(), 1);
     }
 
     /// Everything an agent writes goes through the Markdown renderer, so the

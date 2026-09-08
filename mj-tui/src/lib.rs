@@ -179,6 +179,11 @@ pub enum DashboardAction {
         allow_dirty_local: bool,
         resource_allocation: Option<SessionResourceAllocation>,
     },
+    /// Resolve all network sources for an isolated session and leave the
+    /// creation wizard open until the person reviews that plan.
+    PreflightCreateSession {
+        launch: Box<DashboardAction>,
+    },
     CompleteMountSource {
         target_template_id: String,
         prefix: String,
@@ -352,6 +357,17 @@ pub enum DashboardAction {
     },
     OpenWorkspacePicker,
     QuitDetach,
+}
+
+/// The network plan shown before an isolated session is created. URLs have
+/// already been sanitized at the resolver boundary, so this type is safe to
+/// render in either the terminal or the phone viewer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRepositoryPreview {
+    pub repository_id: String,
+    pub fetch_url: String,
+    pub default_branch: String,
+    pub push_urls: Vec<String>,
 }
 
 pub use mj_controller::hel_server::{WebListenerProcess, WebViewerAccess, WebViewerRecovery};
@@ -1595,6 +1611,13 @@ impl DashboardState {
     /// Identity for supervised launch checks; cancellation invalidates late replies.
     pub fn session_preflight_generation(&self) -> u64 {
         self.session_preflight_generation
+    }
+
+    /// Invalidates an in-flight session preflight while keeping its modal open.
+    /// Selection changes use this so a late result cannot describe a different
+    /// target or repository bundle.
+    pub(crate) fn invalidate_session_preflight(&mut self) {
+        self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);
     }
 
     pub fn cancel_modal(&mut self) {

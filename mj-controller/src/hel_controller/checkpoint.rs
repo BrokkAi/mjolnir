@@ -708,10 +708,8 @@ impl Controller {
                     .map(|repository| CheckpointRepositorySpec {
                         id: repository.id.clone(),
                         relative_destination: repository.destination.clone(),
-                        capture: CheckpointRepositoryCapture::SessionDelta,
-                        origin_override: repository
-                            .is_local()
-                            .then(|| format!("mj-local:{}", repository.id)),
+                        capture: CheckpointRepositoryCapture::RemoteWorkspace,
+                        origin_override: None,
                     })
                     .collect();
                 (workspace_root, bundle.primary_repo.clone(), repositories)
@@ -1922,6 +1920,7 @@ fn export_protocol_unsupported(failure: &str) -> bool {
 
 fn staging_protocol_unsupported(failure: &str) -> bool {
     export_protocol_unsupported(failure)
+        || failure.contains("unsupported checkpoint staging protocol version")
         || failure.contains("unrecognized subcommand")
         || failure.contains("unexpected argument")
 }
@@ -2971,7 +2970,7 @@ mod tests {
                  missing field `relay_root`\n"
         ));
         assert!(export_protocol_unsupported(
-            "Error: unsupported checkpoint export protocol version 2; worker supports 1\n"
+            "Error: unsupported checkpoint export protocol version 3; worker supports 2\n"
         ));
     }
     const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";

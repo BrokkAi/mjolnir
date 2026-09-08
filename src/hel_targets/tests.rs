@@ -81,12 +81,14 @@ fn bundle() -> ProjectBundleSpec {
         repositories: vec![
             RepositorySpec {
                 url: Some("git@github.com:example/app.git".to_owned()),
+                push_urls: Vec::new(),
                 destination: "app".to_owned(),
-                git_ref: Some("main".to_owned()),
+                git_ref: None,
                 reference: None,
             },
             RepositorySpec {
                 url: Some("https://github.com/example/lib.git".to_owned()),
+                push_urls: Vec::new(),
                 destination: "libs/lib".to_owned(),
                 git_ref: None,
                 reference: None,
@@ -833,7 +835,7 @@ fn container_clone_borrows_from_an_optional_read_only_reference() {
             arguments == ["--reference-if-able", "/run/hel/git-cache/app.git"]
         })
     );
-    assert!(clone.args.contains(&"--branch".to_owned()));
+    assert!(!clone.args.contains(&"--branch".to_owned()));
     assert!(
         clone
             .args

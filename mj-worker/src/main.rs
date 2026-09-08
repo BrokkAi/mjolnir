@@ -76,11 +76,6 @@ enum WorkerCommand {
         #[arg(long)]
         spec: PathBuf,
     },
-    /// Restore controller-side local repository bootstrap snapshots.
-    RestoreRepositories {
-        #[arg(long)]
-        spec: PathBuf,
-    },
     /// Install one streamed resource directory on a remote target.
     InstallResource {
         #[arg(long)]
@@ -95,19 +90,6 @@ enum WorkerCommand {
     ReviewMcp {
         #[arg(long)]
         socket: PathBuf,
-    },
-    /// Bridge controller Git services to this worker over stdio.
-    GitBridge {
-        #[arg(long)]
-        root: PathBuf,
-    },
-    /// Expose one bridged repository as a Git ext transport.
-    GitProxy {
-        #[arg(long)]
-        root: PathBuf,
-        #[arg(long)]
-        repository: String,
-        service: String,
     },
 }
 
@@ -220,20 +202,11 @@ async fn run_command(command: Command) -> Result<()> {
         WorkerCommand::RestoreCheckpoint { spec } => {
             hel::hel_checkpoint::restore_from_spec_file(&spec)
         }
-        WorkerCommand::RestoreRepositories { spec } => {
-            hel::hel_checkpoint::restore_repositories_from_spec_file(&spec)
-        }
         WorkerCommand::InstallResource { destination } => {
             hel::hel_resources::install_resource_stream(std::io::stdin(), &destination)
         }
         WorkerCommand::MemoryMcp { root } => hel::hel_project_memory::run_mcp_stdio(&root),
         WorkerCommand::ReviewMcp { socket } => hel::hel_review::mcp::run_mcp_stdio(&socket),
-        WorkerCommand::GitBridge { root } => hel::hel_git_proxy::run_worker_bridge(&root).await,
-        WorkerCommand::GitProxy {
-            root,
-            repository,
-            service,
-        } => hel::hel_git_proxy::run_worker_proxy(&root, &repository, &service).await,
     }
 }
 

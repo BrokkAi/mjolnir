@@ -12,8 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle};
+use hel::hel_config::{HarnessKind, HelConfig, ProjectBundle, is_bare_project_target};
 use hel::hel_database::DetachedSessionDraft;
+use hel::hel_remote_git::{default_branch, display_url, resolve_repository};
 use hel::hel_state::{
     HelState, MaterializedSession, MovePreparation, ProjectSourceIdentity, SessionRecord,
     SessionState,
@@ -21,7 +22,8 @@ use hel::hel_state::{
 use hel::hel_targets::CancellableProcessExecutor;
 use hel_tui::{
     DashboardAction, PreparedMaterializedSessionDetail, PreparedMaterializedSessionSummary,
-    ReviewSettingsChoices, ReviewSettingsDiscoveryResult, SessionOperationKind, WebViewerAccess,
+    RemoteRepositoryPreview, ReviewSettingsChoices, ReviewSettingsDiscoveryResult,
+    SessionOperationKind, WebViewerAccess,
 };
 use mj_controller::hel_controller::Controller;
 use mj_controller::hel_controller::ResumeRepositorySourcePreflight;
@@ -72,6 +74,16 @@ pub(crate) enum DashboardIoUpdate {
         message: String,
     },
     CreateSession(Box<DashboardCreateSessionUpdate>),
+    RemotePreflight {
+        generation: u64,
+        launch: Box<DashboardAction>,
+        result: std::result::Result<Vec<RemoteRepositoryPreview>, String>,
+    },
+    /// A quick launch has no review modal; show the resolved destinations in
+    /// the dashboard notice while creation continues in the worker.
+    RemoteSourcesResolved {
+        repositories: Vec<RemoteRepositoryPreview>,
+    },
     StartupConfig(HelConfig),
     RenameSession {
         session_id: String,
@@ -255,14 +267,8 @@ pub(crate) struct RegisteredDashboardSession {
 }
 
 pub(crate) enum DashboardCreateSessionUpdate {
-    DirtyLocal {
-        action: DashboardAction,
-        repositories: Vec<String>,
-    },
     Registered(Box<RegisteredDashboardSession>),
-    Failed {
-        error: String,
-    },
+    Failed { error: String },
 }
 
 pub(crate) struct ImportedDashboardSessionApply {
@@ -291,6 +297,45 @@ pub(crate) struct LifecycleReload {
 pub(crate) struct LifecycleReloaded {
     reload: LifecycleReload,
     result: std::result::Result<Controller, String>,
+}
+
+fn resolve_remote_repositories(
+    config: &HelConfig,
+    bundle_id: &str,
+    target_template_id: &str,
+    executor: &impl hel::hel_targets::CommandExecutor,
+) -> Result<Vec<RemoteRepositoryPreview>> {
+    let target = config
+        .targets
+        .get(target_template_id)
+        .with_context(|| format!("unknown target template {target_template_id:?}"))?;
+    if is_bare_project_target(target) {
+        return Ok(Vec::new());
+    }
+    let bundle = config
+        .bundles
+        .get(bundle_id)
+        .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
+    bundle
+        .repositories
+        .iter()
+        .map(|repository| {
+            let source = resolve_repository(repository, executor)
+                .with_context(|| format!("repository {:?}", repository.id))?;
+            let default_branch = default_branch(&source, executor)
+                .with_context(|| format!("repository {:?}", repository.id))?;
+            Ok(RemoteRepositoryPreview {
+                repository_id: repository.id.clone(),
+                fetch_url: display_url(&source.fetch_url),
+                default_branch,
+                push_urls: source
+                    .push_urls
+                    .iter()
+                    .map(|url| display_url(url))
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 /// Runs one blocking job off the loop and reports its outcome on the
@@ -1254,7 +1299,7 @@ pub(crate) fn spawn_dashboard_create_session(
             project_directory,
             target_template_id,
             additional_mounts,
-            allow_dirty_local,
+            allow_dirty_local: _allow_dirty_local,
             resource_allocation,
         } = action.clone()
         else {
@@ -1262,29 +1307,19 @@ pub(crate) fn spawn_dashboard_create_session(
         };
         let registered = (|| -> Result<Option<RegisteredDashboardSession>> {
             let controller = Controller::load()?;
-            if !allow_dirty_local && project_directory.is_none() {
-                let dirty = controller
-                    .config
-                    .bundles
-                    .get(&bundle_id)
-                    .with_context(|| format!("unknown bundle {bundle_id:?}"))
-                    .and_then(hel::hel_local_git::dirty_local_repositories)?;
-                if !dirty.is_empty() {
-                    let repositories = dirty
-                        .into_iter()
-                        .map(|repository| {
-                            format!("{}: {}", repository.path.display(), repository.summary)
-                        })
-                        .collect();
-                    if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
-                        DashboardCreateSessionUpdate::DirtyLocal {
-                            action,
-                            repositories,
-                        },
-                    ))) {
-                        tracing::debug!(%error, "dirty repository result dropped after dashboard shutdown");
-                    }
-                    return Ok(None);
+            let executor = CancellableProcessExecutor::new(cancelled.clone())
+                .with_deadline(Duration::from_secs(30));
+            if project_directory.is_none() {
+                let repositories = resolve_remote_repositories(
+                    &controller.config,
+                    &bundle_id,
+                    &target_template_id,
+                    &executor,
+                )?;
+                if let Err(error) =
+                    updates.send(DashboardIoUpdate::RemoteSourcesResolved { repositories })
+                {
+                    tracing::debug!(%error, "remote source result dropped after dashboard shutdown");
                 }
             }
             if cancelled.load(Ordering::Acquire) {
@@ -1308,7 +1343,9 @@ pub(crate) fn spawn_dashboard_create_session(
                         project_directory,
                         target_template_id,
                         additional_mounts,
-                        allow_dirty_local,
+                        // Local changes are never part of isolated creation;
+                        // the compatibility field is intentionally ignored.
+                        allow_dirty_local: false,
                         resource_allocation,
                         title,
                         session_title_override: None,
@@ -1574,6 +1611,34 @@ impl DashboardContext {
                 self.dirty = true;
             }
             DashboardIoUpdate::CreateSession(update) => self.apply_create_session_update(*update),
+            DashboardIoUpdate::RemotePreflight {
+                generation,
+                launch: _launch,
+                result,
+            } => {
+                if generation == self.dashboard.session_preflight_generation() {
+                    self.dashboard
+                        .apply_remote_session_preflight(generation, result);
+                }
+            }
+            DashboardIoUpdate::RemoteSourcesResolved { repositories } => {
+                let destinations = repositories
+                    .iter()
+                    .map(|repository| {
+                        format!(
+                            "{}: fetch {} @ {}; push {}",
+                            repository.repository_id,
+                            repository.fetch_url,
+                            repository.default_branch,
+                            repository.push_urls.join(", ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.dashboard.set_notice(format!(
+                    "Using network repositories (local changes excluded): {destinations}"
+                ));
+            }
             DashboardIoUpdate::RenameSession {
                 session_id,
                 title,
@@ -1889,8 +1954,12 @@ impl DashboardContext {
                             }
                         }
                         launch => {
-                            self.dashboard.finish_session_mount_preflight();
-                            super::actions::start_session_launch(self, launch);
+                            if matches!(&launch, DashboardAction::CreateSession { .. }) {
+                                super::actions::start_create_session_preflight(self, launch);
+                            } else {
+                                self.dashboard.finish_session_mount_preflight();
+                                super::actions::start_session_launch(self, launch);
+                            }
                         }
                     },
                     Ok(Some((source, error))) => {
@@ -1971,12 +2040,6 @@ impl DashboardContext {
 
     fn apply_create_session_update(&mut self, update: DashboardCreateSessionUpdate) {
         match update {
-            DashboardCreateSessionUpdate::DirtyLocal {
-                action,
-                repositories,
-            } => self
-                .dashboard
-                .show_dirty_local_confirmation(action, repositories),
             DashboardCreateSessionUpdate::Registered(registered) => {
                 let registered = *registered;
                 let session_id = registered.session.id.clone();

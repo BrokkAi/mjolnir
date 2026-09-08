@@ -13,7 +13,6 @@ pub mod hel_dictation;
 pub mod hel_doctor;
 pub mod hel_image;
 pub mod hel_import;
-pub use hel::hel_git_proxy;
 pub mod hel_quota;
 pub mod hel_readline;
 pub mod hel_recovery;

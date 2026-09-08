@@ -17,6 +17,7 @@ mod web_viewer;
 mod workspace_selector;
 
 use std::io::{self, Write};
+#[cfg(test)]
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -66,9 +67,6 @@ enum Command {
     /// Internal persistent controller process.
     #[command(hide = true)]
     DaemonRun,
-    /// Internal controller-side local Git broker.
-    #[command(hide = true)]
-    Broker(BrokerArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
     /// Discover local agent homes and create an initial Mjolnir configuration.
@@ -202,12 +200,6 @@ enum RecoverCommand {
 }
 
 #[derive(Debug, Args)]
-struct BrokerArgs {
-    #[arg(long)]
-    spec: PathBuf,
-}
-
-#[derive(Debug, Args)]
 struct DoctorArgs {
     /// Emit a machine-readable array of prerequisite checks.
     #[arg(long)]
@@ -241,15 +233,9 @@ enum SetupPlatform {
 fn main() -> Result<()> {
     mj_controller::hel_server::install_rustls_crypto_provider();
     let cli = Cli::parse();
-    let is_user_process = !matches!(&cli.command, Some(Command::Broker(_)));
-    let log = if is_user_process {
-        Some(logging::ControllerLog::start(command_name(
-            cli.command.as_ref(),
-        ))?)
-    } else {
-        logging::start_stderr()?;
-        None
-    };
+    let log = Some(logging::ControllerLog::start(command_name(
+        cli.command.as_ref(),
+    ))?);
     install_panic_logging();
     let result = run(cli);
     if let Err(error) = &result {
@@ -309,7 +295,6 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Checkpoint(_)) => "checkpoint",
         Some(Command::Move(_)) => "move",
         Some(Command::Login(_)) => "login",
-        Some(Command::Broker(_)) => "broker",
     }
 }
 
@@ -334,9 +319,6 @@ async fn run_command(
             .map(|()| DashboardExit::Normal),
         Some(Command::Daemon(args)) => daemon_command(args).await.map(|()| DashboardExit::Normal),
         Some(Command::DaemonRun) => daemon::run_daemon_process()
-            .await
-            .map(|()| DashboardExit::Normal),
-        Some(Command::Broker(args)) => hel::hel_git_proxy::run_broker(&args.spec)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),

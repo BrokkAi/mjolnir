@@ -384,29 +384,29 @@ pub(super) fn preflight_target(
     }
 }
 
-pub(super) fn backend_bundle(bundle: &ProjectBundle) -> Result<ProjectBundleSpec> {
+pub(super) fn backend_bundle(
+    bundle: &ProjectBundle,
+    executor: &impl CommandExecutor,
+) -> Result<ProjectBundleSpec> {
     let primary = bundle.primary().context("bundle primary is missing")?;
     Ok(ProjectBundleSpec {
         primary: primary.destination.to_string_lossy().into_owned(),
         repositories: bundle
             .repositories
             .iter()
-            .map(|repository| RepositorySpec {
-                url: repository.github.as_deref().map(github_url),
-                destination: repository.destination.to_string_lossy().into_owned(),
-                git_ref: repository.git_ref.clone(),
-                reference: None,
+            .map(|repository| {
+                let source = hel::hel_remote_git::resolve_repository(repository, executor)
+                    .with_context(|| format!("repository {:?}", repository.id))?;
+                Ok(RepositorySpec {
+                    url: Some(source.fetch_url),
+                    push_urls: source.push_urls,
+                    destination: repository.destination.to_string_lossy().into_owned(),
+                    git_ref: None,
+                    reference: None,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
     })
-}
-
-fn github_url(source: &str) -> String {
-    if source.contains("://") || source.starts_with("git@") {
-        source.to_string()
-    } else {
-        format!("https://github.com/{}.git", source.trim_end_matches(".git"))
-    }
 }
 
 /// Per-session container size overrides. They win over both the target
@@ -601,16 +601,18 @@ pub(super) fn configure_github_token_environment(target: &mut hel_targets::Targe
 
 pub(super) fn use_github_https_urls(bundle: &mut hel_targets::ProjectBundleSpec) {
     for repository in &mut bundle.repositories {
-        let Some(source) = repository.url.as_deref() else {
-            continue;
-        };
-        let Some(github) = crate::hel_setup::github_repository_from_origin(source) else {
-            continue;
-        };
-        repository.url = Some(format!(
-            "https://github.com/{}/{}.git",
-            github.owner, github.repository
-        ));
+        for source in repository
+            .url
+            .iter_mut()
+            .chain(repository.push_urls.iter_mut())
+        {
+            if let Some(github) = crate::hel_setup::github_repository_from_origin(source) {
+                *source = format!(
+                    "https://github.com/{}/{}.git",
+                    github.owner, github.repository
+                );
+            }
+        }
     }
 }
 
@@ -1019,32 +1021,6 @@ pub(super) fn backend_locator(
     })
 }
 
-pub(super) fn absolute_target_path(
-    executor: &impl CommandExecutor,
-    locator: &hel_targets::TargetLocator,
-    session_id: &str,
-    path: &str,
-) -> Result<String> {
-    if path.starts_with('/') {
-        return Ok(path.to_owned());
-    }
-    let output = execute_checked(
-        executor,
-        hel_targets::command_on_locator(
-            locator,
-            session_id,
-            vec!["pwd".into()],
-            "resolve target home directory",
-        )?,
-    )?;
-    let directory = String::from_utf8(output.stdout).context("decode target working directory")?;
-    let directory = directory.trim_end_matches(['\r', '\n', '/']);
-    if directory.is_empty() || !directory.starts_with('/') {
-        bail!("target returned an invalid working directory {directory:?}");
-    }
-    Ok(format!("{directory}/{path}"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -1295,10 +1271,10 @@ mod tests {
                 github: Some("example/app".into()),
                 local: None,
                 destination: PathBuf::from("services/app"),
-                git_ref: Some("main".into()),
+                git_ref: None,
             }],
         };
-        let backend = backend_bundle(&bundle).unwrap();
+        let backend = backend_bundle(&bundle, &hel_targets::ProcessExecutor).unwrap();
         assert_eq!(backend.primary, "services/app");
         assert_eq!(
             backend.repositories[0].url.as_deref(),
@@ -1402,6 +1378,10 @@ mod tests {
             primary: "app".into(),
             repositories: vec![hel_targets::RepositorySpec {
                 url: Some("git@github.com:example/app.git".into()),
+                push_urls: vec![
+                    "git@github.com:fork/app.git".into(),
+                    "ssh://git@example.test/app.git".into(),
+                ],
                 destination: "app".into(),
                 git_ref: None,
                 reference: None,
@@ -1411,6 +1391,13 @@ mod tests {
         assert_eq!(
             bundle.repositories[0].url.as_deref(),
             Some("https://github.com/example/app.git")
+        );
+        assert_eq!(
+            bundle.repositories[0].push_urls,
+            [
+                "https://github.com/fork/app.git",
+                "ssh://git@example.test/app.git"
+            ]
         );
     }
     fn container_target(

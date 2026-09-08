@@ -16,7 +16,6 @@ use super::checkpoint::{
     CheckpointExportPolicy, LatchExclusivity, prune_replaced_checkpoint,
     release_projection_behind_checkpoint, verify_installed_checkpoint_gate, wait_for_relay_closed,
 };
-use super::provisioning::retire_git_broker;
 use super::worktree::{cleanup_managed_worktree, retire_managed_worktree};
 use super::{Controller, now, persist_session_record_transition_or_restore};
 
@@ -353,10 +352,6 @@ impl Controller {
                 "could not record that the second-opinion conversation ends with this target"
             );
         }
-        // The session's local Git origin ends here. Stopping the broker before
-        // the target it bridges into disappears is what keeps a normal close
-        // from reading as an unexpected broker death.
-        retire_git_broker(session_id).context("stop the session's local Git broker")?;
         let locator = destroying
             .target
             .as_ref()
@@ -501,7 +496,6 @@ impl Controller {
             verify_installed_checkpoint_gate(session_id, checkpoint)
                 .context("verify the recovery archive before force stopping")?;
         }
-        retire_git_broker(session_id).context("stop the session's local Git broker")?;
         let mut deferred = false;
         if let Some(locator) = &session.target {
             let backend = backend_locator(locator, &session, &self.config)?;
@@ -551,9 +545,6 @@ impl Controller {
         if session.state.is_active() {
             bail!("refusing to destroy active session {session_id}");
         }
-        // A session destroyed for good keeps nothing, including a broker an
-        // earlier failure left running.
-        retire_git_broker(session_id).context("stop the session's local Git broker")?;
         if let Some(worktree) = &session.managed_worktree {
             cleanup_managed_worktree(executor, worktree)
                 .context("remove managed raw-session worktree")?;
@@ -610,7 +601,6 @@ impl Controller {
         // A session destroyed for good keeps nothing, including a broker an
         // earlier failure left running; retiring it first also stops a live
         // writer from recreating files under the teardown below.
-        retire_git_broker(session_id).context("stop the session's local Git broker")?;
         if let Some(locator) = &session.target {
             let backend = backend_locator(locator, &session, &self.config)?;
             execute_target_cleanup(&backend, session_id, executor)?;
@@ -1330,151 +1320,7 @@ mod tests {
             SessionState::Stopped
         );
     }
-    /// Ending a session ends the local Git origin it was serving. Close,
-    /// force stop, and permanent destruction all retire the broker on purpose:
-    /// its spec and lock file go, so nothing restarts it against a target
-    /// that is being torn down, and its log stays for reading afterwards.
-    #[cfg(unix)]
-    #[test]
-    fn every_session_ending_retires_its_local_git_broker() {
-        const RETIREMENT_TEST_CHILD: &str = "MJ_TEST_BROKER_RETIREMENT_CHILD";
 
-        struct SucceedingExecutor;
-
-        impl CommandExecutor for SucceedingExecutor {
-            fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-                Ok(CommandOutput {
-                    status: 0,
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                })
-            }
-        }
-
-        // MJ_DATA_DIR is process-global, so run the half that reads it in an
-        // exact child test instead of racing unrelated tests in this process.
-        if std::env::var_os(RETIREMENT_TEST_CHILD).is_none() {
-            let directory = tempfile::tempdir().unwrap();
-            let test_name = format!(
-                "{}::every_session_ending_retires_its_local_git_broker",
-                module_path!()
-                    .strip_prefix("mj_controller::")
-                    .unwrap_or(module_path!())
-            );
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", &test_name, "--nocapture"])
-                .env(RETIREMENT_TEST_CHILD, "1")
-                .env("MJ_DATA_DIR", directory.path())
-                .output()
-                .unwrap();
-            let reported = String::from_utf8_lossy(&output.stdout).into_owned();
-            assert!(
-                output.status.success(),
-                "isolated broker retirement test failed\nstdout:\n{reported}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            // A filter that matches nothing also exits zero, so insist the
-            // child really ran this test.
-            assert!(
-                reported.contains("1 passed"),
-                "the isolated broker retirement test never ran\nstdout:\n{reported}"
-            );
-            return;
-        }
-        // Alone in this child process, so it installs the one writer.
-        let _writer = hel::hel_database::install_isolated_test_writer();
-
-        let brokers = hel::hel_config::data_dir().join("git-brokers");
-        std::fs::create_dir_all(&brokers).unwrap();
-        let seed_broker = |session_id: &str| {
-            for (extension, contents) in [
-                ("json", "{}"),
-                // A PID file nobody holds a lock on: this session's broker is
-                // already stopped, so ending the session only has to clear
-                // what it would otherwise be restarted from.
-                ("pid", "424242"),
-                ("ready", "ready\n"),
-                ("log", "broker log\n"),
-            ] {
-                std::fs::write(brokers.join(format!("{session_id}.{extension}")), contents)
-                    .unwrap();
-            }
-        };
-        let assert_retired = |session_id: &str| {
-            for extension in ["json", "pid", "ready"] {
-                let path = brokers.join(format!("{session_id}.{extension}"));
-                assert!(!path.exists(), "{} outlived its session", path.display());
-            }
-            assert_eq!(
-                std::fs::read_to_string(brokers.join(format!("{session_id}.log"))).unwrap(),
-                "broker log\n",
-                "the broker log must survive its session"
-            );
-        };
-
-        let directory = tempfile::tempdir().unwrap();
-        let closing = "0123456789abcdef0123456789abcdef";
-        let force_stopped = "0123456789abcdef0123456789abcdee";
-        let destroyed = "0123456789abcdef0123456789abcded";
-        let checkpoint = write_checkpoint_gate_archive(directory.path(), closing, 7);
-        let mut closing_session = checkpoint_test_session(closing);
-        closing_session.target_template_id = "local".into();
-        closing_session.state = SessionState::Closing;
-        closing_session.target = Some(TargetLocator::LocalBare {
-            worker_root: directory.path().join(closing),
-        });
-        closing_session.checkpoint = Some(checkpoint.clone());
-        let force_stop_checkpoint =
-            write_checkpoint_gate_archive(directory.path(), force_stopped, 7);
-        let mut force_stopped_session = checkpoint_test_session(force_stopped);
-        force_stopped_session.target_template_id = "local".into();
-        force_stopped_session.state = SessionState::Running;
-        force_stopped_session.target = Some(TargetLocator::LocalBare {
-            worker_root: directory.path().join(force_stopped),
-        });
-        force_stopped_session.checkpoint = Some(force_stop_checkpoint);
-        let mut destroyed_session = checkpoint_test_session(destroyed);
-        destroyed_session.target_template_id = "local".into();
-        destroyed_session.state = SessionState::Stopped;
-        let mut config = HelConfig::default();
-        config
-            .targets
-            .insert("local".into(), TargetTemplate::LocalBare);
-        let mut controller = Controller {
-            config,
-            state: HelState {
-                sessions: BTreeMap::from([
-                    (closing.into(), closing_session),
-                    (force_stopped.into(), force_stopped_session),
-                    (destroyed.into(), destroyed_session),
-                ]),
-                ..HelState::default()
-            },
-        };
-        for session_id in [closing, force_stopped, destroyed] {
-            seed_broker(session_id);
-        }
-
-        controller
-            .destroy_after_verified_checkpoint_with(
-                closing,
-                &checkpoint,
-                &SucceedingExecutor,
-                |_| Ok(()),
-            )
-            .unwrap();
-        assert_retired(closing);
-
-        controller
-            .force_stop_with(force_stopped, &SucceedingExecutor, |_| Ok(()))
-            .unwrap();
-        assert_retired(force_stopped);
-
-        controller
-            .destroy_session_controlled(destroyed, &SucceedingExecutor)
-            .unwrap();
-        assert_retired(destroyed);
-    }
     #[test]
     fn interrupted_close_error_preserves_destroying_phase() {
         let session_id = "0123456789abcdef0123456789abcdef";

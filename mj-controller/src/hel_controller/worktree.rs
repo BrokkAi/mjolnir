@@ -60,7 +60,19 @@ impl Controller {
                 Ok(())
             }
             TargetTemplate::SshBare { ssh, .. } => {
-                hel_targets::validate_bare_project_directory(&backend_ssh(ssh), directory, executor)
+                hel_targets::validate_bare_project_directory(
+                    &backend_ssh(ssh),
+                    directory,
+                    executor,
+                )?;
+                hel::hel_remote_git::resolve_local_repository(
+                    directory,
+                    &RemoteGitExecutor {
+                        executor,
+                        ssh: backend_ssh(ssh),
+                    },
+                )?;
+                Ok(())
             }
             _ => bail!("project directory validation requires a bare target"),
         }
@@ -202,6 +214,9 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("raw session target template disappeared during provisioning")?;
+        if matches!(template, TargetTemplate::SshBare { .. }) {
+            self.validate_project_directory(&session.target_template_id, selected, executor)?;
+        }
         let target = managed_worktree_target(template)?;
         if matches!(target, ManagedWorktreeTarget::Local)
             && local_project_repository(selected, executor)?.is_none()
@@ -272,6 +287,32 @@ impl Controller {
         } else {
             self.cleanup_new_session_worktree(session_id, executor)
         }
+    }
+}
+
+/// Reuse the same Git configuration resolver on a remote bare host.
+struct RemoteGitExecutor<'a, E> {
+    executor: &'a E,
+    ssh: SshTarget,
+}
+
+impl<E: CommandExecutor> CommandExecutor for RemoteGitExecutor<'_, E> {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let mut arguments = vec!["env".to_owned()];
+        arguments.extend(
+            command
+                .env
+                .iter()
+                .map(|(key, value)| format!("{key}={value}")),
+        );
+        arguments.push(command.program.clone());
+        arguments.extend(command.args.clone());
+        self.executor
+            .execute(&ssh_command_spec(&self.ssh, arguments).purpose(&command.purpose))
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.executor.cancellation_requested()
     }
 }
 
@@ -508,7 +549,7 @@ pub(super) struct RawToWorkspaceConversion {
     /// target. For a managed session this is the session's own worktree, not
     /// the user's primary checkout.
     pub(super) checkout: PathBuf,
-    /// The repository the Git proxy serves, and the bundle's `local:` path.
+    /// The source repository represented by the bundle's local path.
     pub(super) repository: PathBuf,
     pub(super) bundle_id: String,
     /// Set when the configuration does not already describe this checkout.
@@ -1372,10 +1413,8 @@ pub fn resume_compatibility(
                 "this session opens {directory} directly on its host; resume it on the same kind of bare target"
             ));
         }
-        // Only a checkout on this machine can be carried into a target: the
-        // Git proxy serves controller-side paths.
         if matches!(previous, TargetTemplate::LocalBare) {
-            return Ok(ResumePlan::RawToWorkspace);
+            return Err("raw sessions do not have isolated network repository provenance; resume on a bare target or start a new isolated session".to_owned());
         }
         return Err(format!(
             "this session opens {directory} on an SSH host; resume it on a bare target there"
@@ -1391,11 +1430,10 @@ pub fn resume_compatibility(
             "this session works directly in {directory} on {}; resume it on a bare target there",
             managed_worktree_location(&worktree.target)
         )),
-        // The checkout moves into the target, dirty state and all. Only a whole
-        // checkout can move: the checkpoint describes the session's directory as
-        // if it were the repository root.
+        // Reject this in the target picker and live-move preparation, before
+        // any source is stopped: raw checkpoints cannot seed isolated clones.
         Err(_) if Some(&worktree.worktree_root) == session.project_directory.as_ref() => {
-            Ok(ResumePlan::RawToWorkspace)
+            Err("raw sessions do not have isolated network repository provenance; resume on a bare target or start a new isolated session".to_owned())
         }
         Err(_) => Err(format!(
             "this session opens {directory}, a subdirectory of its checkout; resume it on a bare target"
@@ -1778,6 +1816,8 @@ mod tests {
     }
     fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMetadata {
         RepositoryMetadata {
+            push_urls: Vec::new(),
+            remote_workspace: false,
             id: "project".into(),
             relative_destination: PathBuf::from("project"),
             origin: "mj-local:project".into(),
@@ -2001,25 +2041,16 @@ mod tests {
         assert!(reason.contains("dev@builder"), "{reason}");
     }
     #[test]
-    fn a_local_raw_checkout_converts_when_it_resumes_on_a_container() {
+    fn raw_checkpoints_cannot_move_to_an_isolated_target() {
         let config = resume_compatibility_config();
-
-        assert_eq!(
-            resume_compatibility(
-                &managed_raw_session(ManagedWorktreeTarget::Local),
-                &config,
-                "podman",
-            ),
-            Ok(ResumePlan::RawToWorkspace)
-        );
-        assert_eq!(
-            resume_compatibility(
-                &raw_session_on("local-bare", "/home/dev/project"),
-                &config,
-                "podman",
-            ),
-            Ok(ResumePlan::RawToWorkspace)
-        );
+        for session in [
+            managed_raw_session(ManagedWorktreeTarget::Local),
+            raw_session_on("local-bare", "/home/dev/project"),
+        ] {
+            let reason = resume_compatibility(&session, &config, "podman").unwrap_err();
+            assert!(reason.contains("network repository provenance"), "{reason}");
+            assert!(reason.contains("bare target"), "{reason}");
+        }
     }
     #[test]
     fn a_raw_checkout_on_an_ssh_host_cannot_convert() {
