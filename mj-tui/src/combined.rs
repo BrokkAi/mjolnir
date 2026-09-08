@@ -307,11 +307,11 @@ fn render_workspace_switcher(frame: &mut Frame, area: Rect, workspace_name: &str
             name,
             usize::from(name_area.width),
         ))
-        .style(Style::default().fg(theme::ACCENT)),
+        .style(Style::default().fg(theme::palette().accent)),
         name_area,
     );
     frame.render_widget(
-        Paragraph::new(" ▾").style(Style::default().fg(theme::ACCENT)),
+        Paragraph::new(" ▾").style(Style::default().fg(theme::palette().accent)),
         Rect::new(name_area.right(), inner.y, inner.width.min(2), inner.height),
     );
 }
@@ -324,6 +324,17 @@ fn render_workspace_switcher(frame: &mut Frame, area: Rect, workspace_name: &str
 /// selection on the transcript, so its row space has to stay frozen for this
 /// frame.
 pub fn render_combined(
+    frame: &mut Frame,
+    dashboard: &mut DashboardState,
+    chat: Option<&mut ActiveChat>,
+    transcript_selected: bool,
+) {
+    theme::with_theme(dashboard.config.theme, || {
+        render_combined_themed(frame, dashboard, chat, transcript_selected);
+    });
+}
+
+fn render_combined_themed(
     frame: &mut Frame,
     dashboard: &mut DashboardState,
     mut chat: Option<&mut ActiveChat>,

@@ -295,15 +295,15 @@ pub(crate) fn pane_size_controls(active: PaneSize, maximize_enabled: bool) -> Li
         }
         let style = if size == PaneSize::Maximized && !maximize_enabled {
             Style::default()
-                .fg(theme::BORDER)
+                .fg(theme::palette().border)
                 .remove_modifier(Modifier::BOLD)
         } else if size == active {
             Style::default()
-                .fg(theme::ACCENT)
-                .bg(theme::SURFACE_RAISED)
+                .fg(theme::palette().accent)
+                .bg(theme::palette().surface_raised)
                 .add_modifier(Modifier::BOLD)
         } else {
-            theme::muted().bg(theme::SURFACE)
+            theme::muted().bg(theme::palette().surface)
         };
         spans.push(Span::styled(format!(" {glyph} "), style));
     }
@@ -442,7 +442,7 @@ fn drawn_session_rows_with_options(
                     Line::styled(
                         format!("{hotkey}{label}"),
                         Style::default()
-                            .fg(theme::SECONDARY)
+                            .fg(theme::palette().secondary)
                             .add_modifier(Modifier::BOLD),
                     ),
                 ));
@@ -578,7 +578,7 @@ fn drawn_session_rows_with_options(
                 }
                 if selected {
                     for line in lines.iter_mut().skip(usize::from(heading_key.is_some())) {
-                        line.style = line.style.bg(theme::SURFACE_RAISED);
+                        line.style = line.style.bg(theme::palette().surface_raised);
                     }
                 }
                 rows.push(DrawnSessionRow {
@@ -831,7 +831,7 @@ fn sessions_title(workspace_name: &str, width: u16) -> Line<'static> {
         Span::raw(prefix),
         Span::styled(
             crate::widgets::truncate_text(workspace_name, workspace_room),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ),
         Span::raw(" "),
     ])
@@ -853,7 +853,7 @@ fn sessions_title_with_pending(
     let suffix = Span::styled(
         format!(" · Needs input: {pending_count}"),
         Style::default()
-            .fg(theme::WARNING)
+            .fg(theme::palette().warning)
             .add_modifier(Modifier::BOLD),
     );
     if base.width().saturating_add(suffix.width()) <= budget {
@@ -864,7 +864,7 @@ fn sessions_title_with_pending(
     let compact = Line::styled(
         format!(" Sessions [{pending_count}]"),
         Style::default()
-            .fg(theme::WARNING)
+            .fg(theme::palette().warning)
             .add_modifier(Modifier::BOLD),
     );
     if compact.width() <= budget {
@@ -1097,7 +1097,7 @@ pub fn render_sessions_preview(
     let lines = if layout.lines.is_empty() {
         vec![Line::styled(
             "No sessions",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         )]
     } else {
         layout.lines
@@ -1264,9 +1264,9 @@ fn session_transition_line(
         crate::widgets::truncate_text(&line, usize::from(width.saturating_sub(2))),
         Style::default()
             .fg(if failure.is_some() {
-                theme::ERROR
+                theme::palette().error
             } else {
-                theme::WARNING
+                theme::palette().warning
             })
             .add_modifier(Modifier::BOLD),
     )
@@ -1427,13 +1427,13 @@ fn permission_badge(mode: Option<PermissionMode>) -> Option<Span<'static>> {
         PermissionMode::Guardian => Span::styled(
             "[G]",
             Style::default()
-                .fg(theme::SUCCESS)
+                .fg(theme::palette().success)
                 .add_modifier(Modifier::BOLD),
         ),
         PermissionMode::Yolo => Span::styled(
             "[Y]",
             Style::default()
-                .fg(theme::ERROR)
+                .fg(theme::palette().error)
                 .add_modifier(Modifier::BOLD),
         ),
     })
@@ -1480,7 +1480,7 @@ fn prefixed_summary_line(
         )),
     ]);
     if muted {
-        line.style(Style::default().fg(theme::MUTED))
+        line.style(Style::default().fg(theme::palette().muted))
     } else {
         line
     }
@@ -1497,8 +1497,8 @@ pub(crate) fn render_session_scrollbar(
         return;
     }
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .thumb_style(Style::default().fg(theme::TEXT))
-        .track_style(Style::default().fg(theme::MUTED));
+        .thumb_style(Style::default().fg(theme::palette().text))
+        .track_style(Style::default().fg(theme::palette().muted));
     // Ratatui counts possible viewport positions, not total content rows.
     // The last offset must put the thumb against the end of the track.
     let mut state = ScrollbarState::new(
@@ -1620,22 +1620,22 @@ fn session_band_color(
     state: SessionState,
 ) -> Color {
     if unreachable || state == SessionState::Error {
-        return theme::ERROR;
+        return theme::palette().error;
     }
     let Some(detail) = detail else {
-        return theme::WARNING;
+        return theme::palette().warning;
     };
     if !detail.pending_elicitations.is_empty() {
-        return theme::WARNING;
+        return theme::palette().warning;
     }
     if state == SessionState::Running && detail.activity.is_idle(detail.current_turn_started_at) {
-        return theme::ACCENT;
+        return theme::palette().accent;
     }
     if detail.has_unread() {
         // Unread work keeps its attention color until it has been opened.
-        return theme::SECONDARY;
+        return theme::palette().secondary;
     }
-    theme::WARNING
+    theme::palette().warning
 }
 
 #[cfg(test)]
@@ -1656,7 +1656,7 @@ pub(crate) fn unread_line(unread_count: usize) -> Line<'static> {
         Line::from(Span::styled(
             format!("{unread_count} unread"),
             Style::default()
-                .fg(theme::WARNING)
+                .fg(theme::palette().warning)
                 .add_modifier(Modifier::BOLD),
         ))
     } else {
@@ -1774,7 +1774,7 @@ pub(crate) fn render_capacity(
         if let Some(staleness) = capacity_staleness(detail, now_epoch_seconds) {
             in_use.push(Span::styled(
                 format!("  · {staleness}"),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::palette().muted),
             ));
         }
         Row::new([
@@ -1846,9 +1846,9 @@ pub(crate) fn render_capacity(
 /// is the inverse — a busy host has little left.
 fn headroom_color(headroom_percent: u8) -> Color {
     match headroom_percent {
-        0..=20 => theme::ERROR,
-        21..=50 => theme::WARNING,
-        _ => theme::SUCCESS,
+        0..=20 => theme::palette().error,
+        21..=50 => theme::palette().warning,
+        _ => theme::palette().success,
     }
 }
 
@@ -2062,7 +2062,9 @@ const QUOTA_CHART_RIGHT_BORDER: &str = "▏";
 const QUOTA_BAR_CELLS: usize = 10;
 
 fn quota_chart_border_style() -> Style {
-    Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
+    Style::default()
+        .fg(theme::palette().muted)
+        .bg(theme::palette().background)
 }
 
 fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
@@ -2079,20 +2081,20 @@ fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
         .saturating_sub(full_cells)
         .saturating_sub(usize::from(partial_eighths > 0));
     let color = match remaining {
-        0..=20 => theme::ERROR,
-        21..=50 => theme::WARNING,
-        _ => theme::SUCCESS,
+        0..=20 => theme::palette().error,
+        21..=50 => theme::palette().warning,
+        _ => theme::palette().success,
     };
     let bar_style = Style::default()
         .fg(color)
-        .bg(theme::BACKGROUND)
+        .bg(theme::palette().background)
         .add_modifier(Modifier::BOLD);
     Line::from(vec![
         Span::styled("█".repeat(full_cells), bar_style),
         Span::styled(partial.to_string(), bar_style),
         Span::styled(
             EMPTY_QUOTA_CELL.repeat(empty_cells),
-            Style::default().bg(theme::BACKGROUND),
+            Style::default().bg(theme::palette().background),
         ),
         // This replaces the separator before the percentage, keeping the
         // line's width unchanged while closing the chart on its right edge.
@@ -2110,7 +2112,7 @@ fn api_quota_bar() -> Line<'static> {
     let label_cells = label.chars().count().min(QUOTA_BAR_CELLS);
     let left = (QUOTA_BAR_CELLS - label_cells) / 2;
     let right = QUOTA_BAR_CELLS - label_cells - left;
-    let field = Style::default().bg(theme::BACKGROUND);
+    let field = Style::default().bg(theme::palette().background);
     Line::from(vec![
         Span::styled(EMPTY_QUOTA_CELL.repeat(left), field),
         Span::styled(label, field.add_modifier(Modifier::BOLD)),
@@ -2401,7 +2403,7 @@ pub(crate) fn render_quotas(
     let status = crate::widgets::truncate_text(&format!("({refresh_status}) "), status_budget);
     let title = Line::from(vec![
         Span::raw(label),
-        Span::styled(status, Style::default().fg(theme::MUTED)),
+        Span::styled(status, Style::default().fg(theme::palette().muted)),
     ]);
     let quotas_focused = dashboard.focus == Focus::Quota;
     let content_widths = [
@@ -2557,14 +2559,17 @@ pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> St
 pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
     let notice = dashboard.notices.current();
     let line = match notice.as_deref() {
-        Some(notice) => Line::styled(notice.to_owned(), Style::default().fg(theme::WARNING)),
+        Some(notice) => Line::styled(
+            notice.to_owned(),
+            Style::default().fg(theme::palette().warning),
+        ),
         None => {
             let text = combined_footer_text(dashboard, area.width);
             theme::hints(&text)
         }
     };
     frame.render_widget(
-        Paragraph::new(line).style(theme::muted().bg(theme::SURFACE)),
+        Paragraph::new(line).style(theme::muted().bg(theme::palette().surface)),
         area,
     );
 }
@@ -2701,7 +2706,8 @@ mod tests {
             .expect("user transcript line");
         let user_column = cell_column(user_line, "You: question 1");
         assert!((user_column..user_column + 15).all(|column| {
-            buffer[(buffer.area.x + column, buffer.area.y + user_row as u16)].fg == theme::MUTED
+            buffer[(buffer.area.x + column, buffer.area.y + user_row as u16)].fg
+                == theme::palette().muted
         }));
     }
 
@@ -2884,7 +2890,7 @@ mod tests {
         let user_column = cell_column(user_line, "You: unanswered follow-up");
         assert_ne!(
             buffer[(buffer.area.x + user_column, buffer.area.y + user_row as u16)].fg,
-            theme::MUTED
+            theme::palette().muted
         );
     }
 
@@ -2927,16 +2933,16 @@ mod tests {
                 let cell = &buffer[(area.x + 1, area.y)];
                 assert_eq!(cell.symbol(), glyph.to_string());
                 if *size == PaneSize::Maximized && !dashboard.pane_maximize_enabled(pane) {
-                    assert_eq!(cell.bg, theme::SURFACE);
-                    assert_eq!(cell.fg, theme::BORDER);
+                    assert_eq!(cell.bg, theme::palette().surface);
+                    assert_eq!(cell.fg, theme::palette().border);
                     assert!(!cell.modifier.contains(Modifier::BOLD));
                 } else if *size == PaneSize::Standard {
-                    assert_eq!(cell.bg, theme::SURFACE_RAISED);
-                    assert_eq!(cell.fg, theme::ACCENT);
+                    assert_eq!(cell.bg, theme::palette().surface_raised);
+                    assert_eq!(cell.fg, theme::palette().accent);
                     assert!(cell.modifier.contains(Modifier::BOLD));
                 } else {
-                    assert_eq!(cell.bg, theme::SURFACE);
-                    assert_eq!(cell.fg, theme::MUTED);
+                    assert_eq!(cell.bg, theme::palette().surface);
+                    assert_eq!(cell.fg, theme::palette().muted);
                 }
             }
         }
@@ -3326,7 +3332,7 @@ mod tests {
         assert!(
             (first_y..first_y + 4).all(|y| {
                 (buffer.area.x + 1..buffer.area.right() - 1)
-                    .all(|x| buffer[(x, y)].bg != theme::MUTED)
+                    .all(|x| buffer[(x, y)].bg != theme::palette().muted)
             }),
             "selection must not paint a background"
         );
@@ -3577,7 +3583,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&normal), false, SessionState::Running),
-            theme::WARNING
+            theme::palette().warning
         );
 
         let unread = SessionDetail {
@@ -3587,7 +3593,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&unread), false, SessionState::Running),
-            theme::SECONDARY
+            theme::palette().secondary
         );
 
         let unread_idle = SessionDetail {
@@ -3596,13 +3602,13 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&unread_idle), false, SessionState::Running),
-            theme::ACCENT
+            theme::palette().accent
         );
 
         let read_idle = SessionDetail::default();
         assert_eq!(
             session_band_color(Some(&read_idle), false, SessionState::Running),
-            theme::ACCENT
+            theme::palette().accent
         );
 
         let collapsed = collapsed_session_line(
@@ -3619,7 +3625,7 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(collapsed.style.fg, Some(theme::ACCENT));
+        assert_eq!(collapsed.style.fg, Some(theme::palette().accent));
 
         let foreground = SessionDetail {
             activity: mj_chat::usage_format::SessionActivity {
@@ -3630,7 +3636,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&foreground), false, SessionState::Running),
-            theme::WARNING,
+            theme::palette().warning,
             "foreground work is not idle"
         );
 
@@ -3647,7 +3653,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&unread_background), false, SessionState::Running),
-            theme::SECONDARY,
+            theme::palette().secondary,
             "background work does not use the blue idle-unread band"
         );
         let read_background = SessionDetail {
@@ -3656,7 +3662,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&read_background), false, SessionState::Running),
-            theme::WARNING,
+            theme::palette().warning,
             "background work is not idle after it has been read"
         );
 
@@ -3666,7 +3672,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&restarted_idle), false, SessionState::Running),
-            theme::ACCENT
+            theme::palette().accent
         );
 
         let restarted_running = SessionDetail {
@@ -3676,7 +3682,7 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&restarted_running), false, SessionState::Running),
-            theme::SECONDARY
+            theme::palette().secondary
         );
 
         let needs_input = SessionDetail {
@@ -3699,34 +3705,34 @@ mod tests {
         };
         assert_eq!(
             session_band_color(Some(&needs_input), false, SessionState::Running),
-            theme::WARNING,
+            theme::palette().warning,
             "pending input overrides the idle blue"
         );
 
         assert_eq!(
             session_band_color(Some(&read_idle), false, SessionState::Provisioning),
-            theme::WARNING,
+            theme::palette().warning,
             "provisioning is a lifecycle state, not a live idle session"
         );
         assert_eq!(
             session_band_color(Some(&read_idle), false, SessionState::Error),
-            theme::ERROR,
+            theme::palette().error,
             "error overrides idle"
         );
         assert_eq!(
             session_band_color(None, false, SessionState::Running),
-            theme::WARNING,
+            theme::palette().warning,
             "unknown detail stays at the default"
         );
 
         // An unreachable target is red, overriding every other state.
         assert_eq!(
             session_band_color(Some(&unread), true, SessionState::Running),
-            theme::ERROR
+            theme::palette().error
         );
         assert_eq!(
             session_band_color(None, true, SessionState::Running),
-            theme::ERROR
+            theme::palette().error
         );
         let unreachable_line = collapsed_session_line(
             "› ",
@@ -3742,7 +3748,7 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(unreachable_line.style.fg, Some(theme::ERROR));
+        assert_eq!(unreachable_line.style.fg, Some(theme::palette().error));
     }
 
     #[test]
@@ -3767,14 +3773,14 @@ mod tests {
                 .expect("session row");
             buffer[(cell_column(&lines[row], "podman"), row as u16)].fg
         };
-        assert_eq!(row_color(&mut dashboard), theme::SECONDARY);
+        assert_eq!(row_color(&mut dashboard), theme::palette().secondary);
         assert_eq!(
             dashboard.handle_key(alt_key('a')),
             DashboardAction::MarkAllRead {
                 receipts: vec![("session-1".into(), 4)]
             }
         );
-        assert_eq!(row_color(&mut dashboard), theme::WARNING);
+        assert_eq!(row_color(&mut dashboard), theme::palette().warning);
         assert_eq!(
             dashboard.session_details["session-1"].current_turn_started_at,
             Some(1)
@@ -4790,14 +4796,14 @@ mod tests {
         };
 
         let healthy = minimized_sessions_dashboard(1, 1);
-        assert_eq!(colour_of(healthy), theme::ACCENT);
+        assert_eq!(colour_of(healthy), theme::palette().accent);
 
         let mut busy = minimized_sessions_dashboard(1, 1);
         busy.session_details
             .get_mut("session-00")
             .expect("the session detail")
             .current_turn_started_at = Some(1);
-        assert_eq!(colour_of(busy), theme::WARNING);
+        assert_eq!(colour_of(busy), theme::palette().warning);
 
         let mut failed = minimized_sessions_dashboard(1, 1);
         {
@@ -4808,7 +4814,7 @@ mod tests {
                 .expect("the session");
             session.state = SessionState::Error;
         }
-        assert_eq!(colour_of(failed), theme::ERROR);
+        assert_eq!(colour_of(failed), theme::palette().error);
     }
 
     /// A narrow minimized pane truncates the summary without bringing back
@@ -5197,10 +5203,10 @@ mod tests {
                 buffer[(column, row as u16)].fg
             };
 
-            assert_eq!(row_colour(&mut failed), theme::ERROR, "{size:?}");
+            assert_eq!(row_colour(&mut failed), theme::palette().error, "{size:?}");
             assert_ne!(
                 row_colour(&mut healthy),
-                theme::ERROR,
+                theme::palette().error,
                 "{size:?}: only a session that needs attention is red"
             );
         }
@@ -5261,14 +5267,14 @@ mod tests {
         };
         // A quiet host has headroom left, a busy one does not; a quota reads
         // the same scale on the headroom it reports.
-        assert_eq!(colour_of(targets_row, "3%"), theme::SUCCESS);
-        assert_eq!(colour_of(targets_row, "95%"), theme::ERROR);
-        assert_eq!(colour_of(quota_row, "63%"), theme::SUCCESS);
-        assert_eq!(colour_of(quota_row, "10%"), theme::ERROR);
+        assert_eq!(colour_of(targets_row, "3%"), theme::palette().success);
+        assert_eq!(colour_of(targets_row, "95%"), theme::palette().error);
+        assert_eq!(colour_of(quota_row, "63%"), theme::palette().success);
+        assert_eq!(colour_of(quota_row, "10%"), theme::palette().error);
         // The label and the names are ordinary text; only the values carry a
         // colour.
-        assert_eq!(colour_of(targets_row, "Targets"), theme::TEXT);
-        assert_eq!(colour_of(targets_row, "morannon"), theme::TEXT);
+        assert_eq!(colour_of(targets_row, "Targets"), theme::palette().text);
+        assert_eq!(colour_of(targets_row, "morannon"), theme::palette().text);
     }
 
     /// A usage-priced profile has no window to summarise, so it is left out of
@@ -5351,8 +5357,8 @@ mod tests {
             buffer[(column, row as u16)].fg
         };
 
-        assert_eq!(colour_of("96%/5%"), theme::ERROR);
-        assert_eq!(colour_of("8%/90%"), theme::ERROR);
+        assert_eq!(colour_of("96%/5%"), theme::palette().error);
+        assert_eq!(colour_of("8%/90%"), theme::palette().error);
     }
 
     /// A minimized pane is one row by definition, so more hosts than fit have
@@ -5426,7 +5432,7 @@ mod tests {
             assert!(
                 (buffer.area.x + 1..buffer.area.right() - 1)
                     .filter(|x| summary_text_cell(&buffer[(*x, status_y)]))
-                    .all(|x| buffer[(x, status_y)].fg == theme::ACCENT),
+                    .all(|x| buffer[(x, status_y)].fg == theme::palette().accent),
                 "{collapsed}: {status}"
             );
         }
@@ -5582,8 +5588,11 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("morannon-podman [G]"), "{rendered}");
-        assert!(badge_has_color("[Y]", theme::ERROR), "{rendered}");
-        assert!(badge_has_color("[G]", theme::SUCCESS), "{rendered}");
+        assert!(badge_has_color("[Y]", theme::palette().error), "{rendered}");
+        assert!(
+            badge_has_color("[G]", theme::palette().success),
+            "{rendered}"
+        );
     }
 
     fn now_epoch_seconds() -> u64 {
@@ -6068,7 +6077,7 @@ mod tests {
             let pane_index = if focus == Focus::Quota { 2 } else { 1 };
             let area = dashboard.pane_areas.expect("pane areas")[pane_index];
             let border = &terminal.backend().buffer()[(area.x, area.y)];
-            assert_eq!(border.fg, theme::ACCENT);
+            assert_eq!(border.fg, theme::palette().accent);
             assert!(border.modifier.contains(Modifier::BOLD));
         }
     }
@@ -6311,14 +6320,14 @@ mod tests {
                 .collect::<String>(),
             "███████▎  ▏ 73%"
         );
-        assert_eq!(bar.spans[0].style.fg, Some(theme::SUCCESS));
+        assert_eq!(bar.spans[0].style.fg, Some(theme::palette().success));
         assert_eq!(bar.spans[2].style.fg, None);
         assert!(
             bar.spans[..4]
                 .iter()
-                .all(|span| span.style.bg == Some(theme::BACKGROUND))
+                .all(|span| span.style.bg == Some(theme::palette().background))
         );
-        assert_eq!(bar.spans[3].style.fg, Some(theme::MUTED));
+        assert_eq!(bar.spans[3].style.fg, Some(theme::palette().muted));
         let before = cell_before_quota_chart("Codex".into(), 7, true);
         assert_eq!(before.to_string(), "Codex   ▕");
         assert_eq!(before.spans[2].style, quota_chart_border_style());
@@ -6333,9 +6342,9 @@ mod tests {
         assert!(
             api.spans
                 .iter()
-                .all(|span| span.style.bg == Some(theme::BACKGROUND))
+                .all(|span| span.style.bg == Some(theme::palette().background))
         );
-        assert_eq!(api.spans[3].style.fg, Some(theme::MUTED));
+        assert_eq!(api.spans[3].style.fg, Some(theme::palette().muted));
     }
 
     #[test]

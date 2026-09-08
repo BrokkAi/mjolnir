@@ -12,20 +12,30 @@ use super::{ControlKind, Form};
 use crate::hel_text_input::TextInput;
 use crate::theme;
 
-const FOCUS_STYLE: Style = Style::new()
-    .fg(theme::BACKGROUND)
-    .bg(theme::ACCENT)
-    .add_modifier(Modifier::BOLD);
-const NORMAL_STYLE: Style = Style::new().fg(theme::TEXT).bg(theme::SURFACE_RAISED);
-const DISABLED_STYLE: Style = Style::new().fg(theme::MUTED).bg(theme::SURFACE_RAISED);
+fn focus_style() -> Style {
+    Style::new()
+        .fg(theme::palette().background)
+        .bg(theme::palette().accent)
+        .add_modifier(Modifier::BOLD)
+}
+fn normal_style() -> Style {
+    Style::new()
+        .fg(theme::palette().text)
+        .bg(theme::palette().surface_raised)
+}
+fn disabled_style() -> Style {
+    Style::new()
+        .fg(theme::palette().muted)
+        .bg(theme::palette().surface_raised)
+}
 
 fn control_style<K: Copy + Eq>(form: &Form<K>, id: K, enabled: bool) -> Style {
     if !enabled {
-        DISABLED_STYLE
+        disabled_style()
     } else if form.is_focused(id) || form.is_armed(id) {
-        FOCUS_STYLE
+        focus_style()
     } else {
-        NORMAL_STYLE
+        normal_style()
     }
 }
 
@@ -196,9 +206,9 @@ impl TextField {
             form.register_with_cursor_map(id, ControlKind::TextField, area, true, cursor_map);
         }
         let style = if focused && form.is_focused(id) {
-            NORMAL_STYLE.add_modifier(Modifier::UNDERLINED)
+            normal_style().add_modifier(Modifier::UNDERLINED)
         } else {
-            NORMAL_STYLE
+            normal_style()
         };
         frame.render_widget(Paragraph::new(visible).style(style), area);
         if focused && form.is_focused(id) && content.width > 0 && content.height > 0 {
@@ -343,7 +353,7 @@ impl ChoiceList {
                 if enabled[index] {
                     item
                 } else {
-                    item.style(DISABLED_STYLE)
+                    item.style(disabled_style())
                 }
             })
             .collect::<Vec<_>>();
@@ -356,7 +366,7 @@ impl ChoiceList {
         state.select(selected_row);
         frame.render_stateful_widget(
             List::new(items).highlight_style(if selected_row.is_some_and(|row| !enabled[row]) {
-                DISABLED_STYLE
+                disabled_style()
             } else if form.is_focused(id) {
                 theme::selection(true)
             } else {
@@ -429,15 +439,15 @@ impl TabStrip {
                 continue;
             }
             let style = if !enabled {
-                DISABLED_STYLE
+                disabled_style()
             } else if index == selected {
                 if form.is_focused(id) {
-                    FOCUS_STYLE.add_modifier(Modifier::BOLD)
+                    focus_style().add_modifier(Modifier::BOLD)
                 } else {
-                    NORMAL_STYLE.add_modifier(Modifier::UNDERLINED)
+                    normal_style().add_modifier(Modifier::UNDERLINED)
                 }
             } else {
-                NORMAL_STYLE
+                normal_style()
             };
             let skip = visible_start - tab_start;
             let end = visible_end - tab_start;

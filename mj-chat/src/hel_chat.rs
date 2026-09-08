@@ -2960,9 +2960,9 @@ impl Notices {
 /// Active work and ready sessions share the terminal's semantic palette.
 pub fn turn_band_color(turn_in_flight: bool) -> Color {
     if turn_in_flight {
-        crate::theme::ACCENT
+        crate::theme::palette().accent
     } else {
-        crate::theme::SUCCESS
+        crate::theme::palette().success
     }
 }
 

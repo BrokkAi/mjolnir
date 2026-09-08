@@ -4,18 +4,108 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders};
 
-pub const BACKGROUND: Color = rgb(11, 18, 32);
-pub const SURFACE: Color = rgb(17, 29, 45);
-pub const SURFACE_RAISED: Color = rgb(27, 43, 64);
-pub const SELECTION: Color = rgb(39, 57, 79);
-pub const TEXT: Color = rgb(223, 235, 244);
-pub const MUTED: Color = rgb(133, 150, 173);
-pub const BORDER: Color = rgb(52, 70, 94);
-pub const ACCENT: Color = rgb(99, 216, 229);
-pub const SECONDARY: Color = rgb(181, 164, 245);
-pub const SUCCESS: Color = rgb(135, 214, 176);
-pub const WARNING: Color = rgb(240, 195, 123);
-pub const ERROR: Color = rgb(242, 143, 156);
+use std::cell::Cell;
+
+pub use hel::hel_config::UiTheme;
+
+/// Semantic colors always paired with the palette's painted surfaces.
+#[derive(Debug)]
+pub struct Palette {
+    pub background: Color,
+    pub surface_raised: Color,
+    pub surface: Color,
+    pub selection: Color,
+    pub text: Color,
+    pub muted: Color,
+    pub border: Color,
+    pub accent: Color,
+    pub secondary: Color,
+    pub success: Color,
+    pub warning: Color,
+    pub error: Color,
+    pub activity_dim: Color,
+}
+
+const MIDNIGHT: Palette = Palette {
+    background: rgb(11, 18, 32),
+    surface_raised: rgb(27, 43, 64),
+    surface: rgb(17, 29, 45),
+    selection: rgb(39, 57, 79),
+    text: rgb(223, 235, 244),
+    muted: rgb(133, 150, 173),
+    border: rgb(52, 70, 94),
+    accent: rgb(99, 216, 229),
+    secondary: rgb(181, 164, 245),
+    success: rgb(135, 214, 176),
+    warning: rgb(240, 195, 123),
+    error: rgb(242, 143, 156),
+    activity_dim: rgb(78, 37, 55),
+};
+
+const LIGHT: Palette = Palette {
+    background: rgb(242, 245, 250),
+    surface_raised: rgb(232, 237, 245),
+    surface: rgb(255, 255, 255),
+    selection: rgb(211, 228, 241),
+    text: rgb(30, 41, 59),
+    muted: rgb(83, 100, 121),
+    border: rgb(161, 174, 192),
+    accent: rgb(0, 103, 124),
+    secondary: rgb(105, 65, 166),
+    success: rgb(28, 112, 74),
+    warning: rgb(142, 83, 8),
+    error: rgb(179, 42, 65),
+    activity_dim: rgb(220, 178, 186),
+};
+
+const DRACULA: Palette = Palette {
+    background: rgb(30, 31, 41),
+    surface_raised: rgb(52, 55, 70),
+    surface: rgb(40, 42, 54),
+    selection: rgb(68, 71, 90),
+    text: rgb(248, 248, 242),
+    muted: rgb(157, 168, 204),
+    border: rgb(88, 96, 128),
+    accent: rgb(139, 233, 253),
+    secondary: rgb(189, 147, 249),
+    success: rgb(80, 250, 123),
+    warning: rgb(241, 250, 140),
+    error: rgb(255, 128, 128),
+    activity_dim: rgb(86, 44, 53),
+};
+
+thread_local! {
+    static CURRENT: Cell<UiTheme> = const { Cell::new(UiTheme::Midnight) };
+}
+
+pub fn current() -> UiTheme {
+    CURRENT.get()
+}
+
+pub fn palette_for(theme: UiTheme) -> &'static Palette {
+    match theme {
+        UiTheme::Midnight => &MIDNIGHT,
+        UiTheme::Light => &LIGHT,
+        UiTheme::Dracula => &DRACULA,
+    }
+}
+
+pub fn palette() -> &'static Palette {
+    palette_for(current())
+}
+
+/// Select a palette for synchronous rendering, restoring it even on panic.
+/// Keep asynchronous work outside this scope: colors belong to this thread.
+pub fn with_theme<R>(theme: UiTheme, render: impl FnOnce() -> R) -> R {
+    struct Restore(UiTheme);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CURRENT.set(self.0);
+        }
+    }
+    let _restore = Restore(CURRENT.replace(theme));
+    render()
+}
 
 #[allow(
     clippy::disallowed_methods,
@@ -27,35 +117,41 @@ const fn rgb(red: u8, green: u8, blue: u8) -> Color {
 
 /// The canvas beneath panels and modal halos.
 pub fn base() -> Style {
-    Style::default().fg(TEXT).bg(BACKGROUND)
+    Style::default().fg(palette().text).bg(palette().background)
 }
 
 pub fn muted() -> Style {
-    Style::default().fg(MUTED)
+    Style::default().fg(palette().muted)
 }
 
 pub fn border(focused: bool) -> Style {
     if focused {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(palette().accent)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(BORDER)
+        Style::default().fg(palette().border)
     }
 }
 
 pub fn title(focused: bool) -> Style {
     Style::default()
-        .fg(if focused { ACCENT } else { TEXT })
+        .fg(if focused {
+            palette().accent
+        } else {
+            palette().text
+        })
         .add_modifier(Modifier::BOLD)
 }
 
 pub fn selection(focused: bool) -> Style {
     if focused {
         Style::default()
-            .fg(ACCENT)
-            .bg(SELECTION)
+            .fg(palette().accent)
+            .bg(palette().selection)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(TEXT).bg(SELECTION)
+        Style::default().fg(palette().text).bg(palette().selection)
     }
 }
 
@@ -64,13 +160,17 @@ pub fn panel(focused: bool) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .style(Style::default().fg(TEXT).bg(SURFACE))
+        .style(Style::default().fg(palette().text).bg(palette().surface))
         .border_style(border(focused))
         .title_style(title(focused))
 }
 
 pub fn modal() -> Block<'static> {
-    panel(true).style(Style::default().fg(TEXT).bg(SURFACE_RAISED))
+    panel(true).style(
+        Style::default()
+            .fg(palette().text)
+            .bg(palette().surface_raised),
+    )
 }
 
 /// Distinguishes keys from their descriptions without changing hint spacing.
@@ -84,7 +184,9 @@ pub fn hints(text: &str) -> Line<'static> {
         spans.push(Span::styled(hint[..leading].to_owned(), muted()));
         spans.push(Span::styled(
             hint[leading..key_end].to_owned(),
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette().text)
+                .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(hint[key_end..].to_owned(), muted()));
     }
@@ -122,6 +224,79 @@ pub fn fit_footer(pane: &[&str], chords: &[&str], functions: &[&str], width: u16
             functions.remove(index);
         } else {
             return String::new();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_scopes_restore_colors_after_nested_rendering_and_panics() {
+        let original = current();
+        with_theme(UiTheme::Light, || {
+            assert_eq!(base().bg, Some(LIGHT.background));
+            let result = std::panic::catch_unwind(|| {
+                with_theme(UiTheme::Dracula, || {
+                    assert_eq!(base().fg, Some(DRACULA.text));
+                    panic!("interrupted render");
+                });
+            });
+            assert!(result.is_err());
+            assert_eq!(base().bg, Some(LIGHT.background));
+        });
+        assert_eq!(current(), original);
+    }
+
+    fn luminance(color: Color) -> f64 {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("palettes must define explicit RGB colors");
+        };
+        [r, g, b]
+            .into_iter()
+            .zip([0.2126, 0.7152, 0.0722])
+            .map(|(channel, weight)| {
+                let value = f64::from(channel) / 255.0;
+                weight
+                    * if value <= 0.04045 {
+                        value / 12.92
+                    } else {
+                        ((value + 0.055) / 1.055).powf(2.4)
+                    }
+            })
+            .sum()
+    }
+
+    fn contrast(foreground: Color, background: Color) -> f64 {
+        let a = luminance(foreground);
+        let b = luminance(background);
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn palette_text_is_legible_on_its_painted_surfaces() {
+        for theme in UiTheme::ALL {
+            let colors = palette_for(theme);
+            for foreground in [
+                colors.text,
+                colors.muted,
+                colors.accent,
+                colors.secondary,
+                colors.success,
+                colors.warning,
+                colors.error,
+            ] {
+                for background in [colors.background, colors.surface, colors.surface_raised] {
+                    assert!(
+                        contrast(foreground, background) >= 4.5,
+                        "{theme:?}: {foreground:?} on {background:?} has insufficient contrast"
+                    );
+                }
+            }
+            for foreground in [colors.text, colors.accent] {
+                assert!(contrast(foreground, colors.selection) >= 4.5);
+            }
         }
     }
 }

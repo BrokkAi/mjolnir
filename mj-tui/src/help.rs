@@ -146,7 +146,7 @@ pub(crate) fn help_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
         lines.push(Line::styled(
             scope.heading().to_owned(),
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::palette().accent)
                 .add_modifier(Modifier::BOLD),
         ));
         for spec in group {
@@ -165,7 +165,7 @@ pub(crate) fn help_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
             let ready = availability == Availability::Ready;
             let style = if ready {
                 Style::default()
-                    .fg(theme::TEXT)
+                    .fg(theme::palette().text)
                     .add_modifier(Modifier::BOLD)
             } else {
                 theme::muted()
@@ -179,9 +179,9 @@ pub(crate) fn help_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
                 Span::styled(
                     format!("  {keys:<12}  "),
                     Style::default().fg(if ready {
-                        theme::SECONDARY
+                        theme::palette().secondary
                     } else {
-                        theme::MUTED
+                        theme::palette().muted
                     }),
                 ),
                 Span::styled(spec.label, style),
@@ -193,16 +193,16 @@ pub(crate) fn help_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
     lines.push(Line::styled(
         "Composer".to_owned(),
         Style::default()
-            .fg(theme::ACCENT)
+            .fg(theme::palette().accent)
             .add_modifier(Modifier::BOLD),
     ));
     for (keys, description) in COMPOSER_KEYS {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("  {keys:<24}  "),
-                Style::default().fg(theme::SECONDARY),
+                Style::default().fg(theme::palette().secondary),
             ),
-            Span::styled(*description, Style::default().fg(theme::TEXT)),
+            Span::styled(*description, Style::default().fg(theme::palette().text)),
         ]));
     }
     lines

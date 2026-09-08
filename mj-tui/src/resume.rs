@@ -1023,7 +1023,7 @@ pub(crate) fn render_resume_dialog(
     if let Some(detail) = selected {
         footer.push(Line::styled(
             truncate_text(&detail.details, usize::from(rows[3].width)),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ));
     }
     let errors = dialog.errors();
@@ -1035,7 +1035,7 @@ pub(crate) fn render_resume_dialog(
                 &format!("Scan failed for {error}"),
                 usize::from(rows[3].width),
             ),
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ));
     }
     footer.push(Line::styled(
@@ -1047,7 +1047,7 @@ pub(crate) fn render_resume_dialog(
                 "Enter imports · a archives · s shows archived · ←/→ tabs · / searches · Tab moves"
             }
         },
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::palette().muted),
     ));
     let note_area = Rect::new(
         rows[3].x,
@@ -1106,7 +1106,7 @@ pub(crate) fn render_resume_dialog(
 
 fn resume_header_line(layout: &RowLayout) -> Line<'static> {
     let style = Style::default()
-        .fg(theme::MUTED)
+        .fg(theme::palette().muted)
         .add_modifier(Modifier::BOLD);
     Line::from(vec![
         Span::styled(padded_cell("PROFILE", layout.profile), style),
@@ -1135,12 +1135,12 @@ where
     let title_style = if row.status.is_recoverable() {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::WARNING)
+        Style::default().fg(theme::palette().warning)
     };
     let origin = match row.status.warning() {
         Some(warning) => Span::styled(
             format!("{:<width$}", warning, width = layout.origin),
-            Style::default().fg(theme::WARNING),
+            Style::default().fg(theme::palette().warning),
         ),
         None => Span::styled(
             format!(
@@ -1148,7 +1148,7 @@ where
                 truncate_text(&row.origin, layout.origin),
                 width = layout.origin
             ),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::palette().accent),
         ),
     };
     let mut marks = String::new();
@@ -1170,7 +1170,7 @@ where
     Line::from(vec![
         Span::styled(
             padded_cell(&row.profile_id, layout.profile),
-            Style::default().fg(theme::SECONDARY),
+            Style::default().fg(theme::palette().secondary),
         ),
         Span::raw("  "),
         origin,
@@ -1180,11 +1180,11 @@ where
                 &format_last_active(now, row.last_activity_ms),
                 layout.activity,
             ),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         ),
         Span::raw("  "),
         Span::styled(truncate_text(&row.title, layout.title), title_style),
-        Span::styled(marks, Style::default().fg(theme::MUTED)),
+        Span::styled(marks, Style::default().fg(theme::palette().muted)),
     ])
 }
 

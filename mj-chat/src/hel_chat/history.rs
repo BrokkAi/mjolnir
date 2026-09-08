@@ -380,8 +380,8 @@ pub(super) fn highlighted_input_lines(input: &str, query: &str) -> Vec<Line<'sta
             spans.push(Span::styled(
                 input[start..end].to_owned(),
                 Style::default()
-                    .fg(theme::BACKGROUND)
-                    .bg(theme::WARNING)
+                    .fg(theme::palette().background)
+                    .bg(theme::palette().warning)
                     .add_modifier(Modifier::BOLD),
             ));
             cursor = end;

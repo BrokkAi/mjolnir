@@ -2159,6 +2159,7 @@ mod tests {
         original.save_to(&path).unwrap();
         let mut edited = original.clone();
         edited.sessions_side = hel::hel_config::SessionsSide::Right;
+        edited.theme = hel::hel_config::UiTheme::Light;
         HelConfig::update_to(&path, |current| {
             current.startup.prompt = false;
             Ok(())
@@ -2172,6 +2173,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved.sessions_side, hel::hel_config::SessionsSide::Right);
+        assert_eq!(saved.theme, hel::hel_config::UiTheme::Light);
         assert!(!saved.startup.prompt);
         assert_eq!(HelConfig::load_from(&path).unwrap(), saved);
 

@@ -108,14 +108,14 @@ impl ContainerEditor {
             Row::Text(Line::raw(format!("Session: {}", self.session_id))),
             Row::Text(Line::styled(
                 CONTAINER_EDIT_SCOPE,
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::palette().muted),
             )),
             Row::Text(Line::raw("")),
             Row::Field(Cpus, "CPUs", &self.cpus),
             Row::Field(Memory, "Memory", &self.memory),
             Row::Text(Line::styled(
                 "Empty keeps the target's value.",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::palette().muted),
             )),
             Row::Text(Line::raw("")),
             Row::Text(Line::raw("Attached directories")),
@@ -123,7 +123,7 @@ impl ContainerEditor {
         if self.mounts.is_empty() {
             rows.push(Row::Text(Line::styled(
                 "  none",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::palette().muted),
             )));
         } else {
             rows.push(Row::List(
@@ -163,7 +163,7 @@ impl ContainerEditor {
         if let Some(error) = &self.error {
             rows.push(Row::Text(Line::styled(
                 error.clone(),
-                Style::default().fg(theme::WARNING),
+                Style::default().fg(theme::palette().warning),
             )));
         }
         rows
@@ -381,7 +381,7 @@ pub(crate) fn render_container_editor(
         frame.render_widget(
             Line::styled(
                 "Enter attaches/accepts · Space toggles · d removes · Tab moves",
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::palette().muted),
             ),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
         );

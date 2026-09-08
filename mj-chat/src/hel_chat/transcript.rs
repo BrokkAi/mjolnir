@@ -96,6 +96,7 @@ impl TranscriptScrollbarState {
 
 #[derive(Debug)]
 pub(super) struct TranscriptRenderCache {
+    theme: theme::UiTheme,
     width: u16,
     mode: TranscriptRenderMode,
     entries: Vec<Option<CachedEntry>>,
@@ -823,8 +824,8 @@ fn selection_row(offset: i64) -> usize {
     usize::try_from(SELECTION_BASE_ROW.saturating_add(offset)).unwrap_or(0)
 }
 
-/// Drop cached rows that a width or mode change invalidated, and size the cache
-/// to the current entry count.
+/// Drop rows invalidated by width, rendering mode, or palette changes, and
+/// size the cache to the current entry count.
 fn prepare_render_cache(
     entries: &[ChatEntry],
     cache: &mut TranscriptRenderCache,
@@ -832,7 +833,8 @@ fn prepare_render_cache(
     mode: TranscriptRenderMode,
 ) {
     let mode_changed = cache.mode != mode;
-    if cache.width != width || mode_changed {
+    if cache.width != width || mode_changed || cache.theme != theme::current() {
+        cache.theme = theme::current();
         cache.width = width;
         cache.mode = mode;
         cache.entries.clear();
@@ -1141,6 +1143,7 @@ fn cached_entry_lines<'cache>(
 impl Default for TranscriptRenderCache {
     fn default() -> Self {
         Self {
+            theme: theme::current(),
             width: 0,
             mode: TranscriptRenderMode::Rich,
             entries: Vec::new(),
@@ -2124,7 +2127,7 @@ pub(super) fn render_transcript(
         .collect::<Vec<_>>();
     let visible_rows = visible.len();
     frame.render_widget(
-        Paragraph::new(visible).style(Style::default().fg(theme::TEXT)),
+        Paragraph::new(visible).style(Style::default().fg(theme::palette().text)),
         inner,
     );
     chat.register_transcript_surface(inner, top, visible_rows, at_tail, gesture_active);
@@ -2142,9 +2145,9 @@ pub(super) fn render_transcript(
             frame.buffer_mut()[(track.x, row)]
                 .set_symbol(if is_thumb { "▐" } else { "│" })
                 .set_style(Style::default().fg(if is_thumb {
-                    theme::ACCENT
+                    theme::palette().accent
                 } else {
-                    theme::BORDER
+                    theme::palette().border
                 }));
         }
     }
@@ -2184,7 +2187,7 @@ fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line<'static> {
         spans.push(Span::styled("  ", style));
         spans.push(Span::styled(
             chat.header_title.clone(),
-            style.fg(theme::SECONDARY),
+            style.fg(theme::palette().secondary),
         ));
     }
     let suffix = match (chat.anchor, chat.render_mode) {
@@ -2297,7 +2300,7 @@ fn empty_transcript_row(loading: bool) -> Line<'static> {
             "No messages yet — send a prompt to begin."
         },
         Style::default()
-            .fg(theme::MUTED)
+            .fg(theme::palette().muted)
             .add_modifier(Modifier::ITALIC),
     ))
 }
@@ -2399,9 +2402,9 @@ fn entry_logical_lines(
             .iter()
             .map(|item| {
                 let (glyph, style) = match item.status {
-                    PlanStatus::Pending => ("○", Style::default().fg(theme::MUTED)),
-                    PlanStatus::Running => ("●", Style::default().fg(theme::WARNING)),
-                    PlanStatus::Completed => ("✓", Style::default().fg(theme::SUCCESS)),
+                    PlanStatus::Pending => ("○", Style::default().fg(theme::palette().muted)),
+                    PlanStatus::Running => ("●", Style::default().fg(theme::palette().warning)),
+                    PlanStatus::Completed => ("✓", Style::default().fg(theme::palette().success)),
                 };
                 LogicalLine {
                     line: Line::from(vec![
@@ -2452,7 +2455,7 @@ struct EntryVisual {
 fn entry_visual(entry: &ChatEntry) -> EntryVisual {
     match entry.role {
         ChatRole::User => {
-            let style = Style::default().fg(theme::ACCENT);
+            let style = Style::default().fg(theme::palette().accent);
             EntryVisual {
                 glyph: "❯",
                 label: "You".into(),
@@ -2462,25 +2465,25 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
             }
         }
         ChatRole::Agent => {
-            let style = Style::default().fg(theme::SECONDARY);
+            let style = Style::default().fg(theme::palette().secondary);
             EntryVisual {
                 glyph: "●",
                 label: "Agent".into(),
                 header_style: style,
                 body_style: Style::default(),
-                rail_style: Style::default().fg(theme::BORDER),
+                rail_style: Style::default().fg(theme::palette().border),
             }
         }
         ChatRole::Thought => {
             let style = Style::default()
-                .fg(theme::MUTED)
+                .fg(theme::palette().muted)
                 .add_modifier(Modifier::ITALIC);
             EntryVisual {
                 glyph: "○",
                 label: "Thinking".into(),
                 header_style: style,
                 body_style: style,
-                rail_style: Style::default().fg(theme::BORDER),
+                rail_style: Style::default().fg(theme::palette().border),
             }
         }
         ChatRole::Tool => {
@@ -2491,11 +2494,11 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
                 label: format!("Tool · {label}"),
                 header_style: style,
                 body_style: Style::default(),
-                rail_style: Style::default().fg(theme::BORDER),
+                rail_style: Style::default().fg(theme::palette().border),
             }
         }
         ChatRole::Plan => {
-            let style = Style::default().fg(theme::SECONDARY);
+            let style = Style::default().fg(theme::palette().secondary);
             EntryVisual {
                 glyph: "◇",
                 label: "Plan".into(),
@@ -2505,7 +2508,7 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
             }
         }
         ChatRole::PlanProposal => {
-            let style = Style::default().fg(theme::SECONDARY);
+            let style = Style::default().fg(theme::palette().secondary);
             EntryVisual {
                 glyph: "◈",
                 label: "Proposed plan".into(),
@@ -2515,7 +2518,7 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
             }
         }
         ChatRole::System => {
-            let style = Style::default().fg(theme::MUTED);
+            let style = Style::default().fg(theme::palette().muted);
             EntryVisual {
                 glyph: "─",
                 label: "Mjolnir".into(),
@@ -2529,10 +2532,14 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
 
 fn tool_presentation(status: ToolStatus) -> (&'static str, &'static str, Style) {
     match status {
-        ToolStatus::Pending => ("•", "waiting", Style::default().fg(theme::MUTED)),
-        ToolStatus::Running => ("●", "running", Style::default().fg(theme::WARNING)),
-        ToolStatus::Completed => ("✓", "done", Style::default().fg(theme::SUCCESS)),
-        ToolStatus::Failed => ("×", "failed", Style::default().fg(theme::ERROR)),
+        ToolStatus::Pending => ("•", "waiting", Style::default().fg(theme::palette().muted)),
+        ToolStatus::Running => (
+            "●",
+            "running",
+            Style::default().fg(theme::palette().warning),
+        ),
+        ToolStatus::Completed => ("✓", "done", Style::default().fg(theme::palette().success)),
+        ToolStatus::Failed => ("×", "failed", Style::default().fg(theme::palette().error)),
     }
 }
 

@@ -190,30 +190,39 @@ pub fn compact_frame(style: SpinnerStyle, elapsed_ms: u128) -> &'static str {
 pub fn compact_span(style: SpinnerStyle, elapsed_ms: u128) -> Span<'static> {
     Span::styled(
         compact_frame(style, elapsed_ms),
-        Style::default().fg(theme::ACCENT),
+        Style::default().fg(theme::palette().accent),
     )
 }
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "The scan gradient is drawn over the shared theme's painted dark surfaces, not an unknown terminal background."
+    reason = "The scan gradient is drawn over the shared theme's painted surfaces, not an unknown terminal background."
 )]
 fn ink_color(ink: SpinnerInk) -> Color {
     match ink {
-        SpinnerInk::Faint => theme::BORDER,
-        SpinnerInk::Cool => theme::SECONDARY,
-        SpinnerInk::Bright => theme::ACCENT,
-        SpinnerInk::Vivid => theme::TEXT,
-        SpinnerInk::Calm => theme::SUCCESS,
-        SpinnerInk::Warm => theme::WARNING,
-        SpinnerInk::Hot => theme::ERROR,
+        SpinnerInk::Faint => theme::palette().border,
+        SpinnerInk::Cool => theme::palette().secondary,
+        SpinnerInk::Bright => theme::palette().accent,
+        SpinnerInk::Vivid => theme::palette().text,
+        SpinnerInk::Calm => theme::palette().success,
+        SpinnerInk::Warm => theme::palette().warning,
+        SpinnerInk::Hot => theme::palette().error,
         SpinnerInk::Red(level) => {
             let level = u16::from(level.min(SCAN_RED_MAX));
             let max = u16::from(SCAN_RED_MAX);
+            let Color::Rgb(start_r, start_g, start_b) = theme::palette().activity_dim else {
+                return theme::palette().error;
+            };
+            let Color::Rgb(end_r, end_g, end_b) = theme::palette().error else {
+                return theme::palette().error;
+            };
+            let blend = |start: u8, end: u8| {
+                ((u16::from(start) * (max - level) + u16::from(end) * level) / max) as u8
+            };
             Color::Rgb(
-                (78 + 164 * level / max) as u8,
-                (37 + 106 * level / max) as u8,
-                (55 + 101 * level / max) as u8,
+                blend(start_r, end_r),
+                blend(start_g, end_g),
+                blend(start_b, end_b),
             )
         }
     }

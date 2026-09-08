@@ -96,6 +96,10 @@ pub(crate) async fn select_workspace(
     let termination = TERMINATION
         .get_or_init(hel::termination::Coordinator::install)
         .token();
+    let selected_theme = tokio::task::spawn_blocking(hel::hel_config::HelConfig::load)
+        .await
+        .context("load workspace picker appearance task")??
+        .theme;
     let mut terminal = TerminalGuard::enter()?;
     let mut selected = initial_selection(workspaces, selected_workspace_id);
     let mut editing: Option<EditMode> = None;
@@ -130,108 +134,119 @@ pub(crate) async fn select_workspace(
             });
         }
         terminal.terminal.draw(|frame| {
-            frame.render_widget(Block::default().style(theme::base()), frame.area());
-            let [body, footer] = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(4), Constraint::Length(1)])
-                .areas(frame.area());
-            let [left, right] = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
-                .areas(body);
+            theme::with_theme(selected_theme, || {
+                frame.render_widget(Block::default().style(theme::base()), frame.area());
+                let [body, footer] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(4), Constraint::Length(1)])
+                    .areas(frame.area());
+                let [left, right] = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+                    .areas(body);
 
-            let mut items = workspaces
-                .iter()
-                .map(|candidate| {
-                    let attached = if candidate.attached_pids.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            " [attached to {}]",
-                            candidate
-                                .attached_pids
-                                .iter()
-                                .map(u32::to_string)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            candidate.workspace.name.clone(),
-                            Style::default().fg(theme::TEXT),
-                        ),
-                        Span::styled(attached, theme::muted()),
-                    ]))
-                })
-                .collect::<Vec<_>>();
-            items.push(ListItem::new("＋ Create new").style(Style::default().fg(theme::ACCENT)));
-            list_state.select(Some(selected));
-            frame.render_stateful_widget(
-                List::new(items)
-                    .block(theme::panel(true).title(" ✦ Workspaces "))
-                    .highlight_symbol("› ")
-                    .highlight_style(theme::selection(true)),
-                left,
-                &mut list_state,
-            );
-
-            preview_area = right;
-            if let (Some(candidate), Some(preview)) = (workspaces.get(selected), preview.as_ref()) {
-                let metadata = preview_lines(
-                    candidate,
-                    preview.metadata.as_ref(),
-                    preview.session_count(),
+                let mut items = workspaces
+                    .iter()
+                    .map(|candidate| {
+                        let attached = if candidate.attached_pids.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                " [attached to {}]",
+                                candidate
+                                    .attached_pids
+                                    .iter()
+                                    .map(u32::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                candidate.workspace.name.clone(),
+                                Style::default().fg(theme::palette().text),
+                            ),
+                            Span::styled(attached, theme::muted()),
+                        ]))
+                    })
+                    .collect::<Vec<_>>();
+                items.push(
+                    ListItem::new("＋ Create new")
+                        .style(Style::default().fg(theme::palette().accent)),
                 );
-                let status = preview.status();
-                let [header, sessions, status_area] = Layout::vertical([
-                    Constraint::Length(metadata.len() as u16),
-                    Constraint::Min(0),
-                    Constraint::Length(u16::from(status.is_some())),
-                ])
-                .areas(right);
-                frame.render_widget(Paragraph::new(metadata), header);
-                if preview.loaded {
-                    render_sessions_preview(
-                        frame,
-                        sessions,
-                        &preview.dashboard,
-                        &mut preview_scroll,
+                list_state.select(Some(selected));
+                frame.render_stateful_widget(
+                    List::new(items)
+                        .block(theme::panel(true).title(" ✦ Workspaces "))
+                        .highlight_symbol("› ")
+                        .highlight_style(theme::selection(true)),
+                    left,
+                    &mut list_state,
+                );
+
+                preview_area = right;
+                if let (Some(candidate), Some(preview)) =
+                    (workspaces.get(selected), preview.as_ref())
+                {
+                    let metadata = preview_lines(
+                        candidate,
+                        preview.metadata.as_ref(),
+                        preview.session_count(),
                     );
+                    let status = preview.status();
+                    let [header, sessions, status_area] = Layout::vertical([
+                        Constraint::Length(metadata.len() as u16),
+                        Constraint::Min(0),
+                        Constraint::Length(u16::from(status.is_some())),
+                    ])
+                    .areas(right);
+                    frame.render_widget(Paragraph::new(metadata), header);
+                    if preview.loaded {
+                        render_sessions_preview(
+                            frame,
+                            sessions,
+                            &preview.dashboard,
+                            &mut preview_scroll,
+                        );
+                    } else {
+                        frame.render_widget(
+                            Paragraph::new("Loading sessions…")
+                                .style(theme::muted())
+                                .block(theme::panel(false).title(" Sessions ")),
+                            sessions,
+                        );
+                    }
+                    if let Some(status) = status {
+                        frame.render_widget(
+                            Paragraph::new(status)
+                                .style(Style::default().fg(theme::palette().warning)),
+                            status_area,
+                        );
+                    }
                 } else {
                     frame.render_widget(
-                        Paragraph::new("Loading sessions…")
-                            .style(theme::muted())
-                            .block(theme::panel(false).title(" Sessions ")),
-                        sessions,
+                        Paragraph::new(vec![
+                            Line::from("Create a durable workspace for a group of sessions."),
+                            Line::from(""),
+                            Line::from(format!("Suggested name: {suggested_name}")),
+                        ])
+                        .block(theme::panel(false).title(" Preview "))
+                        .wrap(Wrap { trim: false }),
+                        right,
                     );
                 }
-                if let Some(status) = status {
-                    frame.render_widget(
-                        Paragraph::new(status).style(Style::default().fg(theme::WARNING)),
-                        status_area,
-                    );
-                }
-            } else {
-                frame.render_widget(
-                    Paragraph::new(vec![
-                        Line::from("Create a durable workspace for a group of sessions."),
-                        Line::from(""),
-                        Line::from(format!("Suggested name: {suggested_name}")),
-                    ])
-                    .block(theme::panel(false).title(" Preview "))
-                    .wrap(Wrap { trim: false }),
-                    right,
-                );
-            }
 
-            let (footer_text, footer_style) =
-                selector_footer(editing.as_ref(), confirming.as_ref(), &input, notices);
-            frame.render_widget(
-                Paragraph::new(footer_text)
-                    .style(theme::muted().bg(theme::SURFACE).patch(footer_style)),
-                footer,
-            );
+                let (footer_text, footer_style) =
+                    selector_footer(editing.as_ref(), confirming.as_ref(), &input, notices);
+                frame.render_widget(
+                    Paragraph::new(footer_text).style(
+                        theme::muted()
+                            .bg(theme::palette().surface)
+                            .patch(footer_style),
+                    ),
+                    footer,
+                );
+            })
         })?;
 
         let event = tokio::select! {
@@ -428,7 +443,7 @@ fn selector_footer(
         None => match confirming {
             Some(confirm) => (delete_prompt(confirm, input), Style::default()),
             None => match notices.current() {
-                Some(notice) => (notice, Style::default().fg(theme::WARNING)),
+                Some(notice) => (notice, Style::default().fg(theme::palette().warning)),
                 None => (SELECTOR_HINTS.into(), Style::default()),
             },
         },
@@ -503,7 +518,7 @@ mod tests {
         let (text, style) = selector_footer(None, None, &TextInput::new(), &notices);
 
         assert!(text.starts_with("Could not delete workspace:"));
-        assert_eq!(style.fg, Some(theme::WARNING));
+        assert_eq!(style.fg, Some(theme::palette().warning));
         assert!(!notices.dismiss(std::time::Instant::now()));
     }
 

@@ -222,6 +222,9 @@ confirmation. `d` deletes it after a Yes/No choice; no identifier typing is requ
 `F7` opens Setup for accounts, targets, projects, new-session defaults, sidebar
 placement, display, review, and web access. Choose Left or Right for the sidebar,
 and turn off **Focus prompt after creating** to keep focus in Sessions.
+Choose **Theme** for Midnight (the default), Light, or Dracula. Press `Enter` to
+apply the choice to your draft, then `Ctrl+S` to save and update the terminal
+colors immediately. The preference is kept across restarts.
 
 `Tab` moves the keyboard through the layout — Sessions, Prompt, Targets, Quota —
 and `Shift+Tab` reverses it. Every pane remains in that ring at every size. The

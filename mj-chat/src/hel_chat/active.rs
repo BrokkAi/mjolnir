@@ -2714,7 +2714,7 @@ pub(super) fn render_in(
                         ),
                         usize::from(prompt_inner.width),
                     ),
-                    Style::default().fg(theme::MUTED),
+                    Style::default().fg(theme::palette().muted),
                 ))
             })
             .collect::<Vec<_>>();
@@ -2743,7 +2743,7 @@ pub(super) fn render_in(
         let input_scroll = cursor_row.saturating_add(1).saturating_sub(content_height);
         frame.render_widget(
             Paragraph::new(prompt_lines)
-                .style(Style::default().fg(theme::TEXT))
+                .style(Style::default().fg(theme::palette().text))
                 .wrap(Wrap { trim: false })
                 .scroll((input_scroll as u16, 0))
                 .block(prompt_block),
@@ -2905,9 +2905,9 @@ pub(super) fn render_chat_footer(
         .unwrap_or(&default_footer);
     // Notices keep a warm accent; navigation hints remain quiet.
     let footer_color = if search_footer.is_none() && notice.is_some() {
-        theme::WARNING
+        theme::palette().warning
     } else {
-        theme::MUTED
+        theme::palette().muted
     };
     let line = if search_footer.is_none() && notice.is_none() {
         theme::hints(footer)
@@ -4231,7 +4231,10 @@ mod tests {
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
         assert!(footer_text.contains("Background import finished"));
-        assert_eq!(buffer[(buffer.area.x, footer_row)].fg, theme::WARNING);
+        assert_eq!(
+            buffer[(buffer.area.x, footer_row)].fg,
+            theme::palette().warning
+        );
 
         shared.clear();
         terminal
@@ -4242,7 +4245,10 @@ mod tests {
             .map(|x| buffer[(x, footer_row)].symbol())
             .collect::<String>();
         assert!(footer_text.contains("Tab pane"), "{footer_text:?}");
-        assert_eq!(buffer[(buffer.area.x, footer_row)].fg, theme::TEXT);
+        assert_eq!(
+            buffer[(buffer.area.x, footer_row)].fg,
+            theme::palette().text
+        );
     }
 
     /// The composer's own row is where a user typing in it learns the keys,
@@ -4540,7 +4546,7 @@ mod tests {
             let column = u16::try_from(title_start + offset).unwrap();
             assert_eq!(
                 buffer[(column, 0)].fg,
-                theme::TEXT,
+                theme::palette().text,
                 "the title draws bright white: {}",
                 cells.concat()
             );
@@ -4551,7 +4557,7 @@ mod tests {
             .expect("the rule follows the title");
         assert_eq!(
             buffer[(u16::try_from(rule).unwrap(), 0)].fg,
-            theme::BORDER,
+            theme::palette().border,
             "the rule stays chrome"
         );
     }

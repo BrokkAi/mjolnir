@@ -410,10 +410,10 @@ pub(crate) fn render_palette(
                     theme::muted()
                 } else if selected {
                     Style::default()
-                        .fg(theme::TEXT)
+                        .fg(theme::palette().text)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme::TEXT)
+                    Style::default().fg(theme::palette().text)
                 };
                 let padding = label_width.saturating_sub(Line::raw(text.as_str()).width()) + 2;
                 Line::from(vec![
@@ -423,9 +423,9 @@ pub(crate) fn render_palette(
                     Span::styled(
                         keys,
                         Style::default().fg(if ready {
-                            theme::SECONDARY
+                            theme::palette().secondary
                         } else {
-                            theme::MUTED
+                            theme::palette().muted
                         }),
                     ),
                 ])

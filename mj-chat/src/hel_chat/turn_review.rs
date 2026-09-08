@@ -825,7 +825,7 @@ fn render_review_overview(
 ) -> (Rect, usize, usize) {
     let block = theme::panel(false)
         .title(title.to_owned())
-        .border_style(Style::default().fg(theme::WARNING));
+        .border_style(Style::default().fg(theme::palette().warning));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -838,7 +838,7 @@ fn render_review_overview(
         lines.push(Line::from(""));
     }
     lines.push(Line::from(vec![
-        Span::styled("Stage: ", Style::default().fg(theme::MUTED)),
+        Span::styled("Stage: ", Style::default().fg(theme::palette().muted)),
         Span::raw(review.view.status.clone()),
     ]));
     lines.push(Line::from(""));
@@ -849,7 +849,7 @@ fn render_review_overview(
     if review.view.roles.is_empty() {
         lines.push(Line::from(Span::styled(
             "  waiting for reviewer roles to start",
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::palette().muted),
         )));
     } else {
         for role in &review.view.roles {
@@ -864,7 +864,7 @@ fn render_review_overview(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Prompt paused during review. Esc cancels; Tab opens transcripts.",
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(theme::palette().muted),
     )));
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -878,11 +878,11 @@ fn render_review_overview(
 
 fn role_state_color(state: RoleState) -> Color {
     match state {
-        RoleState::Pending => theme::MUTED,
-        RoleState::Running => theme::WARNING,
-        RoleState::Clean => theme::SUCCESS,
-        RoleState::Findings => theme::SECONDARY,
-        RoleState::Failed => theme::ERROR,
+        RoleState::Pending => theme::palette().muted,
+        RoleState::Running => theme::palette().warning,
+        RoleState::Clean => theme::palette().success,
+        RoleState::Findings => theme::palette().secondary,
+        RoleState::Failed => theme::palette().error,
     }
 }
 
@@ -896,7 +896,7 @@ fn render_verdict_panel(
 ) -> (Rect, usize, usize) {
     let block = theme::panel(false)
         .title(title.to_owned())
-        .border_style(Style::default().fg(theme::SECONDARY));
+        .border_style(Style::default().fg(theme::palette().secondary));
     let mut inner = block.inner(area);
     frame.render_widget(block, area);
     if let Some(strip) = strip
@@ -976,7 +976,7 @@ pub(super) fn render_turn_review_actions(
     );
     if status_column < area.right() {
         frame.render_widget(
-            Paragraph::new(status).style(Style::default().fg(theme::MUTED)),
+            Paragraph::new(status).style(Style::default().fg(theme::palette().muted)),
             Rect::new(
                 status_column,
                 area.y,
@@ -1002,10 +1002,10 @@ pub(super) fn role_strip(review: &TurnReview) -> Option<Line<'static>> {
             "Overview",
             if review.overview_selected() {
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::palette().accent)
                     .add_modifier(Modifier::REVERSED)
             } else {
-                Style::default().fg(theme::ACCENT)
+                Style::default().fg(theme::palette().accent)
             },
         ));
     }
@@ -1030,9 +1030,9 @@ pub(super) fn role_strip(review: &TurnReview) -> Option<Line<'static>> {
             spans.push(Span::raw("  "));
         }
         let color = match review.verdict_kind() {
-            Some(VerdictKind::Failed) => theme::ERROR,
-            Some(VerdictKind::Findings) => theme::SECONDARY,
-            _ => theme::SUCCESS,
+            Some(VerdictKind::Failed) => theme::palette().error,
+            Some(VerdictKind::Findings) => theme::palette().secondary,
+            _ => theme::palette().success,
         };
         let mut style = Style::default().fg(color);
         if review.verdict_selected() {

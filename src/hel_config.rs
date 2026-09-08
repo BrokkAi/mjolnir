@@ -156,7 +156,7 @@ impl ReviewConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 4;
+pub const CONFIG_VERSION: u32 = 5;
 pub const PRODUCT_DIR: &str = "mjolnir";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1127,6 +1127,32 @@ impl std::str::FromStr for SpinnerStyle {
     }
 }
 
+/// Color palette for the terminal dashboard and conversation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiTheme {
+    #[default]
+    Midnight,
+    Light,
+    Dracula,
+}
+
+impl UiTheme {
+    pub const ALL: [Self; 3] = [Self::Midnight, Self::Light, Self::Dracula];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Midnight => "Midnight",
+            Self::Light => "Light",
+            Self::Dracula => "Dracula",
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionsSide {
@@ -1158,6 +1184,8 @@ pub struct HelConfig {
     /// Client-side activity animation; omitted configurations retain the classic scan.
     #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
     pub spinner: SpinnerStyle,
+    #[serde(default, skip_serializing_if = "UiTheme::is_default")]
+    pub theme: UiTheme,
     #[serde(default, skip_serializing_if = "PhoneConfig::is_default")]
     pub phone: PhoneConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
@@ -1180,6 +1208,7 @@ impl Default for HelConfig {
             version: CONFIG_VERSION,
             newer_config_version: None,
             spinner: SpinnerStyle::default(),
+            theme: Default::default(),
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
             startup: StartupConfig::default(),
@@ -1255,10 +1284,11 @@ impl HelConfig {
         let mut config: Self = toml::from_str(&contents)
             .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         // Version 2 adds Podman workspace storage; version 3 restores the
-        // spinner preference; version 4 adds stopped-session visibility.
+        // spinner preference; version 4 adds stopped-session visibility;
+        // version 5 adds the terminal theme preference.
         // Earlier configs acquire defaults in memory and
         // upgrade on the next ordinary save.
-        if matches!(config.version, 1..=3) {
+        if matches!(config.version, 1..=4) {
             config.version = CONFIG_VERSION;
         }
         config.validate()?;
@@ -1293,6 +1323,9 @@ impl HelConfig {
         }
         if let Some(side) = salvage_section::<SessionsSide>(document, "sessions_side") {
             config.sessions_side = side;
+        }
+        if let Some(theme) = salvage_section::<UiTheme>(document, "theme") {
+            config.theme = theme;
         }
         if let Some(spinner) = salvage_section::<SpinnerStyle>(document, "spinner") {
             config.spinner = spinner;
@@ -1872,6 +1905,7 @@ mod tests {
             show_stopped_sessions: true,
             newer_config_version: None,
             spinner: SpinnerStyle::default(),
+            theme: Default::default(),
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
             startup: Default::default(),
@@ -2512,6 +2546,51 @@ mod tests {
             assert_eq!(reloaded.phone, config.phone);
             assert_eq!(reloaded.profiles, config.profiles);
         }
+    }
+
+    #[test]
+    fn theme_preferences_upgrade_and_round_trip_without_replacing_other_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let old = "version = 4\nshow_stopped_sessions = false\n";
+        fs::write(&path, old).unwrap();
+        let config = HelConfig::load_from(&path).unwrap();
+        assert_eq!(config.theme, UiTheme::Midnight);
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(fs::read_to_string(&path).unwrap(), old);
+
+        for theme in UiTheme::ALL {
+            HelConfig::update_to(&path, |config| {
+                config.theme = theme;
+                Ok(())
+            })
+            .unwrap();
+            let mut expected = config.clone();
+            expected.theme = theme;
+            assert_eq!(HelConfig::load_from(&path).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn unknown_theme_is_rejected_but_newer_configs_salvage_known_themes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            format!("version = {CONFIG_VERSION}\ntheme = \"unknown\"\n"),
+        )
+        .unwrap();
+        assert!(HelConfig::load_from(&path).is_err());
+
+        let newer = format!(
+            "version = {}\ntheme = \"light\"\nfuture = true\n",
+            CONFIG_VERSION + 1
+        );
+        fs::write(&path, &newer).unwrap();
+        let config = HelConfig::load_from(&path).unwrap();
+        assert_eq!(config.theme, UiTheme::Light);
+        assert!(config.save_to(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
     }
 
     #[test]

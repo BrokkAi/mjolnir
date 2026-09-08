@@ -1657,6 +1657,7 @@ mod tests {
             show_stopped_sessions: true,
             newer_config_version: None,
             spinner: Default::default(),
+            theme: Default::default(),
             phone: Default::default(),
             review: Default::default(),
             startup: Default::default(),

@@ -402,9 +402,9 @@ fn conversation_header_renders_the_session_title_in_a_distinct_color() {
     let title_start = header[..header.find("update the title").unwrap()]
         .chars()
         .count() as u16;
-    assert_eq!(buffer[(2, 0)].fg, theme::TEXT);
+    assert_eq!(buffer[(2, 0)].fg, theme::palette().text);
     for x in title_start..title_start + "update the title".len() as u16 {
-        assert_eq!(buffer[(x, 0)].fg, theme::SECONDARY);
+        assert_eq!(buffer[(x, 0)].fg, theme::palette().secondary);
     }
 }
 
@@ -1646,10 +1646,39 @@ fn agent_preview_head_removes_punctuation_before_its_ellipsis() {
 }
 
 #[test]
+fn changing_theme_recolors_cached_conversation_without_changing_text() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries
+        .push(ChatEntry::plain(1, ChatRole::User, "inspect the renderer"));
+    chat.entries.push(ChatEntry::plain(
+        2,
+        ChatRole::Agent,
+        "**Done.** Use `cargo test`.",
+    ));
+    let mut previous: Option<Vec<Line<'static>>> = None;
+    for theme in theme::UiTheme::ALL {
+        theme::with_theme(theme, || {
+            let lines = transcript_lines(&mut chat, 60);
+            assert!(
+                lines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .any(|span| { span.style.fg == Some(theme::palette().accent) })
+            );
+            if let Some(previous) = &previous {
+                assert_eq!(line_text(lines.clone()), line_text(previous.clone()));
+                assert_ne!(&lines, previous, "existing rows must adopt the new colors");
+            }
+            previous = Some(lines);
+        });
+    }
+}
+
+#[test]
 fn blank_rows_inside_messages_keep_the_role_gutter() {
     for (role, color) in [
-        (ChatRole::User, theme::ACCENT),
-        (ChatRole::Agent, theme::BORDER),
+        (ChatRole::User, theme::palette().accent),
+        (ChatRole::Agent, theme::palette().border),
     ] {
         let entry = ChatEntry::plain(1, role, "1. first\n\n2. second");
         let lines = render_transcript_entry(&entry, 80, TranscriptRenderMode::Rich);
