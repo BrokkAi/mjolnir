@@ -774,6 +774,7 @@ pub(super) fn record_runtime_event(
             protocol_version: Some(protocol_version),
             capabilities: Some(capabilities),
             agent_info,
+            steering_supported,
             ..
         } => {
             relay.record_observation(RelayObservation::AgentInitialized {
@@ -781,6 +782,7 @@ pub(super) fn record_runtime_event(
                 capabilities,
                 agent_info,
             })?;
+            relay.set_steering_supported(steering_supported);
         }
         RuntimeEvent::Connected { .. } => {
             relay.record_observation(RelayObservation::Warning {

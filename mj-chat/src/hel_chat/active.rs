@@ -367,6 +367,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         );
         state.set_current_step_start(snapshot.operational.current_step_started_at_ms);
         state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
+        state.steering_supported = snapshot.operational.steering_supported;
         state.set_session_activity(crate::usage_format::SessionActivity::of(
             &snapshot.operational,
         ));
@@ -654,6 +655,7 @@ impl ActiveChat {
                 );
                 state.set_current_step_start(snapshot.operational.current_step_started_at_ms);
                 state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
+                state.steering_supported = snapshot.operational.steering_supported;
                 state.set_session_activity(crate::usage_format::SessionActivity::of(
                     &snapshot.operational,
                 ));
@@ -1609,11 +1611,13 @@ impl ActiveChat {
                 let Some(command_id) = self.command_id("cancel") else {
                     return ChatEventOutcome::Handled;
                 };
-                self.state.set_notice("Sending cancellation request…");
+                let intent = self.state.turn_control_intent();
+                self.state.set_notice(intent.sending_notice());
                 queue_chat_remote_operation(
                     self.remote.operations(),
                     ChatRemoteOperation::Cancel {
                         command_id,
+                        intent,
                         cancel_agent: self.state.prompt_in_flight(),
                         shell_command_ids: self.state.active_user_shell_ids(),
                     },
@@ -2841,12 +2845,16 @@ pub(super) fn render_chat_footer(
     // chords that answer from anywhere, then the function keys. Only the
     // first group changes with what the composer is doing.
     let footer_area = footer.area;
+    let queued_keys = format!(
+        "Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history · Shift-Enter newline · {}",
+        chat.turn_control_intent().escape_hint(),
+    );
     let composer_keys = if !prompt_focused {
         "Tab pane · PgUp/PgDn transcript"
     } else if chat.voice_active {
         "Listening… Alt-V stop · PgUp/PgDn transcript"
     } else if !chat.queued_prompts.is_empty() {
-        "Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history · Shift-Enter newline · Esc cancel"
+        &queued_keys
     } else {
         "Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Alt-T rendering · Shift-Enter newline"
     };
@@ -2977,10 +2985,10 @@ fn prompt_title_at(chat: &ChatState, queued: usize, now_seconds: u64) -> String 
     if queued > 0 {
         parts.push(format!("{queued} queued"));
     }
-    // Esc cancels a prompt of ours. It cannot stop a turn the harness started
-    // on its own, so the hint follows the prompt rather than the phase.
+    // Esc controls a prompt of ours. It cannot affect a turn the harness
+    // started on its own, so the hint follows the prompt rather than the phase.
     if chat.prompt_in_flight() {
-        parts.push("Esc cancels".into());
+        parts.push(chat.turn_control_intent().escape_hint().into());
     }
     // Auto-review changes what happens when this turn ends, so the composer
     // says it is armed rather than surprising the user with a pane.
@@ -3205,6 +3213,7 @@ mod tests {
                     acp_ready: None,
                     agent_capabilities: None,
                     agent_info: None,
+                    steering_supported: None,
                     config_options: Vec::new(),
                     modes: None,
                     available_commands: Vec::new(),
@@ -4349,6 +4358,115 @@ mod tests {
 
         chat.set_prompt_in_flight(true);
         assert!(prompt_title(&chat, 0).contains("Esc cancels"));
+    }
+
+    #[tokio::test]
+    async fn escape_names_steering_through_submission_and_acceptance() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use hel::hel_state::{MaterializedQueuedPrompt, QueuedCommandKind};
+        use hel::hel_worker::{ActiveRelayPrompt, RelayCommand};
+
+        for (supported, queue_kind, hint, sending, requested) in [
+            (
+                Some(true),
+                Some(QueuedCommandKind::Prompt),
+                "Esc steers next",
+                "Sending steering request…",
+                "Steering requested",
+            ),
+            (
+                Some(false),
+                Some(QueuedCommandKind::Prompt),
+                "Esc cancels",
+                "Sending cancellation request…",
+                "Cancellation requested",
+            ),
+            (
+                None,
+                Some(QueuedCommandKind::Prompt),
+                "Esc applies next",
+                "Requesting queued prompt…",
+                "Queued prompt requested",
+            ),
+            (
+                Some(true),
+                Some(QueuedCommandKind::SetConfig {
+                    key: "model".into(),
+                    value: "next-model".into(),
+                }),
+                "Esc cancels",
+                "Sending cancellation request…",
+                "Cancellation requested",
+            ),
+            (
+                Some(true),
+                None,
+                "Esc cancels",
+                "Sending cancellation request…",
+                "Cancellation requested",
+            ),
+        ] {
+            let mut fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+                "steering-session",
+                12,
+            );
+            let mut chat = ActiveChat::open(
+                fixture.stopped,
+                "bundle-1",
+                None,
+                fixture.control,
+                SessionHeaderIdentity::default(),
+                String::new(),
+                Notices::default(),
+            );
+            let mut materialized = MaterializedSession::empty("steering-session");
+            if let Some(kind) = queue_kind {
+                materialized.queued_prompts.push(MaterializedQueuedPrompt {
+                    command_id: "queued-correction".into(),
+                    kind,
+                    content: vec![serde_json::json!({"type": "text", "text": "change direction"})],
+                    queued_at_ms: 0,
+                });
+            }
+            let mut view = managed_view(materialized);
+            let operational = &mut view.snapshot.as_mut().unwrap().operational;
+            operational.steering_supported = supported;
+            operational.active_prompt = Some(ActiveRelayPrompt {
+                command_id: "running-prompt".into(),
+                created_at_ms: 0,
+                started_at_ms: 0,
+            });
+            apply_session_view(&mut chat.state, Ok(view));
+            assert!(prompt_title(&chat.state, 1).contains(hint));
+
+            chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            assert_eq!(chat.state.notice().as_deref(), Some(sending));
+
+            let result = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let result = chat
+                        .remote
+                        .recv()
+                        .await
+                        .expect("remote worker remains open");
+                    if matches!(result, ChatRemoteResult::Cancel { .. }) {
+                        break result;
+                    }
+                }
+            })
+            .await
+            .expect("turn control request completes");
+            assert!(matches!(
+                fixture.submitted.recv().await,
+                Some(RelayCommand::Cancel)
+            ));
+
+            // A newer view may already have consumed the queue. The reply
+            // must still describe the request that was actually submitted.
+            chat.state.queued_prompts.clear();
+            apply_chat_remote_result(&mut chat.state, result);
+            assert_eq!(chat.state.notice().as_deref(), Some(requested));
+        }
     }
 
     /// While the agent is idle, the composer names what it left running

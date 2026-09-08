@@ -2181,6 +2181,14 @@ async fn exercise_image_steering(with_images: bool) {
         .await
     });
 
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(RuntimeEvent::Connected {
+            steering_supported: Some(true),
+            ..
+        }),
+    ));
+
     request_tx
         .send(if with_images {
             CommandRequest::PromptAttachments {
