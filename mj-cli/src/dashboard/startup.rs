@@ -117,7 +117,7 @@ fn automatic_target(
         ("localhost", TargetTemplate::LocalBare)
     } else {
         bail!(
-            "No usable Podman or Docker runtime. Configure a startup target or press Alt-N to choose one."
+            "No usable Podman or Docker runtime. Configure a startup target or press Alt-W to choose one."
         );
     };
     if let Some((id, target)) = config.targets.iter().find(|(_, target)| {

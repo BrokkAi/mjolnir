@@ -118,6 +118,7 @@ fn snapshot(
     records: Vec<SessionRecord>,
 ) -> daemon::RuntimeSnapshot {
     daemon::RuntimeSnapshot {
+        workspace_names: Default::default(),
         revision,
         config: HelConfig::default(),
         records,

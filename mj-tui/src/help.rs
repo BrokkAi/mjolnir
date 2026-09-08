@@ -71,7 +71,9 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ("Alt-Q", "detach"),
     ("F2", "command palette"),
     ("F3", "workspaces"),
-    ("F4", "web viewer"),
+    ("F4", "setup"),
+    ("F7", "web viewer"),
+    ("Alt-W", "new session with options"),
     ("F5", "refresh targets and quotas"),
 ];
 
@@ -286,7 +288,7 @@ mod tests {
     fn help_overlay_returns_to_the_wizard_it_opened_over() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(alt_key('n'));
+        dashboard.handle_key(alt_key('w'));
         let wizard = dashboard.mode.clone();
         assert!(matches!(wizard, Mode::New(_)), "{wizard:?}");
 

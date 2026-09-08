@@ -190,6 +190,13 @@ fn maximized_pane_is_effective(
         let maximum_sizes = sizes_with_pane_size(sizes, pane, PaneSize::Maximized);
         let bands_for = |sizes: [(SupportPane, PaneSize); 3]| {
             std::array::from_fn(|index| {
+                if index == 0 {
+                    return PaneBand {
+                        minimum: 0,
+                        full: 0,
+                        cap: 0,
+                    };
+                }
                 let (_, size) = sizes[index];
                 let dimensions = bands[index].1;
                 sized_band(
@@ -308,11 +315,34 @@ pub fn render_combined(
     }
     dashboard.resume_sessions_area =
         matches!(dashboard.mode, Mode::ResumeDialog(_)).then(|| resume_sessions_pane(area));
-    if dashboard.config_is_empty() {
+    if dashboard.config_is_empty() && dashboard.state.sessions.is_empty() {
         render_onboarding_surface(frame, dashboard);
         return;
     }
 
+    let sidebar_width = match dashboard.pane_size(SupportPane::Sessions) {
+        PaneSize::Minimized => 24,
+        PaneSize::Standard => (area.width / 3).clamp(28, 44),
+        PaneSize::Maximized => area.width / 2,
+    }
+    .min(area.width / 2);
+    let sidebar_right = dashboard.config.sessions_side == hel::hel_config::SessionsSide::Right;
+    let content_area = Rect::new(
+        area.x + if sidebar_right { 0 } else { sidebar_width },
+        area.y,
+        area.width.saturating_sub(sidebar_width),
+        area.height,
+    );
+    let sessions_area = Rect::new(
+        if sidebar_right {
+            content_area.right()
+        } else {
+            area.x
+        },
+        area.y,
+        sidebar_width,
+        area.height.saturating_sub(FOOTER_HEIGHT),
+    );
     let selected_transition = dashboard.selected_session().and_then(|session| {
         dashboard
             .transition_kind(&session.id)
@@ -331,7 +361,7 @@ pub fn render_combined(
         PROMPT_MINIMUM
     } else {
         chat.as_ref().map_or(EMPTY_PROMPT_HEIGHT, |chat| {
-            chat.desired_prompt_height(area.width)
+            chat.desired_prompt_height(content_area.width)
         })
     };
     let sizes = [
@@ -384,15 +414,17 @@ pub fn render_combined(
             dimensions.standard_cap,
         )
     });
-    let sessions = bands[0];
+    let sessions = PaneBand {
+        minimum: 0,
+        full: 0,
+        cap: 0,
+    };
     let targets = bands[1];
     let quota = bands[2];
-    dashboard.set_pane_maximize_enabled(maximized_pane_is_effective(
-        area.height,
-        dimensions,
-        desired_prompt,
-        sizes,
-    ));
+    let mut maximize_enabled =
+        maximized_pane_is_effective(area.height, dimensions, desired_prompt, sizes);
+    maximize_enabled[0].1 = area.width / 2 > (area.width / 3).clamp(28, 44);
+    dashboard.set_pane_maximize_enabled(maximize_enabled);
     let allocation =
         allocate_combined_heights(area.height, sessions, targets, quota, desired_prompt, sizes);
     let heights = match allocation {
@@ -419,9 +451,10 @@ pub fn render_combined(
             Constraint::Length(heights.quota),
             Constraint::Length(heights.footer),
         ])
-        .split(area);
-    let (sessions_area, transcript_area, prompt_area, targets_area, quota_area, footer_area) =
-        (bands[0], bands[1], bands[2], bands[3], bands[4], bands[5]);
+        .split(content_area);
+    let (transcript_area, prompt_area, targets_area, quota_area) =
+        (bands[1], bands[2], bands[3], bands[4]);
+    let footer_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     dashboard.pane_areas = Some([sessions_area, targets_area, quota_area]);
     for (pane, pane_area) in [
         (SupportPane::Sessions, sessions_area),

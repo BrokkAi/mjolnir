@@ -13,7 +13,6 @@ use hel_tui::WebViewerAccess;
 use hel_tui::{DashboardAction, SessionOperationKind};
 use mj_controller::hel_controller::{Controller, ResumeRepositorySourceReceipt};
 use mj_controller::hel_review_settings::ReviewDiscoveryRequest;
-use mj_controller::hel_setup::SetupOutcome;
 
 use crate::daemon;
 use crate::dashboard::io::{
@@ -22,8 +21,7 @@ use crate::dashboard::io::{
     spawn_archive_write, spawn_cancellable_io, spawn_cancellable_io_with_token,
     spawn_clipboard_read, spawn_config_rename, spawn_create_bundle,
     spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
-    spawn_io, spawn_lifecycle_operation, spawn_review_settings_discovery,
-    spawn_review_settings_save,
+    spawn_lifecycle_operation, spawn_review_settings_discovery, spawn_review_settings_save,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -50,28 +48,27 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::OpenWorkspacePicker => {
             context.request_workspace_switch();
         }
-        DashboardAction::OpenConfig => match context.run_setup_dialog()? {
-            SetupOutcome::Written => {
-                context.dashboard.set_notice("Saving setup changes…");
-                let workspace_id = context.workspace_id.clone();
-                let client_id = context.client_id.clone();
-                spawn_io(
-                    "reload setup state",
-                    context.dashboard_io_tx.clone(),
-                    move || {
-                        let mut controller = Controller::load()?;
-                        super::retain_workspace_sessions(
-                            &mut controller,
-                            &workspace_id,
-                            &client_id,
-                        )?;
-                        Ok(controller)
-                    },
-                    DashboardIoUpdate::SetupReloaded,
-                );
-            }
-            SetupOutcome::Cancelled => context.dashboard.set_notice("Setup cancelled."),
-        },
+        DashboardAction::OpenConfig => context.dashboard.begin_setup(),
+        DashboardAction::DiscoverSetup { generation } => {
+            super::io::spawn_setup_discovery(
+                generation,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::SaveSetup {
+            generation,
+            original,
+            updated,
+        } => {
+            super::io::spawn_setup_save(
+                generation,
+                original,
+                updated,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
         DashboardAction::DiscoverReviewSettings {
             generation,
             profile_id,
@@ -466,6 +463,74 @@ pub(crate) async fn apply_dashboard_action(
         }
         action @ (DashboardAction::CreateSession { .. }
         | DashboardAction::CreateStartupSession { .. }) => start_session_launch(context, action),
+        DashboardAction::QuickNewSession {
+            generation,
+            initial_prompt,
+        } => {
+            match context
+                .dashboard
+                .quick_session_action(context.launch_directory.clone())
+            {
+                Ok(DashboardAction::CreateStartupSession {
+                    profile_id,
+                    target_template_id,
+                    project_directory,
+                    ..
+                }) => start_session_launch(
+                    context,
+                    DashboardAction::CreateStartupSession {
+                        generation,
+                        profile_id,
+                        target_template_id,
+                        project_directory,
+                        initial_prompt,
+                    },
+                ),
+                Ok(_) => unreachable!("quick session resolves startup options"),
+                Err(error) => context.dashboard.quick_new_failed(generation, error),
+            }
+        }
+        DashboardAction::RestartSession { session_id } => {
+            let Some(session) = context.controller.state.sessions.get(&session_id).cloned() else {
+                return Ok(());
+            };
+            let request =
+                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Resuming);
+            context.dashboard.set_notice("Restarting session…");
+            let runtime = tokio::runtime::Handle::current();
+            spawn_lifecycle_operation(
+                request,
+                context.critical_operations.clone(),
+                move |_controller, cancelled| {
+                    runtime.block_on(async {
+                        let mut daemon = daemon::connect_or_start().await?;
+                        if session.state.is_active() {
+                            daemon.close_session(session_id.clone()).await?;
+                        }
+                        anyhow::ensure!(
+                            !cancelled.load(Ordering::Acquire),
+                            "restart cancelled after stopping"
+                        );
+                        daemon
+                            .resume_session(daemon::ResumeSessionRequest {
+                                session_id,
+                                workspace_id: session.workspace_id,
+                                profile_id: session.last_profile.clone(),
+                                target_template_id: session.target_template_id.clone(),
+                                additional_mounts: Some(session.additional_mounts),
+                                resource_allocation: session.resource_allocation,
+                                discard_queue: false,
+                                repository_preflight: None,
+                            })
+                            .await
+                    })?;
+                    Ok(LifecycleSuccess::Resumed {
+                        profile_id: session.last_profile,
+                        target_id: session.target_template_id,
+                    })
+                },
+            );
+        }
         DashboardAction::Open { session_id } => {
             context.open_chat_session(&session_id);
         }
@@ -878,7 +943,13 @@ fn start_session_launch_with_repository_preflight(
                 &profile_id,
                 &target_template_id,
             ));
-            let workspace_id = context.workspace_id.clone();
+            let workspace_id = context
+                .controller
+                .state
+                .sessions
+                .get(&session_id)
+                .map(|session| session.workspace_id.clone())
+                .unwrap_or_else(|| context.workspace_id.clone());
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Resuming);
             context.dashboard.set_resume_destination(

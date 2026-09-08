@@ -610,6 +610,7 @@ mod tests {
 
     fn snapshot(records: Vec<SessionRecord>) -> daemon::RuntimeSnapshot {
         daemon::RuntimeSnapshot {
+            workspace_names: Default::default(),
             revision: 1,
             config: HelConfig::default(),
             records,
@@ -679,7 +680,7 @@ mod tests {
         assert!(text(&preview).contains("Live session title"));
         preview.apply_snapshot(snapshot(Vec::new()));
         assert!(preview.status().is_none());
-        assert!(text(&preview).contains("No active sessions"));
+        assert!(text(&preview).contains("No sessions"));
         preview.apply_prepared(detail("first-session", "Late removed session", 10));
         assert!(!text(&preview).contains("Late removed session"));
     }
@@ -776,7 +777,7 @@ mod tests {
             "{settled}"
         );
         preview.apply_snapshot(snapshot(vec![stopped]));
-        assert!(text(&preview).contains("No active sessions"));
+        assert!(text(&preview).contains("No sessions"));
         assert_eq!(preview.session_count(), Some(0));
     }
 

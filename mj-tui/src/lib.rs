@@ -46,9 +46,11 @@ mod dialogs;
 mod help;
 mod ingest;
 mod palette;
+mod quick_new;
 mod render;
 mod resume;
 mod review_settings;
+mod setup;
 mod widgets;
 mod wizards;
 
@@ -144,8 +146,7 @@ impl SessionsPreviewState {
     }
 }
 
-/// Sessions, targets, and quotas. Sessions that are not live live in
-/// the resume dialog instead of a support pane.
+/// The full-height session sidebar, targets, and quotas.
 pub(crate) const DASHBOARD_PANE_COUNT: usize = 3;
 
 /// Maximum gap between two left clicks on the same session row for the pair
@@ -160,7 +161,16 @@ pub enum DashboardAction {
         session_id: String,
     },
     /// Resolve available local runtimes and the current project off the UI loop.
+    QuickNewSession {
+        generation: Option<u64>,
+        initial_prompt: Option<String>,
+    },
+    RestartSession {
+        session_id: String,
+    },
     CreateStartupSession {
+        generation: Option<u64>,
+        initial_prompt: Option<String>,
         profile_id: String,
         target_template_id: Option<String>,
         project_directory: std::path::PathBuf,
@@ -308,6 +318,14 @@ pub enum DashboardAction {
         include_untracked: bool,
     },
     OpenConfig,
+    DiscoverSetup {
+        generation: u64,
+    },
+    SaveSetup {
+        generation: u64,
+        original: String,
+        updated: String,
+    },
     /// Discover the selectors advertised by the selected reviewer profile.
     /// The generation ties the response to the current dialog draft.
     DiscoverReviewSettings {
@@ -478,6 +496,8 @@ pub(crate) enum Mode {
     Palette(CommandPalette),
     /// The global `[review]` configuration editor, opened from the F2 palette.
     ReviewSettings(ReviewSettingsDialog),
+    Setup(setup::SetupDialog),
+    QuickNew(quick_new::QuickNewDialog),
 }
 
 fn mode_contains_review_settings(mode: &Mode) -> bool {
@@ -604,8 +624,9 @@ pub struct DashboardState {
     /// the wizard so a late reply cannot match a newly opened wizard.
     pub(crate) next_move_preparation_request_id: u64,
     pub(crate) notices: Notices,
-    /// The workspace name, shown at the right of the Sessions title bar.
+    /// The attached workspace name, used by the first-run screen.
     pub(crate) workspace_name: String,
+    pub(crate) workspace_names: BTreeMap<String, String>,
 }
 
 impl DashboardState {
@@ -660,6 +681,7 @@ impl DashboardState {
             next_move_preparation_request_id: 0,
             notices: Notices::default(),
             workspace_name: String::new(),
+            workspace_names: BTreeMap::new(),
         };
         dashboard.session_details = dashboard
             .state
@@ -673,12 +695,7 @@ impl DashboardState {
 
     /// Moves the Sessions selection onto `session_id` without changing focus.
     pub fn select_active_session(&mut self, session_id: &str) {
-        if self
-            .state
-            .sessions
-            .get(session_id)
-            .is_some_and(|session| session.state.is_active())
-        {
+        if self.state.sessions.contains_key(session_id) {
             self.selected_session_id = Some(session_id.to_owned());
         }
     }
@@ -1007,10 +1024,8 @@ impl DashboardState {
                 .is_focused(dialogs::DialogControl::Field),
             Mode::New(wizard) => wizard.text_input_focused(),
             Mode::Resume(wizard) => wizard.text_input_focused(),
-            Mode::Confirm(dialog) => dialog
-                .form
-                .borrow()
-                .is_focused(dialogs::DialogControl::TypedField),
+            Mode::Setup(dialog) => dialog.form.borrow().is_focused(setup::SetupControl::Field),
+            Mode::QuickNew(dialog) => !dialog.preparing,
             _ => false,
         }
     }
@@ -1363,15 +1378,9 @@ impl DashboardState {
             .position(|index| sessions.get(index).is_some_and(|s| s.id == selected))
     }
 
-    /// The sessions the dashboard lists, in creation order: live records and
-    /// terminal records still owned by a transition. Others belong in Resume.
+    /// Every session across workspaces, grouped by project and ordered by creation.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
-        let (mut active, terminal) = partition_sessions(self.state.sessions.values());
-        active.extend(
-            terminal
-                .into_iter()
-                .filter(|session| self.transition_kind(&session.id).is_some()),
-        );
+        let mut active = self.state.sessions.values().collect::<Vec<_>>();
         active.sort_by(|left, right| left.compare_by_creation(right));
         let mut groups = BTreeMap::<String, Vec<&SessionRecord>>::new();
         for session in active {
@@ -1630,27 +1639,6 @@ impl DashboardState {
     }
 }
 
-/// Split sessions into the ones the dashboard lists and the ones the resume
-/// dialog lists. The dashboard shows only live sessions; every other state
-/// belongs to the dialog, and nothing appears in both.
-pub(crate) fn partition_sessions<'a>(
-    sessions: impl IntoIterator<Item = &'a SessionRecord>,
-) -> (Vec<&'a SessionRecord>, Vec<&'a SessionRecord>) {
-    let mut active = Vec::new();
-    let mut terminal = Vec::new();
-    for session in sessions {
-        if session.state.is_active() {
-            active.push(session);
-        } else {
-            terminal.push(session);
-        }
-    }
-    let sequence = |left: &&SessionRecord, right: &&SessionRecord| left.compare_by_creation(right);
-    active.sort_by(sequence);
-    terminal.sort_by(sequence);
-    (active, terminal)
-}
-
 fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
@@ -1741,7 +1729,7 @@ mod tests {
             DashboardAction::OpenResumeDialog
         );
         dashboard.cancel_modal();
-        assert_eq!(dashboard.handle_key(alt_key('n')), DashboardAction::None);
+        assert_eq!(dashboard.handle_key(alt_key('w')), DashboardAction::None);
         assert!(matches!(dashboard.mode, Mode::New(_)));
         dashboard.cancel_modal();
         // `e` was the session edit dialog's key. The command palette replaced
@@ -1751,10 +1739,12 @@ mod tests {
             DashboardAction::None
         );
         assert_eq!(dashboard.mode, Mode::Dashboard);
-        // A pane key that belongs to a different pane does nothing here.
+        // Restart is a direct session action.
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('r'))),
-            DashboardAction::None
+            DashboardAction::RestartSession {
+                session_id: "session-1".into()
+            }
         );
 
         assert_eq!(
@@ -1762,7 +1752,7 @@ mod tests {
             DashboardAction::OpenWorkspacePicker
         );
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::F(4))),
+            dashboard.handle_key(key(KeyCode::F(7))),
             DashboardAction::LoadWebAccess
         );
         dashboard.cancel_modal();
@@ -2023,11 +2013,11 @@ mod tests {
     }
 
     /// Plain letters are pane-local only. New session, resume, and mark read
-    /// answer from everywhere, so each has one spelling — its chord — and the
-    /// letters that used to alias them do nothing at all.
+    /// keep pane-local shortcuts separate from global chords.
     #[test]
-    fn plain_n_a_and_s_no_longer_act() {
-        for character in ['n', 'a', 's'] {
+    fn plain_a_remains_unbound_and_the_wizard_has_its_own_key() {
+        {
+            let character = 'a';
             let mut dashboard = dashboard_with_session(running_session());
             dashboard.focus_sessions();
 
@@ -2043,7 +2033,7 @@ mod tests {
         // The chords still do what the letters used to.
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        assert_eq!(dashboard.handle_key(alt_key('n')), DashboardAction::None);
+        assert_eq!(dashboard.handle_key(alt_key('w')), DashboardAction::None);
         assert!(matches!(dashboard.mode, Mode::New(_)));
         dashboard.cancel_modal();
 
@@ -2096,7 +2086,7 @@ mod tests {
         assert_eq!(rename.mode, Mode::Dashboard);
 
         let mut new_session = dashboard_with_session(running_session());
-        assert_eq!(new_session.handle_key(alt_key('n')), DashboardAction::None);
+        assert_eq!(new_session.handle_key(alt_key('w')), DashboardAction::None);
         let mode_before_ctrl_c = new_session.mode.clone();
         assert!(matches!(mode_before_ctrl_c, Mode::New(_)));
         assert_eq!(new_session.handle_key(ctrl_key('c')), DashboardAction::None);
@@ -2292,8 +2282,8 @@ mod tests {
         dashboard.set_state(state);
         assert_eq!(
             dashboard.selected_session().unwrap().id,
-            "session-0",
-            "the selection falls back to the first row still on screen"
+            "session-1",
+            "stopping a session keeps its selection"
         );
     }
 
@@ -2412,7 +2402,7 @@ mod tests {
     #[test]
     fn alt_q_quits_without_mutating_any_dashboard_modal() {
         let mut new_session = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-        assert_eq!(new_session.handle_key(alt_key('n')), DashboardAction::None);
+        assert_eq!(new_session.handle_key(alt_key('w')), DashboardAction::None);
 
         let mut resume = dashboard_with_session(stopped_session());
         assert_eq!(open_resume_wizard(&mut resume), DashboardAction::None);
@@ -2462,72 +2452,49 @@ mod tests {
     }
 
     #[test]
-    fn the_partition_keeps_terminal_states_off_the_dashboard() {
-        let mut running = stopped_session();
-        running.id = "session-0".into();
-        running.state = SessionState::Running;
-        let stopped = stopped_session();
-        let mut lost = stopped_session();
-        lost.id = "session-2".into();
-        lost.state = SessionState::Lost;
-        let state = HelState {
-            version: STATE_VERSION,
-            sessions: BTreeMap::from([
-                (running.id.clone(), running),
-                (stopped.id.clone(), stopped),
-                (lost.id.clone(), lost),
-            ]),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
-        };
-        let (active, terminal) = partition_sessions(state.sessions.values());
-        assert_eq!(
-            active
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<Vec<_>>(),
-            ["session-0"]
-        );
-        assert_eq!(
-            terminal
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<Vec<_>>(),
-            ["session-1", "session-2"]
-        );
-
-        // Only the live session is on the dashboard; Tab leaves the session
-        // pane rather than walking into a second one.
-        let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
-        dashboard.handle_key(key(KeyCode::Down));
-        assert_eq!(
-            dashboard
-                .selected_session()
-                .map(|session| session.id.as_str()),
-            Some("session-0")
-        );
-        dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(dashboard.focus, Focus::Prompt);
+    fn all_workspaces_and_stopped_sessions_are_visible_and_switchable() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let mut remote = stopped_session();
+        remote.id = "remote".into();
+        remote.workspace_id = "another-workspace".into();
+        remote.state = SessionState::Running;
+        dashboard.state.sessions.insert(remote.id.clone(), remote);
+        dashboard.clamp_selections();
+        assert_eq!(dashboard.ordered_sessions().len(), 2);
+        for id in ["session-1", "remote"] {
+            dashboard.focus_sessions();
+            dashboard.selected_session_id = Some(id.into());
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Enter)),
+                DashboardAction::Open {
+                    session_id: id.into()
+                }
+            );
+        }
+        let state = dashboard.state.clone();
+        dashboard.set_state(state);
+        assert_eq!(dashboard.ordered_sessions().len(), 2);
     }
 
     #[test]
     fn sessions_are_ordered_by_creation_sequence_ascending() {
-        let mut oldest = stopped_session();
-        oldest.id = "session-z".into();
-        oldest.created_at = "2026-08-09T01:00:00Z".into();
-        let mut newest = stopped_session();
-        newest.id = "session-y".into();
-        newest.created_at = "2026-08-09T00:30:00-02:00".into();
-        let mut invalid_timestamp = stopped_session();
-        invalid_timestamp.id = "session-a".into();
-        invalid_timestamp.created_at = "unknown".into();
-
-        let (_, terminal) = partition_sessions([&invalid_timestamp, &oldest, &newest]);
-
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.state.sessions.clear();
+        for (id, created) in [
+            ("session-z", "2026-08-09T01:00:00Z"),
+            ("session-y", "2026-08-09T00:30:00-02:00"),
+            ("session-a", "unknown"),
+        ] {
+            let mut session = stopped_session();
+            session.id = id.into();
+            session.created_at = created.into();
+            dashboard.state.sessions.insert(id.into(), session);
+        }
         assert_eq!(
-            terminal
+            dashboard
+                .ordered_sessions()
                 .iter()
-                .map(|session| session.id.as_str())
+                .map(|s| s.id.as_str())
                 .collect::<Vec<_>>(),
             ["session-z", "session-y", "session-a"]
         );
@@ -2757,14 +2724,14 @@ mod tests {
         assert_eq!(dashboard.focus, Focus::Sessions);
         assert_eq!(dashboard.selected_session().unwrap().id, "session-0");
         dashboard.handle_key(key(KeyCode::Down));
-        assert_eq!(dashboard.selected_session().unwrap().id, "session-0");
+        assert_eq!(dashboard.selected_session().unwrap().id, "session-1");
 
         // The selection is anchored by session id, so it survives focus
         // moving away and Tab lands the user back where they were.
         for expected in [Focus::Prompt, Focus::Targets, Focus::Quota, Focus::Sessions] {
             dashboard.handle_key(key(KeyCode::Tab));
             assert_eq!(dashboard.focus, expected);
-            assert_eq!(dashboard.selected_session().unwrap().id, "session-0");
+            assert_eq!(dashboard.selected_session().unwrap().id, "session-1");
         }
 
         for expected in [Focus::Quota, Focus::Targets, Focus::Prompt, Focus::Sessions] {
@@ -3102,7 +3069,7 @@ mod tests {
     /// Stopping the last session empties the dashboard rather than moving the
     /// row to another pane: it belongs to the resume dialog now.
     #[test]
-    fn stopping_the_last_session_empties_the_dashboard_and_panes_still_cycle() {
+    fn stopping_the_last_session_keeps_it_in_the_sidebar_and_panes_still_cycle() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
@@ -3113,8 +3080,8 @@ mod tests {
         state.sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
         dashboard.set_state(state);
         assert_eq!(dashboard.focus, Focus::Sessions);
-        assert!(dashboard.ordered_sessions().is_empty());
-        assert!(dashboard.selected_session().is_none());
+        assert_eq!(dashboard.ordered_sessions().len(), 1);
+        assert_eq!(dashboard.selected_session().unwrap().id, "session-1");
 
         for expected in [Focus::Prompt, Focus::Targets, Focus::Quota, Focus::Sessions] {
             dashboard.handle_key(key(KeyCode::Tab));

@@ -1895,7 +1895,7 @@ mod tests {
     /// appears in both, and a stop in progress stays on the dashboard until
     /// the state machine reaches Stopped.
     #[test]
-    fn the_dashboard_shows_live_sessions_and_the_dialog_shows_the_rest() {
+    fn the_sidebar_shows_all_sessions_and_resume_also_lists_stopped_sessions() {
         let mut sessions = Vec::new();
         for (index, state) in [
             SessionState::Provisioning,
@@ -1926,8 +1926,8 @@ mod tests {
             .iter()
             .map(|session| session.state)
             .collect::<Vec<_>>();
-        assert_eq!(on_dashboard.len(), 7);
-        assert!(on_dashboard.iter().all(|state| state.is_active()));
+        assert_eq!(on_dashboard.len(), 10);
+        assert!(on_dashboard.contains(&SessionState::Stopped));
         // Closing and Checkpointing are mid-stop and must not vanish.
         assert!(on_dashboard.contains(&SessionState::Closing));
         assert!(on_dashboard.contains(&SessionState::Checkpointing));
@@ -1943,8 +1943,8 @@ mod tests {
             .map(|session| ResumeRowKey::Hel(session.id.clone()))
             .collect::<Vec<_>>();
         assert!(
-            in_dialog.iter().all(|key| !dashboard_ids.contains(key)),
-            "no session is listed in both places"
+            in_dialog.iter().all(|key| dashboard_ids.contains(key)),
+            "resume entries are also accessible from the global sidebar"
         );
     }
 

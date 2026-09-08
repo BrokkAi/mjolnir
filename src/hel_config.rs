@@ -999,6 +999,8 @@ fn validate_environment(owner: &str, environment: &BTreeMap<String, String>) -> 
 #[serde(deny_unknown_fields)]
 pub struct StartupConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub prompt: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -1009,6 +1011,7 @@ pub struct StartupConfig {
 impl Default for StartupConfig {
     fn default() -> Self {
         Self {
+            prompt: true,
             enabled: true,
             profile: None,
             target: None,
@@ -1122,9 +1125,25 @@ impl std::str::FromStr for SpinnerStyle {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionsSide {
+    #[default]
+    Left,
+    Right,
+}
+
+impl SessionsSide {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelConfig {
+    #[serde(default, skip_serializing_if = "SessionsSide::is_default")]
+    pub sessions_side: SessionsSide,
     pub version: u32,
     /// The version found on disk when it was above this build's
     /// [`CONFIG_VERSION`]. Such a config loads best-effort so its settings
@@ -1152,6 +1171,7 @@ pub struct HelConfig {
 impl Default for HelConfig {
     fn default() -> Self {
         Self {
+            sessions_side: SessionsSide::default(),
             version: CONFIG_VERSION,
             newer_config_version: None,
             spinner: SpinnerStyle::default(),
@@ -1262,6 +1282,9 @@ impl HelConfig {
     /// written in a future shape costs only that target.
     fn salvage(document: &toml::Value) -> Self {
         let mut config = Self::default();
+        if let Some(side) = salvage_section::<SessionsSide>(document, "sessions_side") {
+            config.sessions_side = side;
+        }
         if let Some(spinner) = salvage_section::<SpinnerStyle>(document, "spinner") {
             config.spinner = spinner;
         }
@@ -1818,6 +1841,7 @@ mod tests {
     fn sample_config() -> HelConfig {
         HelConfig {
             version: CONFIG_VERSION,
+            sessions_side: Default::default(),
             newer_config_version: None,
             spinner: SpinnerStyle::default(),
             phone: PhoneConfig::default(),

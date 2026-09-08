@@ -103,7 +103,14 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         error: String,
     },
-    SetupReloaded(std::result::Result<Controller, String>),
+    SetupSaved {
+        generation: u64,
+        result: std::result::Result<HelConfig, String>,
+    },
+    SetupDiscovered {
+        generation: u64,
+        result: std::result::Result<HelConfig, String>,
+    },
     ReviewSettingsDiscovered {
         generation: u64,
         profile_id: String,
@@ -239,6 +246,7 @@ pub(crate) struct ActiveLifecycleOperation {
 }
 
 pub(crate) struct RegisteredDashboardSession {
+    generation: Option<u64>,
     session: SessionRecord,
     remembered_container_size: Option<(String, hel::hel_state::HostContainerSize)>,
     cancelled: Arc<AtomicBool>,
@@ -250,7 +258,10 @@ pub(crate) enum DashboardCreateSessionUpdate {
         repositories: Vec<String>,
     },
     Registered(Box<RegisteredDashboardSession>),
-    Failed(String),
+    Failed {
+        generation: Option<u64>,
+        error: String,
+    },
 }
 
 pub(crate) struct ImportedDashboardSessionApply {
@@ -499,6 +510,113 @@ fn review_settings_choices(
         effort_choices: choices.effort_choices,
         effort_capabilities_discovered: choices.effort_capabilities_discovered,
     }
+}
+
+pub(crate) fn spawn_setup_discovery(
+    generation: u64,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_cancellable_io(
+        tracker,
+        "detecting setup",
+        updates,
+        move |cancelled| {
+            use mj_controller::hel_setup::{self, DEFAULT_IMAGE, RuntimeKind};
+            let executor =
+                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
+            let discovery = hel_setup::discover_current(&executor);
+            let mut config = hel_setup::build_config(
+                &discovery.homes,
+                discovery.repository.as_ref(),
+                RuntimeKind::Podman,
+                DEFAULT_IMAGE,
+            );
+            config.targets.clear();
+            for runtime in discovery.runtimes.iter().filter(|runtime| runtime.usable) {
+                let (id, target) = hel_setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
+                config.targets.insert(id.to_owned(), target);
+            }
+            #[cfg(unix)]
+            config.targets.insert(
+                "localhost".into(),
+                hel::hel_config::TargetTemplate::LocalBare,
+            );
+            Ok(config)
+        },
+        move |result| DashboardIoUpdate::SetupDiscovered { generation, result },
+    )
+}
+
+pub(crate) fn spawn_setup_save(
+    generation: u64,
+    original: String,
+    updated: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_critical_io(
+        tracker,
+        "saving setup",
+        updates,
+        move || save_setup_at(&hel::hel_config::config_path(), &original, &updated),
+        move |result| DashboardIoUpdate::SetupSaved { generation, result },
+    )
+}
+
+fn save_setup_at(path: &std::path::Path, original: &str, updated: &str) -> Result<HelConfig> {
+    let original: serde_json::Value = serde_json::from_str(original)?;
+    let updated_config: HelConfig = serde_json::from_str(updated)?;
+    updated_config.validate()?;
+    let updated = serde_json::to_value(updated_config)?;
+    HelConfig::update_to(path, |config| {
+        let current = serde_json::to_value(&*config)?;
+        let merged = merge_setup_edit(Some(&original), Some(&updated), Some(&current), "Setup")?
+            .context("setup cannot remove the configuration")?;
+        *config = serde_json::from_value(merged)?;
+        Ok(())
+    })
+    .map(|(config, ())| config)
+}
+
+/// Apply only fields the dialog changed; refuse conflicting concurrent edits.
+fn merge_setup_edit(
+    original: Option<&serde_json::Value>,
+    updated: Option<&serde_json::Value>,
+    current: Option<&serde_json::Value>,
+    path: &str,
+) -> Result<Option<serde_json::Value>> {
+    use serde_json::Value;
+    if original == updated || updated == current {
+        return Ok(current.cloned());
+    }
+    if original == current {
+        return Ok(updated.cloned());
+    }
+    if updated.is_some_and(Value::is_object)
+        && original.is_none_or(Value::is_object)
+        && current.is_some_and(Value::is_object)
+    {
+        let keys = original
+            .into_iter()
+            .chain(updated)
+            .chain(current)
+            .flat_map(|value| value.as_object().unwrap().keys())
+            .collect::<BTreeSet<_>>();
+        let mut merged = serde_json::Map::new();
+        for key in keys {
+            if let Some(value) = merge_setup_edit(
+                original.and_then(|v| v.get(key)),
+                updated.and_then(|v| v.get(key)),
+                current.and_then(|v| v.get(key)),
+                &format!("{path} / {key}"),
+            )? {
+                merged.insert(key.clone(), value);
+            }
+        }
+        return Ok(Some(Value::Object(merged)));
+    }
+    bail!("{path} changed in another client. Reopen Setup to edit the latest value.")
 }
 
 pub(crate) fn spawn_spinner_style_save(
@@ -1076,11 +1194,20 @@ pub(crate) fn spawn_dashboard_create_session(
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = tracker.begin_cancellable("creating session", cancelled.clone());
     tokio::task::spawn_blocking(move || {
+        let generation = match &action {
+            DashboardAction::CreateStartupSession { generation, .. } => *generation,
+            _ => None,
+        };
+        let initial_prompt = match &action {
+            DashboardAction::CreateStartupSession { initial_prompt, .. } => initial_prompt.clone(),
+            _ => None,
+        };
         let prepared = match action {
             DashboardAction::CreateStartupSession {
                 profile_id,
                 target_template_id,
                 project_directory,
+                ..
             } => super::startup::prepare_session_launch(
                 profile_id,
                 target_template_id,
@@ -1099,7 +1226,10 @@ pub(crate) fn spawn_dashboard_create_session(
             Ok(action) => action,
             Err(error) => {
                 if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
-                    DashboardCreateSessionUpdate::Failed(format!("{error:#}")),
+                    DashboardCreateSessionUpdate::Failed {
+                        generation,
+                        error: format!("{error:#}"),
+                    },
                 ))) {
                     tracing::debug!(%error, "startup preparation result dropped after dashboard shutdown");
                 }
@@ -1159,6 +1289,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
+                        initial_prompt: initial_prompt.clone(),
                         workspace_id: workspace_id.clone(),
                         profile_id,
                         bundle_id,
@@ -1173,6 +1304,7 @@ pub(crate) fn spawn_dashboard_create_session(
                     .await
             })?;
             Ok(Some(RegisteredDashboardSession {
+                generation,
                 session: registered.session,
                 remembered_container_size: registered.remembered_container_size,
                 cancelled: cancelled.clone(),
@@ -1182,7 +1314,10 @@ pub(crate) fn spawn_dashboard_create_session(
             Ok(registered) => registered,
             Err(error) => {
                 if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
-                    DashboardCreateSessionUpdate::Failed(format!("{error:#}")),
+                    DashboardCreateSessionUpdate::Failed {
+                        generation,
+                        error: format!("{error:#}"),
+                    },
                 ))) {
                     tracing::debug!(%error, "session creation failure dropped after dashboard shutdown");
                 }
@@ -1199,12 +1334,37 @@ pub(crate) fn spawn_dashboard_create_session(
         }
         let result = runtime
             .block_on(async {
-                daemon::connect_or_start()
-                    .await?
-                    .wait_create_session(session_id.clone())
-                    .await
+                let mut daemon = daemon::connect_or_start().await?;
+                daemon.wait_create_session(session_id.clone()).await?;
+                if let Some(prompt) = initial_prompt {
+                    let result = async {
+                        daemon
+                            .submit_session_command(
+                                session_id.clone(),
+                                mj_controller::hel_session_manager::new_command_id(
+                                    "initial-prompt",
+                                )?,
+                                hel::hel_worker::RelayCommand::Prompt {
+                                    prompt: vec![
+                                        agent_client_protocol::schema::v1::ContentBlock::from(
+                                            prompt.as_str(),
+                                        ),
+                                    ],
+                                },
+                                Some(prompt),
+                            )
+                            .await
+                            .map(|_| ())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        return Ok(LifecycleSuccess::CreatedWithPromptFailure(format!(
+                            "{error:#}"
+                        )));
+                    }
+                }
+                Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
             })
-            .map(|()| LifecycleSuccess::Created)
             .map_err(|error| format!("{error:#}"));
         if let Err(error) = lifecycle_updates.send(LifecycleUpdate {
             session_id,
@@ -1514,22 +1674,18 @@ impl DashboardContext {
                     self.dashboard.apply_web_error(error);
                 }
             }
-            DashboardIoUpdate::SetupReloaded(result) => match result {
-                Ok(controller) => {
-                    self.controller = controller;
-                    self.dashboard.set_config(self.controller.config.clone());
-                    self.dashboard.set_state(self.controller.state.clone());
+            DashboardIoUpdate::SetupDiscovered { generation, result } => {
+                self.dashboard.setup_discovered(generation, result)
+            }
+            DashboardIoUpdate::SetupSaved { generation, result } => {
+                if let Ok(config) = &result {
+                    self.controller.config = config.clone();
                     self.refresh_chat_context();
                     self.request_quota_refresh();
                     self.refresh_poll_targets();
-                    self.dashboard
-                        .set_notice("Setup complete. Press Alt-N to start your first session.");
                 }
-                Err(error) => {
-                    self.dashboard
-                        .set_notice(format!("Could not reload setup changes: {error}"));
-                }
-            },
+                self.dashboard.setup_saved(generation, result);
+            }
             DashboardIoUpdate::ReviewSettingsChoices {
                 generation,
                 profile_id,
@@ -1829,6 +1985,7 @@ impl DashboardContext {
                 .show_dirty_local_confirmation(action, repositories),
             DashboardCreateSessionUpdate::Registered(registered) => {
                 let registered = *registered;
+                self.dashboard.finish_quick_new(registered.generation);
                 let session_id = registered.session.id.clone();
                 if let Some((host, size)) = registered.remembered_container_size {
                     self.controller.state.remember_container_size(&host, size);
@@ -1854,9 +2011,9 @@ impl DashboardContext {
                     },
                 );
             }
-            DashboardCreateSessionUpdate::Failed(error) => {
+            DashboardCreateSessionUpdate::Failed { generation, error } => {
                 self.dashboard
-                    .set_notice(format!("Could not create session: {error}"));
+                    .quick_new_failed(generation, format!("Could not create session: {error}"));
             }
         }
     }
@@ -1881,8 +2038,15 @@ impl DashboardContext {
         match update.result {
             Ok(LifecycleSuccess::Created) => {
                 self.dashboard.select_active_session(&session_id);
+                self.dashboard.focus_prompt();
                 self.dashboard
                     .set_notice(format!("Session {} is ready", short_id(&session_id)));
+                self.request_quota_refresh();
+            }
+            Ok(LifecycleSuccess::CreatedWithPromptFailure(error)) => {
+                self.dashboard.select_active_session(&session_id);
+                self.dashboard.focus_prompt();
+                self.dashboard.set_failure_notice(format!("Session is ready, but its initial task could not be completed: {error}. Check the transcript before retrying the saved draft."));
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Resumed {
@@ -1998,6 +2162,61 @@ mod tests {
     use super::*;
     use hel::hel_config::ProjectRepository;
     use mj_controller::hel_controller::create_quick_bundle_in_config as create_quick_bundle;
+
+    #[test]
+    fn setup_save_merges_unrelated_edits_and_refuses_conflicts_or_invalid_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let original = HelConfig::default();
+        original.save_to(&path).unwrap();
+        let mut edited = original.clone();
+        edited.sessions_side = hel::hel_config::SessionsSide::Right;
+        HelConfig::update_to(&path, |current| {
+            current.startup.prompt = false;
+            Ok(())
+        })
+        .unwrap();
+        let original_json = serde_json::to_string(&original).unwrap();
+        let saved = save_setup_at(
+            &path,
+            &original_json,
+            &serde_json::to_string(&edited).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.sessions_side, hel::hel_config::SessionsSide::Right);
+        assert!(!saved.startup.prompt);
+        assert_eq!(HelConfig::load_from(&path).unwrap(), saved);
+
+        let mut conflicting = original.clone();
+        conflicting.phone.bind = "127.0.0.1:1234".parse().unwrap();
+        HelConfig::update_to(&path, |current| {
+            current.phone.bind = "127.0.0.1:5678".parse().unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            save_setup_at(
+                &path,
+                &original_json,
+                &serde_json::to_string(&conflicting).unwrap()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("another client")
+        );
+        let mut invalid = original.clone();
+        invalid.startup.profile = Some("missing".into());
+        assert!(
+            save_setup_at(
+                &path,
+                &original_json,
+                &serde_json::to_string(&invalid).unwrap()
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
 
     #[test]
     fn asynchronous_saves_leave_the_blocking_pool_available_for_connection_metadata() {
@@ -2232,7 +2451,7 @@ mod tests {
     /// must carry this workspace's live sessions and the global stopped
     /// history, and nothing else.
     #[tokio::test]
-    async fn a_lifecycle_reload_keeps_other_workspaces_live_sessions_out() {
+    async fn a_lifecycle_reload_keeps_sessions_from_all_workspaces() {
         if std::env::var_os(LIFECYCLE_RELOAD_CHILD).is_none() {
             // MJ_DATA_DIR is process-global, so the database-backed half runs
             // alone in an exact child with its own store.
@@ -2240,7 +2459,7 @@ mod tests {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "dashboard::io::tests::a_lifecycle_reload_keeps_other_workspaces_live_sessions_out",
+                    "dashboard::io::tests::a_lifecycle_reload_keeps_sessions_from_all_workspaces",
                     "--nocapture",
                 ])
                 .env(LIFECYCLE_RELOAD_CHILD, "1")
@@ -2346,9 +2565,10 @@ mod tests {
             ids,
             BTreeSet::from([
                 &"session-beta-live".to_owned(),
+                &"session-alpha-live".to_owned(),
                 &"session-alpha-stopped".to_owned()
             ]),
-            "the pane keeps this workspace's live sessions and the global stopped history"
+            "the sidebar keeps all live sessions and stopped history"
         );
     }
 

@@ -2474,6 +2474,14 @@ impl DashboardState {
         {
             return Ok(DashboardAction::None);
         }
+        self.quick_session_action(project_directory)
+    }
+
+    /// Use the saved creation defaults without opening any selector.
+    pub fn quick_session_action(
+        &mut self,
+        project_directory: std::path::PathBuf,
+    ) -> Result<DashboardAction, String> {
         let profile_id = self
             .config
             .startup
@@ -2487,16 +2495,18 @@ impl DashboardState {
                     .map(|(id, _)| id)
             })
             .or_else(|| self.config.profiles.keys().next())
-            .ok_or("No agent profile is configured. Run `mj setup` to configure one.")?;
+            .ok_or("No agent account is configured. Press F4 to add one in Setup.")?;
         if !self.config.profiles.contains_key(profile_id) {
             return Err(format!("Startup profile {profile_id:?} is not configured."));
         }
         let action = DashboardAction::CreateStartupSession {
+            generation: None,
+            initial_prompt: None,
             profile_id: profile_id.clone(),
             target_template_id: self.config.startup.target.clone(),
             project_directory,
         };
-        self.focus_prompt();
+        self.focus_sessions();
         Ok(action)
     }
 

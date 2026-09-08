@@ -45,7 +45,6 @@ use mj_controller::hel_controller::Controller;
 use mj_controller::hel_session_manager::{
     SessionManagerControl, SessionManagerShutdown, SessionManagerUpdates, ViewError,
 };
-use mj_controller::hel_setup::{SetupOutcome, run_setup_dialog};
 use mj_controller::hel_worker_client::CredentialSyncCoordinator;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
@@ -322,14 +321,14 @@ pub(crate) struct DashboardContext {
     terminal: TerminalGuard,
     pub(crate) controller: Controller,
     pub(crate) workspace_id: String,
+    pub(crate) launch_directory: std::path::PathBuf,
     pub(crate) client_id: String,
     pub(crate) dashboard: DashboardState,
     pane_size_persistence: pane_sizes::PaneSizePersistence,
     /// One notifications bar for the whole process: the dashboard and every
     /// chat view opened from it report through this shared handle.
     notices: mj_chat::hel_chat::Notices,
-    /// Absent only while the setup dialog owns the terminal; see
-    /// [`DashboardContext::run_setup_dialog`].
+    /// Terminal input remains owned by this event loop, including during Setup.
     events: Option<event::EventStream>,
     /// The conversation on screen. One chat stays warm at a time; its feeds
     /// keep running while another pane has the keyboard, so switching back is
@@ -484,15 +483,9 @@ fn enqueue_materialized_projection(
 
 pub(super) fn retain_workspace_sessions(
     controller: &mut Controller,
-    workspace_id: &str,
+    _workspace_id: &str,
     client_id: &str,
 ) -> Result<()> {
-    let session_ids = hel::hel_database::session_ids_for_workspace(workspace_id)?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    controller.state.sessions.retain(|session_id, session| {
-        !session.state.is_active() || session_ids.contains(session_id)
-    });
     for session in controller
         .state
         .sessions
@@ -500,7 +493,7 @@ pub(super) fn retain_workspace_sessions(
         .filter(|session| session.state.is_active())
     {
         let frontier =
-            hel::hel_database::client_read_frontier(client_id, workspace_id, &session.id)?;
+            hel::hel_database::client_read_frontier(client_id, &session.workspace_id, &session.id)?;
         session.viewed_through_event_ordinal = frontier;
     }
     Ok(())
@@ -885,7 +878,12 @@ impl DashboardContext {
         self.read_receipt_in_flight = Some(session_id.clone());
         io::spawn_read_receipt_persist(
             self.client_id.clone(),
-            self.workspace_id.clone(),
+            self.controller
+                .state
+                .sessions
+                .get(&session_id)
+                .map(|session| session.workspace_id.clone())
+                .unwrap_or_else(|| self.workspace_id.clone()),
             session_id,
             through,
             self.dashboard_io_tx.clone(),
@@ -914,6 +912,7 @@ impl DashboardContext {
     /// `Ok(None)` means first-run setup was cancelled and there is nothing to
     /// run.
     fn open(workspace_id: &str, client_id: &str) -> Result<Option<Self>> {
+        let launch_directory = std::env::current_dir().context("read the launch directory")?;
         let mut controller = Controller::load()?;
         retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
         let workspace_name = hel::hel_database::list_workspaces()?
@@ -935,21 +934,9 @@ impl DashboardContext {
             dashboard.apply_queued_prompts(&session_id, queued);
         }
         dashboard.set_workspace_name(workspace_name);
-        let mut terminal = TerminalGuard::enter()?;
+        let terminal = TerminalGuard::enter()?;
         if configuration_needs_setup(&controller.config) {
-            terminal.suspend()?;
-            let setup_result = run_setup_dialog(&config_path());
-            terminal.resume()?;
-            match setup_result? {
-                SetupOutcome::Written => {
-                    controller.reload()?;
-                    retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
-                    dashboard.set_config(controller.config.clone());
-                    dashboard.set_state(controller.state.clone());
-                    dashboard.set_notice("Setup complete.");
-                }
-                SetupOutcome::Cancelled => return Ok(None),
-            }
+            dashboard.begin_setup();
         }
 
         let (quota_profiles_tx, quota_updates_rx) = spawn_quota_refresher();
@@ -1020,6 +1007,7 @@ impl DashboardContext {
             terminal,
             controller,
             workspace_id: workspace_id.to_owned(),
+            launch_directory,
             client_id: client_id.to_owned(),
             dashboard,
             pane_size_persistence,
@@ -1194,9 +1182,9 @@ impl DashboardContext {
             std::time::Instant::now(),
         );
         if sessions.is_empty() {
-            let action = std::env::current_dir()
-                .map_err(|error| format!("Could not read the launch directory: {error}"))
-                .and_then(|directory| self.dashboard.begin_startup_session(directory));
+            let action = self
+                .dashboard
+                .begin_startup_session(self.launch_directory.clone());
             match action {
                 Ok(DashboardAction::None) => self.dashboard.focus_sessions(),
                 Ok(action) => actions::start_session_launch(self, action),
@@ -1867,23 +1855,6 @@ impl DashboardContext {
         self.dirty = true;
     }
 
-    /// Suspends the terminal for the setup dialog and takes back what it
-    /// changed.
-    ///
-    /// The dialog reads the terminal itself, and once polled an `EventStream`
-    /// leaves a reader thread inside crossterm's internal reader, where it
-    /// holds the reader lock and consumes terminal input. So the live stream is
-    /// dropped before the replacement is built, which takes that same lock. The
-    /// replacement reads nothing until the loop polls it again.
-    pub(crate) fn run_setup_dialog(&mut self) -> Result<SetupOutcome> {
-        drop(self.events.take());
-        self.terminal.suspend()?;
-        let outcome = run_setup_dialog(&config_path());
-        self.terminal.resume()?;
-        self.events = Some(event::EventStream::new());
-        outcome
-    }
-
     /// Tells every operation still in flight to stop. Cancellation is
     /// cooperative, so this only requests it.
     fn cancel_background_work(&mut self) {
@@ -2099,6 +2070,7 @@ impl DashboardContext {
             return;
         }
         self.runtime_state_revision = update.revision;
+        self.dashboard.set_workspace_names(update.workspace_names);
         self.apply_runtime_records(update.records);
         self.dashboard.set_move_operations(update.moves);
         self.apply_runtime_lifecycles(update.lifecycles);
@@ -2520,7 +2492,6 @@ impl DashboardContext {
             &mut self.dashboard,
             DetachedChatState {
                 client_id: &self.client_id,
-                workspace_id: &self.workspace_id,
                 session_id: &session_id,
                 event_ordinal: last_seen_event_ordinal,
                 draft,
@@ -2621,7 +2592,6 @@ async fn next_terminal_event(
 /// nothing was queued.
 struct DetachedChatState<'a> {
     client_id: &'a str,
-    workspace_id: &'a str,
     session_id: &'a str,
     event_ordinal: u64,
     draft: DetachedSessionDraft,
@@ -2644,11 +2614,12 @@ fn record_chat_detach_state(
     session.viewed_through_event_ordinal = session
         .viewed_through_event_ordinal
         .max(detached.event_ordinal);
+    let workspace_id = session.workspace_id.clone();
     dashboard.set_state(controller.state.clone());
     dashboard.clear_notice();
     Some(io::spawn_detached_session_state_persist(
         detached.client_id.to_owned(),
-        detached.workspace_id.to_owned(),
+        workspace_id,
         detached.session_id.to_owned(),
         detached.event_ordinal,
         detached.draft,
@@ -3191,7 +3162,7 @@ mod tests {
             .frame_surfaces()
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized sessions list registered");
-        assert_eq!(surface.rect.height, 2);
+        assert_eq!(surface.rect.height, 17);
 
         let start = (surface.rect.x, surface.rect.y);
         let end = (surface.rect.right() - 1, surface.rect.bottom() - 1);
@@ -3225,7 +3196,7 @@ mod tests {
 
         let copied = draw_with_selection(&mut terminal, &mut dashboard, &selection)
             .expect("tiny minimized list selection extracts text");
-        assert!(copied.contains("podman"), "copied list text: {copied:?}");
+        assert!(copied.contains("session"), "copied list text: {copied:?}");
     }
 
     /// A press is held back until the button comes up, then replayed to the
@@ -3526,7 +3497,7 @@ mod tests {
     /// The point of the chord: the user does not have to leave the composer
     /// to start a session.
     #[test]
-    fn alt_n_opens_the_new_wizard_while_the_composer_has_focus() {
+    fn alt_n_creates_with_defaults_while_the_composer_has_focus() {
         let mut dashboard = populated_dashboard();
         dashboard.focus_prompt();
 
@@ -3536,8 +3507,14 @@ mod tests {
             dashboard.dispatch_command(command),
             DashboardAction::None
         ));
-        assert!(dashboard.modal_open(), "the new-session wizard is open");
-        assert_eq!(dashboard.focus(), hel_tui::Focus::Prompt);
+        assert!(
+            dashboard.modal_open(),
+            "quick New opens a fresh task prompt"
+        );
+        dashboard.handle_paste("Task for the new session");
+        assert!(
+            matches!(dashboard.handle_key(plain_key(crossterm::event::KeyCode::Enter)), DashboardAction::QuickNewSession { initial_prompt: Some(prompt), .. } if prompt == "Task for the new session")
+        );
     }
 
     /// One key refreshes both support panes, from wherever the keyboard is —
@@ -3611,19 +3588,19 @@ mod tests {
     fn alt_n_is_ignored_while_a_modal_is_open() {
         let mut dashboard = populated_dashboard();
         dashboard.focus_prompt();
-        let command = chord(&dashboard, alt('n')).expect("Alt-N is a global chord");
-        dashboard.dispatch_command(command);
+        assert!(chord(&dashboard, alt('n')).is_some());
+        dashboard.dispatch_command(CommandId::NewSessionWizard);
         assert!(dashboard.modal_open());
 
         assert_eq!(chord(&dashboard, alt('n')), None);
     }
 
     #[test]
-    fn f4_opens_the_web_dialog_from_the_composer() {
+    fn f7_opens_the_web_dialog_from_the_composer() {
         let mut dashboard = populated_dashboard();
         dashboard.focus_prompt();
 
-        let command = chord(&dashboard, function_key(4)).expect("F4 is a global chord");
+        let command = chord(&dashboard, function_key(7)).expect("F7 is a global chord");
         assert_eq!(command, CommandId::WebViewer);
         assert!(matches!(
             dashboard.dispatch_command(command),

@@ -199,19 +199,29 @@ navigation step, so you can read an agent's output while seeing what your other
 agents are doing and how loaded your machines are.
 
 Mjolnir opens on the session whose agent spoke most recently, with the cursor in
-Prompt.
+Prompt. The Sessions sidebar shows every session across all workspaces, including
+stopped sessions. Select one and press Enter to switch to its conversation.
 
-`Tab` moves the keyboard down the layout — Sessions, Prompt, Targets, Quota —
+In Sessions, `n` opens a fresh task prompt. Enter starts a session using your
+saved defaults: Codex when configured, a usable local Podman or Docker runtime,
+then a local worktree when neither runtime is available. `N` opens the full
+creation wizard. `s` stops and `r` restarts the selected session without
+confirmation. `d` deletes it after a Yes/No choice; no identifier typing is required.
+
+`F4` opens Setup for accounts, targets, projects, new-session defaults, sidebar
+placement, display, review, and web access. Choose Left or Right for the sidebar,
+and disable the task prompt if you prefer immediate creation.
+
+`Tab` moves the keyboard through the layout — Sessions, Prompt, Targets, Quota —
 and `Shift+Tab` reverses it. Every pane remains in that ring at every size. The
 transcript is not a Tab stop: read it with the mouse wheel or
 `PageUp`/`PageDown` from wherever you are. Moving focus never resizes a pane.
 
 Sessions, Targets, and Quota each have `▁`, `▪`, and `□` controls in their
 title bars for minimized, standard, and maximized size. Minimized Targets and
-Quota become one summary row each; minimized Sessions keeps the normal list but
-shows only each session's top summary line, without the `You:` and `Agent:`
-previews. A maximized pane gets the space its contents need after the Prompt has
-grown, while every other band keeps its minimum. Only one pane can be maximized
+Quota become one summary row each; minimized Sessions narrows the full-height
+sidebar and shows one line per session. Maximizing Sessions widens the sidebar.
+A maximized Targets or Quota pane gets available vertical space below Prompt. Only one pane can be maximized
 at a time.
 
 `Alt+Z` cycles the focused support pane through its three sizes without moving
@@ -220,14 +230,15 @@ Targets, and Quota to leave more room for the conversation; from any customized
 layout it restores all three panes to standard. Tab leaves every chosen size alone.
 
 A few keys answer from everywhere, including while you are typing in Prompt:
-`F2` opens the command palette, `F3` the workspace picker, `F4` the web
-viewer, `F5` refreshes the Targets and Quota panes, `Alt+N` creates a session,
+`F2` opens the command palette, `F3` the workspace picker, `F4` Setup,
+`F7` the web viewer, `F5` refreshes Targets and Quota, `Alt+N` opens quick New,
+`Alt+W` opens the full creation wizard,
 `Alt+S` resumes one, `Alt+A` marks everything read, `Alt+X` cancels whatever
 the selected session is in the middle of, `Alt+Z` sizes the focused support
 pane, `Alt+G` toggles the pane preset, and
 `Alt+Q` detaches this terminal client — the daemon and the sessions it runs
-keep working. Each of these has one spelling: a command you can reach from
-anywhere has no plain-letter alias as well.
+keep working. The plain `n`, `N`, `s`, `r`, and `d` keys work in Sessions;
+the global chords also work while Prompt has focus.
 
 `F2` is the way to reach a command you have no key for. It lists the selected
 session's own commands first — rename it, edit its container settings, stop it

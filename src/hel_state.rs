@@ -1778,6 +1778,7 @@ mod tests {
     fn sample_config() -> HelConfig {
         HelConfig {
             version: CONFIG_VERSION,
+            sessions_side: Default::default(),
             newer_config_version: None,
             spinner: Default::default(),
             phone: Default::default(),

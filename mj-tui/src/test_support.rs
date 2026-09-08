@@ -91,6 +91,7 @@ pub(crate) fn mouse_at_row(kind: MouseEventKind, area: Rect, row_offset: u16) ->
 pub(crate) fn config() -> HelConfig {
     HelConfig {
         version: CONFIG_VERSION,
+        sessions_side: Default::default(),
         newer_config_version: None,
         spinner: Default::default(),
         phone: Default::default(),

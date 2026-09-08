@@ -55,7 +55,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 13;
+pub(crate) const PROTOCOL_VERSION: u32 = 14;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -180,6 +180,8 @@ pub(crate) struct RuntimeNotice {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeSnapshot {
     #[serde(default)]
+    pub workspace_names: BTreeMap<String, String>,
+    #[serde(default)]
     pub moves: Vec<hel::hel_state::MoveOperation>,
     pub revision: u64,
     pub config: HelConfig,
@@ -236,6 +238,8 @@ pub(crate) struct ResumeSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateSessionRequest {
+    #[serde(default)]
+    pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub profile_id: String,
     pub bundle_id: String,
@@ -410,6 +414,8 @@ enum DaemonAction {
     RuntimeSnapshot {
         workspace_id: String,
         after_revision: u64,
+        #[serde(default)]
+        all_workspaces: bool,
     },
     RenameProfile {
         old_id: String,
@@ -420,6 +426,8 @@ enum DaemonAction {
         new_id: String,
     },
     SubmitSessionCommand {
+        #[serde(default)]
+        inherited_draft: Option<String>,
         session_id: String,
         command_id: String,
         command: RelayCommand,
@@ -1127,6 +1135,7 @@ impl RuntimeState {
         &self,
         workspace_id: &str,
         after_revision: u64,
+        all_workspaces: bool,
     ) -> Result<RuntimeSnapshot> {
         let mut revisions = self.revisions.subscribe();
         if *revisions.borrow_and_update() <= after_revision {
@@ -1134,13 +1143,27 @@ impl RuntimeState {
         }
         let revision = self.revisions.current();
         let moves = blocking(hel::hel_database::load_move_operations).await?;
-        let session_ids = blocking({
+        let workspace_names = blocking(hel::hel_database::list_workspaces)
+            .await?
+            .into_iter()
+            .map(|workspace| (workspace.id, workspace.name))
+            .collect();
+        let session_ids = if all_workspaces {
+            self.controller
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .state
+                .sessions
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        } else {
             let workspace_id = workspace_id.to_owned();
-            move || hel::hel_database::session_ids_for_workspace(&workspace_id)
-        })
-        .await?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+            blocking(move || hel::hel_database::session_ids_for_workspace(&workspace_id))
+                .await?
+                .into_iter()
+                .collect()
+        };
         let sessions = self
             .sessions
             .lock()
@@ -1162,7 +1185,8 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .filter(|(session_id, active)| {
-                (session_ids.contains(*session_id)
+                (all_workspaces
+                    || session_ids.contains(*session_id)
                     || active.resume_workspace_id.as_deref() == Some(workspace_id))
                     && active.is_visible()
             })
@@ -1197,6 +1221,7 @@ impl RuntimeState {
             .collect();
         let records = runtime_records_for_workspace(&controller, &session_ids);
         Ok(RuntimeSnapshot {
+            workspace_names,
             moves: moves
                 .into_iter()
                 .filter(|operation| session_ids.contains(&operation.selection.session_id))
@@ -1491,6 +1516,7 @@ impl RuntimeState {
                 &request.target_template_id,
                 request.title,
                 SessionLaunchOptions {
+                    initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,
                     allow_dirty_local: request.allow_dirty_local,
@@ -3160,11 +3186,13 @@ impl DaemonClient {
         &mut self,
         workspace_id: String,
         after_revision: u64,
+        all_workspaces: bool,
     ) -> Result<RuntimeSnapshot> {
         match self
             .request(DaemonAction::RuntimeSnapshot {
                 workspace_id,
                 after_revision,
+                all_workspaces,
             })
             .await?
         {
@@ -3178,9 +3206,11 @@ impl DaemonClient {
         session_id: String,
         command_id: String,
         command: RelayCommand,
+        inherited_draft: Option<String>,
     ) -> Result<u64> {
         match self
             .request(DaemonAction::SubmitSessionCommand {
+                inherited_draft,
                 session_id,
                 command_id,
                 command,
@@ -4780,9 +4810,10 @@ async fn handle_action(
         DaemonAction::RuntimeSnapshot {
             workspace_id,
             after_revision,
+            all_workspaces,
         } => Ok(DaemonReply::RuntimeSnapshot(Box::new(
             state
-                .runtime_snapshot(&workspace_id, after_revision)
+                .runtime_snapshot(&workspace_id, after_revision, all_workspaces)
                 .await?,
         ))),
         DaemonAction::RenameProfile { old_id, new_id } => {
@@ -4810,6 +4841,7 @@ async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::SubmitSessionCommand {
+            inherited_draft,
             session_id,
             command_id,
             command,
@@ -4844,6 +4876,29 @@ async fn handle_action(
                 .await?;
             let session_id = session.session_id().to_owned();
             let ordinal = session.submit(command_id, command).await?;
+            if let Some(expected) = inherited_draft {
+                let persisted_id = session_id.clone();
+                let persisted_expected = expected.clone();
+                blocking(move || {
+                    hel::hel_database::clear_session_draft_input_if_matches(
+                        &persisted_id,
+                        &persisted_expected,
+                    )
+                })
+                .await?;
+                if let Some(record) = state
+                    .controller
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .state
+                    .sessions
+                    .get_mut(&session_id)
+                    && record.draft_input == expected
+                {
+                    record.draft_input.clear();
+                }
+                state.publish_revision();
+            }
             if let Some((bundle_id, text)) = history
                 && let Err(error) = blocking(move || {
                     hel::hel_database::record_prompt(&session_id, &bundle_id, ordinal, None, &text)
@@ -5493,6 +5548,7 @@ mod tests {
                 request_id: 1,
                 token: "right-token".into(),
                 action: DaemonAction::SubmitSessionCommand {
+                    inherited_draft: None,
                     session_id: "session-1".into(),
                     command_id: "command-1".into(),
                     command: RelayCommand::ClearQueuedPrompts,
@@ -6031,6 +6087,15 @@ mod tests {
                 responses: [
                     r#"{"protocol_version":11,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.1.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
                     r#"{"protocol_version":11,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+                ],
+            },
+            ProtocolTranscript {
+                protocol_version: 14,
+                daemon_build: "2.1.4",
+                expected_requests: requests(14),
+                responses: [
+                    r#"{"protocol_version":14,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.1.4","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                    r#"{"protocol_version":14,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
                 ],
             },
         ]

@@ -1476,6 +1476,7 @@ pub(crate) struct RemoteDashboardWorkerPoller {
 /// Records and lifecycle ownership must reach the surface in the same frame.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RuntimeStateUpdate {
+    pub workspace_names: std::collections::BTreeMap<String, String>,
     pub revision: u64,
     pub records: Vec<SessionRecord>,
     pub lifecycles: Vec<daemon::RuntimeLifecycleView>,
@@ -1576,7 +1577,11 @@ impl Drop for RuntimeFeed {
 }
 
 pub(crate) fn spawn_runtime_feed(workspace_id: String) -> RuntimeFeed {
-    spawn_runtime_feed_with(workspace_id, poll_daemon_runtime, load_runtime_projection)
+    spawn_runtime_feed_with(
+        workspace_id,
+        |workspace, revision| poll_daemon_runtime(workspace, revision, false),
+        load_runtime_projection,
+    )
 }
 
 type StoredProjection = Option<(MaterializedSession, hel::hel_state::ProjectionWindow)>;
@@ -1809,7 +1814,11 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
     let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::new());
     let (config_tx, config_rx) = tokio::sync::watch::channel(hel::hel_config::HelConfig::default());
     tokio::spawn(async move {
-        let mut feed = spawn_runtime_feed(workspace_id);
+        let mut feed = spawn_runtime_feed_with(
+            workspace_id,
+            |workspace, revision| poll_daemon_runtime(workspace, revision, true),
+            load_runtime_projection,
+        );
         let mut request_order = mj_controller::hel_session_manager::SessionRequestOrder::new();
         loop {
             tokio::select! {
@@ -1825,6 +1834,7 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
                                 else { *config = snapshot.config.clone(); true }
                             });
                             state_tx.send_replace(RuntimeStateUpdate {
+                                workspace_names: snapshot.workspace_names,
                                 revision: snapshot.revision,
                                 records: snapshot.records,
                                 lifecycles: snapshot.lifecycles,
@@ -1860,9 +1870,12 @@ pub(crate) fn spawn_remote_dashboard_worker_poller(
 async fn poll_daemon_runtime(
     workspace_id: String,
     after_revision: u64,
+    all_workspaces: bool,
 ) -> Result<daemon::RuntimeSnapshot> {
     let mut daemon = daemon::connect_or_start().await?;
-    daemon.runtime_snapshot(workspace_id, after_revision).await
+    daemon
+        .runtime_snapshot(workspace_id, after_revision, all_workspaces)
+        .await
 }
 
 async fn forward_remote_session_request(request: RemoteSessionRequest) {
@@ -1883,7 +1896,7 @@ async fn forward_remote_session_request(request: RemoteSessionRequest) {
             let result = async {
                 daemon::connect_or_start()
                     .await?
-                    .submit_session_command(session_id, command_id, command)
+                    .submit_session_command(session_id, command_id, command, None)
                     .await
             }
             .await
@@ -2173,6 +2186,7 @@ fn queued_prompt_entries(
 
 pub(crate) enum LifecycleSuccess {
     Created,
+    CreatedWithPromptFailure(String),
     Resumed {
         profile_id: String,
         target_id: String,

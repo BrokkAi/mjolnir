@@ -2136,6 +2136,7 @@ async fn apply_phone_action(
                 .daemon_runtime
                 .start_create_session_controlled(
                     CreateSessionRequest {
+                        initial_prompt: None,
                         workspace_id,
                         profile_id,
                         bundle_id,
@@ -3667,6 +3668,7 @@ mod tests {
         Controller {
             config: HelConfig {
                 version: CONFIG_VERSION,
+                sessions_side: Default::default(),
                 newer_config_version: None,
                 spinner: Default::default(),
                 phone: Default::default(),

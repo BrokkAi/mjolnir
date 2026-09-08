@@ -279,6 +279,7 @@ fn quick_config_id(value: &str) -> String {
 }
 
 pub struct SessionLaunchOptions {
+    pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
     pub allow_dirty_local: bool,
@@ -503,6 +504,7 @@ impl Controller {
         options: SessionLaunchOptions,
     ) -> Result<String> {
         let SessionLaunchOptions {
+            initial_prompt,
             workspace_id,
             additional_mounts,
             allow_dirty_local,
@@ -601,7 +603,7 @@ impl Controller {
             created_at: now.clone(),
             updated_at: now,
             viewed_through_event_ordinal: 0,
-            draft_input: String::new(),
+            draft_input: initial_prompt.unwrap_or_default(),
             last_error: None,
             last_checkpoint_error: None,
             checkpoint: None,
@@ -1198,6 +1200,7 @@ mod tests {
 
     fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
         SessionLaunchOptions {
+            initial_prompt: None,
             workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             additional_mounts,
             allow_dirty_local: false,
@@ -1260,6 +1263,49 @@ mod tests {
             "isolated {test} failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn registration_saves_the_initial_task_before_provisioning() {
+        const MARKER: &str = "MJ_TEST_INITIAL_TASK_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            run_registration_child(
+                MARKER,
+                "registration_saves_the_initial_task_before_provisioning",
+                directory.path(),
+            );
+            return;
+        }
+        let _writer = hel::hel_database::install_isolated_test_writer();
+        let mut controller = Controller {
+            config: registration_config(),
+            state: HelState::default(),
+        };
+        let prompt = format!(
+            "Initial task\n{}\n\tPreserve indentation and λ",
+            "x".repeat(70_000)
+        );
+        let mut options = launch_options(Vec::new());
+        options.initial_prompt = Some(prompt.clone());
+        let id = controller
+            .register_session_with_resources("codex", "project", "podman", "fresh task", options)
+            .unwrap();
+        let saved = hel::hel_database::load_state().unwrap();
+        assert_eq!(saved.sessions[&id].draft_input, prompt);
+        assert_eq!(saved.sessions[&id].state, SessionState::Provisioning);
+        hel::hel_database::set_session_draft_input(&id, "a newer draft").unwrap();
+        hel::hel_database::clear_session_draft_input_if_matches(&id, &prompt).unwrap();
+        assert_eq!(
+            hel::hel_database::load_state().unwrap().sessions[&id].draft_input,
+            "a newer draft"
+        );
+        hel::hel_database::clear_session_draft_input_if_matches(&id, "a newer draft").unwrap();
+        assert!(
+            hel::hel_database::load_state().unwrap().sessions[&id]
+                .draft_input
+                .is_empty()
         );
     }
 

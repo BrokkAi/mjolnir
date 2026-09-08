@@ -173,8 +173,8 @@ mj doctor --json --smoke
 mj
 ```
 
-This opens Mjolnir's terminal surface. Press **Alt-N** from anywhere to start
-the new-session wizard.
+This opens Mjolnir's terminal surface. Press **Alt-N** from anywhere for a new session with saved defaults.
+Press **Alt-W** for the full new-session wizard.
 It walks you through picking a profile, a target, and a bundle.
 
 Before launch, you can size the container's CPU and memory allocation. The

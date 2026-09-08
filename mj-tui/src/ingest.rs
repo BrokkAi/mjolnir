@@ -473,6 +473,10 @@ pub(crate) struct CapacityDetail {
 }
 
 impl DashboardState {
+    pub fn set_workspace_names(&mut self, names: BTreeMap<String, String>) {
+        self.workspace_names = names;
+    }
+
     pub fn set_workspace_name(&mut self, workspace_name: String) {
         self.workspace_name = workspace_name;
     }
@@ -1185,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn stopped_cleanup_keeps_one_row_only_until_its_owner_finishes() {
+    fn stopped_cleanup_keeps_the_session_visible_after_its_owner_finishes() {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
         assert_eq!(dashboard.ordered_sessions().len(), 1);
@@ -1194,7 +1198,7 @@ mod tests {
             SessionState::Stopped
         );
         dashboard.finish_session_operation("session-1");
-        assert!(dashboard.ordered_sessions().is_empty());
+        assert_eq!(dashboard.ordered_sessions().len(), 1);
     }
 
     #[test]

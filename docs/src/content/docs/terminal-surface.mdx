@@ -6,21 +6,23 @@ description: Navigate the Mjolnir dashboard, resize panes, compose prompts, run 
 import { Image } from 'astro:assets';
 import shotDashboard from '../../assets/screenshots/dashboard.svg';
 import shotCommandPalette from '../../assets/screenshots/command-palette.svg';
+import shotSetup from '../../assets/screenshots/setup.svg';
+import shotQuickNew from '../../assets/screenshots/quick-new.svg';
 
 The Mjolnir TUI is a single control surface for conversations and the infrastructure behind them. It stays responsive while sessions launch, resume, stop, or run work in the background.
 
 <figure class="shot">
   <a class="shot__zoom" href={shotDashboard.src} aria-label="Open the full-size screenshot: Mjolnir terminal dashboard">
-    <Image src={shotDashboard} alt="Mjolnir terminal dashboard with Sessions, unopened Conversation and Prompt regions, Targets, Quota, and shortcut footer arranged vertically" />
+    <Image src={shotDashboard} alt="Mjolnir terminal dashboard with a full-height Sessions sidebar beside Conversation, Prompt, Targets, and Quota" />
   </a>
-  <figcaption>From top to bottom: Sessions, the Conversation and Prompt regions, Targets, Quota, and a context-sensitive shortcut footer.</figcaption>
+  <figcaption>Sessions stays beside the conversation, prompt, targets, and quota. Setup lets you place the sidebar on either side.</figcaption>
 </figure>
 
-At startup, Mjolnir opens the session whose agent spoke most recently and puts the cursor in Prompt.
+At startup, Mjolnir opens the session whose agent spoke most recently and puts the cursor in Prompt. Sessions shows every workspace and includes stopped sessions; opening a row switches to that conversation without changing its workspace ownership.
 
 ## Focus and scrolling
 
-`Tab` moves focus down through **Sessions → Prompt → Targets → Quota**. `Shift+Tab` moves in reverse. The transcript is not a tab stop, so focus changes never take the composer away merely to scroll conversation history.
+`Tab` moves focus through **Sessions → Prompt → Targets → Quota**. `Shift+Tab` moves in reverse. The transcript is not a tab stop, so focus changes never take the composer away merely to scroll conversation history.
 
 Use `Page Up` and `Page Down` to scroll the transcript from any focused pane. A mouse wheel scrolls the surface under the pointer. Clicking a row selects it, and double-clicking a session opens it. Dragging across transcript or pane text copies that surface's selection to the available system or terminal clipboard.
 
@@ -37,6 +39,11 @@ Pane-specific actions are deliberately small:
 | Focus | Key | Action |
 | --- | --- | --- |
 | Sessions | `Enter` | Open the selected session |
+| Sessions | `n` | New session with a fresh task prompt and saved defaults |
+| Sessions | `N` | New session with the full options wizard |
+| Sessions | `s` | Stop immediately, without confirmation |
+| Sessions | `r` | Restart with the same settings, without confirmation |
+| Sessions | `d` / `Delete` | Delete after a Yes/No choice; `y` accepts, `n` cancels |
 | Sessions | `Space` | Fold or unfold the selected project |
 | Sessions | `1`–`9` | Fold or unfold the numbered project |
 | Targets | `Enter` or `e` | Open target actions, including test and rename |
@@ -47,11 +54,11 @@ Pane-specific actions are deliberately small:
 Sessions, Targets, and Quota each have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls. Click a control, or focus the pane and press `Alt+Z` to cycle through the three sizes.
 
 - A minimized Targets or Quota pane becomes a one-line summary.
-- A minimized Sessions pane becomes a compact three-column grid.
+- A minimized Sessions pane narrows the sidebar and shows one line per session.
 - Only one support pane can be maximized at a time.
-- Prompt keeps the conversation's working space; a maximized support pane receives the remaining room and the other bands stay at their minimum.
+- Maximized Sessions widens the full-height sidebar. Maximized Targets or Quota receives available vertical space below Prompt.
 
-`Alt+G` toggles a dashboard preset. When all panes are standard, it maximizes Sessions and minimizes Targets and Quota. When sizes have been customized, it restores all three to standard. `Tab` changes only focus and never changes a pane's size.
+`Alt+G` toggles a dashboard preset. When all panes are standard, it minimizes Sessions, Targets, and Quota. When sizes have been customized, it restores all three to standard. `Tab` changes only focus and never changes a pane's size.
 
 ## Global keys
 
@@ -62,9 +69,11 @@ Function keys and `Alt` chords work no matter which dashboard pane has focus:
 | `F1` | Open help; `?` also opens it when a non-Prompt pane has focus |
 | `F2` | Open the command palette |
 | `F3` | Switch workspace |
-| `F4` | Show the web viewer address and access code |
+| `F4` | Open Setup |
+| `F7` | Show the web viewer address and access code |
 | `F5` | Refresh all target capacity and profile quota data |
-| `Alt+N` | Create a session |
+| `Alt+N` | Open quick New with saved defaults |
+| `Alt+W` | Open the full session creation wizard |
 | `Alt+S` | Resume any non-live session through the resume picker |
 | `Alt+A` | Mark all session activity as read |
 | `Alt+X` | Cancel the selected session's in-flight launch, resume, or stop operation |
@@ -85,7 +94,25 @@ Press `F2` to expose both shortcut-backed and palette-only actions. Commands for
   <figcaption>Type to filter commands. Unavailable actions remain visible with the reason they cannot run.</figcaption>
 </figure>
 
-Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Move, Stop, and Force destroy. **Move** opens a preparation and confirmation flow for a compatible profile or target; it keeps the logical session while rebuilding a fresh environment. Stop asks for confirmation; Force destroy permanently removes the session, its target, and its recovery archive. The palette is also how you discover useful commands that have no dedicated key.
+Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Move, Stop, and Force destroy. **Move** opens a preparation and confirmation flow for a compatible profile or target; it keeps the logical session while rebuilding a fresh environment. Stop and Restart run without confirmation. Delete permanently removes the session, its target, and its recovery archive after a Yes/No choice. The palette is also how you discover useful commands that have no dedicated key.
+
+## New session and Setup
+
+Press `n` in Sessions or `Alt+N` from any pane. Type the task into the fresh prompt and press Enter. Shift+Enter adds a line, pasted multiline text is preserved, and an empty prompt starts a session without sending a task. The task belongs to the newly created session and is saved before provisioning starts.
+
+<figure class="shot">
+  <Image src={shotQuickNew} alt="A new session task prompt with multiline input and Start session and Cancel buttons" />
+  <figcaption>Enter a task and start with your saved defaults.</figcaption>
+</figure>
+
+Quick New uses the current project directory and the saved agent and target defaults. With automatic defaults, it prefers a configured Codex account, usable local Podman, then Docker, then a local worktree. Plain directories use local execution. Set another account or target in Setup, or turn off **Ask for a task when creating** to launch immediately. Use `N` or `Alt+W` for the existing wizard when you want to choose all launch options.
+
+Press `F4` to edit all configuration in Setup: accounts, targets and remote machines, projects, creation defaults, sidebar position, activity animation, review, and web access. Enter opens a section or edits a value. **Add** and **Remove** manage entries; **Detect machine** discovers installed accounts and usable local runtimes. **Save** or Ctrl+S validates and saves the draft. Errors keep your edits in place. Escape goes back, and Cancel discards unsaved edits. Web listener changes take effect on its next start.
+
+<figure class="shot">
+  <Image src={shotSetup} alt="Setup modal with all configuration sections and Save, Cancel, and Detect machine controls" />
+  <figcaption>Configure Mjolnir without leaving the terminal or editing a file.</figcaption>
+</figure>
 
 ## Prompt editor
 

@@ -2156,6 +2156,7 @@ mod tests {
                 "docker",
                 "failed image",
                 SessionLaunchOptions {
+                    initial_prompt: None,
                     workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                     additional_mounts: Vec::new(),
                     allow_dirty_local: false,

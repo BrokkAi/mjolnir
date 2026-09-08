@@ -475,7 +475,6 @@ pub(crate) fn render_palette(
 mod tests {
     use super::*;
     use crate::SessionOperationKind;
-    use crate::dialogs::{ConfirmDialog, Confirmation};
     use crate::render::render;
     use crate::test_support::{
         buffer_lines, dashboard_with_session, key, operation, running_session, stopped_session,
@@ -685,30 +684,31 @@ mod tests {
     }
 
     #[test]
-    fn palette_enter_on_stop_opens_the_close_confirmation() {
+    fn palette_stops_without_opening_another_modal() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         dashboard.handle_key(key(KeyCode::F(2)));
         type_query(&mut dashboard, "stop");
-        dashboard.handle_key(key(KeyCode::Enter));
-        assert!(
-            matches!(
-                dashboard.mode,
-                Mode::Confirm(ConfirmDialog {
-                    confirmation: Confirmation::Close { .. },
-                    ..
-                })
-            ),
-            "{:?}",
-            dashboard.mode
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::Close {
+                session_id: "session-1".into()
+            }
         );
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 
     /// Container settings make no sense for a session that is not on a
     /// container, so the palette leaves the row out rather than greying it.
     #[test]
     fn palette_hides_container_settings_for_a_non_container_session() {
-        let mut dashboard = dashboard_with_session(stopped_session());
+        let mut session = stopped_session();
+        session.target_template_id = "local".into();
+        let mut dashboard = dashboard_with_session(session);
+        dashboard
+            .config
+            .targets
+            .insert("local".into(), hel::hel_config::TargetTemplate::LocalBare);
         dashboard.focus_sessions();
         assert!(
             dashboard.selected_container_session().is_none(),

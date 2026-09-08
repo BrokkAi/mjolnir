@@ -17,7 +17,7 @@ use crate::render::render;
 use crate::{DashboardAction, DashboardState, Mode, nth_key};
 
 #[test]
-fn empty_workspace_starts_codex_in_the_launch_directory_with_prompt_focus() {
+fn empty_workspace_prepares_codex_before_focusing_the_new_session_prompt() {
     let mut config = config();
     config
         .targets
@@ -27,12 +27,14 @@ fn empty_workspace_starts_codex_in_the_launch_directory_with_prompt_focus() {
     assert_eq!(
         dashboard.begin_startup_session(directory.clone()).unwrap(),
         DashboardAction::CreateStartupSession {
+            generation: None,
+            initial_prompt: None,
             profile_id: "codex-1".into(),
             project_directory: directory,
             target_template_id: None,
         }
     );
-    assert!(dashboard.prompt_has_focus());
+    assert!(!dashboard.prompt_has_focus());
     assert!(!dashboard.modal_open());
 
     let mut session = running_session();
@@ -45,13 +47,13 @@ fn empty_workspace_starts_codex_in_the_launch_directory_with_prompt_focus() {
         crate::SessionOperationKind::Launching,
         None,
     );
-    assert!(dashboard.prompt_has_focus());
+    assert!(!dashboard.prompt_has_focus());
     state.sessions.get_mut(&session.id).unwrap().state = SessionState::Running;
     dashboard.set_state(state);
     dashboard.finish_session_operation(&session.id);
     dashboard.select_active_session(&session.id);
     assert_eq!(dashboard.selected_session_id(), Some(session.id.as_str()));
-    assert!(dashboard.prompt_has_focus());
+    assert!(!dashboard.prompt_has_focus());
 }
 
 #[test]
@@ -128,7 +130,7 @@ fn stopped_history_does_not_block_the_first_prompt() {
             .unwrap(),
         DashboardAction::CreateStartupSession { .. }
     ));
-    assert!(dashboard.prompt_has_focus());
+    assert!(!dashboard.prompt_has_focus());
 }
 
 #[test]
@@ -148,14 +150,14 @@ fn startup_reports_missing_agent_profiles() {
         dashboard
             .begin_startup_session(directory)
             .unwrap_err()
-            .contains("mj setup")
+            .contains("F4")
     );
 }
 
 #[test]
 fn new_session_wizard_returns_all_three_choices() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-    assert_eq!(dashboard.handle_key(alt_key('n')), DashboardAction::None);
+    assert_eq!(dashboard.handle_key(alt_key('w')), DashboardAction::None);
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Down)),
         DashboardAction::None
@@ -193,7 +195,7 @@ fn new_session_wizard_returns_all_three_choices() {
 #[test]
 fn new_session_wizard_renders_and_focuses_explicit_navigation_buttons() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -238,7 +240,7 @@ fn opening_session_wizards_prefetches_all_aws_sizes() {
     let mut dashboard = DashboardState::new(config.clone(), HelState::default(), BTreeMap::new());
 
     assert_eq!(
-        dashboard.handle_key(alt_key('n')),
+        dashboard.handle_key(alt_key('w')),
         DashboardAction::ResolveAwsResourceOptions {
             target_template_ids: vec!["aws-a".into(), "aws-b".into()],
         }
@@ -318,7 +320,7 @@ fn new_session_can_request_a_repository_when_no_bundle_exists() {
     let mut config = config();
     config.bundles.clear();
     let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -354,7 +356,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     state.remember_project_directory("builder.example.com", std::path::Path::new("/srv/older"));
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
 
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
@@ -462,7 +464,7 @@ fn raw_localhost_warns_for_harnesses_without_guardian_approvals() {
         let mut state = HelState::default();
         state.remember_project_directory("local", std::path::Path::new("/home/me/project"));
         let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-        dashboard.handle_key(alt_key('n'));
+        dashboard.handle_key(alt_key('w'));
         let mut terminal = Terminal::new(TestBackend::new(180, 32)).unwrap();
         terminal
             .draw(|frame| render(frame, &mut dashboard))
@@ -508,7 +510,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     state.remember_project_directory("local", std::path::Path::new("/home/me/project"));
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
 
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     let mut terminal = Terminal::new(TestBackend::new(140, 28)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -576,7 +578,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
     );
 
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -619,7 +621,7 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
     };
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
 
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new-session wizard");
     };
@@ -641,7 +643,7 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
 /// source already typed and the destination filled in.
 fn dashboard_at_mount_editor(source: &str) -> DashboardState {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Down));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -758,7 +760,7 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
 #[test]
 fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Down));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -871,7 +873,7 @@ fn failed_submit_preflight_reopens_the_invalid_mount() {
 #[test]
 fn directory_completion_is_bounded_and_keyboard_selectable() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -914,7 +916,7 @@ fn directory_completion_is_bounded_and_keyboard_selectable() {
 #[test]
 fn failed_source_validation_does_not_add_new_or_resume_mounts() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -1001,7 +1003,7 @@ fn resume_can_convert_to_another_harness() {
 #[test]
 fn wizard_back_activation_preserves_the_draft_and_cancel_closes_it() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
 
     // Target step: Tab reaches Cancel, then Back. Activating Back returns to
@@ -1719,7 +1721,7 @@ fn resume_target_step_minus_halves_container_size_through_the_key_path() {
 #[test]
 fn new_target_step_minus_halves_container_size_when_focus_is_off_content() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new wizard, got {:?}", dashboard.mode);
     };
@@ -1791,7 +1793,7 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
         0,
     );
 
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new wizard on target step");
@@ -2042,10 +2044,10 @@ fn ec2_size_controls_use_exact_doubling_steps() {
 #[test]
 fn cancelling_a_wizard_invalidates_checks_before_reopening_the_same_form() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     let pending = dashboard.session_preflight_generation();
     dashboard.handle_key(key(KeyCode::Esc));
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     assert!(matches!(dashboard.mode, Mode::New(_)));
     assert_ne!(pending, dashboard.session_preflight_generation());
 }
@@ -2058,7 +2060,7 @@ fn target_next_focuses_the_project_field_and_footer_keys_do_not_edit_it() {
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
     let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('n'));
+    dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     for _ in 0..3 {
         dashboard.handle_key(key(KeyCode::Tab));

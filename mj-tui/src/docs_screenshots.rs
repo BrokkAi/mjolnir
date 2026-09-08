@@ -49,8 +49,18 @@ fn generate_documentation_screenshots() {
         &mut dashboard,
     );
 
+    let mut quick = documentation_dashboard();
+    quick.handle_key(alt_key('n'));
+    quick.handle_paste("Add keyboard navigation to the project picker.\nKeep the current selection visible while scrolling.");
+    capture(
+        &output.join("quick-new.svg"),
+        "Mjolnir quick New",
+        "A fresh task prompt before creating a session with saved defaults.",
+        &mut quick,
+    );
+
     let mut wizard = documentation_dashboard();
-    wizard.handle_key(alt_key('n'));
+    wizard.handle_key(alt_key('w'));
     capture(
         &output.join("new-session.svg"),
         "Mjolnir new-session wizard",
@@ -65,6 +75,15 @@ fn generate_documentation_screenshots() {
         "Mjolnir command palette",
         "The current Mjolnir command palette over the terminal dashboard, with session, pane, and global commands grouped together.",
         &mut palette,
+    );
+
+    let mut setup = documentation_dashboard();
+    setup.handle_key(key(KeyCode::F(4)));
+    capture(
+        &output.join("setup.svg"),
+        "Mjolnir Setup",
+        "The Setup modal with new session defaults, agent accounts, runtimes, projects, review, and web settings.",
+        &mut setup,
     );
 
     println!("wrote documentation screenshots to {}", output.display());
@@ -142,7 +161,16 @@ fn documentation_dashboard() -> DashboardState {
         session.native_session_id = Some(format!("native-{index}"));
         session.created_at.clone_from(&now);
         session.updated_at.clone_from(&now);
-        session.state = SessionState::Running;
+        session.workspace_id = if index == 1 {
+            "maintenance".into()
+        } else {
+            "default".into()
+        };
+        session.state = if index == 2 {
+            SessionState::Stopped
+        } else {
+            SessionState::Running
+        };
         sessions.insert(session.id.clone(), session);
     }
 
@@ -183,8 +211,12 @@ fn documentation_dashboard() -> DashboardState {
         quotas,
     );
     dashboard.set_workspace_name("Mjolnir docs".into());
+    dashboard.set_workspace_names(BTreeMap::from([
+        ("default".into(), "Docs".into()),
+        ("maintenance".into(), "Maintenance".into()),
+    ]));
     dashboard.select_active_session("docs-control-plane");
-    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
+    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Standard);
 
     apply_documentation_transcript(
         &mut dashboard,

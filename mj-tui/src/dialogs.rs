@@ -37,8 +37,6 @@ use crate::{
     DashboardAction, DashboardState, Mode, WebListenerProcess, WebViewerAccess, WebViewerRecovery,
 };
 
-pub(crate) const FORCE_STOP_CONFIRMATION: &str = "STOP";
-
 const IMPORT_STALL_WARNING_AFTER: Duration = Duration::from_secs(10);
 
 /// Stable control identities used by the standard dashboard dialogs.
@@ -48,7 +46,6 @@ const IMPORT_STALL_WARNING_AFTER: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DialogControl {
     Field,
-    TypedField,
     Cancel,
     Save,
     Primary,
@@ -251,31 +248,12 @@ pub(crate) enum Confirmation {
         action: DashboardAction,
         repositories: Vec<String>,
     },
-    Close {
-        session_id: String,
-        /// Whether the latest relay projection has a turn in flight. The
-        /// controller checks authoritatively at close time; this only chooses
-        /// the warning the person sees.
-        active_turn: bool,
-        /// Whether a second opinion is open on this session. Stopping tears
-        /// the target down, and the reviewer's conversation goes with it.
-        reviewer_conversation: bool,
-    },
     CloseFailed {
         session_id: String,
         error: String,
     },
-    ForceStop {
-        session_id: String,
-        typed: TextInput,
-    },
     ForceDestroy {
         session_id: String,
-        /// The short id the user must type: this confirmation also destroys
-        /// the recovery archive, so it names the session being destroyed
-        /// instead of a fixed word.
-        expected: String,
-        typed: TextInput,
     },
     DestroyStopped {
         session_id: String,
@@ -341,7 +319,7 @@ fn dialog_form(controls: &[DialogControl], initial: DialogControl) -> RefCell<Fo
     let mut form = Form::new();
     for id in controls {
         let kind = match id {
-            DialogControl::Field | DialogControl::TypedField => ControlKind::TextField,
+            DialogControl::Field => ControlKind::TextField,
             DialogControl::TargetList => ControlKind::ChoiceList {
                 len: 0,
                 selected: 0,
@@ -358,41 +336,11 @@ fn dialog_form(controls: &[DialogControl], initial: DialogControl) -> RefCell<Fo
 fn confirmation_form(confirmation: &Confirmation) -> RefCell<Form<DialogControl>> {
     let buttons = confirmation_buttons(confirmation);
     let mut form = Form::new();
-    if confirmation_has_typed_field(confirmation) {
-        form.declare(DialogControl::TypedField, ControlKind::TextField);
-        form.declare(DialogControl::ConfirmButton(0), ControlKind::Button);
-        form.declare_with_enabled(DialogControl::ConfirmButton(1), ControlKind::Button, false);
-        form.end_frame(DialogControl::TypedField);
-    } else {
-        for index in 0..buttons.len() {
-            form.declare(DialogControl::ConfirmButton(index), ControlKind::Button);
-        }
-        form.end_frame(DialogControl::ConfirmButton(primary_button(buttons)));
+    for index in 0..buttons.len() {
+        form.declare(DialogControl::ConfirmButton(index), ControlKind::Button);
     }
+    form.end_frame(DialogControl::ConfirmButton(primary_button(buttons)));
     RefCell::new(form)
-}
-
-fn typed_confirmation_valid(confirmation: &Confirmation) -> bool {
-    match confirmation {
-        Confirmation::ForceStop { typed, .. } => typed == FORCE_STOP_CONFIRMATION,
-        Confirmation::ForceDestroy {
-            expected, typed, ..
-        } => typed == expected.as_str(),
-        _ => false,
-    }
-}
-
-fn sync_typed_confirmation_form(dialog: &mut ConfirmDialog) {
-    let enabled = typed_confirmation_valid(&dialog.confirmation);
-    let form = dialog.form.get_mut();
-    form.declare(DialogControl::TypedField, ControlKind::TextField);
-    form.declare(DialogControl::ConfirmButton(0), ControlKind::Button);
-    form.declare_with_enabled(
-        DialogControl::ConfirmButton(1),
-        ControlKind::Button,
-        enabled,
-    );
-    form.end_frame(DialogControl::TypedField);
 }
 
 fn target_actions_form(
@@ -441,21 +389,13 @@ fn clear_dialog_form_geometry(form: &mut Form<DialogControl>) {
     form.reset_geometry();
 }
 
-fn confirmation_has_typed_field(confirmation: &Confirmation) -> bool {
-    matches!(
-        confirmation,
-        Confirmation::ForceStop { .. } | Confirmation::ForceDestroy { .. }
-    )
-}
-
 /// Button labels for a confirmation dialog, ordered Cancel first and the primary
 /// action last. This is the single declaration used by both key handling and
 /// rendering.
 pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
     match confirmation {
         Confirmation::DirtyLocal { .. } => &["Cancel", "Continue"],
-        Confirmation::Close { .. } => &["Cancel", "Stop"],
-        Confirmation::DestroyStopped { .. } => &["Cancel", "Destroy"],
+        Confirmation::DestroyStopped { .. } => &["No", "Yes"],
         Confirmation::CloseFailed { .. } => &["Cancel", "Force stop", "Retry stop"],
         Confirmation::RecoverFailed {
             recoverable: true, ..
@@ -472,8 +412,7 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             "Retry move",
             "Resume previous settings",
         ],
-        Confirmation::ForceStop { .. } => &["Cancel", "Force stop"],
-        Confirmation::ForceDestroy { .. } => &["Cancel", "Force destroy"],
+        Confirmation::ForceDestroy { .. } => &["No", "Yes"],
     }
 }
 
@@ -1171,44 +1110,6 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
             ]);
             (" Local repository has uncommitted changes ", lines)
         }
-        Confirmation::Close {
-            session_id,
-            active_turn,
-            reviewer_conversation,
-        } => {
-            let mut lines = vec![Line::raw(format!("Session: {session_id}")), Line::raw("")];
-            if *active_turn {
-                lines.extend([
-                    Line::styled(
-                        "Mjolnir will interrupt the current turn.",
-                        Style::default().fg(theme::WARNING),
-                    ),
-                    Line::raw("It will then save a recovery copy and destroy the target."),
-                ]);
-            } else {
-                lines.push(Line::raw(
-                    "Mjolnir will verify a recovery copy before destroying the target.",
-                ));
-            }
-            if *reviewer_conversation {
-                // The reviewer's native session lives on the target, and a v1
-                // checkpoint is single session, so resuming cannot bring it
-                // back. Saying so before the stop is the only warning there is.
-                lines.push(Line::raw(""));
-                lines.push(Line::styled(
-                    "The second opinion in progress cannot be continued after resume.",
-                    Style::default().fg(theme::WARNING),
-                ));
-                lines.push(Line::raw(
-                    "Its review is kept for reference; a later one starts a new conversation.",
-                ));
-            }
-            if *active_turn {
-                (" Stop active session? ", lines)
-            } else {
-                (" Stop session? ", lines)
-            }
-        }
         Confirmation::DestroyStopped { session_id, .. } => (
             " Permanently destroy stopped session? ",
             vec![
@@ -1317,30 +1218,13 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
             }
             (" Move recovery ", lines)
         }
-        Confirmation::ForceStop { session_id, .. } => (
-            " FORCE STOP · RECENT WORK MAY BE LOST ",
+        Confirmation::ForceDestroy { session_id } => (
+            " Delete session? ",
             vec![
                 Line::raw(format!("Session: {session_id}")),
                 Line::raw(""),
-                Line::raw("The current target will be removed without a new checkpoint."),
-                Line::raw("You can resume from the latest verified recovery archive."),
-                Line::raw(format!("Type {FORCE_STOP_CONFIRMATION}, then press Enter:")),
-            ],
-        ),
-        Confirmation::ForceDestroy {
-            session_id,
-            expected,
-            ..
-        } => (
-            " FORCE DESTROY · THE SESSION AND ITS RECOVERY ARCHIVE WILL BE LOST ",
-            vec![
-                Line::raw(format!("Session: {session_id}")),
-                Line::raw(""),
-                Line::raw("The target, worktree, recovery archive, and record are removed."),
-                Line::raw("Nothing from this session can be resumed or read afterwards."),
-                Line::raw(format!(
-                    "Type {expected} (this session's short id), then press Enter:"
-                )),
+                Line::raw("Delete this session, its worktree, and its recovery archive?"),
+                Line::raw("Y: Yes    N / Esc: No"),
             ],
         ),
     }
@@ -1357,22 +1241,16 @@ pub(crate) fn render_confirmation(
     let nominal: u16 = match confirmation {
         Confirmation::DirtyLocal { .. } => 11,
         Confirmation::CloseFailed { .. } => 12,
-        Confirmation::Close {
-            reviewer_conversation: true,
-            ..
-        } => 13,
-        Confirmation::Close { .. } | Confirmation::DestroyStopped { .. } => 10,
+        Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,
         Confirmation::RecoverMove { .. } => 14,
-        Confirmation::ForceStop { .. } => 10,
         Confirmation::ForceDestroy { .. } => 11,
     };
     let (title, mut lines) = confirmation_body(confirmation);
     let buttons = confirmation_buttons(confirmation);
-    let has_typed_field = confirmation_has_typed_field(confirmation);
     lines.push(Line::raw(""));
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let extra = if has_typed_field { 2 } else { 1 };
+    let extra = 1;
     let height = popup_height(&paragraph, 72, nominal.saturating_add(extra), area);
     let popup = centered_modal(frame, surfaces, 72, height, area);
     frame.render_widget(
@@ -1394,7 +1272,7 @@ pub(crate) fn render_confirmation(
         clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
         return;
     }
-    let controls_height = if has_typed_field { 2 } else { 1 };
+    let controls_height = 1;
     let body = Rect::new(
         inner.x,
         inner.y,
@@ -1404,16 +1282,6 @@ pub(crate) fn render_confirmation(
     frame.render_widget(paragraph, body);
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
-    if has_typed_field {
-        let typed = match confirmation {
-            Confirmation::ForceStop { typed, .. } | Confirmation::ForceDestroy { typed, .. } => {
-                typed
-            }
-            _ => unreachable!("buttonless confirmation must have a typed field"),
-        };
-        let field = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1);
-        TextField::render(frame, field, typed, &mut form, DialogControl::TypedField);
-    }
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
     ButtonRow::render(
         frame,
@@ -1421,21 +1289,11 @@ pub(crate) fn render_confirmation(
         &buttons
             .iter()
             .enumerate()
-            .map(|(index, label)| {
-                (
-                    DialogControl::ConfirmButton(index),
-                    *label,
-                    index == 0 || !has_typed_field || typed_confirmation_valid(confirmation),
-                )
-            })
+            .map(|(index, label)| (DialogControl::ConfirmButton(index), *label, true))
             .collect::<Vec<_>>(),
         &mut form,
     );
-    form.end_frame(if has_typed_field {
-        DialogControl::TypedField
-    } else {
-        DialogControl::ConfirmButton(primary_button(buttons))
-    });
+    form.end_frame(DialogControl::ConfirmButton(primary_button(buttons)));
 }
 
 impl DashboardState {
@@ -2019,6 +1877,25 @@ impl DashboardState {
         event: Event,
         mut dialog: ConfirmDialog,
     ) -> DashboardAction {
+        if matches!(
+            dialog.confirmation,
+            Confirmation::ForceDestroy { .. } | Confirmation::DestroyStopped { .. }
+        ) && let Event::Key(key) = &event
+            && key.kind != crossterm::event::KeyEventKind::Release
+            && !key.modifiers.intersects(
+                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+            )
+        {
+            match key.code {
+                crossterm::event::KeyCode::Char('y' | 'Y') => {
+                    return self.activate_confirmation_button(dialog.confirmation, 1);
+                }
+                crossterm::event::KeyCode::Char('n' | 'N') => {
+                    return self.activate_confirmation_button(dialog.confirmation, 0);
+                }
+                _ => {}
+            }
+        }
         let interaction = dialog.form.get_mut().handle(&event).action;
         match interaction {
             Some(Interaction::Cancel) => {
@@ -2027,58 +1904,6 @@ impl DashboardState {
                 } else {
                     self.cancel_modal();
                 }
-            }
-            Some(Interaction::Edit(DialogControl::TypedField, edit)) => {
-                match &mut dialog.confirmation {
-                    Confirmation::ForceStop { typed, .. }
-                    | Confirmation::ForceDestroy { typed, .. } => {
-                        TextField::apply(typed, edit);
-                    }
-                    _ => {}
-                }
-                sync_typed_confirmation_form(&mut dialog);
-                self.mode = Mode::Confirm(dialog);
-            }
-            Some(Interaction::Activate(DialogControl::TypedField)) => {
-                let valid = typed_confirmation_valid(&dialog.confirmation);
-                if valid {
-                    match dialog.confirmation {
-                        Confirmation::ForceStop { session_id, .. } => {
-                            self.cancel_modal();
-                            return DashboardAction::ForceStop { session_id };
-                        }
-                        Confirmation::ForceDestroy { session_id, .. } => {
-                            self.cancel_modal();
-                            return DashboardAction::ForceDestroy { session_id };
-                        }
-                        _ => {}
-                    }
-                } else {
-                    self.mode = Mode::Confirm(dialog);
-                }
-            }
-            Some(Interaction::Activate(DialogControl::ConfirmButton(1)))
-                if typed_confirmation_valid(&dialog.confirmation) =>
-            {
-                match dialog.confirmation {
-                    Confirmation::ForceStop { session_id, .. } => {
-                        self.cancel_modal();
-                        return DashboardAction::ForceStop { session_id };
-                    }
-                    Confirmation::ForceDestroy { session_id, .. } => {
-                        self.cancel_modal();
-                        return DashboardAction::ForceDestroy { session_id };
-                    }
-                    _ => self.mode = Mode::Confirm(dialog),
-                }
-            }
-            Some(Interaction::Activate(DialogControl::ConfirmButton(1)))
-                if confirmation_has_typed_field(&dialog.confirmation) =>
-            {
-                // The form normally suppresses activation for a disabled
-                // primary button. Keep the state machine safe if an event is
-                // supplied directly before the next redraw.
-                self.mode = Mode::Confirm(dialog);
             }
             Some(Interaction::Activate(DialogControl::ConfirmButton(index))) => {
                 return self.activate_confirmation_button(dialog.confirmation, index);
@@ -2105,24 +1930,17 @@ impl DashboardState {
                 self.cancel_modal();
                 action
             }
-            (Confirmation::Close { session_id, .. }, 1) => {
+            (Confirmation::ForceDestroy { session_id }, 1) => {
                 self.cancel_modal();
-                DashboardAction::Close { session_id }
+                DashboardAction::ForceDestroy { session_id }
             }
             (Confirmation::DestroyStopped { session_id, reopen }, 1) => {
                 self.restore_after_confirmation(reopen);
                 DashboardAction::DestroyStopped { session_id }
             }
             (Confirmation::CloseFailed { session_id, .. }, 1) => {
-                self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ForceStop {
-                    session_id,
-                    typed: TextInput::new()
-                        .with_max_chars(FORCE_STOP_CONFIRMATION.len())
-                        .with_filter(
-                            mj_chat::hel_text_input::InputFilter::AsciiAlphabeticUppercase,
-                        ),
-                }));
-                DashboardAction::None
+                self.cancel_modal();
+                DashboardAction::ForceStop { session_id }
             }
             (Confirmation::CloseFailed { session_id, .. }, 2) => {
                 self.cancel_modal();
@@ -2492,22 +2310,12 @@ mod tests {
         assert!(matches!(dashboard.mode, Mode::Rename(_)));
     }
 
-    fn open_stop_dialog(dashboard: &mut DashboardState) {
-        through_the_palette(dashboard, "stop");
-        assert!(matches!(
-            dashboard.mode,
-            Mode::Confirm(ConfirmDialog {
-                confirmation: Confirmation::Close { .. },
-                ..
-            })
-        ));
-    }
-
     #[test]
-    fn ctrl_e_opens_the_container_editor_only_once_setup_is_done() {
+    fn setup_opens_in_place_and_container_settings_remain_available() {
         let mut empty = DashboardState::new(
             hel::hel_config::HelConfig {
                 version: hel::hel_config::CONFIG_VERSION,
+                sessions_side: Default::default(),
                 newer_config_version: None,
                 spinner: Default::default(),
                 phone: Default::default(),
@@ -2522,9 +2330,9 @@ mod tests {
         );
         assert_eq!(
             empty.handle_key(key(KeyCode::Char('e'))),
-            DashboardAction::OpenConfig
+            DashboardAction::None
         );
-        assert!(matches!(empty.mode, Mode::Dashboard));
+        assert!(matches!(empty.mode, Mode::Setup(_)));
 
         let mut dashboard = dashboard_with_container_session();
         open_container_editor(&mut dashboard);
@@ -3149,261 +2957,45 @@ mod tests {
     }
 
     #[test]
-    fn failed_archive_dialog_offers_retry_or_explicit_force_stop() {
+    fn stop_and_restart_use_one_key_without_a_modal() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
-        open_stop_dialog(&mut dashboard);
+        dashboard.focus_sessions();
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
+            dashboard.handle_key(key(KeyCode::Char('s'))),
             DashboardAction::Close {
                 session_id: "session-1".into()
             }
         );
-
-        // "Retry stop" is the primary button, so it is focused when the dialog opens.
-        dashboard.show_close_failure("session-1".into(), "archive unavailable");
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::Close {
+            dashboard.handle_key(key(KeyCode::Char('r'))),
+            DashboardAction::RestartSession {
                 session_id: "session-1".into()
             }
-        );
-
-        dashboard.show_close_failure("session-1".into(), "archive unavailable");
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('x'))),
-            DashboardAction::None
-        );
-        // "Force stop" sits between Cancel and Retry stop.
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Left)),
-            DashboardAction::None
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
-        assert!(matches!(
-            dashboard.mode,
-            Mode::Confirm(ConfirmDialog {
-                confirmation: Confirmation::ForceStop { .. },
-                ..
-            })
-        ));
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .unwrap();
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("FORCE STOP · RECENT WORK MAY BE LOST"));
-        assert!(rendered.contains("resume from the latest verified recovery archive"));
-        for character in FORCE_STOP_CONFIRMATION.chars() {
-            assert_eq!(
-                dashboard.handle_key(key(KeyCode::Char(character))),
-                DashboardAction::None
-            );
-        }
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::ForceStop {
-                session_id: "session-1".into()
-            }
-        );
-    }
-
-    #[test]
-    fn typed_confirmation_updates_submit_eligibility_before_redraw() {
-        let mut dashboard = running_dashboard_with_stop_dialog();
-        dashboard.show_close_failure("session-1".into(), "archive unavailable");
-        // The middle button opens the typed confirmation.
-        dashboard.handle_key(key(KeyCode::Tab));
-        dashboard.handle_key(key(KeyCode::Right));
-        dashboard.handle_key(key(KeyCode::Enter));
-        for character in FORCE_STOP_CONFIRMATION.chars() {
-            assert_eq!(
-                dashboard.handle_key(key(KeyCode::Char(character))),
-                DashboardAction::None
-            );
-        }
-        let Mode::Confirm(dialog) = &dashboard.mode else {
-            panic!("expected typed confirmation");
-        };
-        assert_eq!(
-            dialog.form.borrow().focused(),
-            Some(DialogControl::TypedField)
-        );
-        // Tab sees the newly enabled standard buttons without a render pass.
-        dashboard.handle_key(key(KeyCode::Tab));
-        let Mode::Confirm(dialog) = &dashboard.mode else {
-            panic!("expected typed confirmation");
-        };
-        assert_eq!(
-            dialog.form.borrow().focused(),
-            Some(DialogControl::ConfirmButton(0))
-        );
-        dashboard.handle_key(key(KeyCode::Tab));
-        let Mode::Confirm(dialog) = &dashboard.mode else {
-            panic!("expected typed confirmation");
-        };
-        assert_eq!(
-            dialog.form.borrow().focused(),
-            Some(DialogControl::ConfirmButton(1))
-        );
-        dashboard.handle_key(key(KeyCode::BackTab));
-        dashboard.handle_key(key(KeyCode::BackTab));
-        dashboard.handle_key(key(KeyCode::Backspace));
-        dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(
-            match &dashboard.mode {
-                Mode::Confirm(dialog) => dialog.form.borrow().focused(),
-                _ => None,
-            },
-            Some(DialogControl::ConfirmButton(0)),
-            "the enabled cancel button remains reachable after invalidation"
-        );
-        dashboard.handle_key(key(KeyCode::Tab));
-        let Mode::Confirm(dialog) = &dashboard.mode else {
-            panic!("expected typed confirmation");
-        };
-        assert_eq!(
-            dialog.form.borrow().focused(),
-            Some(DialogControl::TypedField),
-            "invalidating the text disables the submit control immediately"
-        );
-        dashboard.handle_key(key(KeyCode::Char('P')));
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::ForceStop {
-                session_id: "session-1".into()
-            }
-        );
-    }
-
-    #[test]
-    fn close_failure_cancel_button_closes_the_dialog_without_acting() {
-        let mut session = stopped_session();
-        session.state = SessionState::Running;
-        let mut dashboard = dashboard_with_session(session);
-        dashboard.show_close_failure("session-1".into(), "archive unavailable");
-
-        // Tab from the rightmost button (Retry stop) wraps to Cancel.
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Tab)),
-            DashboardAction::None
-        );
-        let Mode::Confirm(dialog) = &dashboard.mode else {
-            panic!("expected close failure dialog");
-        };
-        assert_eq!(
-            dialog.form.borrow().focused(),
-            Some(DialogControl::ConfirmButton(0))
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
         );
         assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 
-    fn running_hex_session_dashboard() -> DashboardState {
-        // Real session ids are lowercase hex; the force-destroy confirmation
-        // gates on the id's first eight characters.
-        let mut session = stopped_session();
-        session.state = SessionState::Running;
-        session.id = "0123456789abcdef0123456789abcdef".into();
-        dashboard_with_session(session)
-    }
-
     #[test]
-    fn force_destroy_confirmation_requires_the_typed_short_id() {
-        let mut dashboard = running_hex_session_dashboard();
-        through_the_palette(&mut dashboard, "force destroy");
-        assert!(matches!(
-            dashboard.mode,
-            Mode::Confirm(ConfirmDialog {
-                confirmation: Confirmation::ForceDestroy { .. },
-                ..
-            })
-        ));
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .unwrap();
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(
-            rendered.contains("FORCE DESTROY · THE SESSION AND ITS RECOVERY ARCHIVE WILL BE LOST")
-        );
-        assert!(rendered.contains("Type 01234567 (this session's short id), then press Enter:"));
-
-        for character in "ffffffff".chars() {
-            assert_eq!(
-                dashboard.handle_key(key(KeyCode::Char(character))),
-                DashboardAction::None
-            );
-        }
+    fn deleting_a_session_only_asks_yes_or_no() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Delete));
+        let Mode::Confirm(dialog) = &dashboard.mode else {
+            panic!("delete confirmation");
+        };
+        assert_eq!(confirmation_buttons(&dialog.confirmation), &["No", "Yes"]);
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None,
-            "a mismatched id must not destroy"
+            dashboard.handle_key(key(KeyCode::Char('n'))),
+            DashboardAction::None
         );
-        for _ in 0..8 {
-            dashboard.handle_key(key(KeyCode::Backspace));
-        }
-        for character in "01234567".chars() {
-            assert_eq!(
-                dashboard.handle_key(key(KeyCode::Char(character))),
-                DashboardAction::None
-            );
-        }
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
+        dashboard.handle_key(key(KeyCode::Delete));
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
+            dashboard.handle_key(key(KeyCode::Char('y'))),
             DashboardAction::ForceDestroy {
-                session_id: "0123456789abcdef0123456789abcdef".into()
-            }
-        );
-    }
-
-    #[test]
-    fn force_destroy_paste_is_filtered_to_lowercase_hex_and_capped() {
-        let mut dashboard = running_hex_session_dashboard();
-        through_the_palette(&mut dashboard, "force destroy");
-        dashboard.handle_paste("zz0123ABcD!");
-        let Mode::Confirm(ConfirmDialog {
-            confirmation: Confirmation::ForceDestroy { typed, .. },
-            ..
-        }) = &dashboard.mode
-        else {
-            panic!("expected force destroy dialog");
-        };
-        assert_eq!(typed.value(), "0123abcd");
-    }
-
-    fn running_dashboard_with_stop_dialog() -> DashboardState {
-        let mut session = stopped_session();
-        session.state = SessionState::Running;
-        let mut dashboard = dashboard_with_session(session);
-        open_stop_dialog(&mut dashboard);
-        dashboard
-    }
-
-    #[test]
-    fn stop_confirmation_focuses_the_primary_button_so_enter_stops() {
-        let mut dashboard = running_dashboard_with_stop_dialog();
-        let Mode::Confirm(dialog) = &dashboard.mode else {
-            panic!("expected stop confirmation");
-        };
-        assert_eq!(
-            confirmation_buttons(&dialog.confirmation),
-            &["Cancel", "Stop"]
-        );
-        assert_eq!(
-            dialog.form.borrow().focused(),
-            Some(DialogControl::ConfirmButton(1))
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::Close {
                 session_id: "session-1".into()
             }
         );
@@ -3411,214 +3003,29 @@ mod tests {
     }
 
     #[test]
-    fn stop_confirmation_cycles_focus_and_cancels_from_the_cancel_button() {
-        for cycle_keys in [
-            vec![KeyCode::Tab],
-            vec![KeyCode::Right],
-            vec![KeyCode::Left],
-            vec![KeyCode::BackTab],
-        ] {
-            let mut dashboard = running_dashboard_with_stop_dialog();
-            for cycle_key in &cycle_keys {
-                assert_eq!(dashboard.handle_key(key(*cycle_key)), DashboardAction::None);
-            }
-            let Mode::Confirm(dialog) = &dashboard.mode else {
-                panic!("expected stop confirmation to stay open for {cycle_keys:?}");
-            };
-            assert_eq!(
-                dialog.form.borrow().focused(),
-                Some(DialogControl::ConfirmButton(0)),
-                "{cycle_keys:?}"
-            );
-            assert_eq!(
-                dashboard.handle_key(key(KeyCode::Enter)),
-                DashboardAction::None,
-                "{cycle_keys:?}"
-            );
-            assert!(matches!(dashboard.mode, Mode::Dashboard), "{cycle_keys:?}");
-        }
-    }
-
-    #[test]
-    fn stop_confirmation_wraps_focus_back_to_the_primary_button() {
-        let mut dashboard = running_dashboard_with_stop_dialog();
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Tab)),
-            DashboardAction::None
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Tab)),
-            DashboardAction::None
-        );
+    fn failed_stop_offers_retry_and_direct_force_stop() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.show_close_failure("session-1".into(), "archive unavailable");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::Close {
                 session_id: "session-1".into()
             }
         );
-    }
-
-    #[test]
-    fn stop_confirmation_escape_cancels_from_any_button() {
-        for presses in 0..2 {
-            let mut dashboard = running_dashboard_with_stop_dialog();
-            for _ in 0..presses {
-                dashboard.handle_key(key(KeyCode::Tab));
-            }
-            assert_eq!(
-                dashboard.handle_key(key(KeyCode::Esc)),
-                DashboardAction::None,
-                "after {presses} focus moves"
-            );
-            assert!(matches!(dashboard.mode, Mode::Dashboard), "{presses}");
-        }
-    }
-
-    #[test]
-    fn stop_confirmation_ignores_the_removed_letter_accelerators() {
-        for accelerator in ['y', 'Y', 'n', 'N'] {
-            let mut dashboard = running_dashboard_with_stop_dialog();
-            assert_eq!(
-                dashboard.handle_key(key(KeyCode::Char(accelerator))),
-                DashboardAction::None,
-                "{accelerator}"
-            );
-            assert!(
-                matches!(
-                    dashboard.mode,
-                    Mode::Confirm(ConfirmDialog {
-                        confirmation: Confirmation::Close { .. },
-                        ..
-                    })
-                ),
-                "{accelerator}"
-            );
-        }
-    }
-
-    #[test]
-    fn stop_confirmation_renders_only_cancel_and_stop_with_stop_focused() {
-        let mut dashboard = running_dashboard_with_stop_dialog();
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .expect("draw stop confirmation");
-        let buffer = terminal.backend().buffer();
-        let lines = buffer_lines(buffer);
-        let row = lines
-            .iter()
-            .position(|line| line.contains(" Cancel ") && line.contains(" Stop "))
-            .expect("button row");
-        let button_y = buffer.area.y + row as u16;
-        let cancel_x = buffer.area.x + cell_column(&lines[row], "Cancel");
-        let stop_x = buffer.area.x + cell_column(&lines[row], "Stop");
-        assert_eq!(buffer[(stop_x, button_y)].bg, theme::ACCENT);
-        assert_eq!(buffer[(cancel_x, button_y)].bg, theme::SURFACE_RAISED);
-        // Each label keeps its one-cell padding inside the button background.
-        assert_eq!(buffer[(cancel_x - 1, button_y)].bg, theme::SURFACE_RAISED);
-        assert_eq!(buffer[(stop_x - 1, button_y)].bg, theme::ACCENT);
-        assert!(!lines.iter().any(|line| line.contains("Press y/Enter")));
-    }
-
-    #[test]
-    fn stopping_an_active_turn_names_and_explains_the_interruption() {
-        let mut session = stopped_session();
-        session.state = SessionState::Running;
-        let mut dashboard = dashboard_with_session(session);
-        dashboard
-            .session_details
-            .get_mut("session-1")
-            .expect("session detail")
-            .current_turn_started_at = Some(1_000);
-
-        open_stop_dialog(&mut dashboard);
-        let Mode::Confirm(dialog) = &dashboard.mode else {
-            panic!("expected stop confirmation");
-        };
-        let Confirmation::Close { active_turn, .. } = &dialog.confirmation else {
-            panic!("expected close confirmation");
-        };
-        assert!(*active_turn);
-        let (title, lines) = confirmation_body(&dialog.confirmation);
-        assert_eq!(title, " Stop active session? ");
-        assert!(
-            lines.iter().any(|line| line.spans.iter().any(|span| {
-                span.content
-                    .contains("Mjolnir will interrupt the current turn")
-            })),
-            "active stop did not explain its interruption: {lines:?}"
-        );
+        dashboard.show_close_failure("session-1".into(), "archive unavailable");
+        dashboard.handle_key(key(KeyCode::Left));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::Close {
+            DashboardAction::ForceStop {
                 session_id: "session-1".into()
             }
         );
-    }
-
-    #[test]
-    fn stopping_a_session_warns_about_a_review_it_would_end() {
-        let quiet = confirmation_lines(&Confirmation::Close {
-            session_id: "session-1".into(),
-            active_turn: false,
-            reviewer_conversation: false,
-        });
-        assert!(
-            !quiet.iter().any(|line| line.contains("second opinion")),
-            "a session with no review says nothing about one: {quiet:?}"
-        );
-
-        let warned = confirmation_lines(&Confirmation::Close {
-            session_id: "session-1".into(),
-            active_turn: false,
-            reviewer_conversation: true,
-        });
-        assert!(
-            warned
-                .iter()
-                .any(|line| line.contains("cannot be continued after resume")),
-            "stopping must warn that the review ends with the target: {warned:?}"
-        );
-        // The choice is still the ordinary one: stop anyway, or cancel.
-        assert_eq!(
-            confirmation_buttons(&Confirmation::Close {
-                session_id: "session-1".into(),
-                active_turn: false,
-                reviewer_conversation: true,
-            }),
-            &["Cancel", "Stop"]
-        );
-    }
-
-    /// The rendered body of one confirmation, as plain strings.
-    fn confirmation_lines(confirmation: &Confirmation) -> Vec<String> {
-        confirmation_body(confirmation)
-            .1
-            .into_iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect()
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 
     #[test]
     fn button_confirmations_keep_their_button_row_visible() {
         let confirmations = [
-            Confirmation::Close {
-                session_id: "session-1".into(),
-                active_turn: false,
-                reviewer_conversation: false,
-            },
-            // The warning adds rows, so the taller variant has to keep its
-            // buttons on screen too.
-            Confirmation::Close {
-                session_id: "session-1".into(),
-                active_turn: true,
-                reviewer_conversation: true,
-            },
             Confirmation::DestroyStopped {
                 session_id: "session-1".into(),
                 reopen: None,
@@ -3631,14 +3038,8 @@ mod tests {
                 action: DashboardAction::None,
                 repositories: vec!["/work/repo".into(), "/work/other".into()],
             },
-            Confirmation::ForceStop {
-                session_id: "session-1".into(),
-                typed: TextInput::new(),
-            },
             Confirmation::ForceDestroy {
                 session_id: "session-1".into(),
-                expected: "session-1".into(),
-                typed: TextInput::new(),
             },
         ];
         for confirmation in confirmations {
@@ -3669,10 +3070,7 @@ mod tests {
         let Mode::Confirm(dialog) = &dashboard.mode else {
             panic!("expected destroy confirmation");
         };
-        assert_eq!(
-            confirmation_buttons(&dialog.confirmation),
-            &["Cancel", "Destroy"]
-        );
+        assert_eq!(confirmation_buttons(&dialog.confirmation), &["No", "Yes"]);
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::DestroyStopped {

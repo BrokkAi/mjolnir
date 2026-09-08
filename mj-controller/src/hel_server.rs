@@ -3421,6 +3421,7 @@ mod tests {
     fn sample_config_state() -> (HelConfig, HelState) {
         let config = HelConfig {
             version: CONFIG_VERSION,
+            sessions_side: Default::default(),
             newer_config_version: None,
             spinner: Default::default(),
             phone: Default::default(),

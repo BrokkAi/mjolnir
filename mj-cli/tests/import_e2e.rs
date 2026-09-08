@@ -111,6 +111,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
 
     let mut config = HelConfig {
         version: CONFIG_VERSION,
+        sessions_side: Default::default(),
         newer_config_version: None,
         spinner: Default::default(),
         phone: Default::default(),
@@ -223,6 +224,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = HelConfig {
         version: CONFIG_VERSION,
+        sessions_side: Default::default(),
         newer_config_version: None,
         spinner: Default::default(),
         phone: Default::default(),
@@ -342,6 +344,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = HelConfig {
         version: CONFIG_VERSION,
+        sessions_side: Default::default(),
         newer_config_version: None,
         spinner: Default::default(),
         phone: Default::default(),
@@ -568,6 +571,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
     let config = HelConfig {
         version: CONFIG_VERSION,
+        sessions_side: Default::default(),
         newer_config_version: None,
         spinner: Default::default(),
         phone: Default::default(),

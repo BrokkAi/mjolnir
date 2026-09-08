@@ -14,13 +14,14 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::dialogs::{ConfirmDialog, Confirmation};
 use crate::{DashboardAction, DashboardState, Focus};
-use mj_chat::hel_text_input::{InputFilter, TextInput};
 
 /// One thing the surface can be asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandId {
     OpenSession,
     NewSession,
+    NewSessionWizard,
+    RestartSession,
     ResumeDialog,
     RenameSession,
     ContainerSettings,
@@ -255,10 +256,20 @@ fn stop_session_available(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.selected_session() else {
         return Availability::Hidden;
     };
-    if dashboard.move_queue_admission_incomplete(&session.id) {
-        return Availability::Blocked("Move queue admission is incomplete; retry Move first");
+    if !session.state.is_active() {
+        return Availability::Hidden;
     }
-    Availability::Ready
+    session_idle(dashboard)
+}
+
+fn restart_session_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.selected_session() else {
+        return Availability::Hidden;
+    };
+    if !session.state.is_active() && session.checkpoint.is_none() {
+        return Availability::Blocked("this session has no recovery copy to restart");
+    }
+    session_idle(dashboard)
 }
 
 fn move_session_available(dashboard: &DashboardState) -> Availability {
@@ -281,19 +292,19 @@ fn container_session(dashboard: &DashboardState) -> Availability {
     Availability::Ready
 }
 
-fn config_present(dashboard: &DashboardState) -> Availability {
-    if dashboard.config_is_empty() {
-        Availability::Blocked("configure at least one profile and target first")
+fn quick_new_available(dashboard: &DashboardState) -> Availability {
+    if dashboard.config.profiles.is_empty() {
+        Availability::Blocked("add an agent account in Setup (F4) first")
     } else {
         Availability::Ready
     }
 }
 
-fn config_absent(dashboard: &DashboardState) -> Availability {
+fn config_present(dashboard: &DashboardState) -> Availability {
     if dashboard.config_is_empty() {
-        Availability::Ready
+        Availability::Blocked("configure at least one profile and target first")
     } else {
-        Availability::Hidden
+        Availability::Ready
     }
 }
 
@@ -358,13 +369,41 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::NewSession,
         label: "New session",
-        description: "Start the wizard that picks a profile, a bundle, and a target.",
+        description: "Start with a fresh task prompt and saved defaults.",
         scope: Scope::Sessions,
-        keys: &[KeyHint::alt(KeyCode::Char('n'), "Alt-N")],
+        keys: &[
+            KeyHint::alt(KeyCode::Char('n'), "Alt-N"),
+            KeyHint::plain(KeyCode::Char('n'), "n"),
+        ],
         footer: footer_word!("new"),
         footer_group: FooterGroup::Chord,
         footer_rank: 0,
+        available: quick_new_available,
+    },
+    CommandSpec {
+        id: CommandId::NewSessionWizard,
+        label: "New session with options",
+        description: "Choose the profile, project, target, and mounts in the full wizard.",
+        scope: Scope::Sessions,
+        keys: &[
+            KeyHint::plain(KeyCode::Char('N'), "N"),
+            KeyHint::alt(KeyCode::Char('w'), "Alt-W"),
+        ],
+        footer: footer_word!("new options"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 1,
         available: config_present,
+    },
+    CommandSpec {
+        id: CommandId::RestartSession,
+        label: "Restart session",
+        description: "Restart with the same profile, target, and mounts, without confirmation.",
+        scope: Scope::Session,
+        keys: &[KeyHint::plain(KeyCode::Char('r'), "r")],
+        footer: footer_word!("restart"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 2,
+        available: restart_session_available,
     },
     CommandSpec {
         id: CommandId::ResumeDialog,
@@ -435,10 +474,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::StopSession,
         label: "Stop session",
-        description: "Shut the selected session down, after a confirmation.",
+        description: "Stop the selected session without confirmation.",
         scope: Scope::Session,
-        keys: &[],
-        footer: no_footer,
+        keys: &[KeyHint::plain(KeyCode::Char('s'), "s")],
+        footer: footer_word!("stop"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: stop_session_available,
@@ -456,11 +495,14 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: CommandId::ForceDestroySession,
-        label: "Force destroy session",
+        label: "Delete session",
         description: "Permanently remove the selected session, its target, and its recovery archive.",
         scope: Scope::Session,
-        keys: &[],
-        footer: no_footer,
+        keys: &[
+            KeyHint::plain(KeyCode::Delete, "Del"),
+            KeyHint::plain(KeyCode::Char('d'), "d"),
+        ],
+        footer: footer_word!("delete"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         // Deliberately available while an operation runs: preempting a wedged
@@ -498,13 +540,13 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::OpenConfig,
         label: "Open setup",
-        description: "Run first-run setup, which writes a working configuration.",
-        scope: Scope::Setup,
-        keys: &[KeyHint::plain(KeyCode::Char('e'), "e")],
+        description: "Edit all configuration in the Setup modal.",
+        scope: Scope::Settings,
+        keys: &[KeyHint::plain(KeyCode::F(4), "F4")],
         footer: footer_word!("setup"),
-        footer_group: FooterGroup::Pane,
-        footer_rank: 0,
-        available: config_absent,
+        footer_group: FooterGroup::Function,
+        footer_rank: 2,
+        available: always_ready,
     },
     CommandSpec {
         id: CommandId::CycleFocus,
@@ -558,7 +600,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Web viewer",
         description: "Show the address and code for the browser and phone viewer.",
         scope: Scope::Global,
-        keys: &[KeyHint::plain(KeyCode::F(4), "F4")],
+        keys: &[KeyHint::plain(KeyCode::F(7), "F7")],
         footer: footer_word!("web"),
         footer_group: FooterGroup::Function,
         footer_rank: 2,
@@ -639,10 +681,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
 /// owns the keyboard.
 ///
 /// Each one's chord is the entry in its `keys` list that [`KeyHint::is_chord`]
-/// accepts — a function key or an Alt letter. A command reached from
-/// everywhere carries no plain-letter alias: the plain letters are pane-local
-/// only, because the composer reads a bare letter as text and two spellings of
-/// one command is what the key reference exists to avoid.
+/// accepts — a function key or an Alt letter. Plain-letter aliases remain
+/// local to their pane because the composer reads bare letters as text.
 ///
 /// `F2` opens the command palette; its old workspace-picker binding moved to
 /// `F3`.
@@ -653,6 +693,8 @@ const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::WebViewer,
     CommandId::Refresh,
     CommandId::NewSession,
+    CommandId::NewSessionWizard,
+    CommandId::OpenConfig,
     CommandId::ResumeDialog,
     CommandId::MarkAllRead,
     CommandId::CycleFocusedPaneSize,
@@ -783,9 +825,26 @@ impl DashboardState {
     /// key handler used to call directly, so the footer, the help overlay, and
     /// the keyboard cannot disagree about what a command does.
     pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
+        if matches!(id, CommandId::StopSession | CommandId::RestartSession) {
+            match (spec(id).available)(self) {
+                Availability::Hidden => return DashboardAction::None,
+                Availability::Blocked(reason) => {
+                    self.set_notice(reason);
+                    return DashboardAction::None;
+                }
+                Availability::Ready => {}
+            }
+        }
         match id {
             CommandId::OpenSession => self.open_selected_session(),
-            CommandId::NewSession => self.begin_new(),
+            CommandId::NewSession => self.begin_quick_new(),
+            CommandId::NewSessionWizard => self.begin_new(),
+            CommandId::RestartSession => self
+                .selected_session()
+                .map(|s| DashboardAction::RestartSession {
+                    session_id: s.id.clone(),
+                })
+                .unwrap_or(DashboardAction::None),
             CommandId::ResumeDialog => DashboardAction::OpenResumeDialog,
             CommandId::Palette => {
                 self.begin_palette();
@@ -819,31 +878,15 @@ impl DashboardState {
                 else {
                     return DashboardAction::None;
                 };
-                let active_turn = self
-                    .session_details
-                    .get(&session_id)
-                    .is_some_and(|detail| detail.current_turn_started_at.is_some());
-                let reviewer_conversation = self.session_reviews.contains_key(&session_id)
-                    || self.sessions_with_review.contains(&session_id);
-                self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::Close {
-                    session_id,
-                    active_turn,
-                    reviewer_conversation,
-                }));
-                DashboardAction::None
+                DashboardAction::Close { session_id }
             }
             CommandId::ForceDestroySession => {
                 let Some(session_id) = self.selected_session().map(|session| session.id.clone())
                 else {
                     return DashboardAction::None;
                 };
-                let expected = session_id.get(..8).unwrap_or(&session_id).to_owned();
                 self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::ForceDestroy {
                     session_id,
-                    typed: TextInput::new()
-                        .with_max_chars(expected.chars().count())
-                        .with_filter(InputFilter::AsciiHexLowercase),
-                    expected,
                 }));
                 DashboardAction::None
             }
@@ -876,7 +919,10 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::Refresh => DashboardAction::RefreshAll,
-            CommandId::OpenConfig => DashboardAction::OpenConfig,
+            CommandId::OpenConfig => {
+                self.begin_setup();
+                DashboardAction::None
+            }
             CommandId::CycleFocus => {
                 self.cycle_focus(false);
                 DashboardAction::None

@@ -38,6 +38,7 @@ pub struct TextInput {
     chain_kill: bool,
     max_chars: Option<usize>,
     filter: InputFilter,
+    multiline: bool,
     history: Option<Box<InputHistory>>,
 }
 
@@ -128,7 +129,16 @@ impl TextInput {
             chain_kill: false,
             max_chars: None,
             filter: InputFilter::Any,
+            multiline: false,
             history: None,
+        }
+    }
+
+    #[must_use]
+    pub fn multiline() -> Self {
+        Self {
+            multiline: true,
+            ..Self::new()
         }
     }
 
@@ -452,7 +462,7 @@ impl TextInput {
 
     fn insert_filtered(&mut self, text: &str) {
         for mut character in text.chars() {
-            if matches!(character, '\r' | '\n') || character.is_control() {
+            if character.is_control() && !(self.multiline && matches!(character, '\n' | '\t')) {
                 continue;
             }
             match self.filter {

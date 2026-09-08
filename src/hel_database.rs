@@ -3254,6 +3254,19 @@ fn set_session_draft_input_at(path: &Path, session_id: &str, draft: &str) -> Res
     Ok(())
 }
 
+/// Retire a submitted shared draft without erasing a newer client's edit.
+pub fn clear_session_draft_input_if_matches(session_id: &str, expected: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let expected = expected.to_owned();
+    submit_database_write("clear_session_draft_input_if_matches", move |connection| {
+        connection.execute(
+            "UPDATE sessions SET draft_input = '' WHERE session_id = ?1 AND draft_input = ?2",
+            params![session_id, expected],
+        )?;
+        Ok(())
+    })
+}
+
 /// Atomically apply the controller's MRU policy for newly used mount sources.
 pub fn remember_mount_sources(host: &str, mounts: &[AdditionalMount]) -> Result<()> {
     if mounts.is_empty() {
@@ -4073,8 +4086,8 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
              native_session_id, acp_session_title, session_title_override, updated_at,
              viewed_through_event_ordinal, last_error, resource_allocation,
              last_checkpoint_error, project_directory, managed_worktree,
-             container_cpus, container_memory, archived
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+             container_cpus, container_memory, archived, draft_input
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -4128,6 +4141,7 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
             session.container_cpus,
             session.container_memory,
             session.archived,
+            session.draft_input,
         ],
     )?;
     tx.execute(

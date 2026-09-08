@@ -1307,47 +1307,6 @@ impl TerminalGuard {
         )
         .context("copy selection to the terminal clipboard")
     }
-
-    pub(crate) fn suspend(&mut self) -> Result<()> {
-        if self.keyboard_enhancement {
-            execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags)
-                .context("restore terminal key reporting for setup")?;
-        }
-        execute!(
-            self.terminal.backend_mut(),
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            LeaveAlternateScreen
-        )
-        .context("disable terminal input modes and leave alternate screen for setup")?;
-        disable_raw_mode().context("disable terminal raw mode for setup")?;
-        self.terminal
-            .show_cursor()
-            .context("show cursor for setup")?;
-        Ok(())
-    }
-
-    pub(crate) fn resume(&mut self) -> Result<()> {
-        enable_raw_mode().context("re-enable terminal raw mode after setup")?;
-        if self.keyboard_enhancement {
-            execute!(
-                self.terminal.backend_mut(),
-                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-            )
-            .context("re-enable unambiguous terminal key reporting after setup")?;
-        }
-        execute!(
-            self.terminal.backend_mut(),
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste
-        )
-        .context("re-enter alternate screen and enable terminal input modes after setup")?;
-        self.terminal
-            .clear()
-            .context("clear dashboard after setup")?;
-        Ok(())
-    }
 }
 
 impl Drop for TerminalGuard {

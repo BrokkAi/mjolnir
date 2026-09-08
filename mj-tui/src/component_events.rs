@@ -10,6 +10,8 @@ impl DashboardState {
             self.mode,
             Mode::EditContainer(_)
                 | Mode::ReviewSettings(_)
+                | Mode::Setup(_)
+                | Mode::QuickNew(_)
                 | Mode::Palette(_)
                 | Mode::ResumeDialog(_)
                 | Mode::Rename(_)
@@ -30,6 +32,14 @@ impl DashboardState {
         match &self.mode {
             Mode::EditContainer(editor) => {
                 let form = editor.form.borrow();
+                form.captures_pointer() || form.contains(mouse.column, mouse.row)
+            }
+            Mode::QuickNew(dialog) => {
+                let form = dialog.form.borrow();
+                form.captures_pointer() || form.contains(mouse.column, mouse.row)
+            }
+            Mode::Setup(dialog) => {
+                let form = dialog.form.borrow();
                 form.captures_pointer() || form.contains(mouse.column, mouse.row)
             }
             Mode::ReviewSettings(dialog) => {
@@ -92,6 +102,8 @@ impl DashboardState {
         match &mut self.mode {
             Mode::EditContainer(editor) => editor.form.get_mut().cancel_pointer(),
             Mode::ReviewSettings(dialog) => dialog.form.get_mut().cancel_pointer(),
+            Mode::Setup(dialog) => dialog.form.get_mut().cancel_pointer(),
+            Mode::QuickNew(dialog) => dialog.form.get_mut().cancel_pointer(),
             Mode::Palette(palette) => palette.form.get_mut().cancel_pointer(),
             Mode::ResumeDialog(dialog) => dialog.form.get_mut().cancel_pointer(),
             Mode::Rename(dialog) => dialog.form.get_mut().cancel_pointer(),
@@ -112,6 +124,8 @@ impl DashboardState {
         match &mut self.mode {
             Mode::EditContainer(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::ReviewSettings(dialog) => dialog.form.get_mut().reset_geometry(),
+            Mode::Setup(dialog) => dialog.form.get_mut().reset_geometry(),
+            Mode::QuickNew(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::Palette(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::ResumeDialog(dialog) => dialog.form.get_mut().reset_geometry(),
             Mode::Rename(dialog) => dialog.form.get_mut().reset_geometry(),
@@ -138,6 +152,8 @@ impl DashboardState {
         match std::mem::replace(&mut self.mode, Mode::Dashboard) {
             Mode::EditContainer(editor) => self.handle_container_edit_event(event, editor),
             Mode::ReviewSettings(dialog) => self.handle_review_settings_event(event, dialog),
+            Mode::Setup(dialog) => self.handle_setup_event(event, dialog),
+            Mode::QuickNew(dialog) => self.handle_quick_new_event(event, dialog),
             Mode::Rename(dialog) => self.handle_rename_event(event, dialog),
             Mode::ConfigId(dialog) => self.handle_config_id_event(event, dialog),
             Mode::RepositoryOrigin(dialog) => self.handle_repository_origin_event(event, dialog),
