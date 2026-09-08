@@ -78,7 +78,12 @@ Mjolnir exists for the second case.
 | Kimi Code | yes | yes |
 | Grok Build | yes | yes |
 | DeepSeek Harness | credentials yes; usage-priced, no subscription quota | yes |
-| Muse Code | credentials yes; quota unavailable | yes, without workspace relocation |
+| Muse Code | credentials yes; quota unavailable | yes |
+
+All six harnesses support importing external native sessions through the Import
+view or `mj import <harness>`. Use `deepseek` (or `dsh`) for DSH and `muse` for
+Muse Code. Imports preserve native session identity and can resume in a relocated
+workspace; Muse and DSH accept one workspace root.
 
 The set is extensible by design: these six are reference integrations, not a
 closed list. A new ACP-speaking harness needs a launch recipe or bridge, its
@@ -155,8 +160,7 @@ docker pull ghcr.io/brokkai/mjolnir/agent-dev:latest
 ```
 
 It includes Rust, cargo-nextest, Node, OpenJDK 25, Git, GitHub CLI, the Codex
-and Claude ACP bridges, and pinned DeepSeek Harness plus `dsh-acp-server`
-packages.
+and Claude ACP bridges, and pinned DeepSeek Harness with its bundled ACP profile.
 It also bakes in Playwright's Chromium system libraries and the Chromium
 headless shell (in `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`), so headless
 browser tests run without a privileged install or a run-time download,

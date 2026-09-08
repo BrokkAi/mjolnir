@@ -50,7 +50,7 @@ fn imported_sessions_prefer_a_custom_named_local_podman_target() {
     assert_eq!(default_import_target_id(&config), "workstation");
 }
 
-fn initialize_repository(path: &Path, id: &str) {
+pub(super) fn initialize_repository(path: &Path, id: &str) {
     fs::create_dir_all(path).unwrap();
     for arguments in [
         vec!["init", "-q", "-b", "main"],

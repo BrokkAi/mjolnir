@@ -34,11 +34,10 @@ the session (see [Container targets](/containers/)).
 
 For each harness, Mjolnir first looks for an image-baked bridge binary on
 `PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, `grok`, or
-`dsh-acp-server`. If it doesn't find one, Codex and Claude Code fall back to
+`dsh`. If it doesn't find one, Codex and Claude Code fall back to
 running the bridge with `npx -y`, pinned to Mjolnir's fallback versions. DeepSeek
-Harness requires Node 22 or newer and follows its adapter's supported install
-model: bake the pinned `@deepseek-ai/dsh` and `dsh-acp-server` packages into the
-image. Kimi Code and Grok Build have no npm bridge: Mjolnir runs their official
+Harness requires Node 22 or newer: bake the pinned `@deepseek-ai/dsh` package
+into the image. Kimi Code and Grok Build have no npm bridge: Mjolnir runs their official
 installer with `curl` piped to Bash instead, which needs both tools in the image.
 
 Baking the bridges in, the way the reference image does, avoids that
@@ -53,8 +52,8 @@ through `bash -lc`, so a custom image must also provide `bash` on `PATH` for
 that surface to work. Those commands intentionally use the session user's
 shell environment.
 
-The DeepSeek bridge is the third-party `dsh-acp-server` package. Mjolnir pins both
-it and `@deepseek-ai/dsh`, launches its self-managed ACP profile over stdio,
+DeepSeek Harness includes its own ACP implementation. Mjolnir pins
+`@deepseek-ai/dsh` 0.1.2-rc.1 and launches `dsh --profile acp` over stdio,
 and stages only `.credentials.yaml`, settings, instructions, skills, and agent
 presets from `DSH_HOME`. DeepSeek's adapter currently accepts one workspace
 root, so a DeepSeek profile cannot launch a multi-repository bundle or a

@@ -1,6 +1,11 @@
 //! Import native harness sessions into Hel's durable archive format.
 //
 
+mod deepseek;
+mod muse;
+#[cfg(test)]
+mod native_tests;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -379,9 +384,9 @@ pub fn locate_native_session(
     selection: &ClaudeSessionSelection,
 ) -> Result<LocatedNativeSession> {
     let (native_session_id, source_path) = match harness {
-        HarnessKind::Muse => bail!(
-            "Muse Code native import is unavailable; create and resume Muse sessions through Mjolnir"
-        ),
+        HarnessKind::Muse => {
+            return muse::locate(&hel::hel_native::muse_sessions_root(home)?, selection);
+        }
         HarnessKind::Codex => {
             let located = locate_codex_session(home, selection)?;
             (located.native_session_id, located.jsonl_path)
@@ -398,9 +403,7 @@ pub fn locate_native_session(
             let located = locate_grok_session(home, selection)?;
             (located.native_session_id, located.session_path)
         }
-        HarnessKind::Deepseek => bail!(
-            "DeepSeek Harness sessions resume through ACP and are not imported from native storage"
-        ),
+        HarnessKind::Deepseek => return deepseek::locate(home, selection),
     };
     Ok(LocatedNativeSession {
         native_session_id,
@@ -414,14 +417,12 @@ pub fn read_native_transcript(
     source_path: &Path,
 ) -> Result<ClaudeTranscript> {
     match harness {
-        HarnessKind::Muse => bail!("Muse Code native import is unavailable"),
+        HarnessKind::Muse => muse::read_transcript(source_path),
         HarnessKind::Codex => read_codex_transcript(source_path),
         HarnessKind::Claude => read_claude_transcript(source_path),
         HarnessKind::Kimi => read_kimi_transcript(source_path),
         HarnessKind::Grok => read_grok_transcript(source_path),
-        HarnessKind::Deepseek => bail!(
-            "DeepSeek Harness sessions resume through ACP and have no Mjolnir native-import projection"
-        ),
+        HarnessKind::Deepseek => deepseek::read_transcript(source_path),
     }
 }
 
@@ -439,7 +440,9 @@ pub fn scan_native_sessions(
         });
     };
     match harness {
-        HarnessKind::Muse => bail!("Muse Code native import is unavailable"),
+        HarnessKind::Muse => muse::scan(&hel::hel_native::muse_sessions_root(home)?, |progress| {
+            forward(progress.scanned, progress.total, progress.session);
+        }),
         HarnessKind::Codex => scan_codex_sessions(home, |progress| {
             let session = progress.session.map(|session| NativeSessionListing {
                 unavailable_reason: session.history_mode.import_issue(),
@@ -492,9 +495,9 @@ pub fn scan_native_sessions(
             });
             forward(progress.scanned, progress.total, session);
         }),
-        HarnessKind::Deepseek => bail!(
-            "DeepSeek Harness sessions resume through ACP and are not imported from native storage"
-        ),
+        HarnessKind::Deepseek => deepseek::scan(home, |progress| {
+            forward(progress.scanned, progress.total, progress.session);
+        }),
     }
 }
 
@@ -2720,7 +2723,7 @@ pub fn import_native_session_with_control(
     import_native_session(config, state, request, Some(control))
 }
 
-fn import_native_session(
+pub fn import_native_session(
     config: &HelConfig,
     state: &mut HelState,
     request: NativeImportRequest<'_>,
@@ -2756,6 +2759,31 @@ fn import_native_session(
     let repositories = collect_local_repositories(bundle, &targets.git_roots, control)?;
     let native_artifacts =
         collect_import_native_artifacts(harness, harness_home, native_session_id, source_path)?;
+    if matches!(harness, HarnessKind::Deepseek | HarnessKind::Muse) {
+        // The preview may precede a user's confirmation by minutes. Never
+        // pair its old transcript with a newer native conversation.
+        if let Some(control) = control {
+            control.check_cancelled()?;
+        }
+        let current = read_native_transcript(harness, source_path)?;
+        ensure!(
+            current.cwd == transcript.cwd
+                && current.edited_paths == transcript.edited_paths
+                && serde_json::to_value(&current.events)?
+                    == serde_json::to_value(&transcript.events)?,
+            "native session changed after it was selected; select it again"
+        );
+        ensure!(
+            native_artifacts
+                == collect_import_native_artifacts(
+                    harness,
+                    harness_home,
+                    native_session_id,
+                    source_path
+                )?,
+            "native session changed while being imported; stop its harness and retry"
+        );
+    }
     let session_id = new_session_id()?;
     let canonical_session =
         canonical_import_session(session_id.as_str(), &transcript.events, source_path)?;

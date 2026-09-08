@@ -18,6 +18,7 @@ pub mod hel_git_proxy;
 pub mod hel_harness_runtime;
 #[cfg(feature = "controller")]
 pub mod hel_local_git;
+pub mod hel_native;
 pub mod hel_project_memory;
 #[cfg(feature = "controller")]
 pub mod hel_projection;

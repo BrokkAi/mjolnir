@@ -16,9 +16,7 @@ use hel::hel_archive::{
     checkpoint_bundle_prerequisites, read_checkpoint_repository_bundles, verify_archive_streaming,
 };
 use hel::hel_checkpoint::{CheckpointRestoreSpec, restore_command};
-use hel::hel_config::{
-    HarnessKind, HelConfig, ProjectRepository, TargetTemplate, mount_history_host,
-};
+use hel::hel_config::{HarnessKind, HelConfig, ProjectRepository, mount_history_host};
 use hel::hel_projection::materialized_session_from_canonical;
 use hel::hel_state::{MaterializedSession, SessionRecord, SessionResourceAllocation, SessionState};
 use hel::hel_targets::{
@@ -108,12 +106,12 @@ impl Drop for ResumePhaseTimer<'_> {
 }
 
 impl Controller {
-    /// Muse MSP resumes the recorded workspace and cannot relocate it.
+    /// Muse has one workspace root; native restore relocates its metadata.
     pub(super) fn validate_muse_resume_destination(
         &self,
         source: &SessionRecord,
         destination_harness: HarnessKind,
-        target_id: &str,
+        _target_id: &str,
     ) -> Result<()> {
         if destination_harness != HarnessKind::Muse {
             return Ok(());
@@ -126,37 +124,6 @@ impl Controller {
                     .get(&source.bundle_id)
                     .is_none_or(|bundle| bundle.repositories.len() == 1),
             "Muse Code ACP supports one workspace root; use a single-repository bundle"
-        );
-        if source.harness_kind != HarnessKind::Muse {
-            return Ok(());
-        }
-        let plan =
-            resume_compatibility(source, &self.config, target_id).map_err(anyhow::Error::msg)?;
-        let destination = self
-            .config
-            .targets
-            .get(target_id)
-            .context("unknown Muse destination target")?;
-        let source_target = self
-            .config
-            .targets
-            .get(&source.target_template_id)
-            .context("original Muse target is missing")?;
-        let container = |target: &TargetTemplate| {
-            matches!(
-                target,
-                TargetTemplate::LocalPodman { .. }
-                    | TargetTemplate::LocalDocker { .. }
-                    | TargetTemplate::AppleContainer { .. }
-                    | TargetTemplate::SshPodman { .. }
-                    | TargetTemplate::SshDocker { .. }
-            )
-        };
-        ensure!(
-            plan == ResumePlan::InPlace
-                && (target_id == source.target_template_id
-                    || (container(source_target) && container(destination))),
-            "Muse Code cannot relocate a native session's workspace; resume on its original target or a container with the same workspace path"
         );
         Ok(())
     }
@@ -1816,7 +1783,7 @@ mod tests {
     const WORKER_PREFLIGHT_TEST_CHILD: &str = "MJ_WORKER_PREFLIGHT_TEST_CHILD";
 
     #[test]
-    fn muse_resume_rejects_workspace_relocation_before_provisioning() {
+    fn muse_resume_allows_workspace_relocation_before_provisioning() {
         let mut config = resume_compatibility_config();
         config
             .targets
@@ -1837,10 +1804,9 @@ mod tests {
                 .validate_muse_resume_destination(&session, HarnessKind::Muse, "other-container")
                 .is_ok()
         );
-        let error = controller
+        controller
             .validate_muse_resume_destination(&session, HarnessKind::Muse, "ssh-bare")
-            .unwrap_err();
-        assert!(error.to_string().contains("cannot relocate"));
+            .unwrap();
         assert!(
             controller
                 .validate_muse_resume_destination(&session, HarnessKind::Codex, "ssh-bare")

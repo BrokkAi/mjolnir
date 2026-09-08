@@ -268,13 +268,7 @@ fn install_npm(
         .context("write managed harness package-lock.json")?;
     let mut command = Command::new("npm");
     command
-        .args([
-            "ci",
-            "--omit=dev",
-            "--no-audit",
-            "--no-fund",
-            "--legacy-peer-deps",
-        ])
+        .args(["ci", "--omit=dev", "--no-audit", "--no-fund"])
         .current_dir(staging);
     apply_path(&mut command, environment);
     run_checked(&mut command, "install exact managed npm harness")
@@ -657,8 +651,7 @@ mod tests {
         });
     }
     use hel::hel_harness_runtime::{
-        CLAUDE_ACP_VERSION, CODEX_ACP_VERSION, CODEX_CLI_VERSION, DEEPSEEK_ACP_VERSION,
-        DEEPSEEK_DSH_VERSION,
+        CLAUDE_ACP_VERSION, CODEX_ACP_VERSION, CODEX_CLI_VERSION, DEEPSEEK_DSH_VERSION,
     };
 
     fn executable(path: &Path, body: &str) {
@@ -717,10 +710,7 @@ mod tests {
             ),
             (
                 DEEPSEEK_PACKAGE_JSON,
-                vec![
-                    ("@deepseek-ai/dsh", DEEPSEEK_DSH_VERSION),
-                    ("dsh-acp-server", DEEPSEEK_ACP_VERSION),
-                ],
+                vec![("@deepseek-ai/dsh", DEEPSEEK_DSH_VERSION)],
             ),
         ] {
             let package: serde_json::Value = serde_json::from_slice(body).unwrap();
@@ -728,6 +718,14 @@ mod tests {
                 assert_eq!(package["dependencies"][name], version);
             }
         }
+        let deepseek: serde_json::Value = serde_json::from_slice(DEEPSEEK_PACKAGE_JSON).unwrap();
+        assert_eq!(
+            deepseek["dependencies"]
+                .as_object()
+                .map(|dependencies| dependencies.len()),
+            Some(1),
+            "the bundled DSH ACP profile must not carry a separately pinned bridge"
+        );
     }
 
     #[test]

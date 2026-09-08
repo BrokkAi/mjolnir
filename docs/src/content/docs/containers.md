@@ -48,8 +48,8 @@ installs both Linux companions.
 
 Mjolnir ships a reference container image with everything a session needs
 pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Git, GitHub CLI, the
-Codex and Claude ACP bridges, and pinned DeepSeek Harness plus
-`dsh-acp-server`. It also carries Playwright's Chromium system libraries and
+Codex and Claude ACP bridges, and pinned DeepSeek Harness with
+its bundled ACP profile. It also carries Playwright's Chromium system libraries and
 the pre-installed Chromium headless shell in
 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
 privileged install and no run-time browser download, and the profiling tools

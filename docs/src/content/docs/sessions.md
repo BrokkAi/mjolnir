@@ -133,14 +133,18 @@ For Codex, the archive includes the primary thread and child-agent results surfa
 
 ## Import a native harness session
 
-The `Alt+S` picker also has an Import view for sessions created outside Mjolnir. Native Claude Code, Codex, Kimi Code, and Grok Build sessions can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. DeepSeek and Muse native import are not available.
+The `Alt+S` picker also has an Import view for sessions created outside Mjolnir. Native sessions from all six supported harnesses can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. DSH and Muse imports retain their native session IDs and support workspace relocation. Both harnesses accept one workspace root.
 
 For scripting, select a specific native UUID or the latest session:
 
 ```sh
 mj import codex --latest --bundle myapp --title "Investigate flaky tests"
 mj import claude --session <native-uuid> --bundle myapp
+mj import deepseek --latest --bundle myapp
+mj import muse --session <native-uuid> --bundle myapp
 ```
+
+Close the source harness before importing. If it changes the session during import, select it again after it stops. Unsupported native storage versions report an error rather than importing partial history.
 
 If imported Git roots are dirty, Mjolnir warns that it will archive their complete current state; edited non-Git or scratch directories are omitted. An interactive CLI or dashboard import can acknowledge those warnings. For non-interactive use, pass `--allow-dirty` and, when applicable, `--allow-omitted-non-git`. See the [CLI reference](/cli-reference/#import-a-native-session) for every flag.
 
