@@ -673,9 +673,9 @@ fn expanded_session_lines(
     let mut output = message
         .map(|message| {
             let text = if label.is_empty() {
-                std::borrow::Cow::Borrowed(message)
+                message.replace('\n', " ")
             } else {
-                std::borrow::Cow::Owned(format!("{label}{message}"))
+                format!("{label}{message}")
             };
             render_agent_message_head(&text, output_width, 2)
         })
@@ -4176,7 +4176,7 @@ mod tests {
     /// Expanded output keeps the transcript's rich formatting without adding
     /// a second role rail.
     #[test]
-    fn an_expanded_agent_excerpt_carries_no_transcript_gutter() {
+    fn an_expanded_agent_excerpt_flattens_newlines_without_a_transcript_gutter() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         apply_materialized_transcript(
@@ -4191,7 +4191,7 @@ mod tests {
                         })],
                     },
                 ),
-                agent_message(2, "reliability reply: summarize the README"),
+                agent_message(2, "reliability\nreply: summarize the README"),
             ],
         );
 
