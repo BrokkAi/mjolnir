@@ -93,7 +93,7 @@ pub enum BackgroundWorkPolicy {
     HostedTerminals,
     /// Claude's live background-task set, together with hosted terminals.
     ClaudeTasks,
-    /// `exec_command` cards whose result has no exit code.
+    /// `exec_command` cards whose result has an explicitly null exit code.
     CodexExecCards,
 }
 
@@ -630,7 +630,7 @@ impl DurableRelay {
     ///
     /// A hosted terminal only counts while nothing of ours is in flight: until
     /// then it is the turn's own work, not something left behind. A Codex exec
-    /// card counts from the moment its result arrives without an exit code,
+    /// card counts from the moment its result arrives with a null exit code,
     /// because Codex starts these during a turn and never mentions them again.
     fn background_commands(&self) -> Vec<BackgroundCommand> {
         let mut commands: Vec<BackgroundCommand> = match self.background_work {
@@ -1910,7 +1910,7 @@ impl DurableRelay {
         }
     }
 
-    /// Follow a Codex `exec_command` card: a result with no exit code is a
+    /// Follow a Codex `exec_command` card: a result with a null exit code is a
     /// process Codex left running, and the next card for the same call reports
     /// the exit that ends it.
     ///
@@ -1968,10 +1968,12 @@ impl DurableRelay {
         let Some(raw_output) = raw_output else {
             return;
         };
-        if raw_output
-            .get("exit_code")
-            .is_some_and(|code| !code.is_null())
-        {
+        // MCP calls also have kind Execute, but their result/error envelope
+        // has no process exit field. Absence is not evidence of detachment.
+        let Some(exit_code) = raw_output.get("exit_code") else {
+            return;
+        };
+        if !exit_code.is_null() {
             self.codex_execute_tools.remove(tool_call_id);
             self.background_exec_cards.remove(tool_call_id);
             return;
@@ -4499,6 +4501,67 @@ mod tests {
             .record_session_update(exec_card_update("call-1", Some(0)))
             .unwrap();
         assert!(relay.operational_state().background_commands.is_empty());
+    }
+
+    #[test]
+    fn completed_codex_mcp_execute_calls_do_not_leave_background_work() {
+        use agent_client_protocol::schema::v1::{
+            ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        };
+
+        for partial in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+            relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
+            relay
+                .record_observation(RelayObservation::SessionConfigured {
+                    config_options: Vec::new(),
+                })
+                .unwrap();
+            submit_relay(&mut relay, "memory-prompt", prompt("remember the result"));
+            assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+
+            let mut call = ToolCall::new("memory", "mcp.mj-project-memory.memory_write");
+            call.kind = ToolKind::Execute;
+            call.raw_input = Some(serde_json::json!({
+                "server": "mj-project-memory", "tool": "memory_write",
+                "arguments": {"path": "/MEMORY.md", "content": "done"}
+            }));
+            let output = serde_json::json!({
+                "result": {"content": [{"type": "text", "text": "saved"}]},
+                "error": null
+            });
+            if partial {
+                call.status = ToolCallStatus::InProgress;
+                relay
+                    .record_session_update(SessionUpdate::ToolCall(call))
+                    .unwrap();
+                relay
+                    .record_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        "memory",
+                        ToolCallUpdateFields::new()
+                            .status(ToolCallStatus::Completed)
+                            .raw_output(output),
+                    )))
+                    .unwrap();
+            } else {
+                call.status = ToolCallStatus::Completed;
+                call.raw_output = Some(output);
+                relay
+                    .record_session_update(SessionUpdate::ToolCall(call))
+                    .unwrap();
+            }
+            assert!(relay.operational_state().background_commands.is_empty());
+            relay
+                .record_command_completed(
+                    "memory-prompt",
+                    RelayCommandOutcome::Prompt {
+                        stop_reason: "end_turn".into(),
+                    },
+                )
+                .unwrap();
+            assert!(relay.operational_state().is_quiet());
+        }
     }
 
     #[test]

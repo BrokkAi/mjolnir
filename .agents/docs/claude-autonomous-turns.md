@@ -125,14 +125,16 @@ evidence differently, and `BackgroundWorkPolicy` picks which one a relay reads
 - `CodexExecCards` (Codex). codex-acp runs its own shells and never calls
   `terminal/create`, so the only evidence is the tool card. An `exec_command`
   card carries its result under `rawOutput`, with `exit_code` parsed from
-  Codex's structured result. A card whose `rawOutput` has no exit code (null or
-  absent) is a process Codex's unified exec left running; the relay tracks it by
+  Codex's structured result. A card whose `rawOutput` has an explicitly null
+  `exit_code` is a process Codex's unified exec left running; the relay tracks it by
   tool call id and clears it when a later card for the same call reports an exit
   code, when the harness restarts, and when the session closes. ACP tool-call
   updates are partial, so the relay first remembers that the card was explicitly
   introduced with `kind: execute`. A later `rawOutput` without `kind` inherits
   that remembered identity. Raw output by itself is not execution evidence:
-  Codex Guardian reviews and searches also return it.
+  Codex Guardian reviews and searches also return it. MCP calls can themselves
+  have `kind: execute`; their `result`/`error` envelopes omit `exit_code` and
+  must not be classified as background processes.
 
 The Claude level contract was checked on 2026-09-06 against the installed
 claude-agent-acp 0.73.0 `dist/acp-agent.js` (raw SDK forwarding and
@@ -202,3 +204,10 @@ Running clocks read `43m36s`, not `00:43:36` (`format_clock`).
 - **Autonomous cycles are not reviewed.** The turn-review host starts a review
   on a prompt-driven turn only; reviewing self-started turns is a separate
   decision.
+
+On 2026-09-07, the completed `Merge master into 2771-pre-merge` session
+showed six completed project-memory MCP calls with `kind: execute` and
+`rawOutput` containing only `result` and `error`. Every shell execution had
+a non-null exit code. Treating a missing exit field as null falsely kept BG
+active after the turn. The relay now requires an explicit null field, with
+regressions for both complete cards and partial updates through turn completion.
