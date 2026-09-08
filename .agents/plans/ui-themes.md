@@ -14,6 +14,7 @@ Users can choose Midnight (the current appearance), Light, or Dracula in F7 Setu
 - [x] (2026-09-08) Verified save/cancel/failure behavior, persistence, rendering, contrast, and cache refresh. Full Cargo tests, Clippy with warnings denied, formatting, and diff checks pass.
 - [x] (2026-09-08) Reviewed and staged the validated implementation for the required commit on the current branch, `master`.
 - [x] (2026-09-08) Validated the integration with origin's newer mouse controls: the full Cargo suite and Clippy pass on the combined tree.
+- [x] (2026-09-08) Validated integration with GitHub master for the user-requested `ui-themes` branch and PR: the full Cargo suite and Clippy pass again.
 
 ## Surprises & Discoveries
 
@@ -26,6 +27,10 @@ The full-height Setup modal covers all underlying panels at the 100-column test 
 The requested push encountered newer mouse-control work on origin/master. Integration preserves the structured clickable footer and the extracted workspace controls, wraps their complete rendering in the selected theme, and converts the added sidebar/workspace control colors to palette reads. The merge required conflicts to be resolved in the shared theme helpers, dashboard footer, and workspace selector.
 
 The combined tree passed `cargo test` and `cargo clippy --all-targets -- -D warnings`, including all theme tests and the mouse-control behavior tests. The integration preserves both features without rebasing or changing branches.
+
+In this environment, origin is a workspace repository proxy and its commits can differ from GitHub master. Origin rejected updating master while its working directory contained staged changes. The user then explicitly requested a branch and PR, authorizing creation of `ui-themes`. Publishing that branch to GitHub required pushing to the repository's HTTPS URL as well as origin. GitHub master also needed merging; its multi-repository bundle wizard was preserved and its added colors converted to palette reads. The PR description identifies inherited local UI commits that GitHub master did not contain.
+
+The integration with GitHub master passed the full Cargo suite and Clippy with all targets and warnings denied. The feature and its inherited UI updates are reviewed in PR #978.
 
 ## Decision Log
 
@@ -103,3 +108,5 @@ Use existing serde, ratatui, and standard-library facilities. Define `hel::hel_c
 Revision note: Final update records the completed behavior, passing full-suite validation, and reviewed changes staged for the required current-branch commit.
 
 Revision note: Delivery integration records the newer upstream mouse controls and successful full validation of the combined tree before the authorized push.
+
+Revision note: Records the user-authorized branch/PR workflow, the distinction between workspace origin and GitHub master, and successful validation of their integration for PR #978.

@@ -2201,7 +2201,7 @@ fn git_root_for_path(path: &Path) -> Result<Option<PathBuf>> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum RepositoryIdentity {
+pub(crate) enum RepositoryIdentity {
     Github(String, String),
     Local(PathBuf),
 }
@@ -2327,7 +2327,7 @@ pub fn resolve_bundle(
     })
 }
 
-fn bundle_matches(
+pub(crate) fn bundle_matches(
     bundle: &ProjectBundle,
     detected: &BTreeSet<RepositoryIdentity>,
     primary: &RepositoryIdentity,

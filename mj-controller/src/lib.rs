@@ -4,6 +4,7 @@
 mod claude_usage;
 mod codex_usage;
 mod grok_usage;
+mod muse_usage;
 
 pub mod hel_compaction;
 pub mod hel_controller;
