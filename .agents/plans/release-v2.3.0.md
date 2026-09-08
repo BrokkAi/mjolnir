@@ -15,9 +15,9 @@ Publish the work since v2.2.0, including immediate New, startup workspace correc
 - [x] (2026-09-08) Synchronize all eight package versions, five dependency constraints, lockfile entries, and the generated license report; supplemental notices match. Prepare the clean release commit for validation.
 - [x] (2026-09-08) Run clean-commit formatting, tests, host and musl Clippy/release builds, whole-workspace checks, all eight source packages, licenses, npm tests, documentation, and version checks against candidate `10004d18`.
 - [x] Push `10004d18` to origin/master; CI passes reliability, Linux desktop, licenses, and voice checks, but exposes an incorrect raw-output readiness assertion in the macOS PTY test.
-- [ ] Validate the corrected PTY readiness check, push the replacement candidate, and verify its CI.
-- [ ] Create and push the annotated tag after exact-commit validation passes.
-- [ ] Verify GitHub artifacts and registry publication.
+- [x] (2026-09-08) Validate the corrected PTY readiness check and push replacement candidate `f286aa71ce971148a05eb0789065fe6b8d5362b3`. Repeat the full clean-commit local checks; CI run `34242392556` passes all seven jobs.
+- [x] (2026-09-08) Create and push annotated tag v2.3.0 at `f286aa71`; remote tag object is `2a0d09a3efe624aed208390141541f1ce54918f4`. Release workflow `34245436627` is building the downloads.
+- [x] (2026-09-08) Verify the published GitHub Release, all three archives and checksum sidecars, the Linux controller and worker version, all eight Rust crates, and all four npm packages at latest 2.3.0.
 
 ## Surprises & Discoveries
 
@@ -34,7 +34,9 @@ Use 2.3.0 because the release also contains browser voice input and native impor
 ## Outcomes & Retrospective
 
 
-The release code and version candidate passed local validation and is public on master. A macOS test synchronization repair is being validated before the tag. Publication remains; no v2.3.0 tag has been created yet.
+Mjolnir v2.3.0 is published at https://github.com/BrokkAi/mjolnir/releases/tag/v2.3.0. GitHub release workflow `34245436627`, crates.io workflow `34248971085`, and npm workflow `34248983366` all completed successfully. All six GitHub assets are public, their archive digests match the checksum sidecars, and the downloaded Linux controller and portable worker both report 2.3.0. All eight Rust crates expose 2.3.0 without being yanked; all four npm packages expose 2.3.0 as latest. The release notes describe the final feature scope. No release work remains.
+
+The macOS failure was an invalid terminal-stream assertion, not missing preview content. Synchronizing the termination test on first-frame controls preserved the advertised shutdown checks and passed on macOS and Linux. This completion record is committed separately after publication; the immutable release tag continues to identify `f286aa71`.
 
 ## Context and Orientation
 
@@ -81,7 +83,9 @@ Version synchronization and report generation are repeatable. Never move a publi
 ## Artifacts and Notes
 
 
-The session fixes are commits `39171a81` and `4028975e`; native import is upstream commit `fab6694e`. Logs and downloaded artifacts stay under target. This plan records preparation; the final response records the immutable release commit, tag, URL, and validation outcome.
+The session fixes are commits `39171a81` and `4028975e`; native import is upstream commit `fab6694e`. The release commit is `f286aa71ce971148a05eb0789065fe6b8d5362b3`; the public annotated tag is v2.3.0. Tagging followed successful completion of every validation step; Windows CI cache housekeeping finished afterward and the overall CI run completed successfully. Logs and downloaded artifacts stay under target. The final response records the immutable release commit, tag, URL, and publication outcome.
+
+The Linux archive SHA-256 is `32f08c5930ea91b9f6782c031825f4bc5f8fb29b01781e43f39eb20df7fcc0c1`. Verification records are `target/release-v2.3.0-published.json`, `target/release-v2.3.0-npm-verification.json`, and `target/release-v2.3.0-crates-verification.json`. The Linux archive's checksum passed and its digest matches the public GitHub asset byte-for-byte.
 
 ## Interfaces and Dependencies
 
@@ -93,3 +97,7 @@ Revision 2026-09-08: start the resumed release with the merged feature scope and
 Revision 2026-09-08: record synchronized versions and notice checks before creating the clean release candidate.
 
 Revision 2026-09-08: record successful local validation, the public candidate, and the evidence-backed macOS PTY test repair.
+
+Revision 2026-09-08: record passing validation of the corrected candidate and the public release tag while artifact publication runs.
+
+Revision 2026-09-08: record successful GitHub, crates.io, and npm publication and the verified public artifacts and package versions.
