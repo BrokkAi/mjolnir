@@ -1129,8 +1129,6 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use ratatui::style::{Modifier, Style};
-
     use hel::hel_state::{
         HelState, MaterializedExecutionState, MaterializedSession, SessionState, TranscriptBody,
         TranscriptItem,
@@ -1141,7 +1139,6 @@ mod tests {
     use super::*;
     use crate::test_support::*;
 
-    use crate::render::unread_line;
     use crate::{DashboardState, SessionOperationKind};
 
     #[test]
@@ -1297,14 +1294,6 @@ mod tests {
 
         let detail = dashboard.session_details.get("session-1").unwrap();
         assert_eq!(detail.unread_agent_messages, 2);
-        let badge = unread_line(2);
-        assert_eq!(badge.spans[0].content.as_ref(), "2 unread");
-        assert_eq!(
-            badge.spans[0].style,
-            Style::default()
-                .fg(mj_chat::theme::WARNING)
-                .add_modifier(Modifier::BOLD)
-        );
 
         let mut state = dashboard.state.clone();
         state

@@ -2290,6 +2290,7 @@ mod tests {
             latest_credential_sync_signal: None,
             worker_build: None,
             operational: hel::hel_worker::RelayOperationalState {
+                activity_turn_started_at_ms: None,
                 acp_ready: None,
                 store_id: None,
                 idle_since_ms: None,

@@ -3120,8 +3120,8 @@ fn viewer_snapshot(
                 }
             };
             session.config_options = viewer_config_options(state);
-            // The same three states the terminal's expanded row shows, from
-            // the same helper, so the phone never disagrees with it.
+            // Share activity classification with the terminal. The browser
+            // retains its detailed turn/step/background clock presentation.
             let turn_started_at_ms = state
                 .active_prompt
                 .as_ref()
@@ -3482,6 +3482,7 @@ mod tests {
         use hel::hel_worker::{RelayExecutionState, RelayOperationalState};
 
         let operational = |agent_capabilities| RelayOperationalState {
+            activity_turn_started_at_ms: None,
             session_id: "session-1".into(),
             store_id: None,
             idle_since_ms: None,
@@ -3543,6 +3544,7 @@ mod tests {
         record.state = SessionState::Running;
         controller.state.sessions.insert(record.id.clone(), record);
         let operational = RelayOperationalState {
+            activity_turn_started_at_ms: None,
             session_id: "session-1".into(),
             store_id: None,
             idle_since_ms: None,
@@ -3664,8 +3666,14 @@ mod tests {
         assert!(background.sessions[0].activity.starts_with("BG "));
         let state = operational.get_mut("session-1").unwrap();
         state.background_commands.clear();
-        // Execution is authoritative even before its timestamp arrives.
+        // A phase flag alone can be stale; a current SDK step proves work.
         state.execution = RelayExecutionState::Running;
+        let stale_running = project(&operational);
+        assert!(stale_running.sessions[0].is_idle);
+        operational
+            .get_mut("session-1")
+            .unwrap()
+            .current_step_started_at_ms = Some(1_000);
         let running = project(&operational);
         assert!(!running.sessions[0].is_idle);
         assert_ne!(running.sessions[0].activity, "[idle]");
@@ -3692,6 +3700,7 @@ mod tests {
             config: HelConfig {
                 version: CONFIG_VERSION,
                 sessions_side: Default::default(),
+                advanced: Default::default(),
                 newer_config_version: None,
                 spinner: Default::default(),
                 phone: Default::default(),

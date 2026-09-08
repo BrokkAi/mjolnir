@@ -24,6 +24,10 @@ On a workstation, the dashboard arranges sessions in columns and conversations
 use a wider reading area with the composer kept in view. On phones, sessions
 remain in a single column with touch controls.
 
+**New** and **Resume** stay above the Sessions list, including when a workspace
+has no live sessions or the list is filtered. Opening a conversation does not
+move those controls away from the list.
+
 The viewer can:
 
 - create a session by choosing its profile, target, project or bundle, and

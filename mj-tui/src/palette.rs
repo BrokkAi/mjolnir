@@ -573,7 +573,7 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::None
         );
-        assert!(matches!(dashboard.mode, Mode::ReviewSettings(_)));
+        assert!(matches!(dashboard.mode, Mode::Setup(_)));
     }
 
     /// From the composer the selection is the conversation on screen, so the

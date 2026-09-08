@@ -188,7 +188,7 @@ pub(crate) const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 /// A v1 snapshot is upgraded in place to the current schema on open (its stored
 /// frontier digests stay valid, since each is recomputed with the formula that
 /// matches the record's format).
-const RELAY_STATE_VERSION: u32 = 4;
+const RELAY_STATE_VERSION: u32 = 5;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
@@ -354,6 +354,19 @@ impl DurableRelay {
             // record's format — so only the schema marker advances; the next
             // persist writes it back at the current version.
             snapshot.format_version = RELAY_STATE_VERSION;
+            // Older snapshots can still identify a live turn, even though
+            // they did not retain its start through subsequent background work.
+            snapshot.activity_turn_started_at_ms = snapshot
+                .active_prompt
+                .as_ref()
+                .map(|prompt| prompt.started_at_ms)
+                .or_else(|| {
+                    snapshot
+                        .harness_turn
+                        .as_ref()
+                        .map(|turn| turn.started_at_ms)
+                })
+                .or(snapshot.activity_turn_started_at_ms);
             if snapshot.session_id != session_id {
                 bail!(
                     "relay state belongs to session {}, not {session_id}",
@@ -491,6 +504,9 @@ impl DurableRelay {
             relay.snapshot.idle_since_ms = None;
             relay.snapshot.activity_was_idle = Some(idle);
         }
+        if idle {
+            relay.snapshot.activity_turn_started_at_ms = None;
+        }
         if !state_path.exists() || replayed || assigned_store_id {
             relay.persist_snapshot()?;
         }
@@ -597,6 +613,9 @@ impl DurableRelay {
             return false;
         }
         self.snapshot.idle_since_ms = (idle && previous == Some(false)).then_some(now_ms);
+        if idle {
+            self.snapshot.activity_turn_started_at_ms = None;
+        }
         self.snapshot.activity_was_idle = Some(idle);
         true
     }
@@ -2958,6 +2977,51 @@ mod tests {
     }
 
     #[test]
+    fn legacy_snapshot_keeps_its_live_turn_when_activity_clocks_are_upgraded() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted {
+                started_at_ms: 12_000,
+            })
+            .unwrap();
+        let mut legacy = serde_json::to_value(&relay.snapshot).unwrap();
+        legacy["format_version"] = serde_json::json!(4);
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("activity_turn_started_at_ms");
+        drop(relay);
+        fs::write(
+            temp.path().join(RELAY_STATE_FILE),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        assert_eq!(relay.snapshot.format_version, RELAY_STATE_VERSION);
+        assert_eq!(
+            relay.operational_state().activity_turn_started_at_ms,
+            Some(12_000)
+        );
+        assert_eq!(
+            relay
+                .operational_state()
+                .harness_turn
+                .unwrap()
+                .started_at_ms,
+            12_000
+        );
+        relay.persist_snapshot().unwrap();
+        drop(relay);
+        let reopened = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        assert_eq!(
+            reopened.operational_state().activity_turn_started_at_ms,
+            Some(12_000)
+        );
+    }
+
+    #[test]
     fn idle_clock_starts_at_settlement_survives_reopen_and_ignores_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(temp.path());
@@ -3007,6 +3071,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(temp.path());
         relay.record_session_update(tool_call_update()).unwrap();
+        let turn_start = relay.operational_state().activity_turn_started_at_ms;
+        assert!(turn_start.is_some());
         relay
             .agent_terminal_started(ActiveAgentTerminal {
                 terminal_id: "background".into(),
@@ -3018,7 +3084,40 @@ mod tests {
             .record_session_update(settling_usage_update("task-notification"))
             .unwrap();
         assert_eq!(relay.operational_state().idle_since_ms, None);
+        assert_eq!(
+            relay.operational_state().activity_turn_started_at_ms,
+            turn_start
+        );
+        // A newly attached client receives the original clock from the worker.
+        let reattached: RelayOperationalState =
+            serde_json::from_slice(&serde_json::to_vec(&relay.operational_state()).unwrap())
+                .unwrap();
+        assert_eq!(reattached.activity_turn_started_at_ms, turn_start);
+        let stored: RelaySnapshot =
+            serde_json::from_slice(&fs::read(temp.path().join(RELAY_STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(stored.activity_turn_started_at_ms, turn_start);
+        let next_turn = turn_start.unwrap() + 1_000;
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted {
+                started_at_ms: next_turn,
+            })
+            .unwrap();
+        assert_eq!(
+            relay.operational_state().activity_turn_started_at_ms,
+            Some(next_turn)
+        );
+        relay
+            .record_observation(RelayObservation::HarnessTurnSettled {
+                origin: None,
+                prompt_in_flight: false,
+            })
+            .unwrap();
+        assert_eq!(
+            relay.operational_state().activity_turn_started_at_ms,
+            Some(next_turn)
+        );
         relay.agent_terminal_closed("background").unwrap();
+        assert_eq!(relay.operational_state().activity_turn_started_at_ms, None);
         let idle_since = relay.operational_state().idle_since_ms;
         assert!(idle_since.is_some());
         drop(relay);

@@ -156,7 +156,7 @@ impl ReviewConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 3;
+pub const CONFIG_VERSION: u32 = 4;
 pub const PRODUCT_DIR: &str = "mjolnir";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1142,11 +1142,30 @@ impl SessionsSide {
     }
 }
 
+/// Settings that are useful while diagnosing or tuning the client surface.
+///
+/// The section is optional on disk so configurations written before it was
+/// introduced retain their existing representation and behavior.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdvancedConfig {
+    #[serde(skip_serializing_if = "is_false")]
+    pub detailed_activity_clocks: bool,
+}
+
+impl AdvancedConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelConfig {
     #[serde(default, skip_serializing_if = "SessionsSide::is_default")]
     pub sessions_side: SessionsSide,
+    #[serde(default, skip_serializing_if = "AdvancedConfig::is_default")]
+    pub advanced: AdvancedConfig,
     pub version: u32,
     /// The version found on disk when it was above this build's
     /// [`CONFIG_VERSION`]. Such a config loads best-effort so its settings
@@ -1175,6 +1194,7 @@ impl Default for HelConfig {
     fn default() -> Self {
         Self {
             sessions_side: SessionsSide::default(),
+            advanced: AdvancedConfig::default(),
             version: CONFIG_VERSION,
             newer_config_version: None,
             spinner: SpinnerStyle::default(),
@@ -1253,9 +1273,10 @@ impl HelConfig {
         let mut config: Self = toml::from_str(&contents)
             .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         // Version 2 adds Podman workspace storage; version 3 restores the
-        // spinner preference. Earlier configs acquire defaults in memory and
-        // upgrade on the next ordinary save.
-        if matches!(config.version, 1 | 2) {
+        // spinner preference; version 4 adds optional advanced settings.
+        // Earlier configs acquire defaults in memory and upgrade on the next
+        // ordinary save.
+        if matches!(config.version, 1..=3) {
             config.version = CONFIG_VERSION;
         }
         config.validate()?;
@@ -1290,6 +1311,9 @@ impl HelConfig {
         }
         if let Some(spinner) = salvage_section::<SpinnerStyle>(document, "spinner") {
             config.spinner = spinner;
+        }
+        if let Some(advanced) = salvage_section::<AdvancedConfig>(document, "advanced") {
+            config.advanced = advanced;
         }
         if let Some(phone) = salvage_section::<PhoneConfig>(document, "phone")
             && phone.validate().is_ok()
@@ -1845,6 +1869,7 @@ mod tests {
         HelConfig {
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
+            advanced: Default::default(),
             newer_config_version: None,
             spinner: SpinnerStyle::default(),
             phone: PhoneConfig::default(),
@@ -2466,6 +2491,28 @@ mod tests {
         let saved = fs::read_to_string(&path).unwrap();
         assert!(saved.starts_with(&format!("version = {CONFIG_VERSION}")));
         assert!(!saved.contains("spinner"));
+    }
+
+    #[test]
+    fn detailed_activity_clocks_default_off_and_round_trip_without_breaking_old_configs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "version = 2\n").unwrap();
+        let old = HelConfig::load_from(&path).unwrap();
+        assert!(!old.advanced.detailed_activity_clocks);
+
+        let mut config = old;
+        config.advanced.detailed_activity_clocks = true;
+        config.save_to(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("[advanced]"));
+        assert!(saved.contains("detailed_activity_clocks = true"));
+        assert!(
+            HelConfig::load_from(&path)
+                .unwrap()
+                .advanced
+                .detailed_activity_clocks
+        );
     }
 
     #[test]

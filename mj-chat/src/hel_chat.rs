@@ -518,6 +518,8 @@ pub struct ChatState {
     header_profile: String,
     spinner_style: hel::hel_config::SpinnerStyle,
     turn_started_at_epoch_seconds: Option<u64>,
+    detailed_activity_clocks: bool,
+    activity_reachable: bool,
     /// Whether a prompt of ours is in flight. `phase` also goes Running for a
     /// turn the harness started on its own, which the relay refuses to cancel,
     /// so cancellation and the composer's cancel hint key on this instead.
@@ -625,8 +627,13 @@ impl ChatState {
             header_profile: String::new(),
             spinner_style: hel::hel_config::SpinnerStyle::default(),
             turn_started_at_epoch_seconds: None,
+            detailed_activity_clocks: false,
+            activity_reachable: true,
             prompt_in_flight: snapshot.active_prompt.is_some(),
-            session_activity: crate::usage_format::SessionActivity::default(),
+            session_activity: crate::usage_format::SessionActivity {
+                prompt_in_flight: snapshot.active_prompt.is_some(),
+                ..crate::usage_format::SessionActivity::default()
+            },
             current_step_started_at_ms: None,
             frame_surfaces: FrameSurfaces::new(),
             frame_surfaces_exclusive: false,
@@ -1140,6 +1147,7 @@ impl ChatState {
     /// what the relay accepts a cancellation for.
     pub(super) fn set_prompt_in_flight(&mut self, in_flight: bool) {
         self.prompt_in_flight = in_flight;
+        self.session_activity.prompt_in_flight = in_flight;
     }
 
     #[must_use]
@@ -1187,6 +1195,10 @@ impl ChatState {
         self.spinner_style = style;
     }
 
+    pub fn set_detailed_activity_clocks(&mut self, detailed: bool) {
+        self.detailed_activity_clocks = detailed;
+    }
+
     /// Activity animates only while the session has work to report.
     pub fn needs_animation(&self) -> bool {
         let primary_working = match self.phase {
@@ -1195,12 +1207,13 @@ impl ChatState {
             // activity must not keep the spinner alive after the terminal
             // lifecycle event has settled.
             WorkerPhase::Closed => false,
-            WorkerPhase::Running | WorkerPhase::Closing => true,
-            WorkerPhase::Idle => !self
-                .session_activity
-                .is_idle(self.turn_started_at_epoch_seconds),
+            WorkerPhase::Closing => true,
+            WorkerPhase::Running | WorkerPhase::Idle => self.session_activity.is_working(
+                self.turn_started_at_epoch_seconds,
+                !self.pending_elicitations.is_empty(),
+            ),
         };
-        primary_working
+        (self.activity_reachable && primary_working)
             || self
                 .turn_review()
                 .is_some_and(|review| review.view.is_working())
@@ -2573,6 +2586,8 @@ impl ChatState {
             WorkerEvent::TurnCompleted => {
                 self.phase = WorkerPhase::Idle;
                 self.prompt_in_flight = false;
+                self.session_activity.prompt_in_flight = false;
+                self.session_activity.harness_turn_started_at_ms = None;
                 self.goal_prompt_active = false;
                 self.turn_started_at_epoch_seconds = None;
             }
@@ -2989,7 +3004,13 @@ mod tests {
         let mut chat = ChatState::new(&snapshot(), &[]);
         assert!(!chat.needs_animation());
         chat.phase = WorkerPhase::Running;
+        assert!(!chat.needs_animation());
+        chat.turn_started_at_epoch_seconds = Some(1);
         assert!(chat.needs_animation());
+        chat.activity_reachable = false;
+        assert!(!chat.needs_animation());
+        chat.activity_reachable = true;
+        chat.turn_started_at_epoch_seconds = None;
         chat.phase = WorkerPhase::Idle;
         chat.session_activity.foreground_tool_started_at_ms = Some(1);
         assert!(chat.needs_animation());

@@ -1777,6 +1777,7 @@ mod tests {
 
     fn sample_config() -> HelConfig {
         HelConfig {
+            advanced: Default::default(),
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
             newer_config_version: None,

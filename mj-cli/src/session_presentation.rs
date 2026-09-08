@@ -1,6 +1,6 @@
 //! Shared, display-only projections for live session and lifecycle views.
 //!
-//! The dashboard and the workspace selector consume the same bounded runtime
+//! The dashboard and workspace views consume the same bounded runtime
 //! snapshots.  Keeping these setters here prevents either surface from
 //! turning a display update into persistence or chat-side behavior.
 
@@ -163,6 +163,7 @@ mod tests {
         current_step_started_at_ms: Option<i64>,
     ) -> RelayOperationalState {
         RelayOperationalState {
+            activity_turn_started_at_ms: None,
             idle_since_ms: None,
             session_id: "session-1".into(),
             execution,
@@ -261,7 +262,7 @@ mod tests {
     #[test]
     fn activity_projection_captures_current_step_and_connectivity() {
         let mut dashboard = dashboard();
-        let view = managed_view(
+        let mut view = managed_view(
             operational(RelayExecutionState::Running, Some(1_700_000_000_000)),
             false,
         );
@@ -270,14 +271,25 @@ mod tests {
 
         let (text, colors) = dashboard_text(&mut dashboard);
         assert!(
-            text.contains("Turn"),
-            "activity clock missing from {text:?}"
+            text.contains("Unreachable"),
+            "connection status missing from {text:?}"
         );
-        assert!(text.contains("Step"), "step clock missing from {text:?}");
+        assert!(
+            !text.contains("Running "),
+            "stale activity must not hide the connection failure"
+        );
         assert!(
             colors.contains(&mj_chat::theme::ERROR),
             "disconnected row was not marked red"
         );
+        view.connected = true;
+        apply_session_activity(&mut dashboard, "session-1", &view);
+        let (text, _) = dashboard_text(&mut dashboard);
+        assert!(
+            text.contains("Running "),
+            "live SDK step clock missing from {text:?}"
+        );
+        assert!(!text.contains("Unreachable"));
     }
 
     #[test]

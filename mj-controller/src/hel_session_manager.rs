@@ -3952,6 +3952,7 @@ mod tests {
                 window: hel::hel_state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational: RelayOperationalState {
+                    activity_turn_started_at_ms: None,
                     store_id: None,
                     idle_since_ms: None,
                     session_id: "session-1".into(),

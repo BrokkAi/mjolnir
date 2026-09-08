@@ -36,7 +36,6 @@ use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
-use crate::review_settings::ReviewSettingsDialog;
 use crate::wizards::{NewWizard, ResumeWizard};
 use crate::workspaces::WorkspaceManager;
 
@@ -85,6 +84,13 @@ pub(crate) enum SessionsRow {
     /// A live session, by index into `ordered_sessions()`. `expanded` picks
     /// the four-row form over the one-line form.
     Session { index: usize, expanded: bool },
+}
+
+/// Fixed actions rendered above the scrollable Sessions rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionControl {
+    Create,
+    Resume,
 }
 
 /// The full-height session sidebar, targets, and quotas.
@@ -283,10 +289,6 @@ pub enum DashboardAction {
     },
     /// Cancel a reviewer selector discovery that is no longer visible.
     CancelReviewSettingsDiscovery,
-    /// Persist only the global `[review]` section.
-    SaveReviewSettings {
-        review: hel::hel_config::ReviewConfig,
-    },
     /// Persist the client-side activity animation without replacing other settings.
     SaveSpinnerStyle {
         style: hel::hel_config::SpinnerStyle,
@@ -469,18 +471,8 @@ pub(crate) enum Mode {
     Help(HelpOverlay),
     /// The `F2` command palette: every command that applies right now.
     Palette(CommandPalette),
-    /// The global `[review]` configuration editor, opened from the F2 palette.
-    ReviewSettings(ReviewSettingsDialog),
     Setup(setup::SetupDialog),
     QuickNew(quick_new::QuickNewDialog),
-}
-
-fn mode_contains_review_settings(mode: &Mode) -> bool {
-    match mode {
-        Mode::ReviewSettings(_) => true,
-        Mode::Help(overlay) => mode_contains_review_settings(&overlay.return_to),
-        _ => false,
-    }
 }
 
 pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], reverse: bool) -> T {
@@ -572,6 +564,7 @@ pub struct DashboardState {
     /// selects it.
     pub(crate) session_row_areas: Vec<(usize, Rect)>,
     pub(crate) project_heading_areas: Vec<(String, Rect)>,
+    pub(crate) session_control_areas: Vec<(SessionControl, Rect)>,
     /// Click targets for the three size controls in each support-pane title.
     pub(crate) pane_size_control_areas: Vec<(SupportPane, PaneSize, Rect)>,
     /// Whether the current frame gives each pane a larger allocation when its
@@ -685,6 +678,7 @@ impl DashboardState {
             resume_rows: Vec::new(),
             session_row_areas: Vec::new(),
             project_heading_areas: Vec::new(),
+            session_control_areas: Vec::new(),
             pane_size_control_areas: Vec::new(),
             pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
             collapsed_project_keys: BTreeSet::new(),
@@ -964,8 +958,9 @@ impl DashboardState {
     /// navigator. The minimized navigator uses this as its one compact
     /// aggregate while expanded rows identify the individual sessions.
     pub(crate) fn pending_input_count(&self) -> usize {
-        self.session_details
-            .values()
+        self.ordered_sessions()
+            .into_iter()
+            .filter_map(|session| self.session_details.get(&session.id))
             .map(|detail| detail.pending_elicitations.len())
             .sum()
     }
@@ -1209,6 +1204,16 @@ impl DashboardState {
                 crate::workspaces::workspace_tab_click(self, mouse.column, mouse.row)
             {
                 return action;
+            }
+            if let Some(&(control, _)) = self
+                .session_control_areas
+                .iter()
+                .find(|(_, area)| rect_contains(*area, mouse.column, mouse.row))
+            {
+                return match control {
+                    SessionControl::Create => self.dispatch_command(CommandId::NewSession),
+                    SessionControl::Resume => self.dispatch_command(CommandId::ResumeDialog),
+                };
             }
             if let Some(&(pane, size, _)) = self
                 .pane_size_control_areas
@@ -1711,7 +1716,7 @@ impl DashboardState {
     }
 
     pub fn cancel_modal(&mut self) {
-        if mode_contains_review_settings(&self.mode) {
+        if self.review_settings_discovery_active() {
             self.review_settings_generation = self.review_settings_generation.wrapping_add(1);
         }
         self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);

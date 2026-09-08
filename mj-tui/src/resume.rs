@@ -496,7 +496,7 @@ impl DashboardState {
             Mode::Importing(_) => true,
             Mode::TargetActions(dialog) => dialog.testing.is_some(),
             Mode::ResumeDialog(dialog) => dialog.is_scanning(),
-            Mode::ReviewSettings(_) | Mode::Help(_) => self.review_settings_discovery_active(),
+            Mode::Setup(_) | Mode::Help(_) => self.review_settings_discovery_active(),
             _ => false,
         };
         dialog_animates
@@ -513,12 +513,16 @@ impl DashboardState {
                         ))
                     || (session.state == SessionState::Running
                         && !self.unreachable_sessions.contains(&session.id)
-                        && (self.session_details.get(&session.id).is_some_and(|detail| {
-                            !detail.activity.is_idle(detail.current_turn_started_at)
-                        }) || self
-                            .session_reviews
-                            .get(&session.id)
-                            .is_some_and(|review| review.is_working())))
+                        && self.session_details.get(&session.id).is_some_and(|detail| {
+                            detail.activity.is_working(
+                                detail.current_turn_started_at,
+                                !detail.pending_elicitations.is_empty(),
+                            )
+                        }))
+                    || self
+                        .session_reviews
+                        .get(&session.id)
+                        .is_some_and(|review| review.is_working())
             })
     }
 

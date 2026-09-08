@@ -5,6 +5,7 @@
 //! carry a generation so a slow discovery can never replace a newer choice.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use crossterm::event::Event;
@@ -57,9 +58,33 @@ pub(crate) enum ReviewSettingsFocus {
     Profile,
     Model,
     Effort,
+    Back,
     Cancel,
     Refresh,
     Save,
+}
+
+/// What the nested editor wants its owning Setup draft to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewSettingsOutcome {
+    Continue,
+    Back,
+    CancelSetup,
+    Save,
+}
+
+/// Capability knowledge that must remain attached to a Setup draft after the
+/// nested editor is left. Without it, a known unsupported model or effort
+/// could be saved after the user pressed Back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewSettingsValidation {
+    pub(crate) profile: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
+    pub(crate) model_choices: Vec<SessionConfigChoice>,
+    pub(crate) effort_choices: Vec<SessionConfigChoice>,
+    pub(crate) model_choices_discovered: bool,
+    pub(crate) effort_capabilities_discovered: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,10 +118,13 @@ pub(crate) struct ReviewSettingsDialog {
     pub(crate) saving: bool,
     pub(crate) save_error: Option<String>,
     pub(crate) read_only_reason: Option<String>,
+    /// Profiles whose definitions differ from the saved Setup config. Their
+    /// workers must not be queried until Setup persists the account changes.
+    pub(crate) blocked_profile_ids: BTreeSet<String>,
 }
 
 impl ReviewSettingsDialog {
-    fn new(config: &HelConfig) -> Self {
+    pub(crate) fn new(config: &HelConfig) -> Self {
         let mut profiles = vec![None];
         profiles.extend(
             config
@@ -125,6 +153,7 @@ impl ReviewSettingsDialog {
             saving: false,
             save_error: None,
             read_only_reason: config.newer_build_notice(),
+            blocked_profile_ids: BTreeSet::new(),
         };
         dialog.prepare();
         dialog
@@ -230,7 +259,7 @@ impl ReviewSettingsDialog {
         ]
     }
 
-    fn prepare(&self) {
+    pub(crate) fn prepare(&self) {
         use ReviewSettingsFocus::*;
         let mut form = self.form.borrow_mut();
         form.begin_update();
@@ -246,6 +275,7 @@ impl ReviewSettingsDialog {
             );
         }
         form.declare_with_enabled(Refresh, ControlKind::Button, !self.saving);
+        form.declare_with_enabled(Back, ControlKind::Button, true);
         form.declare_with_enabled(Cancel, ControlKind::Button, true);
         form.declare_with_enabled(Save, ControlKind::Button, self.can_save());
         form.end_frame(Enabled);
@@ -292,6 +322,52 @@ impl ReviewSettingsDialog {
             return false;
         }
         true
+    }
+
+    pub(crate) fn validation_snapshot(&self) -> ReviewSettingsValidation {
+        ReviewSettingsValidation {
+            profile: self.review.profile.clone(),
+            model: self.review.model.clone(),
+            effort: self.review.effort.clone(),
+            model_choices: self.model_choices.clone(),
+            effort_choices: self.effort_choices.clone(),
+            model_choices_discovered: self.model_choices_discovered,
+            effort_capabilities_discovered: self.effort_capabilities_discovered,
+        }
+    }
+
+    pub(crate) fn validation_error(
+        snapshot: &ReviewSettingsValidation,
+        review: &ReviewConfig,
+    ) -> Option<String> {
+        if !review.enabled
+            || snapshot.profile != review.profile
+            || snapshot.model != review.model
+            || snapshot.effort != review.effort
+        {
+            return None;
+        }
+        if snapshot.model_choices_discovered
+            && review.model.as_deref().is_some_and(|model| {
+                !snapshot
+                    .model_choices
+                    .iter()
+                    .any(|choice| choice.value == model)
+            })
+        {
+            return Some("Selected review model is unavailable in the discovered choices.".into());
+        }
+        if snapshot.effort_capabilities_discovered
+            && review.effort.as_deref().is_some_and(|effort| {
+                !snapshot
+                    .effort_choices
+                    .iter()
+                    .any(|choice| choice.value == effort)
+            })
+        {
+            return Some("Selected review effort is unavailable in the discovered choices.".into());
+        }
+        None
     }
 
     fn apply_cached_choices(&mut self, choices: &ReviewSettingsChoices) {
@@ -341,6 +417,16 @@ impl ReviewSettingsDialog {
             return DashboardAction::CancelReviewSettingsDiscovery;
         };
 
+        if self.blocked_profile_ids.contains(&profile) {
+            self.generation = dashboard.next_review_settings_generation();
+            self.probing = false;
+            self.choices_loading = false;
+            self.request_key = None;
+            self.discovery_error =
+                Some("Save account changes before discovering review capabilities.".into());
+            return DashboardAction::CancelReviewSettingsDiscovery;
+        }
+
         let key = (profile.clone(), self.review.model.clone());
         if !matches!(kind, ReviewSettingsDiscoveryKind::Refresh)
             && let Some(choices) = dashboard.review_settings_choices.get(&key).cloned()
@@ -379,6 +465,13 @@ impl ReviewSettingsDialog {
             profile_id: profile,
             model: self.review.model.clone(),
         }
+    }
+
+    pub(crate) fn start_initial_discovery(
+        &mut self,
+        dashboard: &mut DashboardState,
+    ) -> DashboardAction {
+        self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Profile)
     }
 
     fn apply_choices(
@@ -447,25 +540,22 @@ impl ReviewSettingsDialog {
         }
     }
 
-    pub(crate) fn apply_save_result(&mut self, result: Result<(), String>) {
-        self.saving = false;
-        self.save_error = result.err();
-    }
-
-    fn handle_event(
+    pub(crate) fn handle_event(
         &mut self,
         dashboard: &mut DashboardState,
         event: Event,
-    ) -> (DashboardAction, bool) {
+    ) -> (DashboardAction, ReviewSettingsOutcome) {
         use ReviewSettingsFocus::*;
         let interaction = self.form.get_mut().handle(&event).action;
         let changed = interaction.is_some();
-        let close = matches!(
-            interaction,
-            Some(Interaction::Cancel | Interaction::Activate(Cancel))
+        let back = matches!(
+            &interaction,
+            Some(Interaction::Cancel | Interaction::Activate(Back))
         );
+        let cancel_setup = matches!(&interaction, Some(Interaction::Activate(Cancel)));
+        let apply = matches!(&interaction, Some(Interaction::Activate(Save))) && self.can_save();
         let action = match interaction {
-            Some(Interaction::Cancel | Interaction::Activate(Cancel)) => {
+            Some(Interaction::Cancel | Interaction::Activate(Back | Cancel)) => {
                 DashboardAction::CancelReviewSettingsDiscovery
             }
             Some(Interaction::Toggle(Enabled)) => {
@@ -520,6 +610,7 @@ impl ReviewSettingsDialog {
                 self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Refresh)
             }
             Some(Interaction::Activate(Save)) if self.can_save() => {
+                let had_pending = self.probing;
                 if self.probing {
                     // Saving supersedes the background request. Invalidate its
                     // identity immediately so a queued progress/final reply
@@ -529,10 +620,11 @@ impl ReviewSettingsDialog {
                     self.choices_loading = false;
                     self.request_key = None;
                 }
-                self.saving = true;
                 self.save_error = None;
-                DashboardAction::SaveReviewSettings {
-                    review: self.review.clone(),
+                if had_pending {
+                    DashboardAction::CancelReviewSettingsDiscovery
+                } else {
+                    DashboardAction::None
                 }
             }
             _ => DashboardAction::None,
@@ -540,7 +632,16 @@ impl ReviewSettingsDialog {
         if changed {
             self.prepare();
         }
-        (action, close)
+        let outcome = if back {
+            ReviewSettingsOutcome::Back
+        } else if cancel_setup {
+            ReviewSettingsOutcome::CancelSetup
+        } else if apply {
+            ReviewSettingsOutcome::Save
+        } else {
+            ReviewSettingsOutcome::Continue
+        };
+        (action, outcome)
     }
 }
 
@@ -548,7 +649,10 @@ impl DashboardState {
     pub(crate) fn review_settings_discovery_active(&self) -> bool {
         fn active(mode: &Mode) -> bool {
             match mode {
-                Mode::ReviewSettings(dialog) => dialog.probing,
+                Mode::Setup(setup) => setup
+                    .review_editor
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.probing),
                 Mode::Help(overlay) => active(&overlay.return_to),
                 _ => false,
             }
@@ -600,29 +704,8 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_review_settings(&mut self) -> DashboardAction {
-        let mut dialog = ReviewSettingsDialog::new(&self.config);
-        let action = if dialog.review.profile.is_some() {
-            dialog.start_discovery(self, ReviewSettingsDiscoveryKind::Profile)
-        } else {
-            DashboardAction::None
-        };
-        dialog.prepare();
-        self.mode = Mode::ReviewSettings(dialog);
-        action
-    }
-
-    pub(crate) fn handle_review_settings_event(
-        &mut self,
-        event: Event,
-        mut dialog: ReviewSettingsDialog,
-    ) -> DashboardAction {
-        let (action, close) = dialog.handle_event(self, event);
-        if close {
-            self.cancel_modal();
-        } else {
-            self.mode = Mode::ReviewSettings(dialog);
-        }
-        action
+        self.begin_setup();
+        self.begin_setup_review()
     }
 
     pub fn apply_review_settings_discovery(
@@ -651,19 +734,11 @@ impl DashboardState {
         dialog.prepare();
         true
     }
-
-    pub fn review_settings_save_failed(&mut self, error: String) {
-        let Some(dialog) = review_settings_dialog_mut(&mut self.mode) else {
-            return;
-        };
-        dialog.apply_save_result(Err(error));
-        dialog.prepare();
-    }
 }
 
 fn review_settings_dialog_mut(mode: &mut Mode) -> Option<&mut ReviewSettingsDialog> {
     match mode {
-        Mode::ReviewSettings(dialog) => Some(dialog),
+        Mode::Setup(setup) => setup.review_editor.as_deref_mut(),
         Mode::Help(overlay) => review_settings_dialog_mut(&mut overlay.return_to),
         _ => None,
     }
@@ -693,7 +768,7 @@ pub(crate) fn render_review_settings(
     };
     let mut notes = vec![
         Line::styled(
-            "Global settings; changes apply to subsequent reviews.",
+            "Changes stay in the Setup draft until you save Setup.",
             theme::muted(),
         ),
         Line::styled(
@@ -778,7 +853,7 @@ pub(crate) fn render_review_settings(
             .max(20),
         area,
     );
-    let block = theme::modal().title(" Review settings ");
+    let block = theme::modal().title(" Setup › Code review ");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let body = Rect::new(
@@ -867,7 +942,7 @@ pub(crate) fn render_review_settings(
     if inner.height > 1 {
         frame.render_widget(
             Line::styled(
-                "Tab moves · arrows select · Space toggles · Esc closes",
+                "Tab moves · arrows select · Space toggles · Esc back",
                 Style::default().fg(theme::MUTED),
             ),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
@@ -878,10 +953,15 @@ pub(crate) fn render_review_settings(
         footer,
         &[
             (Refresh, "Refresh choices", !dialog.saving),
+            (Back, "Back", true),
             (Cancel, "Cancel", true),
             (
                 Save,
-                if dialog.saving { "Saving…" } else { "Save" },
+                if dialog.saving {
+                    "Saving…"
+                } else {
+                    "Save Setup"
+                },
                 dialog.can_save(),
             ),
         ],
@@ -902,10 +982,10 @@ mod tests {
     }
 
     fn dialog(dashboard: &DashboardState) -> &ReviewSettingsDialog {
-        let Mode::ReviewSettings(dialog) = &dashboard.mode else {
+        let Mode::Setup(setup) = &dashboard.mode else {
             panic!("expected review settings dialog")
         };
-        dialog
+        setup.review_editor.as_ref().expect("review child")
     }
 
     fn choice(value: &str) -> SessionConfigChoice {
@@ -979,7 +1059,7 @@ mod tests {
         );
         let action = open(&mut dashboard);
         assert!(matches!(action, DashboardAction::None));
-        assert!(matches!(dashboard.mode, Mode::ReviewSettings(_)));
+        assert!(matches!(dashboard.mode, Mode::Setup(_)));
         assert_eq!(dashboard.selected_session_id(), None);
 
         let mut dashboard = DashboardState::new(
@@ -1021,7 +1101,7 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Esc)),
             DashboardAction::CancelReviewSettingsDiscovery
         ));
-        assert!(!matches!(dashboard.mode, Mode::ReviewSettings(_)));
+        assert!(matches!(dashboard.mode, Mode::Setup(_)));
     }
 
     #[test]
@@ -1045,8 +1125,8 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         let action = dashboard.handle_key(key(KeyCode::Enter));
-        assert!(matches!(action, DashboardAction::SaveReviewSettings { .. }));
-        assert!(dialog(&dashboard).saving);
+        assert!(matches!(action, DashboardAction::SaveSetup { .. }));
+        assert!(matches!(dashboard.mode, Mode::Setup(_)));
     }
 
     #[test]
@@ -1228,6 +1308,7 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Esc)),
             DashboardAction::CancelReviewSettingsDiscovery
         );
+        dashboard.cancel_modal();
         assert!(!dashboard.modal_open());
 
         assert!(!dashboard.apply_review_settings_discovery(
@@ -1369,9 +1450,10 @@ mod tests {
         let Mode::Help(overlay) = &dashboard.mode else {
             panic!("expected help")
         };
-        let Mode::ReviewSettings(dialog) = overlay.return_to.as_ref() else {
+        let Mode::Setup(setup) = overlay.return_to.as_ref() else {
             panic!("help must cover review settings")
         };
+        let dialog = setup.review_editor.as_ref().expect("review child");
         assert!(dialog.model_choices_discovered);
         assert!(dialog.probing);
         assert!(
@@ -1449,6 +1531,24 @@ mod tests {
             Ok(available(&["tiny"], &["high"], true)),
         ));
         assert!(!dialog(&dashboard).can_save());
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::CancelReviewSettingsDiscovery
+        );
+        let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(action, DashboardAction::None);
+        let Mode::Setup(setup) = &dashboard.mode else {
+            panic!("setup remains open after rejected save")
+        };
+        assert!(
+            setup
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("unavailable"))
+        );
     }
 
     #[test]
@@ -1470,7 +1570,7 @@ mod tests {
         }
         assert!(matches!(
             dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::SaveReviewSettings { .. }
+            DashboardAction::SaveSetup { .. }
         ));
         dashboard.cancel_modal();
 

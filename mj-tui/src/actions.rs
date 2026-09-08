@@ -678,7 +678,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::ReviewSettings,
         label: "Review settings…",
-        description: "Edit the global automatic review profile, tier, model, and effort.",
+        description: "Open Setup at Code review.",
         scope: Scope::Settings,
         keys: &[],
         footer: no_footer,

@@ -21,9 +21,9 @@ use crate::dashboard::io::{
     spawn_archive_write, spawn_cancellable_io, spawn_cancellable_io_with_token,
     spawn_clipboard_read, spawn_config_rename, spawn_create_bundle,
     spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
-    spawn_lifecycle_operation, spawn_review_settings_discovery, spawn_review_settings_save,
-    spawn_workspace_create, spawn_workspace_delete, spawn_workspace_draft_recovery,
-    spawn_workspace_management_load, spawn_workspace_rename,
+    spawn_lifecycle_operation, spawn_review_settings_discovery, spawn_workspace_create,
+    spawn_workspace_delete, spawn_workspace_draft_recovery, spawn_workspace_management_load,
+    spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -113,6 +113,9 @@ pub(crate) async fn apply_dashboard_action(
             original,
             updated,
         } => {
+            if let Some(cancelled) = context.review_discovery_cancel.take() {
+                cancelled.store(true, Ordering::Release);
+            }
             super::io::spawn_setup_save(
                 generation,
                 original,
@@ -146,16 +149,6 @@ pub(crate) async fn apply_dashboard_action(
             if let Some(cancelled) = context.review_discovery_cancel.take() {
                 cancelled.store(true, Ordering::Release);
             }
-        }
-        DashboardAction::SaveReviewSettings { review } => {
-            if let Some(cancelled) = context.review_discovery_cancel.take() {
-                cancelled.store(true, Ordering::Release);
-            }
-            spawn_review_settings_save(
-                review,
-                context.dashboard_io_tx.clone(),
-                context.critical_operations.clone(),
-            );
         }
         // One key refreshes both panes, so it runs both requests rather than
         // leaving the user to focus each pane in turn.

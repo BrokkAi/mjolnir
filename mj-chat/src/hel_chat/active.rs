@@ -341,6 +341,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         Err(error) => {
             // Keep the transcript readable rather than tearing the surface
             // down around a stopped manager.
+            state.activity_reachable = false;
             tracing::warn!(error = format!("{error:#}"), "chat session view failed");
             state.set_notice(format!("connection lost: {error:#}"));
             return false;
@@ -349,6 +350,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     // A transient connection error does not make an as-yet-unavailable
     // transcript empty. The actor keeps retrying, so retain the loading row
     // until a real projection arrives; the error still appears in the notice.
+    state.activity_reachable = view.connected && view.snapshot.is_some() && view.error.is_none();
     if view.snapshot.is_some() {
         state.set_transcript_loading(false);
     }
@@ -371,6 +373,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         ));
     }
     if let Some(error) = view.error {
+        state.activity_reachable = false;
         match error {
             ViewError::Unreachable(detail) => {
                 tracing::warn!(%detail, "chat session became unreachable");
@@ -639,6 +642,8 @@ impl ActiveChat {
             if let Some(context) = context.as_ref() {
                 state.set_review_config(context.config.review.clone());
                 state.set_spinner_style(context.config.spinner);
+                state
+                    .set_detailed_activity_clocks(context.config.advanced.detailed_activity_clocks);
             }
             state.set_session_modes(
                 snapshot
@@ -929,6 +934,8 @@ impl ActiveChat {
         self.state.set_harness_kind(harness_kind);
         self.state.set_review_config(config.review.clone());
         self.state.set_spinner_style(config.spinner);
+        self.state
+            .set_detailed_activity_clocks(config.advanced.detailed_activity_clocks);
         self.refresh_voice_availability();
     }
 
@@ -3040,6 +3047,22 @@ mod tests {
     use ratatui::layout::{Position, Rect};
     use std::collections::BTreeMap;
 
+    #[test]
+    fn a_disconnected_view_without_a_snapshot_stops_stale_animation() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.turn_started_at_epoch_seconds = Some(1);
+        assert!(chat.needs_animation());
+        apply_session_view(
+            &mut chat,
+            Ok(ManagedSessionView {
+                snapshot: None,
+                connected: false,
+                error: None,
+            }),
+        );
+        assert!(!chat.needs_animation());
+    }
+
     /// Captures the real conversation renderer for visual review. The caller
     /// chooses an artifact path; ordinary test runs never write screenshots.
     #[test]
@@ -3170,6 +3193,7 @@ mod tests {
                 latest_credential_sync_signal: None,
                 worker_build: None,
                 operational: hel::hel_worker::RelayOperationalState {
+                    activity_turn_started_at_ms: None,
                     store_id: None,
                     idle_since_ms: None,
                     session_id,
@@ -3996,10 +4020,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            rendered.contains("podman  [idle]  claude-2"),
+            rendered.contains("podman  Idle  claude-2"),
             "the refreshed target/profile must be visible in the conversation header: {rendered:?}"
         );
-        assert!(!rendered.contains("localhost  [idle]  codex-1"));
+        assert!(!rendered.contains("localhost  Idle  codex-1"));
     }
 
     #[tokio::test]
@@ -4337,6 +4361,8 @@ mod tests {
         assert!(prompt_title_at(&chat, 0, now_seconds).contains("Prompt"));
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            activity_turn_started_at_ms: None,
+            prompt_in_flight: false,
             idle_since_ms: None,
             execution: None,
             harness_turn_started_at_ms: None,
@@ -4354,6 +4380,8 @@ mod tests {
         );
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            activity_turn_started_at_ms: None,
+            prompt_in_flight: false,
             idle_since_ms: None,
             execution: None,
             harness_turn_started_at_ms: None,

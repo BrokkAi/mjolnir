@@ -41,17 +41,19 @@ const PANE_MINIMUM: u16 = 3;
 const SUMMARY_ROW: u16 = 1;
 
 /// The terminal height at or above which the minimized Sessions list gets its
-/// taller five-row cap; below it the list is capped at two rows.
+/// taller five-row cap; below it the list is capped at two rows. Compact
+/// summaries occupy two lines, so the returned value is a content height.
 const TALL_TERMINAL_HEIGHT: u16 = 40;
 
-/// How many one-line entries the minimized Sessions list can show. Short and
-/// tall terminals retain the existing two- and five-row caps respectively.
+/// How many content lines the minimized Sessions list can show. Short and
+/// tall terminals retain the existing two- and five-entry caps respectively;
+/// each compact entry now occupies two lines.
 pub(crate) fn minimized_session_rows(frame_height: u16, content_height: usize) -> u16 {
     let required = content_height.max(1).try_into().unwrap_or(u16::MAX);
     let cap = if frame_height >= TALL_TERMINAL_HEIGHT {
-        5
+        10
     } else {
-        2
+        4
     };
     required.min(cap)
 }
@@ -306,6 +308,7 @@ pub fn render_combined(
     dashboard.clear_workspace_tab_areas();
     dashboard.session_row_areas.clear();
     dashboard.project_heading_areas.clear();
+    dashboard.session_control_areas.clear();
     dashboard.pane_size_control_areas.clear();
     dashboard.frame_surfaces.clear();
     dashboard.chat_transcript_area = None;
@@ -328,8 +331,8 @@ pub fn render_combined(
     }
 
     let sidebar_width = match dashboard.pane_size(SupportPane::Sessions) {
-        PaneSize::Minimized => 24,
-        PaneSize::Standard => (area.width / 3).clamp(28, 44),
+        PaneSize::Minimized => 20,
+        PaneSize::Standard => (area.width / 3).max(40),
         PaneSize::Maximized => area.width / 2,
     }
     .min(area.width / 2);
@@ -378,10 +381,12 @@ pub fn render_combined(
             PaneDimensions {
                 minimized: minimized_session_rows(
                     area.height,
-                    minimized_sessions_content_height(dashboard, area.width).into(),
+                    minimized_sessions_content_height(dashboard, sidebar_width.saturating_sub(2))
+                        .into(),
                 )
-                .saturating_add(2),
-                full: sessions_content_height(dashboard, area.width).saturating_add(2),
+                .saturating_add(3),
+                full: sessions_content_height(dashboard, sidebar_width.saturating_sub(2))
+                    .saturating_add(2),
                 standard_cap: area.height / 3,
             },
         ),
@@ -424,7 +429,7 @@ pub fn render_combined(
     let supports_adjacent = support_panes_fit(area.width, dashboard);
     let mut maximize_enabled =
         maximized_pane_is_effective(area.height, dimensions, desired_prompt, sizes);
-    maximize_enabled[0].1 = area.width / 2 > (area.width / 3).clamp(28, 44);
+    maximize_enabled[0].1 = area.width / 2 >= (area.width / 3).max(40);
     dashboard.set_pane_maximize_enabled(maximize_enabled);
     let allocation =
         allocate_combined_heights(area.height, sessions, targets, quota, desired_prompt, sizes);
@@ -513,6 +518,7 @@ pub fn render_combined(
     let rendered = render_sessions(frame, sessions_area, dashboard);
     dashboard.session_row_areas = rendered.session_row_areas;
     dashboard.project_heading_areas = rendered.project_heading_areas;
+    dashboard.session_control_areas = rendered.session_control_areas;
     let sessions_content = bordered_content(sessions_area);
     dashboard.frame_surfaces.push(SurfaceFrame::fixed(
         SurfaceId::DashboardPane(0),
@@ -860,7 +866,7 @@ mod tests {
     use crate::test_support::{dashboard_with_session, running_session};
 
     #[test]
-    fn minimized_sessions_use_one_row_per_visible_item() {
+    fn minimized_sessions_use_two_content_lines_per_visible_item() {
         assert_eq!(minimized_session_rows(40, 0), 1);
         assert_eq!(minimized_session_rows(40, 1), 1);
         assert_eq!(minimized_session_rows(40, 3), 3);
@@ -868,11 +874,11 @@ mod tests {
     }
 
     #[test]
-    fn minimized_sessions_cap_rows_at_two_short_and_five_tall() {
-        assert_eq!(minimized_session_rows(39, 6), 2);
-        assert_eq!(minimized_session_rows(39, 100), 2);
-        assert_eq!(minimized_session_rows(40, 15), 5);
-        assert_eq!(minimized_session_rows(100, 100), 5);
+    fn minimized_sessions_cap_content_lines_at_four_short_and_ten_tall() {
+        assert_eq!(minimized_session_rows(39, 6), 4);
+        assert_eq!(minimized_session_rows(39, 100), 4);
+        assert_eq!(minimized_session_rows(40, 15), 10);
+        assert_eq!(minimized_session_rows(100, 100), 10);
     }
 
     #[test]

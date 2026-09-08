@@ -1,10 +1,19 @@
 //! In-memory setup form. Discovery and persistence run in supervised workers.
 mod schema;
 
-use crate::{DashboardAction, DashboardState, Mode, widgets::centered_modal};
+use crate::{
+    DashboardAction, DashboardState, Mode,
+    review_settings::{
+        ReviewSettingsDialog, ReviewSettingsOutcome, ReviewSettingsValidation,
+        render_review_settings,
+    },
+    widgets::centered_modal,
+};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use hel::hel_config::HelConfig;
-use mj_chat::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
+use mj_chat::components::{
+    ButtonRow, Checkbox, ChoiceList, ControlKind, Form, Interaction, TextField,
+};
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 use mj_chat::theme;
@@ -49,16 +58,31 @@ pub(crate) struct SetupDialog {
     path: Vec<String>,
     selected: usize,
     editor: Option<Editor>,
+    pub(crate) review_editor: Option<Box<ReviewSettingsDialog>>,
+    review_validation: Option<ReviewSettingsValidation>,
     pub(crate) form: RefCell<Form<SetupControl>>,
     pub(crate) saving: bool,
     discovering: bool,
-    notice: Option<String>,
+    pub(crate) notice: Option<String>,
     read_only: Option<String>,
 }
 
 fn pointer(path: &[String]) -> String {
     path.iter()
         .map(|key| format!("/{}", key.replace('~', "~0").replace('/', "~1")))
+        .collect()
+}
+
+fn changed_profile_ids(
+    draft: &HelConfig,
+    current: &HelConfig,
+) -> std::collections::BTreeSet<String> {
+    draft
+        .profiles
+        .keys()
+        .chain(current.profiles.keys())
+        .filter(|profile| draft.profiles.get(*profile) != current.profiles.get(*profile))
+        .cloned()
         .collect()
 }
 
@@ -75,6 +99,8 @@ impl SetupDialog {
             path: Vec::new(),
             selected: 0,
             editor: None,
+            review_editor: None,
+            review_validation: None,
             form: RefCell::new(Form::default()),
             saving: false,
             discovering: false,
@@ -122,6 +148,10 @@ impl SetupDialog {
     }
 
     fn prepare(&mut self) {
+        if let Some(review) = &self.review_editor {
+            review.prepare();
+            return;
+        }
         use SetupControl::*;
         let len = self.keys().len();
         self.selected = self.selected.min(len.saturating_sub(1));
@@ -143,13 +173,15 @@ impl SetupDialog {
                 Choices
             }
         } else {
-            form.declare(
-                List,
+            let kind = if self.path.first().is_some_and(|key| key == "advanced") {
+                ControlKind::Checkbox
+            } else {
                 ControlKind::ChoiceList {
                     len,
                     selected: self.selected,
-                },
-            );
+                }
+            };
+            form.declare(List, kind);
             List
         };
         form.declare(Back, ControlKind::Button);
@@ -275,6 +307,11 @@ impl SetupDialog {
             };
             object.insert(name.to_owned(), value);
             self.editor = None;
+            if editor.path.first().is_some_and(|key| key == "profiles") {
+                self.invalidate_review_validation_for(Some(
+                    editor.path.get(1).map_or(name, String::as_str),
+                ));
+            }
             self.selected = self.keys().iter().position(|key| key == name).unwrap();
             self.open_selected();
             return Ok(());
@@ -320,6 +357,7 @@ impl SetupDialog {
         if clear && !defaults.get(&key).is_some_and(Value::is_null) {
             return Err("This setting is required. Choose a value instead of clearing it.".into());
         }
+        let changed = old != &value;
         if key == "kind" {
             let old_parent = self.draft.pointer(&pointer(&parent_path)).unwrap().clone();
             let mut replacement = schema::defaults(&parent_path, &json!({"kind":value}));
@@ -335,6 +373,9 @@ impl SetupDialog {
         } else {
             *self.draft.pointer_mut(&pointer(&editor.path)).unwrap() = value;
         }
+        if changed && editor.path.first().is_some_and(|path| path == "profiles") {
+            self.invalidate_review_validation_for(editor.path.get(1).map(String::as_str));
+        }
         self.editor = None;
         self.form = RefCell::new(Form::default());
         Ok(())
@@ -347,6 +388,12 @@ impl SetupDialog {
         let result = serde_json::from_value::<HelConfig>(self.draft.clone())
             .map_err(|error| error.to_string())
             .and_then(|config| {
+                if let Some(snapshot) = &self.review_validation
+                    && let Some(error) =
+                        ReviewSettingsDialog::validation_error(snapshot, &config.review)
+                {
+                    return Err(error);
+                }
                 config
                     .validate()
                     .map(|()| config)
@@ -368,11 +415,93 @@ impl SetupDialog {
             }
         }
     }
+
+    fn selected_is_review(&self) -> bool {
+        self.selected_path().is_some_and(|path| path == ["review"])
+    }
+
+    fn open_review(&mut self, dashboard: &mut DashboardState) -> DashboardAction {
+        let config = match serde_json::from_value::<HelConfig>(self.draft.clone()) {
+            Ok(config) => config,
+            Err(error) => {
+                self.notice = Some(format!(
+                    "Fix the invalid setup draft before opening Code review: {error}"
+                ));
+                self.form = RefCell::new(Form::default());
+                self.prepare();
+                return DashboardAction::None;
+            }
+        };
+        let mut review = ReviewSettingsDialog::new(&config);
+        review.read_only_reason = dashboard.config.newer_build_notice();
+        review.blocked_profile_ids = changed_profile_ids(&config, &dashboard.config);
+        let action = if review.review.profile.is_some() {
+            review.start_initial_discovery(dashboard)
+        } else {
+            DashboardAction::None
+        };
+        self.review_editor = Some(Box::new(review));
+        self.form = RefCell::new(Form::default());
+        self.prepare();
+        action
+    }
+
+    fn sync_review(&mut self, review: &hel::hel_config::ReviewConfig) {
+        self.draft["review"] = serde_json::to_value(review).expect("review serializes");
+    }
+
+    fn sync_review_validation(&mut self, review: &ReviewSettingsDialog) {
+        self.sync_review(&review.review);
+        self.review_validation = Some(review.validation_snapshot());
+    }
+
+    fn invalidate_review_validation_for(&mut self, profile_id: Option<&str>) {
+        let invalidated = self.review_validation.as_ref().is_some_and(|snapshot| {
+            profile_id.is_none() || snapshot.profile.as_deref() == profile_id
+        });
+        if invalidated {
+            self.review_validation = None;
+        }
+    }
+
+    pub(crate) fn handles_mouse(&self, column: u16, row: u16) -> bool {
+        if let Some(dialog) = &self.review_editor {
+            let form = dialog.form.borrow();
+            return form.captures_pointer() || form.contains(column, row);
+        }
+        let form = self.form.borrow();
+        form.captures_pointer() || form.contains(column, row)
+    }
+
+    pub(crate) fn cancel_pointer(&mut self) {
+        if let Some(review) = &mut self.review_editor {
+            review.form.get_mut().cancel_pointer();
+        } else {
+            self.form.get_mut().cancel_pointer();
+        }
+    }
+
+    pub(crate) fn reset_geometry(&mut self) {
+        if let Some(review) = &mut self.review_editor {
+            review.form.get_mut().reset_geometry();
+        } else {
+            self.form.get_mut().reset_geometry();
+        }
+    }
 }
 
 impl DashboardState {
     pub fn begin_setup(&mut self) {
         self.mode = Mode::Setup(SetupDialog::new(&self.config));
+    }
+
+    pub(crate) fn begin_setup_review(&mut self) -> DashboardAction {
+        let Mode::Setup(mut dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
+            return DashboardAction::None;
+        };
+        let action = dialog.open_review(self);
+        self.mode = Mode::Setup(dialog);
+        action
     }
 
     pub(crate) fn handle_setup_event(
@@ -381,6 +510,59 @@ impl DashboardState {
         mut dialog: SetupDialog,
     ) -> DashboardAction {
         use SetupControl::*;
+        if let Some(mut review) = dialog.review_editor.take() {
+            let save_shortcut = matches!(
+                &event,
+                Event::Key(key)
+                    if key.kind != KeyEventKind::Release
+                        && key.code == KeyCode::Char('s')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+            );
+            if save_shortcut {
+                dialog.sync_review_validation(&review);
+                let action = dialog.save();
+                if dialog.saving {
+                    dialog.form = RefCell::new(Form::default());
+                    self.mode = Mode::Setup(dialog);
+                } else {
+                    review.save_error = dialog.notice.clone();
+                    dialog.review_editor = Some(review);
+                    self.mode = Mode::Setup(dialog);
+                }
+                return action;
+            }
+            let (mut action, outcome) = review.handle_event(self, event);
+            match outcome {
+                ReviewSettingsOutcome::Continue => {
+                    dialog.sync_review_validation(&review);
+                    dialog.review_editor = Some(review);
+                }
+                ReviewSettingsOutcome::Back => {
+                    dialog.sync_review_validation(&review);
+                    dialog.form = RefCell::new(Form::default());
+                }
+                ReviewSettingsOutcome::CancelSetup => {
+                    self.cancel_modal();
+                    return action;
+                }
+                ReviewSettingsOutcome::Save => {
+                    dialog.sync_review_validation(&review);
+                    dialog.review_editor = None;
+                    dialog.form = RefCell::new(Form::default());
+                    action = dialog.save();
+                    if !dialog.saving {
+                        review.save_error = dialog.notice.clone();
+                        dialog.review_editor = Some(review);
+                        dialog.prepare();
+                    }
+                }
+            }
+            if dialog.review_editor.is_none() {
+                dialog.prepare();
+            }
+            self.mode = Mode::Setup(dialog);
+            return action;
+        }
         if dialog.saving {
             self.mode = Mode::Setup(dialog);
             return DashboardAction::None;
@@ -411,7 +593,14 @@ impl DashboardState {
                 return DashboardAction::None;
             }
             Some(Interaction::Select(List, index)) => dialog.selected = index,
-            Some(Interaction::Activate(List)) => dialog.open_selected(),
+            Some(Interaction::Toggle(List)) => dialog.open_selected(),
+            Some(Interaction::Activate(List)) => {
+                if dialog.selected_is_review() {
+                    action = dialog.open_review(self);
+                } else {
+                    dialog.open_selected();
+                }
+            }
             Some(Interaction::Edit(Field, edit)) => {
                 if let Some(editor) = &mut dialog.editor {
                     TextField::apply(&mut editor.input, edit);
@@ -437,6 +626,10 @@ impl DashboardState {
                             array.remove(dialog.selected);
                         }
                         _ => {}
+                    }
+                    if dialog.path.first().is_some_and(|path| path == "profiles") {
+                        let profile_id = dialog.path.get(1).unwrap_or(&key).clone();
+                        dialog.invalidate_review_validation_for(Some(&profile_id));
                     }
                 }
             }
@@ -497,11 +690,15 @@ impl DashboardState {
                 for section in ["profiles", "targets", "bundles"] {
                     if let Some(entries) = discovered[section].as_object() {
                         for (key, value) in entries {
+                            let inserted = dialog.draft[section].get(key).is_none();
                             dialog.draft[section]
                                 .as_object_mut()
                                 .unwrap()
                                 .entry(key.clone())
                                 .or_insert_with(|| value.clone());
+                            if section == "profiles" && inserted {
+                                dialog.invalidate_review_validation_for(Some(key));
+                            }
                         }
                     }
                 }
@@ -529,6 +726,10 @@ pub(crate) fn render_setup(
     dialog: &SetupDialog,
     surfaces: &mut FrameSurfaces,
 ) {
+    if let Some(review) = &dialog.review_editor {
+        render_review_settings(frame, area, review, surfaces);
+        return;
+    }
     use SetupControl::*;
     let popup = centered_modal(
         frame,
@@ -647,7 +848,22 @@ pub(crate) fn render_setup(
                 Line::raw(format!("{name:<32}  {summary}"))
             })
             .collect::<Vec<_>>();
-        ChoiceList::render(frame, body, &rows, dialog.selected, &mut form, List);
+        if dialog.path.first().is_some_and(|key| key == "advanced") {
+            let value = dialog.current()["detailed_activity_clocks"]
+                .as_bool()
+                .unwrap_or(false);
+            Checkbox::render(
+                frame,
+                body,
+                &schema::label("detailed_activity_clocks"),
+                value,
+                !dialog.saving && dialog.read_only.is_none(),
+                &mut form,
+                List,
+            );
+        } else {
+            ChoiceList::render(frame, body, &rows, dialog.selected, &mut form, List);
+        }
         initial = List;
         ButtonRow::render(
             frame,
@@ -695,6 +911,7 @@ pub(crate) fn render_setup(
 mod tests {
     use super::*;
     use crate::test_support::{buffer_lines, config, dashboard_with_session, key, stopped_session};
+    use crossterm::event::KeyEvent;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn choose(dashboard: &mut DashboardState, name: &str) {
@@ -855,6 +1072,157 @@ mod tests {
             assert!(!dashboard.modal_open());
             assert_eq!(dashboard.config, original);
         }
+    }
+
+    #[test]
+    fn review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        choose(&mut dashboard, "review");
+        dashboard.handle_key(key(KeyCode::Char(' ')));
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(matches!(dashboard.mode, Mode::Setup(_)));
+        assert!(!dashboard.config.review.enabled);
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup remains open after leaving review")
+        };
+        assert!(dialog.draft["review"]["enabled"].as_bool().unwrap());
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(!dashboard.modal_open());
+        assert!(!dashboard.config.review.enabled);
+
+        dashboard.begin_setup();
+        choose(&mut dashboard, "review");
+        dashboard.handle_key(key(KeyCode::Char(' ')));
+        dashboard.handle_key(key(KeyCode::Tab));
+        dashboard.handle_key(key(KeyCode::Tab));
+        dashboard.handle_key(key(KeyCode::Right));
+        let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        ));
+        assert!(matches!(action, DashboardAction::SaveSetup { .. }));
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup save remains pending")
+        };
+        let generation = dialog.generation;
+        let updated: HelConfig = serde_json::from_str(match &action {
+            DashboardAction::SaveSetup { updated, .. } => updated,
+            _ => unreachable!(),
+        })
+        .unwrap();
+        assert!(updated.review.enabled);
+        dashboard.setup_saved(generation, Ok(updated));
+        assert!(!dashboard.modal_open());
+        assert!(dashboard.config.review.enabled);
+    }
+
+    #[test]
+    fn unsaved_account_edits_block_review_cache_and_refresh_until_setup_is_saved() {
+        use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsFocus};
+
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.config.review.profile = Some("codex-1".into());
+        dashboard.config.review.enabled = true;
+        dashboard
+            .review_settings_choices
+            .insert(("codex-1".into(), None), ReviewSettingsChoices::default());
+        dashboard.begin_setup();
+        choose(&mut dashboard, "profiles");
+        choose(&mut dashboard, "codex-1");
+        choose(&mut dashboard, "home");
+        dashboard.handle_paste("-changed");
+        dashboard.handle_key(key(KeyCode::Enter));
+        dashboard.handle_key(key(KeyCode::Esc));
+        dashboard.handle_key(key(KeyCode::Esc));
+        choose(&mut dashboard, "review");
+        let setup = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        let review = setup.review_editor.as_mut().unwrap();
+        assert!(!review.probing);
+        assert!(
+            !review.model_choices_discovered,
+            "old account cache must not apply"
+        );
+        assert!(
+            review
+                .discovery_error
+                .as_deref()
+                .unwrap()
+                .contains("Save account changes")
+        );
+        review.form.get_mut().focus(ReviewSettingsFocus::Refresh);
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::CancelReviewSettingsDiscovery
+        );
+        let setup = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        let review = setup.review_editor.as_mut().unwrap();
+        review.form.get_mut().focus(ReviewSettingsFocus::Profile);
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Right)),
+            DashboardAction::DiscoverReviewSettings { profile_id, .. } if profile_id == "codex-2"
+        ));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Left)),
+            DashboardAction::CancelReviewSettingsDiscovery
+        );
+        let DashboardAction::SaveSetup { updated, .. } =
+            dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        else {
+            panic!("unverified capabilities must not prevent saving account changes")
+        };
+        let saved: HelConfig = serde_json::from_str(&updated).unwrap();
+        assert_eq!(saved.review.profile.as_deref(), Some("codex-1"));
+        assert_ne!(
+            saved.profiles["codex-1"].home,
+            dashboard.config.profiles["codex-1"].home
+        );
+    }
+
+    #[test]
+    fn unrelated_account_edits_do_not_allow_saving_a_known_unavailable_review_model() {
+        use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
+
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.config.review.profile = Some("codex-1".into());
+        dashboard.config.review.enabled = true;
+        dashboard.config.review.model = Some("unavailable-model".into());
+        let DashboardAction::DiscoverReviewSettings {
+            generation,
+            profile_id,
+            model,
+        } = dashboard.begin_review_settings()
+        else {
+            panic!("expected capability discovery")
+        };
+        dashboard.apply_review_settings_discovery(
+            generation,
+            &profile_id,
+            model.as_deref(),
+            Ok(ReviewSettingsDiscoveryResult::Available {
+                choices: ReviewSettingsChoices::default(),
+                cleanup_warning: None,
+            }),
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
+        choose(&mut dashboard, "profiles");
+        choose(&mut dashboard, "codex-2");
+        choose(&mut dashboard, "home");
+        dashboard.handle_paste("-changed");
+        dashboard.handle_key(key(KeyCode::Enter));
+        let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(action, DashboardAction::None);
+        let setup = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(setup.notice.as_deref().unwrap().contains("unavailable"));
+        dashboard.handle_key(key(KeyCode::Esc));
+        choose(&mut dashboard, "codex-1");
+        choose(&mut dashboard, "home");
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            DashboardAction::None,
+            "applying an unchanged account field must retain known validation"
+        );
     }
 
     #[test]

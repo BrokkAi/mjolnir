@@ -18,7 +18,6 @@ use hel::hel_state::{
 use hel::hel_targets::{DeploymentCapacityKind, DeploymentCapacityTarget, ProvisionStage};
 
 use crate::ingest::SessionOperationDisplay;
-use crate::render::SUMMARY_RULE;
 use crate::{DashboardState, SessionOperationKind};
 
 pub(crate) fn key(code: KeyCode) -> KeyEvent {
@@ -47,7 +46,7 @@ pub(crate) fn cell_column(line: &str, needle: &str) -> u16 {
 /// A drawn summary cell that holds session text rather than the rule fill.
 pub(crate) fn summary_text_cell(cell: &ratatui::buffer::Cell) -> bool {
     let symbol = cell.symbol();
-    !symbol.trim().is_empty() && symbol != SUMMARY_RULE
+    !symbol.trim().is_empty() && symbol != "─"
 }
 
 pub(crate) fn ctrl_key(character: char) -> KeyEvent {
@@ -92,6 +91,7 @@ pub(crate) fn config() -> HelConfig {
     HelConfig {
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
+        advanced: Default::default(),
         newer_config_version: None,
         spinner: Default::default(),
         phone: Default::default(),

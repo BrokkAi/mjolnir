@@ -85,15 +85,13 @@ base64 = "0.22"
 # name exactly to restore a checkpoint. `default-features = false` keeps the
 # cross-compiled musl build free of the optional Rayon and SIMD extras.
 blake3 = { version = "1", default-features = false, features = ["std"] }
-# `clock` pulls `iana-time-zone`/`android-tzdata` so `Local` can render reset
-# timestamps in the machine's wall-clock time (DST-correct); `default-features
-# = false` drops the wasm-only bits.
+# `clock` enables local-time support so `Local` can render reset timestamps in
+# the machine's wall-clock time (DST-correct); `default-features = false` drops
+# the wasm-only bits.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6"
 getrandom = "0.3"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-# Resolves the IANA zone name (e.g. "Europe/Paris") to append to reset times.
-iana-time-zone = "0.1"
 libc = "0.2"
 signal-hook = { version = "0.3", optional = true }
 rayon = "1"

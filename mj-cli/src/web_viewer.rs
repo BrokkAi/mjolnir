@@ -623,13 +623,37 @@ mod tests {
         })
         .await;
         drop(occupied);
+        // Concurrent process-spawning tests can inherit the listening socket
+        // between fork and exec. Dropping our descriptor alone does not prove
+        // the OS has released it. Wait for that precondition before Retry.
+        // Bind without listening so the probe cannot become another inherited
+        // listener; SO_REUSEADDR matches the server's bind behavior.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let probe = tokio::net::TcpSocket::new_v4().unwrap();
+                probe.set_reuseaddr(true).unwrap();
+                match probe.bind(address) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("cannot check listener release: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("original listener was not released");
         control.recover(WebViewerRecovery::Retry).unwrap();
         let access = wait_access(&control, |access| {
-            matches!(access, WebViewerAccess::Ready { .. })
+            matches!(
+                access,
+                WebViewerAccess::Ready { .. } | WebViewerAccess::Failed { .. }
+            )
         })
         .await;
         assert!(
-            matches!(access, WebViewerAccess::Ready { viewer_url, .. } if viewer_url == format!("http://{address}/"))
+            matches!(&access, WebViewerAccess::Ready { viewer_url, .. } if viewer_url == &format!("http://{address}/")),
+            "retry did not restore the original listener: {access:?}"
         );
         assert!(http_response(address).await.starts_with("HTTP/1.1 200"));
         cancel.cancel();

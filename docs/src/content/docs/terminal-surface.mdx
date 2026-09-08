@@ -34,6 +34,21 @@ Each list supports the same navigation keys:
 | `Ctrl+P` / `Ctrl+N` | Select the previous or next row |
 | `Home` / `End` | Select the first or last row |
 
+The Sessions pane keeps **Create** and **Resume** above the session list. They
+remain available when the list is empty or filtered: use `n` or `Alt+N` for
+Quick New, `N` or `Alt+W` for the full creation wizard, and `Alt+S` to search
+non-live history.
+
+Normal session rows use four lines: the session name, one metadata line, and
+two wrapped output lines. The metadata keeps the profile, target, and useful
+status details together; the output shows the latest reply, tool activity, or
+prompt. A minimized Sessions pane uses two lines per row, retaining the status
+and queue count in the compact form.
+
+Terminal scrollbars are intentionally slim. The transcript, list panes, and
+dialogs keep their scrollbar rails for mouse and keyboard scrolling without
+letting the rail take space from the content.
+
 Pane-specific actions are deliberately small:
 
 | Focus | Key | Action |
@@ -51,10 +66,10 @@ Pane-specific actions are deliberately small:
 
 ## Pane sizes
 
-Sessions, Targets, and Quota each have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls. Click a control, or focus the pane and press `Alt+Z` to cycle through the three sizes.
+Sessions, Targets, and Quota each have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls. Click a control, or focus the pane and press `Alt+Z` to cycle through the three sizes. Sessions is 20 columns wide when minimized, uses `max(40, terminal width / 3)` columns at standard size, and uses half the terminal at maximized size. The dashboard still requires at least 80 columns, so standard and maximized are both 40 columns at the minimum width.
 
 - A minimized Targets or Quota pane becomes a one-line summary.
-- A minimized Sessions pane narrows the sidebar and shows one line per session.
+- A minimized Sessions pane narrows the sidebar and shows two lines per session.
 - Only one support pane can be maximized at a time.
 - Maximized Sessions widens the sidebar. Maximized Targets or Quota receives available vertical space below Prompt.
 
@@ -110,7 +125,15 @@ Press `n` in Sessions or `Alt+N` from any pane. Type the task into the fresh pro
 
 Quick New uses the current project directory and the saved agent and target defaults. With automatic defaults, it prefers a configured Codex account, usable local Podman, then Docker, then a local worktree. Plain directories use local execution. Set another account or target in Setup, or turn off **Ask for a task when creating** to launch immediately. Use `N` or `Alt+W` for the existing wizard when you want to choose all launch options.
 
-Press `F4` to edit all configuration in Setup: accounts, targets and remote machines, projects, creation defaults, sidebar position, activity animation, review, and web access. Enter opens a section or edits a value. **Add** and **Remove** manage entries; **Detect machine** discovers installed accounts and usable local runtimes. **Save** or Ctrl+S validates and saves the draft. Errors keep your edits in place. Escape goes back, and Cancel discards unsaved edits. Web listener changes take effect on its next start.
+Press `F4` to edit all configuration in Setup: accounts, targets and remote machines, projects, creation defaults, sidebar position, activity animation, the Advanced options, review, and web access. Enter opens a section or edits a value. **Add** and **Remove** manage entries; **Detect machine** discovers installed accounts and usable local runtimes. Review settings are part of the same draft: discovery checks the selected reviewer profile's model and effort capabilities and filters incompatible profiles. **Save** or Ctrl+S validates and saves the complete draft. Errors keep your edits in place. Escape goes back, and Cancel discards unsaved setup and review edits. Web listener changes take effect on its next start.
+
+Detailed activity clocks are off by default. Turn them on in **Setup →
+Advanced → Detailed activity clocks** when you want the normal session rows and
+conversation header to show the separate `T` (turn), `S` (step), and `BG`
+(background) clocks. The ordinary **Running** status covers the originating
+turn and its follow-on background work continuously, so it does not reset or
+go idle between those phases. Compact rows keep their short activity clock
+even when detailed clocks are enabled.
 
 <figure class="shot">
   <Image src={shotSetup} alt="Setup modal with all configuration sections and Save, Cancel, and Detect machine controls" />

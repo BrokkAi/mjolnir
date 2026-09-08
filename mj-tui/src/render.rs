@@ -7,16 +7,14 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table, TableState, Wrap,
+    Block, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap,
 };
 
 use hel::hel_config::{HarnessKind, HelConfig, PermissionMode};
 use hel::hel_state::{SessionRecord, SessionState, SessionTransitionKind};
 use hel::hel_targets::DeploymentCapacityKind;
+use mj_chat::components::{render_scrollbar, scrollbar_geometry};
 use mj_chat::hel_chat::render_agent_message_head;
-#[cfg(test)]
-use mj_chat::hel_chat::render_agent_message_tail;
 use mj_chat::theme;
 use mj_controller::hel_quota::{ProfileQuota, QuotaWindow};
 use mj_controller::hel_review_host::RuntimeReviewView;
@@ -28,7 +26,6 @@ use crate::dialogs::{
 };
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::resume::render_resume_dialog;
-use crate::review_settings::render_review_settings;
 use crate::widgets::format_resource_bytes;
 use crate::wizards::{render_new_wizard, render_resume_wizard};
 use crate::workspaces::render_workspace_manager;
@@ -36,9 +33,6 @@ use crate::{
     DashboardState, Focus, Mode, PaneSize, SelectionDirection, SessionOperationKind, SessionsRow,
     SupportPane,
 };
-
-#[cfg(test)]
-const ACTIVE_MESSAGE_LINES: usize = 4;
 
 const SESSION_TABLE_CHROME_HEIGHT: u16 = 3;
 
@@ -113,9 +107,6 @@ fn take_scroll_lookahead(dashboard: &DashboardState, focus: Focus) -> Option<Sel
     }
 }
 
-#[cfg(test)]
-pub(crate) const SUMMARY_RULE: &str = "─";
-
 /// Draws the first-run screen: there is no conversation and no session list
 /// yet, so the surface explains how to get one and shows the support panes
 /// under it.
@@ -178,7 +169,6 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
         Mode::Palette(palette) => {
             crate::palette::render_palette(frame, area, dashboard, palette, &mut surfaces)
         }
-        Mode::ReviewSettings(dialog) => render_review_settings(frame, area, dialog, &mut surfaces),
         Mode::Setup(dialog) => crate::setup::render_setup(frame, area, dialog, &mut surfaces),
         Mode::QuickNew(dialog) => {
             crate::quick_new::render_quick_new(frame, area, dialog, &mut surfaces)
@@ -273,6 +263,7 @@ fn render_onboarding(frame: &mut Frame, area: Rect, dashboard: &DashboardState) 
 pub(crate) struct SessionRowsRendered {
     pub(crate) session_row_areas: Vec<(usize, Rect)>,
     pub(crate) project_heading_areas: Vec<(String, Rect)>,
+    pub(crate) session_control_areas: Vec<(crate::SessionControl, Rect)>,
 }
 
 const PANE_SIZE_CONTROLS_WIDTH: u16 = 11;
@@ -453,17 +444,18 @@ fn drawn_session_rows_with_options(
                 let detail = dashboard.session_details.get(&session.id);
                 let review = dashboard.session_review(&session.id);
                 let unreachable = dashboard.unreachable_sessions.contains(&session.id);
-                let facts = SessionRowFacts {
-                    detail,
-                    unreachable,
-                    state: session.state,
-                    now_epoch_seconds,
-                };
-                let busy = !unreachable
+                let primary_busy = !unreachable
                     && session.state == SessionState::Running
-                    && (detail.is_some_and(|detail| {
-                        !detail.activity.is_idle(detail.current_turn_started_at)
-                    }) || review.is_some_and(RuntimeReviewView::is_working));
+                    && detail.is_some_and(|detail| {
+                        detail.activity.is_working(
+                            detail.current_turn_started_at,
+                            !detail.pending_elicitations.is_empty(),
+                        )
+                    });
+                // Review work is independent of the session's primary
+                // lifecycle. A review can keep animating while the session
+                // is stopped or unreachable, so do not gate it on either.
+                let busy = primary_busy || review.is_some_and(RuntimeReviewView::is_working);
                 let spinner = busy.then(|| {
                     mj_chat::spinner::compact_frame(dashboard.config.spinner, animation_ms)
                 });
@@ -522,37 +514,10 @@ fn drawn_session_rows_with_options(
                     });
                     continue;
                 }
-                if width < 70 && (options.summary_only || !expanded) {
-                    lines.push(Line::styled(
-                        format!(
-                            "{prefix}{} · {}",
-                            session_name(session),
-                            sidebar_status(facts, review, spinner)
-                        ),
-                        facts.style(),
-                    ));
-                } else if options.summary_only {
-                    lines.push(session_top_line(
-                        prefix,
-                        session,
-                        detail,
-                        review,
-                        unreachable,
-                        operation,
-                        now_epoch_seconds,
-                        &target,
-                        permission,
-                        spinner,
-                    ));
-                } else if expanded {
+                if expanded && !options.summary_only {
                     expanded_session_lines(
                         &mut lines,
                         session,
-                        dashboard
-                            .workspace_names
-                            .get(&session.workspace_id)
-                            .map(String::as_str)
-                            .unwrap_or(&session.workspace_id),
                         detail,
                         review,
                         unreachable,
@@ -563,17 +528,23 @@ fn drawn_session_rows_with_options(
                         width,
                         selected,
                         spinner,
+                        dashboard.config.advanced.detailed_activity_clocks,
                     );
                 } else {
-                    lines.push(collapsed_session_line(
+                    compact_session_lines(
+                        &mut lines,
                         prefix,
-                        &target,
-                        facts,
+                        session,
+                        detail,
                         review,
-                        usize::from(width.saturating_sub(4)),
+                        unreachable,
+                        operation,
+                        now_epoch_seconds,
+                        &target,
                         permission,
                         spinner,
-                    ));
+                        width,
+                    );
                 }
                 if selected {
                     for line in lines.iter_mut().skip(usize::from(heading_key.is_some())) {
@@ -596,15 +567,14 @@ fn drawn_session_rows_with_options(
     rows
 }
 
-/// The four rows an expanded session draws: status and identity, the user's
-/// last message, and two rows of agent activity. The agent block is always
-/// two rows, even with nothing to say, so every expanded session is the same
+/// The four rows an expanded session draws: name, status and identity, and
+/// two wrapped rows of the current output. The output block is always two
+/// rows, even with nothing to say, so every expanded session is the same
 /// height and the layout can be computed from a count.
 #[allow(clippy::too_many_arguments)]
 fn expanded_session_lines(
     lines: &mut Vec<Line<'static>>,
     session: &SessionRecord,
-    workspace_name: &str,
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
     unreachable: bool,
@@ -615,43 +585,23 @@ fn expanded_session_lines(
     width: u16,
     selected: bool,
     spinner: Option<&'static str>,
+    detailed_activity_clocks: bool,
 ) {
     let prefix = if selected { "› " } else { "  " };
-    if width < 70 {
-        let style = Style::default().fg(session_band_color(detail, unreachable, session.state));
-        lines.push(Line::styled(
-            format!("{prefix}{}", session_name(session)),
-            style,
-        ));
-        let status = sidebar_status(
-            SessionRowFacts {
-                state: session.state,
-                detail,
-                unreachable,
-                now_epoch_seconds,
-            },
-            review,
-            spinner,
-        );
-        lines.push(Line::styled(
-            format!("  {status} · {}", session.last_profile),
-            style,
-        ));
-        lines.push(Line::styled(
-            format!("  {target} · {workspace_name}"),
-            theme::muted(),
-        ));
-        lines.push(prefixed_summary_line(
-            "  ",
-            "",
-            session_preview_text(detail),
-            usize::from(width.saturating_sub(2)),
-            false,
-        ));
-        return;
-    }
-    lines.push(session_top_line(
-        prefix,
+    let style = Style::default().fg(session_band_color(detail, unreachable, session.state));
+    let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
+    lines.push(Line::styled(
+        format!(
+            "{prefix}{}",
+            truncate_display_text(
+                &name,
+                usize::from(width).saturating_sub(Line::raw(prefix).width())
+            )
+        ),
+        style,
+    ));
+    lines.push(session_activity_line(
+        "  ",
         session,
         detail,
         review,
@@ -661,51 +611,262 @@ fn expanded_session_lines(
         target,
         permission,
         spinner,
+        width,
+        detailed_activity_clocks,
     ));
-    lines.push(prefixed_summary_line(
-        "  ",
-        "You: ",
-        detail.and_then(|detail| detail.last_user_message.as_deref()),
-        usize::from(width.saturating_sub(4)),
-        detail.is_some_and(|detail| detail.last_agent_message_follows_last_user),
-    ));
-    let agent_excerpt = detail.and_then(current_agent_excerpt);
-    let prefixes = dashboard_agent_prefixes(now_epoch_seconds, detail);
-    let prefix_width = prefixes.iter().map(String::len).max().unwrap_or_default();
-    let mut agent = agent_excerpt
+
+    let (label, message, muted) = match detail.and_then(current_agent_excerpt) {
+        Some(message) => ("", Some(message), false),
+        None => match detail.and_then(|detail| detail.last_user_message.as_deref()) {
+            Some(message) => ("You: ", Some(message), true),
+            None => ("", None, false),
+        },
+    };
+    let output_width = usize::from(width.saturating_sub(2));
+    let mut output = message
         .map(|message| {
-            render_agent_message_head(
-                message,
-                usize::from(
-                    width.saturating_sub(u16::try_from(prefix_width + 5).unwrap_or(u16::MAX)),
-                ),
-                2,
-            )
+            let text = if label.is_empty() {
+                std::borrow::Cow::Borrowed(message)
+            } else {
+                std::borrow::Cow::Owned(format!("{label}{message}"))
+            };
+            render_agent_message_head(&text, output_width, 2)
         })
         .unwrap_or_default();
-    if agent.is_empty() {
-        agent.push(Line::raw("No messages yet"));
+    if output.is_empty() {
+        output.push(Line::raw("No messages yet"));
     }
-    agent.resize(2, Line::default());
-    for (agent_index, mut line) in agent.into_iter().take(2).enumerate() {
+    output.resize(2, Line::default());
+    for mut line in output.into_iter().take(2) {
         let mut spans = vec![Span::raw("  ")];
-        spans.push(Span::styled(
-            format!("{} ", prefixes[agent_index]),
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
         spans.append(&mut line.spans);
-        lines.push(Line::from(spans));
+        let mut line = Line::from(spans);
+        if muted {
+            line.style = Style::default().fg(theme::MUTED);
+        }
+        lines.push(line);
     }
 }
 
-/// The one-line form the pane uses while the keyboard is elsewhere: which
-/// project, which target, how long the turn has been running, and what the
-/// agent last said.
-/// What a one-line session row needs to know about the session behind it.
-///
-/// Both one-line forms derive the same three things from it - the turn clock,
-/// the last thing the agent said, and the colour the row carries - so they
-/// derive them in one place.
+/// The second row of a session. Actionable state and queued work come first so
+/// a narrow pane cannot hide them behind the target or profile identity.
+#[allow(clippy::too_many_arguments)]
+fn session_activity_line(
+    prefix: &str,
+    session: &SessionRecord,
+    detail: Option<&SessionDetail>,
+    review: Option<&RuntimeReviewView>,
+    unreachable: bool,
+    operation: Option<&SessionOperationDisplay>,
+    now_epoch_seconds: u64,
+    target: &str,
+    permission: Option<Span<'static>>,
+    spinner: Option<&'static str>,
+    width: u16,
+    detailed_activity_clocks: bool,
+) -> Line<'static> {
+    let facts = SessionRowFacts {
+        detail,
+        unreachable,
+        state: session.state,
+        now_epoch_seconds,
+    };
+    let mut status = if let Some(operation) = operation {
+        let (label, started_at) = operation_status(operation);
+        format!(
+            "{label} {}",
+            mj_chat::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
+        )
+    } else if facts.state == SessionState::Error {
+        "Error".to_owned()
+    } else if session.state == SessionState::Provisioning {
+        let started_at = session_updated_at_epoch_seconds(session).unwrap_or(now_epoch_seconds);
+        format!(
+            "Launch {}",
+            mj_chat::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
+        )
+    } else if facts.unreachable {
+        "Unreachable".to_owned()
+    } else if facts.needs_input() {
+        "Question".to_owned()
+    } else if let Some(label) = review_status_label(review) {
+        label.to_owned()
+    } else if facts.state.is_active() {
+        facts.clock(detailed_activity_clocks)
+    } else {
+        format!("{:?}", facts.state)
+    };
+    let queue = detail
+        .map(|detail| detail.queued_prompts.len())
+        .filter(|count| *count > 0)
+        .map(|count| {
+            if width <= 24 {
+                format!("Q{count}")
+            } else {
+                format!("[Q {count}]")
+            }
+        });
+    // At the minimum sidebar width, retain both the attention marker and the
+    // queue count while using a compact status word.
+    if width <= 24 && status == "Unreachable" {
+        status = "Offline".to_owned();
+    }
+    let available = usize::from(width);
+    // A minimized cell's second line is reserved for activity and its queue.
+    // Identity is already on the first line; indentation must not consume the
+    // cells needed by a running clock and an actionable queue count.
+    let compact = width <= 24;
+    let prefix = if compact { "" } else { prefix };
+    let queue_width = queue
+        .as_ref()
+        .map_or(0, |queue| Line::raw(queue.as_str()).width() + 1);
+    let spinner = spinner.filter(|spinner| {
+        Line::raw(prefix).width()
+            + Line::raw(*spinner).width()
+            + 1
+            + Line::raw(status.as_str()).width()
+            + queue_width
+            <= available
+    });
+    let spinner_width = spinner.map_or(0, |spinner| Line::raw(spinner).width() + 1);
+    let status = truncate_display_text(
+        &status,
+        available.saturating_sub(Line::raw(prefix).width() + spinner_width + queue_width),
+    );
+    let status_width = Line::raw(status.as_str()).width() + queue_width + 2;
+    let identity_width = if compact {
+        0
+    } else {
+        available.saturating_sub(Line::raw(prefix).width() + spinner_width + status_width)
+    };
+    let badge_text = permission
+        .as_ref()
+        .map_or_else(String::new, |permission| format!(" {}", permission.content));
+    let badge_width = Line::raw(badge_text.as_str()).width();
+    let show_permission = badge_width > 0 && identity_width >= badge_width.saturating_add(1);
+    let identity_width =
+        identity_width.saturating_sub(if show_permission { badge_width } else { 0 });
+    let profile = operation
+        .and_then(|operation| operation.resume_destination.as_ref())
+        .map(|(profile, _)| profile.as_str())
+        .unwrap_or(&session.last_profile);
+    let (target_width, profile_width) =
+        if Line::raw(target).width() + 2 + Line::raw(profile).width() <= identity_width {
+            (Line::raw(target).width(), Line::raw(profile).width())
+        } else {
+            let half = identity_width.saturating_sub(2) / 2;
+            (half, identity_width.saturating_sub(2).saturating_sub(half))
+        };
+    let target = truncate_display_text(target, target_width);
+    let profile = truncate_display_text(profile, profile_width);
+    let identity = match (target.is_empty(), profile.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => profile,
+        (false, true) => target,
+        (false, false) => format!("{target}  {profile}"),
+    };
+    let mut spans = vec![Span::raw(prefix.to_owned())];
+    if let Some(spinner) = spinner {
+        spans.push(Span::styled(format!("{spinner} "), facts.style()));
+    }
+    let status_separator = if identity.is_empty() && !show_permission {
+        ""
+    } else {
+        "  "
+    };
+    spans.push(Span::styled(identity, facts.style()));
+    if show_permission && let Some(permission) = permission {
+        spans.push(Span::raw(" "));
+        spans.push(permission);
+    }
+    spans.push(Span::styled(
+        format!("{status_separator}{status}"),
+        facts.style().add_modifier(if facts.needs_input() {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        }),
+    ));
+    if let Some(queue) = queue {
+        spans.push(Span::styled(
+            format!(" {queue}"),
+            facts.style().add_modifier(Modifier::BOLD),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn truncate_display_text(text: &str, width: usize) -> String {
+    if Line::raw(text).width() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_owned();
+    }
+    let mut output = String::new();
+    for character in text.chars() {
+        let candidate = format!("{output}{character}…");
+        if Line::raw(candidate.as_str()).width() > width {
+            break;
+        }
+        output.push(character);
+    }
+    format!("{output}…")
+}
+
+/// Folded and minimized sessions retain a fixed two-line summary: identity on
+/// the first line, then status, clock, and queued work on the second.
+#[allow(clippy::too_many_arguments)]
+fn compact_session_lines(
+    lines: &mut Vec<Line<'static>>,
+    prefix: &str,
+    session: &SessionRecord,
+    detail: Option<&SessionDetail>,
+    review: Option<&RuntimeReviewView>,
+    unreachable: bool,
+    operation: Option<&SessionOperationDisplay>,
+    now_epoch_seconds: u64,
+    target: &str,
+    permission: Option<Span<'static>>,
+    spinner: Option<&'static str>,
+    width: u16,
+) {
+    let facts = SessionRowFacts {
+        detail,
+        unreachable,
+        state: session.state,
+        now_epoch_seconds,
+    };
+    let style = facts.style();
+    let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
+    let available = usize::from(width);
+    lines.push(Line::styled(
+        format!(
+            "{prefix}{}",
+            truncate_display_text(&name, available.saturating_sub(Line::raw(prefix).width()))
+        ),
+        style,
+    ));
+    lines.push(session_activity_line(
+        "  ",
+        session,
+        detail,
+        review,
+        unreachable,
+        operation,
+        now_epoch_seconds,
+        target,
+        permission,
+        spinner,
+        width,
+        false,
+    ));
+}
+
+/// Shared state used to derive a session's status, activity clock, and colour.
 #[derive(Clone, Copy)]
 struct SessionRowFacts<'a> {
     detail: Option<&'a SessionDetail>,
@@ -723,13 +884,15 @@ impl SessionRowFacts<'_> {
         ))
     }
 
-    fn clock(&self) -> String {
+    fn clock(&self, detailed: bool) -> String {
         let activity = self.detail.map(|detail| &detail.activity);
-        mj_chat::usage_format::format_activity_clock(
+        activity.unwrap_or(&*EMPTY_ACTIVITY).display_clock(
             self.now_epoch_seconds,
             self.detail
                 .and_then(|detail| detail.current_turn_started_at),
-            activity.unwrap_or(&*EMPTY_ACTIVITY),
+            self.detail
+                .and_then(|detail| detail.current_step_started_at_ms),
+            detailed,
         )
     }
 
@@ -737,32 +900,14 @@ impl SessionRowFacts<'_> {
         self.detail
             .is_some_and(|detail| !detail.pending_elicitations.is_empty())
     }
-
-    /// The current reply/activity or the latest user prompt. A previous reply
-    /// is deliberately omitted once a newer user prompt has no current agent
-    /// response yet.
-    fn last_agent_line(&self) -> &str {
-        session_preview_text(self.detail)
-            .and_then(|message| message.lines().rev().find(|line| !line.trim().is_empty()))
-            .unwrap_or("No messages yet")
-            .trim()
-    }
 }
 
-/// Select the one piece of session content that is current enough to show in
-/// a compact row. The projection separates a reply from thought/tool work;
-/// when neither follows the latest user prompt, showing that prompt is more
-/// useful than repeating an older answer.
-fn session_preview_text(detail: Option<&SessionDetail>) -> Option<&str> {
-    let detail = detail?;
-    current_agent_excerpt(detail).or(detail.last_user_message.as_deref())
-}
-
-/// Select only content authored by the agent for the expanded `Agent:` rows.
+/// Select only content authored by the agent for the expanded output rows.
 /// The user prompt is a fallback for the compact summary, never an agent
 /// excerpt with a misleading prefix.
 fn current_agent_excerpt(detail: &SessionDetail) -> Option<&str> {
-    if detail.last_user_message.is_none() || detail.last_agent_message_follows_last_user {
+    let _ = detail.last_user_message.as_ref()?;
+    if detail.last_agent_message_follows_last_user {
         detail
             .last_agent_message
             .as_deref()
@@ -817,6 +962,7 @@ pub(crate) fn sessions_content_height(dashboard: &DashboardState, width: u16) ->
         .iter()
         .map(|row| row.content_height().saturating_add(row.spacing))
         .fold(0, u16::saturating_add)
+        .saturating_add(1)
 }
 
 pub(crate) fn minimized_sessions_content_height(dashboard: &DashboardState, width: u16) -> u16 {
@@ -850,9 +996,9 @@ fn sessions_title(workspace_name: &str, width: u16) -> Line<'static> {
     ])
 }
 
-/// The minimized navigator has no room for a separate status row, so reserve
-/// a title suffix for the number of pending questions. At narrow widths a
-/// compact form keeps that count visible while preserving the Sessions label.
+/// Reserve a title suffix for the number of pending questions. At narrow
+/// widths a compact form keeps that count visible while preserving the
+/// Sessions label.
 fn sessions_title_with_pending(
     workspace_name: &str,
     width: u16,
@@ -883,6 +1029,15 @@ fn sessions_title_with_pending(
     if compact.width() <= budget {
         return compact;
     }
+    let tiny = Line::styled(
+        format!(" Q{pending_count}"),
+        Style::default()
+            .fg(theme::WARNING)
+            .add_modifier(Modifier::BOLD),
+    );
+    if tiny.width() <= budget {
+        return tiny;
+    }
     base
 }
 
@@ -898,11 +1053,7 @@ fn sessions_block(
         .title(sessions_title_with_pending(
             workspace_name,
             width,
-            if size == PaneSize::Minimized {
-                pending_count
-            } else {
-                0
-            },
+            pending_count,
         ))
         .title(pane_size_controls(size, maximize_enabled))
 }
@@ -913,20 +1064,37 @@ pub(crate) fn render_sessions(
     area: Rect,
     dashboard: &DashboardState,
 ) -> SessionRowsRendered {
+    let content = area.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let controls_area = Rect::new(content.x, content.y, content.width, content.height.min(1));
+    let rows_area = Rect::new(
+        content.x,
+        content.y.saturating_add(1),
+        content.width,
+        content.height.saturating_sub(1),
+    );
+    let width = content.width;
     let drawn = if dashboard.sessions_minimized() {
-        drawn_session_rows_with_options(dashboard, area.width, SessionRowsRenderOptions::MINIMIZED)
+        drawn_session_rows_with_options(dashboard, width, SessionRowsRenderOptions::MINIMIZED)
     } else {
-        drawn_session_rows(dashboard, area.width)
+        drawn_session_rows(dashboard, width)
     };
     let focused = dashboard.focus() == Focus::Sessions;
-    let block = sessions_block(
-        focused,
-        "",
-        area.width,
-        dashboard.pane_size(SupportPane::Sessions),
-        dashboard.pending_input_count(),
-        dashboard.pane_maximize_enabled(SupportPane::Sessions),
+    frame.render_widget(
+        sessions_block(
+            focused,
+            "",
+            area.width,
+            dashboard.pane_size(SupportPane::Sessions),
+            dashboard.pending_input_count(),
+            dashboard.pane_maximize_enabled(SupportPane::Sessions),
+        ),
+        area,
     );
+    let mut session_control_areas = Vec::new();
+    render_session_controls(frame, controls_area, &mut session_control_areas);
     let table = Table::new(
         drawn.iter().map(|row| {
             Row::new([Cell::from(Text::from(row.lines.clone()))])
@@ -934,8 +1102,7 @@ pub(crate) fn render_sessions(
                 .bottom_margin(row.spacing)
         }),
         [Constraint::Min(1)],
-    )
-    .block(block);
+    );
     let selected = dashboard
         .selected_visible_index()
         .filter(|index| *index < drawn.len());
@@ -952,33 +1119,30 @@ pub(crate) fn render_sessions(
             selected,
             direction,
             &row_heights,
-            usize::from(area.height.saturating_sub(2)),
+            usize::from(rows_area.height),
         );
     }
     let mut state = TableState::default()
         .with_offset(offset)
         .with_selected(selected);
-    frame.render_stateful_widget(table, area, &mut state);
+    frame.render_stateful_widget(table, rows_area, &mut state);
     // The table scrolled only as far as it had to; remember where it settled
     // so the next frame does not scroll back to the top.
     dashboard.sessions_scroll.set(state.offset());
 
     let offset = state.offset();
-    let mut row_y = area.y + 1;
+    let mut row_y = rows_area.y;
     let mut visible = 0;
     let mut session_row_areas = Vec::new();
     let mut project_heading_areas = Vec::new();
     for row in drawn.iter().skip(offset) {
-        if row_y >= area.bottom().saturating_sub(1) {
+        if row_y >= rows_area.bottom() {
             break;
         }
         visible += 1;
         let heading_rows = u16::from(row.heading.is_some());
         if let Some(key) = row.heading.clone() {
-            project_heading_areas.push((
-                key,
-                Rect::new(area.x + 1, row_y, area.width.saturating_sub(2), 1),
-            ));
+            project_heading_areas.push((key, Rect::new(rows_area.x, row_y, rows_area.width, 1)));
         }
         if let Some(index) = row.session {
             let session_y = row_y.saturating_add(heading_rows);
@@ -986,10 +1150,10 @@ pub(crate) fn render_sessions(
             session_row_areas.push((
                 index,
                 Rect::new(
-                    area.x.saturating_add(1),
+                    rows_area.x,
                     session_y,
-                    area.width.saturating_sub(2),
-                    height.min(area.bottom().saturating_sub(1).saturating_sub(session_y)),
+                    rows_area.width,
+                    height.min(rows_area.bottom().saturating_sub(session_y)),
                 ),
             ));
         }
@@ -1000,82 +1164,43 @@ pub(crate) fn render_sessions(
     SessionRowsRendered {
         session_row_areas,
         project_heading_areas,
+        session_control_areas,
     }
 }
 
-/// Keep attention and queued work visible even in the narrow sidebar.
-fn sidebar_status(
-    facts: SessionRowFacts<'_>,
-    review: Option<&RuntimeReviewView>,
-    spinner: Option<&str>,
-) -> String {
-    let status = if facts.needs_input() {
-        "Needs input".to_owned()
-    } else if let Some(label) = review_status_label(review) {
-        label.to_owned()
-    } else if facts.unreachable {
-        "Unreachable".to_owned()
-    } else if facts.state.is_active() {
-        facts.clock()
-    } else {
-        format!("{:?}", facts.state)
+fn render_session_controls(
+    frame: &mut Frame,
+    area: Rect,
+    hitboxes: &mut Vec<(crate::SessionControl, Rect)>,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let create_width = (area.width.saturating_sub(1) / 2).max(1);
+    let resume_width = area.width.saturating_sub(create_width.saturating_add(1));
+    let create_area = Rect::new(area.x, area.y, create_width, area.height);
+    let resume_area = Rect::new(
+        area.x.saturating_add(create_width.saturating_add(1)),
+        area.y,
+        resume_width,
+        area.height,
+    );
+    let button = |frame: &mut Frame, area: Rect, label: &str| {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::raw(format!(" {label} "))))
+                .alignment(Alignment::Center)
+                .style(theme::muted().bg(theme::SURFACE_RAISED)),
+            area,
+        );
     };
-    let queued = facts.detail.map_or(0, |detail| detail.queued_prompts.len());
-    format!(
-        "{}{status}{}",
-        spinner.map_or(String::new(), |spinner| format!("{spinner} ")),
-        if queued > 0 {
-            format!(" [Q {queued}]")
-        } else {
-            String::new()
-        }
-    )
-}
-
-fn collapsed_session_line(
-    prefix: &str,
-    target: &str,
-    facts: SessionRowFacts<'_>,
-    review: Option<&RuntimeReviewView>,
-    width: usize,
-    permission: Option<Span<'static>>,
-    spinner: Option<&'static str>,
-) -> Line<'static> {
-    // A review owns the compact activity slot while it is open. The primary
-    // is idle during a review, so do not append a contradictory `[idle]`.
-    let clock = review_status_label(review).map_or_else(|| facts.clock(), |label| label.to_owned());
-    let fragment = facts.last_agent_line();
-    let style = facts.style();
-    let mut lead_width = prefix.chars().count() + target.chars().count() + 2;
-    let mut spans = vec![Span::styled(format!("{prefix}{target}"), style)];
-    if let Some(spinner) = spinner {
-        spans.push(Span::styled(format!(" {spinner}"), style));
-        lead_width += 2;
+    button(frame, create_area, "Create");
+    if resume_area.width > 0 {
+        button(frame, resume_area, "Resume");
     }
-    if let Some(permission) = permission {
-        spans.push(Span::styled("  ", style));
-        lead_width += permission.width() + 2;
-        spans.push(permission);
+    hitboxes.push((crate::SessionControl::Create, create_area));
+    if resume_area.width > 0 {
+        hitboxes.push((crate::SessionControl::Resume, resume_area));
     }
-    if facts.needs_input() {
-        const NEEDS_INPUT: &str = "Needs input";
-        spans.push(Span::styled("  ", style));
-        spans.push(Span::styled(
-            NEEDS_INPUT,
-            style.add_modifier(Modifier::BOLD),
-        ));
-        lead_width += NEEDS_INPUT.chars().count() + 2;
-    }
-    spans.push(Span::styled("  ", style));
-    lead_width += clock.chars().count() + 1;
-    spans.push(Span::styled(
-        format!(
-            "{clock} {}",
-            crate::widgets::truncate_text(fragment, width.saturating_sub(lead_width))
-        ),
-        style,
-    ));
-    Line::from(spans).style(style)
 }
 
 /// The single row used while a lifecycle owns a session. It deliberately
@@ -1130,22 +1255,13 @@ fn session_transition_line(
         session.project_name(config),
         session_name(session)
     );
-    let line = if width < 70 {
-        format!(
-            "{prefix}{} · {} · {elapsed}{}",
-            transition.label(),
-            session_name(session),
-            if failure.is_some() { " · failed" } else { "" }
-        )
-    } else {
-        format!(
-            "{prefix}{target}  {} · {stages} · {elapsed}  {profile} · {identity}{}",
-            transition.label(),
-            failure.map_or_else(String::new, |error| format!(" · failed: {error}"))
-        )
-    };
+    let line = format!(
+        "{prefix}{target}  {} · {stages} · {elapsed}  {profile} · {identity}{}",
+        transition.label(),
+        failure.map_or_else(String::new, |error| format!(" · failed: {error}"))
+    );
     Line::styled(
-        crate::widgets::truncate_text(&line, usize::from(width.saturating_sub(2))),
+        crate::widgets::truncate_text(&line, usize::from(width)),
         Style::default()
             .fg(if failure.is_some() {
                 theme::SESSION_ERROR
@@ -1156,128 +1272,9 @@ fn session_transition_line(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn session_top_line(
-    prefix: &str,
-    session: &SessionRecord,
-    detail: Option<&SessionDetail>,
-    review: Option<&RuntimeReviewView>,
-    unreachable: bool,
-    operation: Option<&SessionOperationDisplay>,
-    now_epoch_seconds: u64,
-    target: &str,
-    permission: Option<Span<'static>>,
-    spinner: Option<&'static str>,
-) -> Line<'static> {
-    let (profile, _) = operation
-        .and_then(|operation| operation.resume_destination.clone())
-        .unwrap_or_else(|| {
-            (
-                session.last_profile.clone(),
-                session.target_template_id.clone(),
-            )
-        });
-    let status_columns = if let Some(operation) = operation {
-        let (label, started_at) = operation_status(operation);
-        Some(vec![format!(
-            "{label} {}",
-            mj_chat::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
-        )])
-    } else if session.state == SessionState::Provisioning {
-        let started_at = session_updated_at_epoch_seconds(session).unwrap_or(now_epoch_seconds);
-        Some(vec![format!(
-            "Launch {}",
-            mj_chat::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
-        )])
-    } else {
-        None
-    };
-    let queued_prompts = detail.map_or(0, |detail| detail.queued_prompts.len());
-    let mut columns = vec![target.to_owned()];
-    if let Some(label) = review_status_label(review) {
-        columns.push(label.to_owned());
-    }
-    if detail.is_some_and(|detail| !detail.pending_elicitations.is_empty()) {
-        columns.push("Needs input".to_owned());
-    }
-    if queued_prompts > 0 {
-        columns.push(format!("[Q {queued_prompts}]"));
-    }
-    let summary = if let Some(status_columns) = status_columns {
-        columns.extend(status_columns);
-        columns.push(profile.clone());
-        columns.join("  ")
-    } else {
-        columns.push(profile.clone());
-        columns.join("  ")
-    };
-    let session_name =
-        recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
-    let summary_tail = summary
-        .strip_prefix(target)
-        .expect("session summary starts with its target");
-    let style = Style::default().fg(session_band_color(detail, unreachable, session.state));
-    let mut spans = vec![Span::styled(format!("{prefix}{target}"), style)];
-    if let Some(spinner) = spinner {
-        spans.push(Span::styled(format!(" {spinner}"), style));
-    }
-    if let Some(permission) = permission {
-        spans.push(Span::styled("  ", style));
-        spans.push(permission);
-    }
-    spans.push(Span::styled(
-        format!("{summary_tail}  {session_name}"),
-        style,
-    ));
-    Line::from(spans).style(style)
-}
-
-const DASHBOARD_CLOCK_WIDTH: usize = 6;
-
 /// A session the dashboard has heard nothing operational about yet.
 static EMPTY_ACTIVITY: std::sync::LazyLock<mj_chat::usage_format::SessionActivity> =
     std::sync::LazyLock::new(mj_chat::usage_format::SessionActivity::default);
-
-/// The two column heads an expanded row puts in front of the agent's last
-/// lines: the turn and its step while a turn runs, the background work the
-/// agent left behind (with a blank beside it) while that runs, and otherwise
-/// the time it last spoke.
-fn dashboard_agent_prefixes(now_epoch_seconds: u64, detail: Option<&SessionDetail>) -> [String; 2] {
-    let last_spoke = || {
-        let time = detail
-            .and_then(|detail| detail.last_activity_at_ms)
-            .and_then(|value| i64::try_from(value).ok())
-            .and_then(|value| mj_chat::hel_chat::format_event_time(Some(value)))
-            .unwrap_or_default();
-        format!("{time:<6}")
-    };
-    let columns = mj_chat::usage_format::format_activity_columns(
-        now_epoch_seconds,
-        detail.and_then(|detail| detail.current_turn_started_at),
-        detail.and_then(|detail| detail.current_step_started_at_ms),
-        detail.map_or(&*EMPTY_ACTIVITY, |detail| &detail.activity),
-    );
-    match columns.as_slice() {
-        [turn, step] => [pad_dashboard_column(turn), pad_dashboard_column(step)],
-        // Foreground tools without a harness turn marker and background work
-        // each take one clock column. The blank keeps the two excerpt lines
-        // aligned; `[idle]` says nothing worth a column.
-        [activity] if activity.trim() != "[idle]" => {
-            let activity = pad_dashboard_column(activity);
-            let blank = " ".repeat(activity.len());
-            [activity, blank]
-        }
-        _ => ["Agent:".into(), last_spoke()],
-    }
-}
-
-/// Right-align one clock column's value so the clocks line up between rows.
-fn pad_dashboard_column(column: &str) -> String {
-    match column.rsplit_once(' ') {
-        Some((label, clock)) => format!("{label} {clock:>DASHBOARD_CLOCK_WIDTH$}"),
-        None => column.to_owned(),
-    }
-}
 
 fn session_target_label(
     session: &SessionRecord,
@@ -1342,34 +1339,6 @@ fn capacity_target_labels(target_ids: &[String], config: &HelConfig) -> Line<'st
     Line::from(spans)
 }
 
-fn prefixed_summary_line(
-    prefix: &str,
-    label: &str,
-    message: Option<&str>,
-    width: usize,
-    muted: bool,
-) -> Line<'static> {
-    let message = message.unwrap_or("No messages yet");
-    let flattened = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    let lead = format!("{prefix}{label}");
-    let line = Line::from(vec![
-        Span::raw(prefix.to_owned()),
-        Span::styled(
-            label.to_owned(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(crate::widgets::truncate_text(
-            &flattened,
-            width.saturating_sub(lead.chars().count()),
-        )),
-    ]);
-    if muted {
-        line.style(Style::default().fg(theme::MUTED))
-    } else {
-        line
-    }
-}
-
 pub(crate) fn render_session_scrollbar(
     frame: &mut Frame,
     area: Rect,
@@ -1377,71 +1346,20 @@ pub(crate) fn render_session_scrollbar(
     position: usize,
     viewport_content_length: usize,
 ) {
-    if content_length <= viewport_content_length {
+    if area.width == 0 || content_length <= viewport_content_length {
         return;
     }
-    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .thumb_style(Style::default().fg(theme::TEXT))
-        .track_style(Style::default().fg(theme::MUTED));
-    // Ratatui counts possible viewport positions, not total content rows.
-    // The last offset must put the thumb against the end of the track.
-    let mut state = ScrollbarState::new(
-        content_length
-            .saturating_sub(viewport_content_length.max(1))
-            .saturating_add(1),
-    )
-    .position(position)
-    .viewport_content_length(viewport_content_length.max(1));
-    frame.render_stateful_widget(
-        scrollbar,
-        area.inner(Margin {
-            vertical: 1,
-            horizontal: 0,
-        }),
-        &mut state,
+    let track = Rect::new(
+        area.right().saturating_sub(1),
+        area.y.saturating_add(1),
+        1,
+        area.height.saturating_sub(2),
     );
-}
-
-#[cfg(test)]
-fn session_values(
-    session: &SessionRecord,
-    detail: Option<&SessionDetail>,
-    operation: Option<&SessionOperationDisplay>,
-    now_epoch_seconds: u64,
-    config: &HelConfig,
-) -> (String, String, String, String, String) {
-    let clock = if let Some(operation) = operation {
-        let (label, started_at) = operation_status(operation);
-        let elapsed = now_epoch_seconds.saturating_sub(started_at);
-        format!("{label} {elapsed}s")
-    } else if session.state == SessionState::Provisioning {
-        let started_at = session_updated_at_epoch_seconds(session).unwrap_or(now_epoch_seconds);
-        format!("Launch {}s", now_epoch_seconds.saturating_sub(started_at))
-    } else {
-        mj_chat::usage_format::format_activity_clock(
-            now_epoch_seconds,
-            detail.and_then(|detail| detail.current_turn_started_at),
-            detail.map_or(&*EMPTY_ACTIVITY, |detail| &detail.activity),
-        )
-    };
-    // An in-flight resume already told the controller its destination; show
-    // that instead of the session record, which the dashboard won't refresh
-    // until the operation finishes (see `SessionOperationDisplay::resume_destination`).
-    let (profile_id, target_template_id) = operation
-        .and_then(|operation| operation.resume_destination.clone())
-        .unwrap_or_else(|| {
-            (
-                session.last_profile.clone(),
-                session.target_template_id.clone(),
-            )
-        });
-    (
-        clock,
-        profile_id,
-        target_template_id,
-        session.project_name(config),
-        session_name(session).to_string(),
-    )
+    if let Some(geometry) =
+        scrollbar_geometry(track, content_length, position, viewport_content_length)
+    {
+        render_scrollbar(frame, geometry);
+    }
 }
 
 fn operation_status(operation: &SessionOperationDisplay) -> (String, u64) {
@@ -1519,32 +1437,6 @@ fn session_band_color(
         return theme::SESSION_ATTENTION;
     }
     theme::SESSION_ACTIVITY
-}
-
-#[cfg(test)]
-fn active_message_tail(
-    detail: Option<&SessionDetail>,
-    width: usize,
-    maximum_lines: usize,
-) -> Vec<Line<'static>> {
-    detail
-        .and_then(|detail| detail.last_agent_message.as_deref())
-        .map(|message| render_agent_message_tail(message, width, maximum_lines))
-        .unwrap_or_default()
-}
-
-#[cfg(test)]
-pub(crate) fn unread_line(unread_count: usize) -> Line<'static> {
-    if unread_count > 0 {
-        Line::from(Span::styled(
-            format!("{unread_count} unread"),
-            Style::default()
-                .fg(theme::WARNING)
-                .add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        Line::default()
-    }
 }
 
 fn checkpoint_age(now_epoch_seconds: u64, checkpointed_at: &str) -> String {
@@ -2548,7 +2440,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
 
-    use hel::hel_config::{HarnessKind, HelConfig, ProjectRepository};
+    use hel::hel_config::{HarnessKind, HelConfig};
     use hel::hel_state::{
         HelState, MaterializedExecutionState, STATE_VERSION, SessionState, TranscriptBody,
     };
@@ -2562,16 +2454,40 @@ mod tests {
     use crate::ingest::SessionDetail;
     use crate::{DashboardAction, DashboardState, Focus, SessionOperationKind};
 
+    fn session_metadata_text(
+        session: &SessionRecord,
+        detail: Option<&SessionDetail>,
+        operation: Option<&SessionOperationDisplay>,
+        now_epoch_seconds: u64,
+        config: &HelConfig,
+    ) -> String {
+        session_activity_line(
+            "",
+            session,
+            detail,
+            None,
+            false,
+            operation,
+            now_epoch_seconds,
+            &session_target_label(session, operation, config),
+            session_permission_badge(session, operation, config),
+            None,
+            120,
+            false,
+        )
+        .to_string()
+    }
+
     #[test]
     fn scrollbar_thumb_reaches_both_ends_of_the_viewport() {
         let mut terminal = Terminal::new(TestBackend::new(1, 10)).unwrap();
-        for (position, thumb_row) in [(0, 2), (90, 7)] {
+        for (position, thumb_row) in [(0, 1), (90, 8)] {
             terminal
                 .draw(|frame| {
                     render_session_scrollbar(frame, Rect::new(0, 0, 1, 10), 100, position, 10);
                 })
                 .unwrap();
-            assert_eq!(terminal.backend().buffer()[(0, thumb_row)].symbol(), "█");
+            assert_eq!(terminal.backend().buffer()[(0, thumb_row)].symbol(), "▐");
         }
         terminal
             .draw(|frame| {
@@ -2629,7 +2545,7 @@ mod tests {
             });
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
         terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+            .draw(|frame| render(frame, &mut dashboard))
             .expect("draw dashboard");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
 
@@ -2637,32 +2553,26 @@ mod tests {
         assert!(!rendered.contains("[1] hel"));
         assert!(!rendered.contains("Turn clock"));
         assert!(!rendered.contains("Session name"));
-        assert!(rendered.contains("podman "));
-        assert!(rendered.contains("[Q 1]  codex-1  ACP pretty name"));
+        assert!(rendered.contains("po…"), "{rendered}");
+        assert!(rendered.contains("cod…"), "{rendered}");
+        assert!(rendered.contains("[Q 1]"));
         assert!(rendered.contains("Sessions"));
         assert!(!rendered.contains("Turn=time"));
         assert!(!rendered.contains("Step=time"));
-        assert!(rendered.contains("  codex-1  ACP pretty name"));
+        assert!(rendered.contains("codex-1"));
         assert!(!rendered.contains("queued]"));
-        assert!(rendered.contains("You: question 1"));
         assert!(rendered.contains("answer 1"));
-
-        let buffer = terminal.backend().buffer();
-        let lines = buffer_lines(buffer);
-        let (user_row, user_line) = lines
-            .iter()
-            .enumerate()
-            .find(|(_, line)| line.contains("You: question 1"))
-            .expect("user transcript line");
-        let user_column = cell_column(user_line, "You: question 1");
-        assert!((user_column..user_column + 15).all(|column| {
-            buffer[(buffer.area.x + column, buffer.area.y + user_row as u16)].fg == theme::MUTED
-        }));
     }
 
     #[test]
     fn pending_questions_mark_the_session_and_minimized_navigator() {
         let mut dashboard = dashboard_with_session(running_session());
+        dashboard
+            .state
+            .sessions
+            .get_mut("session-1")
+            .unwrap()
+            .session_title_override = Some("長いセッション名のテスト".repeat(4));
         let mut session = materialized_session_for("session-1", Vec::new());
         session.pending_elicitations = vec![
             hel::hel_elicitation::ElicitationRequest::from_acp_params(
@@ -2682,13 +2592,31 @@ mod tests {
             .expect("valid test question"),
         ];
         dashboard.apply_materialized_session(&session);
+        let mut foreign = running_session();
+        foreign.id = "foreign-session".into();
+        foreign.workspace_id = "other-workspace".into();
+        dashboard.session_details.insert(
+            foreign.id.clone(),
+            SessionDetail {
+                pending_elicitations: dashboard.session_details["session-1"]
+                    .pending_elicitations
+                    .clone(),
+                ..SessionDetail::default()
+            },
+        );
+        dashboard.state.sessions.insert(foreign.id.clone(), foreign);
+        assert_eq!(dashboard.pending_input_count(), 1);
 
-        let expanded = drawn_wide_session_rows(&mut dashboard, 120, 30).join("\n");
-        assert!(expanded.contains("Needs input"), "{expanded}");
+        let expanded = drawn(&mut dashboard, 120, 30).join("\n");
+        assert!(expanded.contains("Question"), "{expanded}");
 
         minimize_all_panes(&mut dashboard);
-        let minimized = drawn_wide_session_rows(&mut dashboard, 120, 40).join("\n");
-        assert!(minimized.contains("Needs input: 1"), "{minimized}");
+        let minimized = drawn(&mut dashboard, 120, 40).join("\n");
+        assert!(minimized.contains("Question"), "{minimized}");
+        assert!(
+            minimized.contains("Sessions [1]") || minimized.contains("Q1"),
+            "{minimized}"
+        );
     }
 
     #[test]
@@ -2708,7 +2636,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
 
         terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+            .draw(|frame| render(frame, &mut dashboard))
             .expect("draw rename dialog");
         let lines = buffer_lines(terminal.backend().buffer());
 
@@ -2821,22 +2749,21 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
 
         terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+            .draw(|frame| render(frame, &mut dashboard))
             .expect("draw dashboard");
         let buffer = terminal.backend().buffer();
         let lines = buffer_lines(buffer);
         let rendered = lines.join("\n");
 
-        assert!(rendered.contains("You: unanswered follow-up"));
-        assert!(rendered.contains(" Checking the workspace"), "{rendered}");
-        assert!(!rendered.contains("Agent:"));
+        assert!(rendered.contains("Checking the workspace"));
+        assert!(!rendered.contains("You: unanswered follow-up"));
         assert!(!rendered.contains("answer 0"));
         let (user_row, user_line) = lines
             .iter()
             .enumerate()
-            .find(|(_, line)| line.contains("You: unanswered follow-up"))
-            .expect("user transcript line");
-        let user_column = cell_column(user_line, "You: unanswered follow-up");
+            .find(|(_, line)| line.contains("Checking the workspace"))
+            .expect("current activity line");
+        let user_column = cell_column(user_line, "Checking the workspace");
         assert_ne!(
             buffer[(buffer.area.x + user_column, buffer.area.y + user_row as u16)].fg,
             theme::MUTED
@@ -2854,6 +2781,114 @@ mod tests {
         assert!(narrow.starts_with(" S · "), "{narrow:?}");
         assert!(narrow.contains('…'), "{narrow:?}");
         assert!(narrow.chars().count() <= usize::from(pane_title_content_width(32)));
+    }
+
+    #[test]
+    fn actual_sessions_renderer_keeps_actions_and_row_shapes_across_widths() {
+        use hel::hel_config::SessionsSide;
+
+        for (width, expected_sidebar) in [(80, 40), (120, 40), (180, 60)] {
+            for side in [SessionsSide::Left, SessionsSide::Right] {
+                let mut dashboard = dashboard_with_session(running_session());
+                dashboard.config.sessions_side = side;
+                dashboard
+                    .session_details
+                    .get_mut("session-1")
+                    .expect("fixture detail")
+                    .queued_prompts
+                    .push(hel::hel_worker::QueuedPrompt {
+                        id: "queued".into(),
+                        text: "follow-up".into(),
+                        attachments: Vec::new(),
+                        created_at_ms: 1,
+                    });
+                let rendered = drawn(&mut dashboard, width, 40).join("\n");
+                let sessions = dashboard.pane_areas.expect("dashboard panes")[0];
+                assert_eq!(sessions.width, expected_sidebar);
+                assert_eq!(dashboard.session_control_areas.len(), 2);
+                assert!(rendered.contains("Create"), "{rendered}");
+                assert!(rendered.contains("Resume"), "{rendered}");
+                assert!(rendered.contains("Q"), "{rendered}");
+                assert!(
+                    dashboard
+                        .session_row_areas
+                        .iter()
+                        .all(|(_, area)| area.height == 4)
+                );
+            }
+        }
+
+        let mut minimized = dashboard_with_session(running_session());
+        minimized.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+        let rendered = drawn(&mut minimized, 80, 40).join("\n");
+        let sessions = minimized.pane_areas.expect("minimized panes")[0];
+        assert_eq!(sessions.width, 20);
+        assert!(rendered.contains("Create"), "{rendered}");
+        assert!(rendered.contains("Resume"), "{rendered}");
+        assert!(
+            minimized
+                .session_row_areas
+                .iter()
+                .all(|(_, area)| area.height == 2)
+        );
+    }
+
+    #[test]
+    fn sessions_create_and_resume_buttons_dispatch_from_the_minimized_pane() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+        for control in [crate::SessionControl::Create, crate::SessionControl::Resume] {
+            drawn(&mut dashboard, 80, 30);
+            let area = dashboard
+                .session_control_areas
+                .iter()
+                .find(|(candidate, _)| *candidate == control)
+                .unwrap()
+                .1;
+            let action = dashboard.handle_mouse(mouse_at_row(
+                MouseEventKind::Down(MouseButton::Left),
+                area,
+                0,
+            ));
+            match control {
+                crate::SessionControl::Create => {
+                    assert_eq!(action, DashboardAction::None);
+                    assert!(matches!(dashboard.mode, Mode::QuickNew(_)));
+                    dashboard.cancel_modal();
+                }
+                crate::SessionControl::Resume => {
+                    assert_eq!(action, DashboardAction::OpenResumeDialog)
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn minimized_running_clocks_leave_the_queue_count_visible() {
+        for elapsed in [45, 6_000, 172_800] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+            let detail = dashboard.session_details.get_mut("session-1").unwrap();
+            detail.current_turn_started_at = Some(now_seconds().saturating_sub(elapsed));
+            detail.pending_elicitations.clear();
+            detail.queued_prompts.push(hel::hel_worker::QueuedPrompt {
+                id: "queued-1".into(),
+                text: "next task".into(),
+                attachments: Vec::new(),
+                created_at_ms: 1,
+            });
+            let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &mut dashboard))
+                .unwrap();
+            let (_, row) = dashboard.session_row_areas[0];
+            let status = (row.x..row.right())
+                .map(|x| terminal.backend().buffer()[(x, row.y + 1)].symbol())
+                .collect::<String>();
+            assert!(status.contains("Running "), "{status:?}");
+            assert!(status.contains(" Q1"), "{status:?}");
+            assert!(!status.contains('…'), "{status:?}");
+        }
     }
 
     #[test]
@@ -2998,7 +3033,7 @@ mod tests {
             let standard = drawn(&mut dashboard, 120, height).join("\n");
             let standard_panes = dashboard.pane_areas.unwrap();
             let standard_transcript = dashboard.chat_transcript_area.unwrap();
-            assert!(standard.contains("[idle]"), "{standard}");
+            assert!(standard.contains("Idle"), "{standard}");
             assert!(standard.contains("codex-1"), "{standard}");
 
             dashboard.handle_key(alt_key('g'));
@@ -3051,90 +3086,6 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_agent_prefixes_show_active_clocks_and_idle_activity_time() {
-        let detail = SessionDetail {
-            current_turn_started_at: Some(1_000),
-            current_step_started_at_ms: Some(1_297_000),
-            ..SessionDetail::default()
-        };
-
-        assert_eq!(
-            dashboard_agent_prefixes(1_330, Some(&detail)),
-            ["Turn  5m30s", "Step    33s"]
-        );
-
-        let idle = SessionDetail {
-            last_activity_at_ms: Some(1_297_000),
-            ..SessionDetail::default()
-        };
-        let activity_time = mj_chat::hel_chat::format_event_time(Some(1_297_000)).unwrap();
-        assert_eq!(
-            dashboard_agent_prefixes(1_330, Some(&idle)),
-            ["Agent:".to_owned(), format!("{activity_time:<6}")]
-        );
-
-        // An idle agent with a command still running says so in the turn
-        // column and does not show the time it last spoke: the turn is not
-        // over while that work continues.
-        let background = SessionDetail {
-            last_activity_at_ms: Some(1_297_000),
-            activity: mj_chat::usage_format::SessionActivity {
-                idle_since_ms: None,
-                execution: None,
-                harness_turn_started_at_ms: None,
-                foreground_tool_started_at_ms: None,
-                background_commands: vec![hel::hel_worker::BackgroundCommand {
-                    started_at_ms: 1_000_000,
-                    command: "cargo test".into(),
-                }],
-                active_user_shells: Vec::new(),
-            },
-            ..SessionDetail::default()
-        };
-        assert_eq!(
-            dashboard_agent_prefixes(1_330, Some(&background)),
-            ["  BG  5m30s".to_owned(), " ".repeat("  BG  5m30s".len())]
-        );
-
-        let foreground = SessionDetail {
-            activity: mj_chat::usage_format::SessionActivity {
-                foreground_tool_started_at_ms: Some(1_297_000),
-                background_commands: background.activity.background_commands.clone(),
-                ..mj_chat::usage_format::SessionActivity::default()
-            },
-            ..SessionDetail::default()
-        };
-        assert_eq!(
-            dashboard_agent_prefixes(1_330, Some(&foreground)),
-            ["Step    33s".to_owned(), " ".repeat("Step    33s".len())],
-            "a live foreground tool takes the clock column from older background work"
-        );
-    }
-
-    #[test]
-    fn idle_dashboard_moves_state_and_activity_time_beside_the_agent_excerpt() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut materialized =
-            materialized_session_for("session-1", vec![agent_message(2, "Finished work")]);
-        materialized.execution = MaterializedExecutionState::Idle;
-        dashboard.apply_materialized_session(&materialized);
-        let activity_time = mj_chat::hel_chat::format_event_time(Some(2_000)).unwrap();
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-
-        terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
-            .expect("draw dashboard");
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-
-        assert!(!rendered.contains("[idle]"), "{rendered}");
-        assert!(rendered.contains("Agent: Finished work"), "{rendered}");
-        assert!(
-            rendered.contains(&format!("{activity_time}  ")),
-            "{rendered}"
-        );
-    }
-
-    #[test]
     fn sessions_in_an_expanded_project_have_a_blank_row_and_only_the_caret_marks_selection() {
         let mut first = running_session();
         first.id = "session-first".into();
@@ -3155,34 +3106,36 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
 
         terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+            .draw(|frame| render(frame, &mut dashboard))
             .expect("draw dashboard");
 
         let buffer = terminal.backend().buffer();
         let lines = buffer_lines(buffer);
         let first_y = lines
             .iter()
-            .position(|line| line.contains("podman [1]"))
+            .position(|line| line.contains("First session"))
             .expect("first session row") as u16;
         let second_y = lines
             .iter()
-            .position(|line| line.contains("podman [2]"))
+            .position(|line| line.contains("Second session"))
             .expect("second session row") as u16;
         assert!(
             (first_y..first_y + 4).all(|y| {
-                (buffer.area.x + 1..buffer.area.right() - 1)
+                (dashboard.pane_areas.expect("pane areas")[0].x + 1
+                    ..dashboard.pane_areas.expect("pane areas")[0].right() - 1)
                     .all(|x| buffer[(x, y)].bg != theme::MUTED)
             }),
             "selection must not paint a background"
         );
-        assert!(lines[first_y as usize].contains("› podman [1]"));
+        assert!(lines[first_y as usize].contains("› First session"));
         assert_eq!(
             second_y,
             first_y + 5,
             "sessions in an expanded project have one blank row between them"
         );
+        let pane = dashboard.pane_areas.expect("pane areas")[0];
         assert!(
-            (buffer.area.x + 1..buffer.area.right() - 1)
+            (pane.x + 1..pane.right() - 1)
                 .all(|x| buffer[(x, first_y + 4)].symbol().trim().is_empty())
         );
     }
@@ -3219,13 +3172,13 @@ mod tests {
                 session.last_error = Some("checkpoint failed".into());
             }
             terminal
-                .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+                .draw(|frame| render(frame, &mut dashboard))
                 .expect("draw session transition");
             let buffer = terminal.backend().buffer();
             let lines = buffer_lines(buffer);
             let first_y = lines
                 .iter()
-                .position(|line| line.contains("First session"))
+                .position(|line| line.contains("podman [1]"))
                 .expect("transition row");
             let second_y = lines
                 .iter()
@@ -3233,7 +3186,8 @@ mod tests {
                 .expect("following session row");
             assert_eq!(second_y, first_y + 2, "{kind:?}: {lines:#?}");
             assert!(
-                (buffer.area.x + 1..buffer.area.right() - 1)
+                (dashboard.pane_areas.expect("pane areas")[0].x + 1
+                    ..dashboard.pane_areas.expect("pane areas")[0].right() - 1)
                     .all(|x| { buffer[(x, (first_y + 1) as u16)].symbol().trim().is_empty() }),
                 "{kind:?}: the separator must be blank"
             );
@@ -3259,14 +3213,14 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
 
         terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+            .draw(|frame| render(frame, &mut dashboard))
             .expect("draw dashboard");
 
         let buffer = terminal.backend().buffer();
         let lines = buffer_lines(buffer);
         let first_y = lines
             .iter()
-            .position(|line| line.contains("› podman"))
+            .position(|line| line.contains("› ACP pretty name"))
             .expect("first session row") as u16;
         let second_heading_y = lines
             .iter()
@@ -3274,8 +3228,9 @@ mod tests {
             .expect("second project heading") as u16;
         let first_bottom = first_y + 4;
         assert_eq!(second_heading_y, first_bottom + 1);
+        let pane = dashboard.pane_areas.expect("pane areas")[0];
         assert!(
-            (buffer.area.x + 1..buffer.area.right() - 1)
+            (pane.x + 1..pane.right() - 1)
                 .all(|x| buffer[(x, first_bottom)].symbol().trim().is_empty())
         );
     }
@@ -3314,14 +3269,14 @@ mod tests {
         ));
         let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
         terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+            .draw(|frame| render(frame, &mut dashboard))
             .expect("draw first project");
         let first_draw = buffer_lines(terminal.backend().buffer()).join("\n");
         // Every project starts expanded, so both groups show their full form.
         assert!(first_draw.contains("[1] alpha"));
         assert!(first_draw.contains("[2] beta"));
-        assert!(first_draw.contains("You: question 0"));
-        assert!(first_draw.contains("You: beta question"));
+        assert!(first_draw.contains("answer 0"));
+        assert!(first_draw.contains("beta answer"));
 
         // The numbered hotkey collapses only its own project.
         assert_eq!(
@@ -3329,35 +3284,33 @@ mod tests {
             DashboardAction::None
         );
         terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+            .draw(|frame| render(frame, &mut dashboard))
             .expect("draw with beta collapsed");
         let second_draw = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(second_draw.contains("You: question 0"), "{second_draw}");
-        assert!(!second_draw.contains("You: beta question"), "{second_draw}");
+        assert!(second_draw.contains("answer 0"), "{second_draw}");
+        assert!(!second_draw.contains("beta answer"), "{second_draw}");
         assert!(
-            second_draw
-                .lines()
-                .any(|line| line.contains("podman ") && line.contains("beta answer")),
-            "the collapsed group keeps a one-line row per session: {second_draw}"
+            second_draw.contains("[2] beta") && second_draw.contains("Running"),
+            "the collapsed group keeps a two-line summary per session: {second_draw}"
         );
 
         // Collapsing alpha too leaves both groups collapsed at once.
         dashboard.handle_key(crate::test_support::key(KeyCode::Char('1')));
         terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+            .draw(|frame| render(frame, &mut dashboard))
             .expect("draw with both collapsed");
         let third_draw = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(!third_draw.contains("You: question 0"), "{third_draw}");
-        assert!(!third_draw.contains("You: beta question"), "{third_draw}");
+        assert!(!third_draw.contains("answer 0"), "{third_draw}");
+        assert!(!third_draw.contains("beta answer"), "{third_draw}");
 
         // And the hotkey is a toggle, so pressing it again brings beta back.
         dashboard.handle_key(crate::test_support::key(KeyCode::Char('2')));
         terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+            .draw(|frame| render(frame, &mut dashboard))
             .expect("draw with beta expanded again");
         let fourth_draw = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(fourth_draw.contains("You: beta question"), "{fourth_draw}");
-        assert!(!fourth_draw.contains("You: question 0"), "{fourth_draw}");
+        assert!(fourth_draw.contains("beta answer"), "{fourth_draw}");
+        assert!(!fourth_draw.contains("answer 0"), "{fourth_draw}");
     }
 
     #[test]
@@ -3390,28 +3343,27 @@ mod tests {
             "session-beta-second",
             vec![agent_message(1, "second tail")],
         ));
+        dashboard.focus_sessions();
         let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
-        // Collapse the beta project so its sessions draw their one-line form,
+        // Collapse the beta project so its sessions draw their compact form,
         // which is where duplicate targets need their numbering.
         dashboard.handle_key(crate::test_support::key(KeyCode::Char('2')));
 
         terminal
-            .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+            .draw(|frame| render(frame, &mut dashboard))
             .expect("draw collapsed duplicate targets");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
 
-        assert!(
+        assert_eq!(
             rendered
                 .lines()
-                .any(|line| line.contains("podman [1] ") && line.contains("first tail")),
+                .filter(|line| line.contains("podma…"))
+                .count(),
+            2,
             "{rendered}"
         );
-        assert!(
-            rendered
-                .lines()
-                .any(|line| line.contains("podman [2] ") && line.contains("second tail")),
-            "{rendered}"
-        );
+        assert!(!rendered.contains("first tail"), "{rendered}");
+        assert!(!rendered.contains("second tail"), "{rendered}");
     }
 
     #[test]
@@ -3449,22 +3401,6 @@ mod tests {
             session_band_color(Some(&read_idle), false, SessionState::Running),
             theme::SESSION_IDLE
         );
-
-        let collapsed = collapsed_session_line(
-            "› ",
-            "podman",
-            SessionRowFacts {
-                detail: Some(&read_idle),
-                unreachable: false,
-                state: SessionState::Running,
-                now_epoch_seconds: 1,
-            },
-            None,
-            80,
-            None,
-            None,
-        );
-        assert_eq!(collapsed.style.fg, Some(theme::SESSION_IDLE));
 
         let foreground = SessionDetail {
             activity: mj_chat::usage_format::SessionActivity {
@@ -3573,31 +3509,15 @@ mod tests {
             session_band_color(None, true, SessionState::Running),
             theme::SESSION_ERROR
         );
-        let unreachable_line = collapsed_session_line(
-            "› ",
-            "podman",
-            SessionRowFacts {
-                detail: Some(&unread_idle),
-                unreachable: true,
-                state: SessionState::Running,
-                now_epoch_seconds: 1,
-            },
-            None,
-            80,
-            None,
-            None,
-        );
-        assert_eq!(unreachable_line.style.fg, Some(theme::SESSION_ERROR));
     }
 
     #[test]
-    fn session_preview_uses_current_agent_work_then_latest_user_prompt() {
+    fn current_agent_excerpt_never_repeats_an_old_answer() {
         let waiting = SessionDetail {
             last_agent_message: Some("previous answer".into()),
             last_user_message: Some("new request".into()),
             ..SessionDetail::default()
         };
-        assert_eq!(session_preview_text(Some(&waiting)), Some("new request"));
         assert_eq!(current_agent_excerpt(&waiting), None);
 
         let thinking = SessionDetail {
@@ -3606,10 +3526,6 @@ mod tests {
             latest_agent_activity_after_last_user: Some("checking files".into()),
             ..SessionDetail::default()
         };
-        assert_eq!(
-            session_preview_text(Some(&thinking)),
-            Some("checking files")
-        );
         assert_eq!(current_agent_excerpt(&thinking), Some("checking files"));
 
         let replying = SessionDetail {
@@ -3619,11 +3535,13 @@ mod tests {
             latest_agent_activity_after_last_user: Some("older thought".into()),
             ..SessionDetail::default()
         };
-        assert_eq!(
-            session_preview_text(Some(&replying)),
-            Some("current answer")
-        );
         assert_eq!(current_agent_excerpt(&replying), Some("current answer"));
+
+        let old_only = SessionDetail {
+            last_agent_message: Some("old answer".into()),
+            ..SessionDetail::default()
+        };
+        assert_eq!(current_agent_excerpt(&old_only), None);
     }
 
     #[test]
@@ -3638,13 +3556,13 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
         let mut row_color = |dashboard: &mut DashboardState| {
             terminal
-                .draw(|frame| render_wide_session_rows(frame, dashboard))
+                .draw(|frame| render(frame, dashboard))
                 .expect("draw dashboard");
             let buffer = terminal.backend().buffer();
             let lines = buffer_lines(buffer);
             let row = lines
                 .iter()
-                .position(|line| line.contains("ACP pretty name"))
+                .position(|line| line.contains("podman") && line.contains("Running"))
                 .expect("session row");
             buffer[(cell_column(&lines[row], "podman"), row as u16)].fg
         };
@@ -4016,26 +3934,38 @@ mod tests {
         }
     }
 
-    /// The expanded row draws its own `Agent:`/clock prefix, so the excerpt
-    /// beside it must not arrive carrying the transcript's rail as well.
+    /// Expanded output keeps the transcript's rich formatting without adding
+    /// a second role rail.
     #[test]
     fn an_expanded_agent_excerpt_carries_no_transcript_gutter() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         apply_materialized_transcript(
             &mut dashboard,
-            vec![agent_message(1, "reliability reply: summarize the README")],
+            vec![
+                transcript_item(
+                    1,
+                    TranscriptBody::User {
+                        content: vec![serde_json::json!({
+                            "type": "text",
+                            "text": "summarize the README"
+                        })],
+                    },
+                ),
+                agent_message(2, "reliability reply: summarize the README"),
+            ],
         );
 
-        let lines = drawn_wide_session_rows(&mut dashboard, 120, 44);
+        let lines = drawn(&mut dashboard, 120, 44);
         let agent = lines
             .iter()
             .find(|line| line.contains("reliability reply"))
             .expect("the agent excerpt row");
         // The rounded pane contributes one edge on each side; the excerpt
         // must not duplicate the conversation's interior rail.
+        let session_cell = agent.split("││").next().unwrap_or(agent.as_str());
         assert!(
-            !agent.trim_matches('\u{2502}').contains('\u{2502}'),
+            !session_cell.trim_matches('\u{2502}').contains('\u{2502}'),
             "the excerpt carries no transcript rail: {agent:?}"
         );
     }
@@ -4245,30 +4175,6 @@ mod tests {
         );
     }
 
-    // Wide session summaries are also used by the workspace preview and a
-    // maximized sidebar on large terminals. Exercise their rich row rendering
-    // independently from the sidebar's width allocation.
-    fn render_wide_session_rows(frame: &mut Frame, dashboard: &mut DashboardState) {
-        let area = frame.area();
-        frame.render_widget(Block::default().style(theme::base()), area);
-        let rendered = render_sessions(frame, area, dashboard);
-        dashboard.session_row_areas = rendered.session_row_areas;
-        dashboard.project_heading_areas = rendered.project_heading_areas;
-        render_modal(frame, area, dashboard);
-    }
-
-    fn drawn_wide_session_rows(
-        dashboard: &mut DashboardState,
-        width: u16,
-        height: u16,
-    ) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| render_wide_session_rows(frame, dashboard))
-            .unwrap();
-        buffer_lines(terminal.backend().buffer())
-    }
-
     fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal
@@ -4283,6 +4189,8 @@ mod tests {
     fn background_work_reaches_both_session_row_forms() {
         let started_at_ms = i64::try_from(hel::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
         let activity = mj_chat::usage_format::SessionActivity {
+            activity_turn_started_at_ms: None,
+            prompt_in_flight: false,
             idle_since_ms: None,
             execution: None,
             harness_turn_started_at_ms: None,
@@ -4297,16 +4205,23 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         assert!(
-            drawn_wide_session_rows(&mut dashboard, 120, 44)
+            drawn(&mut dashboard, 120, 44)
                 .iter()
-                .any(|line| line.contains("Agent:")),
-            "an idle session with nothing running shows when it last spoke"
+                .any(|line| line.contains("No messages yet")),
+            "an idle session with no current output keeps the output block stable"
         );
 
         dashboard.set_session_activity("session-1", activity.clone());
-        let expanded = drawn_wide_session_rows(&mut dashboard, 120, 44);
+        dashboard
+            .session_details
+            .get_mut("session-1")
+            .expect("session detail")
+            .current_turn_started_at = None;
+        let expanded = drawn(&mut dashboard, 120, 44);
         assert!(
-            expanded.iter().any(|line| line.contains("  BG 43m3")),
+            expanded
+                .iter()
+                .any(|line| line.contains("Running") && line.contains("43m3")),
             "the expanded row: {expanded:?}"
         );
 
@@ -4326,13 +4241,16 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
 
-        let lines = drawn_wide_session_rows(&mut dashboard, 120, 44);
+        let lines = drawn(&mut dashboard, 120, 44);
         let first = lines
             .iter()
-            .position(|line| line.contains("podman"))
-            .expect("the session's identity row");
-        assert!(lines[first].contains("ACP pretty name"));
-        assert!(lines[first + 1].contains("You:"), "{:?}", lines[first + 1]);
+            .position(|line| line.contains("ACP pretty name"))
+            .expect("the session's name row");
+        assert!(
+            lines[first + 1].contains("podman"),
+            "{:?}",
+            lines[first + 1]
+        );
         assert!(
             lines[first + 2].contains("No messages yet"),
             "{:?}",
@@ -4373,25 +4291,25 @@ mod tests {
             verdict: None,
         }]);
 
-        // Collapse the project so the test exercises the one-line session
+        // Collapse the project so the test exercises the compact two-line
         // form; the reviewed session is intentionally unselected.
         dashboard.focus_sessions();
         dashboard.handle_key(crate::test_support::key(KeyCode::Char('1')));
-        let rendered = drawn_wide_session_rows(&mut dashboard, 140, 44).join("\n");
+        let rendered = drawn(&mut dashboard, 140, 44).join("\n");
         let review_line = rendered
             .lines()
             .find(|line| line.contains("Reviewing"))
             .expect("review activity on the unselected compact row");
-        assert!(!review_line.contains("[idle]"), "{review_line}");
+        assert!(!review_line.contains("Idle"), "{review_line}");
 
         // Removing the complete runtime projection restores the primary
         // session's ordinary activity clock.
         dashboard.set_session_reviews(Vec::new());
-        let restored = drawn_wide_session_rows(&mut dashboard, 140, 44).join("\n");
+        let restored = drawn(&mut dashboard, 140, 44).join("\n");
         assert!(
             restored
                 .lines()
-                .any(|line| line.contains("podman") && line.contains("[idle]")),
+                .any(|line| line.contains("podman") && line.contains("Idle")),
             "{restored}"
         );
 
@@ -4406,14 +4324,14 @@ mod tests {
             verdict: None,
         }]);
         minimize_all_panes(&mut dashboard);
-        let minimized = drawn_wide_session_rows(&mut dashboard, 140, 44).join("\n");
+        let minimized = drawn(&mut dashboard, 140, 44).join("\n");
         let minimized_line = minimized
             .lines()
             .find(|line| line.contains("Reviewing"))
             .expect("review activity in the minimized list");
         let review_cell =
             &minimized_line[minimized_line.find("Reviewing").expect("review label")..];
-        assert!(!review_cell.contains("[idle]"), "{minimized_line}");
+        assert!(!review_cell.contains("Idle"), "{minimized_line}");
     }
 
     /// `projects` projects, `per_project` live sessions in each, laid out so
@@ -4479,7 +4397,7 @@ mod tests {
         assert!(!rendered.contains("Agent:"), "{rendered}");
     }
 
-    /// A busy minimized list keeps a bounded height and one-line hitboxes.
+    /// A busy minimized list keeps a bounded height and two-line hitboxes.
     #[test]
     fn minimized_sessions_bound_the_viewport_to_preserve_the_conversation() {
         let mut dashboard = minimized_sessions_dashboard(3, 3);
@@ -4489,7 +4407,7 @@ mod tests {
             dashboard
                 .session_row_areas
                 .iter()
-                .all(|(_, area)| area.height == 1)
+                .all(|(_, area)| area.height == 2)
         );
         assert!(!lines.iter().any(|line| line.contains("You:")), "{lines:?}");
     }
@@ -4506,13 +4424,13 @@ mod tests {
         assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 42);
     }
 
-    /// The minimized row is the same top line as the expanded session.
+    /// The minimized row keeps the session name and its actionable status.
     #[test]
     fn minimized_sessions_identify_the_session_by_name() {
         let mut dashboard = minimized_sessions_dashboard(1, 1);
         let rendered = drawn(&mut dashboard, 120, 44).join("\n");
         assert!(rendered.contains("ACP pretty name"), "{rendered}");
-        assert!(!rendered.contains("[idle]"), "{rendered}");
+        assert!(rendered.contains("Idle"), "{rendered}");
     }
 
     /// A session row is coloured by the same state rule the expanded rows
@@ -4645,9 +4563,10 @@ mod tests {
         let lines = drawn(&mut dashboard, 120, 20);
 
         assert!(
-            lines[1].contains('╭') && lines[1].contains("Sessions"),
+            lines[1].contains('╭') && lines[1].contains("Sessi"),
             "the minimized list keeps its title and border: {lines:?}"
         );
+        assert!(lines[1].contains('▁') && lines[1].contains('▪') && lines[1].contains('□'));
         for visible in ["Targets", "Quota"] {
             assert!(
                 lines.iter().any(|line| line.contains(visible)),
@@ -4668,11 +4587,11 @@ mod tests {
         let mut dashboard = minimized_sessions_dashboard(3, 2);
 
         let tall = drawn(&mut dashboard, 120, 44);
-        assert!(tall[1].contains('╭') && tall[1].contains("Sessions"));
+        assert!(tall[1].contains('╭') && tall[1].contains("Sessi"));
         assert_eq!(dashboard.pane_areas.expect("tall panes")[0].height, 42);
 
         let short = drawn(&mut dashboard, 120, 20);
-        assert!(short[1].contains('╭') && short[1].contains("Sessions"));
+        assert!(short[1].contains('╭') && short[1].contains("Sessi"));
         assert_eq!(dashboard.pane_areas.expect("short panes")[0].height, 18);
 
         drawn(&mut dashboard, 120, 44);
@@ -4928,15 +4847,25 @@ mod tests {
             let row_colour = |dashboard: &mut DashboardState| {
                 let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
                 terminal
-                    .draw(|frame| render_wide_session_rows(frame, dashboard))
+                    .draw(|frame| render(frame, dashboard))
                     .expect("draw the session list");
                 let buffer = terminal.backend().buffer();
                 let lines = buffer_lines(buffer);
+                let status = if dashboard
+                    .state
+                    .sessions
+                    .values()
+                    .any(|session| session.state == SessionState::Error)
+                {
+                    "Error"
+                } else {
+                    "Idle"
+                };
                 let row = lines
                     .iter()
-                    .position(|line| line.contains("podman"))
-                    .expect("the session's row");
-                let column = cell_column(&lines[row], "podman");
+                    .position(|line| line.contains(status))
+                    .unwrap_or_else(|| panic!("the session's row ({status}): {lines:?}"));
+                let column = cell_column(&lines[row], status);
                 buffer[(column, row as u16)].fg
             };
 
@@ -5151,7 +5080,7 @@ mod tests {
 
             let mut terminal = Terminal::new(TestBackend::new(140, 28)).expect("terminal");
             terminal
-                .draw(|frame| render_wide_session_rows(frame, &mut dashboard))
+                .draw(|frame| render(frame, &mut dashboard))
                 .expect("draw dashboard");
             let buffer = terminal.backend().buffer();
             let status_y = (buffer.area.y..buffer.area.bottom())
@@ -5166,8 +5095,9 @@ mod tests {
                 .map(|x| buffer[(x, status_y)].symbol())
                 .collect::<String>();
             assert!(!status.contains("unread"));
+            let pane = dashboard.pane_areas.expect("pane areas")[0];
             assert!(
-                (buffer.area.x + 1..buffer.area.right() - 1)
+                (pane.x + 1..pane.right() - 1)
                     .filter(|x| summary_text_cell(&buffer[(*x, status_y)]))
                     .all(|x| buffer[(x, status_y)].fg == theme::SESSION_IDLE),
                 "{collapsed}: {status}"
@@ -5455,10 +5385,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<Vec<_>>();
 
-        let up = symbols.iter().filter(|symbol| **symbol == "▲").count();
-        let down = symbols.iter().filter(|symbol| **symbol == "▼").count();
-        assert!(up >= 1, "expected an upper arrow, rendered {up}");
-        assert!(down >= 1, "expected a lower arrow, rendered {down}");
+        let thumb = symbols.iter().filter(|symbol| **symbol == "▐").count();
+        let track = symbols.iter().filter(|symbol| **symbol == "│").count();
+        assert!(thumb >= 1, "expected a scrollbar thumb, rendered {thumb}");
+        assert!(track >= 1, "expected a scrollbar track, rendered {track}");
     }
 
     #[test]
@@ -5477,7 +5407,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<Vec<_>>();
 
-        assert!(!symbols.iter().any(|symbol| matches!(*symbol, "▲" | "▼")));
+        assert!(!symbols.contains(&"▐"));
     }
 
     #[test]
@@ -5504,8 +5434,8 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<Vec<_>>();
 
-        assert!(symbols.contains(&"▲"));
-        assert!(symbols.contains(&"▼"));
+        assert!(symbols.contains(&"▐"));
+        assert!(symbols.contains(&"│"));
     }
 
     #[test]
@@ -5547,56 +5477,8 @@ mod tests {
             ..SessionDetail::default()
         };
 
-        let (clock, _, _, _, _) = session_values(&session, Some(&detail), None, 1_480, &config());
-        assert_eq!(clock, "[idle]");
-    }
-
-    #[test]
-    fn active_message_tail_uses_the_last_four_nonempty_lines() {
-        let short = SessionDetail {
-            last_agent_message: Some("one line".into()),
-            ..SessionDetail::default()
-        };
-        assert_eq!(
-            active_message_tail(Some(&short), 80, ACTIVE_MESSAGE_LINES).len(),
-            1
-        );
-
-        let long = SessionDetail {
-            last_agent_message: Some("one\ntwo\nthree\nfour\nfive".into()),
-            ..SessionDetail::default()
-        };
-        let lines = active_message_tail(Some(&long), 80, ACTIVE_MESSAGE_LINES)
-            .into_iter()
-            .map(|line| {
-                line.spans
-                    .into_iter()
-                    .map(|span| span.content.into_owned())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(lines, ["two", "three", "four", "five"]);
-        assert!(active_message_tail(None, 80, ACTIVE_MESSAGE_LINES).is_empty());
-    }
-
-    #[test]
-    fn active_message_tail_removes_blank_lines_before_capping() {
-        let detail = SessionDetail {
-            last_agent_message: Some(
-                "Fixed and pushed.\n\nDuplicate LinkedIn URLs now use last-write-wins behavior.\n\nCommit: b6cb3e8 Keep the last duplicate connection record".into(),
-            ),
-            ..SessionDetail::default()
-        };
-
-        let rendered = active_message_tail(Some(&detail), 80, ACTIVE_MESSAGE_LINES)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-
-        assert!(!rendered.contains("more]"));
-        assert!(rendered.contains("Fixed and pushed."));
-        assert!(rendered.contains("Commit: b6cb3e8"));
+        let text = session_metadata_text(&session, Some(&detail), None, 1_480, &config());
+        assert!(text.contains("Idle"), "{text}");
     }
 
     #[test]
@@ -5605,8 +5487,8 @@ mod tests {
         session.state = SessionState::Provisioning;
         session.updated_at = "1970-01-01T00:16:40Z".into();
 
-        let (clock, _, _, _, _) = session_values(&session, None, None, 1_012, &config());
-        assert_eq!(clock, "Launch 12s");
+        let text = session_metadata_text(&session, None, None, 1_012, &config());
+        assert!(text.contains("Launch 12s"), "{text}");
     }
 
     #[test]
@@ -5644,9 +5526,8 @@ mod tests {
             Some(ProvisionStage::Booting),
         );
 
-        let (clock, _, _, _, _) =
-            session_values(&session, None, Some(&operation), 1_012, &config());
-        assert_eq!(clock, "Boot 12s");
+        let text = session_metadata_text(&session, None, Some(&operation), 1_012, &config());
+        assert!(text.contains("Boot 12s"), "{text}");
     }
 
     #[test]
@@ -5654,9 +5535,8 @@ mod tests {
         let session = stopped_session();
         let operation = operation(SessionOperationKind::Launching, None);
 
-        let (clock, _, _, _, _) =
-            session_values(&session, None, Some(&operation), 1_012, &config());
-        assert_eq!(clock, "Launch 12s");
+        let text = session_metadata_text(&session, None, Some(&operation), 1_012, &config());
+        assert!(text.contains("Launch 12s"), "{text}");
     }
 
     #[test]
@@ -5667,9 +5547,8 @@ mod tests {
             Some(ProvisionStage::Syncing),
         );
 
-        let (clock, _, _, _, _) =
-            session_values(&session, None, Some(&operation), 1_012, &config());
-        assert_eq!(clock, "Stopping 12s");
+        let text = session_metadata_text(&session, None, Some(&operation), 1_012, &config());
+        assert!(text.contains("Stopping 12s"), "{text}");
     }
 
     #[test]
@@ -5684,11 +5563,10 @@ mod tests {
         let mut resuming = operation(SessionOperationKind::Resuming, None);
         resuming.resume_destination = Some(("grok-1".into(), "localhost".into()));
 
-        let (_, profile_id, target_template_id, _, _) =
-            session_values(&session, None, Some(&resuming), 1_012, &config());
+        let text = session_metadata_text(&session, None, Some(&resuming), 1_012, &config());
 
-        assert_eq!(profile_id, "grok-1");
-        assert_eq!(target_template_id, "localhost");
+        assert!(text.contains("grok-1"), "{text}");
+        assert!(text.contains("localhost"), "{text}");
     }
 
     #[test]
@@ -5696,11 +5574,10 @@ mod tests {
         let session = stopped_session();
         let resuming = operation(SessionOperationKind::Resuming, None);
 
-        let (_, profile_id, target_template_id, _, _) =
-            session_values(&session, None, Some(&resuming), 1_012, &config());
+        let text = session_metadata_text(&session, None, Some(&resuming), 1_012, &config());
 
-        assert_eq!(profile_id, session.last_profile);
-        assert_eq!(target_template_id, session.target_template_id);
+        assert!(text.contains(&session.last_profile), "{text}");
+        assert!(text.contains(&session.target_template_id), "{text}");
     }
 
     #[test]
@@ -5716,9 +5593,8 @@ mod tests {
             .active_stages
             .insert(ProvisionStage::Booting, 1_040);
 
-        let (clock, _, _, _, _) =
-            session_values(&session, None, Some(&operation), 1_052, &config());
-        assert_eq!(clock, "Boot 12s");
+        let text = session_metadata_text(&session, None, Some(&operation), 1_052, &config());
+        assert!(text.contains("Boot 12s"), "{text}");
     }
 
     #[test]
@@ -5730,11 +5606,10 @@ mod tests {
             Some(ProvisionStage::Installing(HarnessKind::Codex)),
         );
 
-        let (clock, profile_id, _, _, _) =
-            session_values(&session, None, Some(&operation), 1_012, &config());
+        let text = session_metadata_text(&session, None, Some(&operation), 1_012, &config());
 
-        assert_eq!(clock, "Installing Codex 12s");
-        assert_eq!(profile_id, "codex-1");
+        assert!(text.contains("Installing Codex 12s"), "{text}");
+        assert!(text.contains("codex-1"), "{text}");
     }
 
     #[test]
@@ -5748,30 +5623,8 @@ mod tests {
             .active_stages
             .insert(ProvisionStage::Cloning, 1_002);
 
-        let (clock, _, _, _, _) =
-            session_values(&session, None, Some(&operation), 1_012, &config());
-        assert_eq!(clock, "Clone, Sync 10s");
-    }
-
-    #[test]
-    fn active_target_and_project_are_separate_cells() {
-        let mut config = config();
-        config
-            .bundles
-            .get_mut("hel")
-            .unwrap()
-            .repositories
-            .push(ProjectRepository {
-                id: "anvil".into(),
-                github: Some("BrokkAi/anvil".into()),
-                local: None,
-                destination: "anvil".into(),
-                git_ref: None,
-            });
-
-        let (_, _, target, project, _) = session_values(&stopped_session(), None, None, 0, &config);
-        assert_eq!(target, "podman");
-        assert_eq!(project, "anvil + hel");
+        let text = session_metadata_text(&session, None, Some(&operation), 1_012, &config());
+        assert!(text.contains("Clone, Sync 10s"), "{text}");
     }
 
     #[test]

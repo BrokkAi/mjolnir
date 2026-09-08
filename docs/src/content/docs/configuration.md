@@ -31,15 +31,18 @@ Mjolnir appends `config.toml` to it.
 Every current file starts with the required schema version:
 
 ```toml
-version = 2
+version = 4
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `2`. |
+| `version` | integer | yes | none | Configuration schema version; use `4`. |
+| `sessions_side` | string | no | `"left"` | Place the Sessions sidebar on the left or right. |
+| `spinner` | string | no | `"scan"` | Terminal activity animation style. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
+| `advanced` | table | no | default `[advanced]` values | Detailed activity-clock display options. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
 | `startup` | table | no | explicit Quick New defaults | Defaults used when you create a session without opening the full wizard. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
@@ -85,6 +88,24 @@ On Linux and macOS, a completely unconfigured installation receives a local
 Codex profile and `localhost` target during dashboard startup. The dashboard
 remains session-empty until you use Quick New or the full creation wizard; use
 `mj setup` when you want guided discovery of other profiles and targets.
+
+## Advanced display options `[advanced]`
+
+The optional `[advanced]` table controls detail that is useful while diagnosing
+activity without changing how sessions run:
+
+```toml
+[advanced]
+detailed_activity_clocks = false
+```
+
+| Field | TOML type | Default | Behavior |
+| --- | --- | --- | --- |
+| `detailed_activity_clocks` | boolean | `false` | When enabled, normal session rows and the conversation header show separate turn, step, and background clocks. |
+
+The terminal Setup screen edits this setting under **Advanced**. The normal
+`Running` status continues across the originating turn and its background work;
+the setting only controls how much timing detail is shown.
 
 ## Web viewer `[phone]`
 
@@ -136,6 +157,11 @@ Use a reviewer profile different from the profile doing the primary work. The
 quick tier runs one general reviewer and validates reported findings. Extended
 review may add intent analysis, a supervisor, and specialist lanes. See
 [Independent turn review](/turn-review/).
+
+In the terminal, these review fields are edited inside **Setup** so one Save or
+Cancel applies to the entire configuration draft. Setup can discover the
+selected review profile's supported model and effort choices and filters the
+profile list to compatible reviewer profiles.
 
 ## Profiles `[profiles.<id>]`
 

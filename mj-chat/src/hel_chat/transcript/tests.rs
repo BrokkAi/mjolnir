@@ -302,13 +302,19 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
 
     assert_eq!(
         transcript_title(&chat, 20_000),
-        " precision-3260/bifrost-fuzz  Turn 3h22m  Step 0s  kimi "
+        " precision-3260/bifrost-fuzz  Running 3h22m  kimi "
     );
+    chat.set_detailed_activity_clocks(true);
+    assert_eq!(
+        transcript_title(&chat, 20_000),
+        " precision-3260/bifrost-fuzz  T 3h22m S 0s  kimi "
+    );
+    chat.set_detailed_activity_clocks(false);
 
     chat.render_mode = TranscriptRenderMode::Raw;
     assert_eq!(
         transcript_title(&chat, 20_000),
-        " precision-3260/bifrost-fuzz  Turn 3h22m  Step 0s  kimi · raw source "
+        " precision-3260/bifrost-fuzz  Running 3h22m  kimi · raw source "
     );
 
     // An idle session that left a command running names it in the same place
@@ -316,6 +322,8 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
     chat.render_mode = TranscriptRenderMode::Rich;
     chat.turn_started_at_epoch_seconds = None;
     chat.set_session_activity(crate::usage_format::SessionActivity {
+        activity_turn_started_at_ms: None,
+        prompt_in_flight: false,
         idle_since_ms: None,
         execution: None,
         harness_turn_started_at_ms: None,
@@ -328,8 +336,14 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
     });
     assert_eq!(
         transcript_title(&chat, 20_000),
-        " precision-3260/bifrost-fuzz    BG 43m36s  kimi "
+        " precision-3260/bifrost-fuzz  Running 43m36s  kimi "
     );
+    chat.set_detailed_activity_clocks(true);
+    assert_eq!(
+        transcript_title(&chat, 20_000),
+        " precision-3260/bifrost-fuzz  BG 43m36s  kimi "
+    );
+    chat.set_detailed_activity_clocks(false);
 
     let previous_activity = chat.session_activity().clone();
     chat.set_session_activity(crate::usage_format::SessionActivity {
@@ -338,7 +352,7 @@ fn conversation_title_is_the_dashboard_summary_without_the_session_name() {
     });
     assert_eq!(
         transcript_title(&chat, 20_000),
-        " precision-3260/bifrost-fuzz  Step 12s  kimi "
+        " precision-3260/bifrost-fuzz  Running 12s  kimi "
     );
 }
 
@@ -350,7 +364,7 @@ fn conversation_title_shows_review_activity_then_restores_primary_activity() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_header_summary("podman", "codex3");
     let idle = transcript_title(&chat, 20_000);
-    assert!(idle.contains("[idle]"));
+    assert!(idle.contains("Idle"));
     let mut view = RuntimeReviewView {
         session_id: "session".to_owned(),
         tier: hel::hel_review::lanes::ReviewTier::Quick,

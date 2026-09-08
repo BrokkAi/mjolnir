@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use crate::components::{ScrollbarGeometry, render_scrollbar, scrollbar_geometry};
 use crate::theme;
 use agent_client_protocol::schema::v1::{Plan, ToolCall, ToolCallContent, ToolCallStatus};
 use ratatui::Frame;
@@ -44,19 +45,13 @@ struct CachedEntry {
 
 const SCROLLBAR_DEFAULT_ENTRY_ROWS: usize = 4;
 
-/// The one-cell primary transcript scrollbar. Its geometry is rebuilt after
-/// every draw. During a drag, frozen row estimates keep newly rendered
-/// history from shifting the thumb under the pointer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TranscriptScrollbarGeometry {
-    track: Rect,
-    thumb: Rect,
-    max_scroll: usize,
-}
+/// The primary transcript scrollbar. Its geometry is rebuilt after every draw.
+/// During a drag, frozen row estimates keep newly rendered history from
+/// shifting the thumb under the pointer.
 
 #[derive(Debug)]
 pub(super) struct TranscriptScrollbarState {
-    geometry: Option<TranscriptScrollbarGeometry>,
+    geometry: Option<ScrollbarGeometry>,
     dragging: bool,
     grab_offset: u16,
     metric_width: u16,
@@ -1351,7 +1346,7 @@ impl ChatState {
         viewport_rows: usize,
         top: AnchorRow,
         anchor: TranscriptAnchor,
-    ) -> Option<TranscriptScrollbarGeometry> {
+    ) -> Option<ScrollbarGeometry> {
         if track.width == 0 || track.height == 0 || self.transcript_scrollbar_modal_blocked() {
             self.transcript_scrollbar.clear_geometry();
             return None;
@@ -1378,40 +1373,7 @@ impl ChatState {
         } else {
             raw_scroll.min(max_scroll)
         };
-        let track_height = usize::from(track.height);
-        let thumb_height = if max_scroll == 0 {
-            track_height
-        } else {
-            let proportional = (u64::from(track.height)
-                .saturating_mul(u64::try_from(viewport_rows).unwrap_or(u64::MAX))
-                / u64::try_from(total_rows).unwrap_or(u64::MAX))
-            .max(1);
-            usize::try_from(proportional)
-                .unwrap_or(track_height)
-                .min(track_height)
-        };
-        let travel = track_height.saturating_sub(thumb_height);
-        let thumb_offset = if max_scroll == 0 {
-            0
-        } else {
-            (u64::try_from(travel)
-                .unwrap_or(u64::MAX)
-                .saturating_mul(u64::try_from(scroll).unwrap_or(u64::MAX))
-                / u64::try_from(max_scroll).unwrap_or(u64::MAX)) as usize
-        };
-        let thumb = Rect::new(
-            track.x,
-            track
-                .y
-                .saturating_add(u16::try_from(thumb_offset).unwrap_or(u16::MAX)),
-            track.width,
-            u16::try_from(thumb_height).unwrap_or(track.height),
-        );
-        let geometry = TranscriptScrollbarGeometry {
-            track,
-            thumb,
-            max_scroll,
-        };
+        let geometry = scrollbar_geometry(track, total_rows, scroll, viewport_rows)?;
         self.transcript_scrollbar.geometry = Some(geometry);
         Some(geometry)
     }
@@ -2155,16 +2117,7 @@ pub(super) fn render_transcript(
     if let Some(geometry) =
         chat.update_transcript_scrollbar(track, content_width, viewport_height, top, chat.anchor)
     {
-        for row in track.y..track.bottom() {
-            let is_thumb = row >= geometry.thumb.y && row < geometry.thumb.bottom();
-            frame.buffer_mut()[(track.x, row)]
-                .set_symbol(if is_thumb { "▐" } else { "│" })
-                .set_style(Style::default().fg(if is_thumb {
-                    theme::ACCENT
-                } else {
-                    theme::BORDER
-                }));
-        }
+        render_scrollbar(frame, geometry);
     }
 }
 
@@ -2186,15 +2139,28 @@ fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> String {
         columns.push(chat.header_profile.clone());
         columns.join("  ")
     } else {
-        crate::usage_format::format_session_summary(
-            &chat.header_target,
-            chat.queued_prompts.len(),
-            now_epoch_seconds,
-            chat.turn_started_at_epoch_seconds,
-            chat.current_step_started_at_ms,
-            chat.session_activity(),
-            &chat.header_profile,
-        )
+        let mut columns = vec![chat.header_target.clone()];
+        if !chat.queued_prompts.is_empty() {
+            columns.push(format!("[Q {}]", chat.queued_prompts.len()));
+        }
+        columns.push(if !chat.activity_reachable {
+            "Unreachable".to_owned()
+        } else if chat.phase == super::WorkerPhase::Closed {
+            "Closed".to_owned()
+        } else if chat.phase == super::WorkerPhase::Closing {
+            "Closing".to_owned()
+        } else if !chat.pending_elicitations.is_empty() {
+            "Question".to_owned()
+        } else {
+            chat.session_activity().display_clock(
+                now_epoch_seconds,
+                chat.turn_started_at_epoch_seconds,
+                chat.current_step_started_at_ms,
+                chat.detailed_activity_clocks,
+            )
+        });
+        columns.push(chat.header_profile.clone());
+        columns.join("  ")
     };
     match (chat.anchor, chat.render_mode) {
         (TranscriptAnchor::Bottom, TranscriptRenderMode::Rich) => format!(" {summary} "),

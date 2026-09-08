@@ -5,12 +5,13 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "startup":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "advanced":{}, "startup":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
         }
         "startup" => json!({"enabled":true,"prompt":true,"profile":null,"target":null}),
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
+        "advanced" => json!({"detailed_activity_clocks":false}),
         "review" => {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
         }
@@ -96,6 +97,8 @@ pub(super) fn label(key: &str) -> String {
         "startup" => "New session defaults",
         "sessions_side" => "Session sidebar position",
         "spinner" => "Activity animation",
+        "advanced" => "Advanced",
+        "detailed_activity_clocks" => "Detailed activity clocks",
         "phone" => "Web access",
         "review" => "Code review",
         "profiles" => "Agent accounts",
@@ -248,6 +251,8 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "phone" => {
             "Web access changes take effect when the background server next starts. Remote access requires a certificate and key."
         }
+        "advanced" => "Optional diagnostics and display details for the activity surface.",
+        "detailed_activity_clocks" => "Show elapsed turn and tool clocks in session activity rows.",
         "bundles" => {
             "Projects can contain one or more repositories. Choose the main repository where the agent starts."
         }

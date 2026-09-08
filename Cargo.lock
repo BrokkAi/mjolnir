@@ -608,7 +608,6 @@ dependencies = [
  "brokk-mj-core",
  "chrono",
  "crossterm",
- "dirs",
  "png",
  "pulldown-cmark",
  "rat-event",
@@ -616,7 +615,6 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "textwrap",
  "tokio",
@@ -644,7 +642,6 @@ dependencies = [
  "http-body-util",
  "image",
  "libc",
- "qrcode",
  "rayon",
  "reedline",
  "reqwest 0.12.28",
@@ -675,7 +672,6 @@ dependencies = [
  "dirs",
  "flate2",
  "getrandom 0.3.4",
- "iana-time-zone",
  "libc",
  "proptest",
  "rayon",
@@ -743,7 +739,6 @@ dependencies = [
  "qrcode",
  "ratatui",
  "serde_json",
- "sha2 0.10.9",
 ]
 
 [[package]]

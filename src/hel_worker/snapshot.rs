@@ -352,6 +352,9 @@ pub struct RelayCursor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
     pub session_id: String,
+    /// Start of the latest turn, retained until its background work settles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_turn_started_at_ms: Option<i64>,
     /// Durable identity of this relay store, replaced by a fresh restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_id: Option<String>,
@@ -696,6 +699,8 @@ pub(crate) struct HandledRelayCommand {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RelaySnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) activity_turn_started_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) store_id: Option<String>,
     pub(crate) format_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -740,6 +745,7 @@ pub(crate) struct RelaySnapshot {
 impl RelaySnapshot {
     pub(crate) fn new(session_id: String) -> Self {
         Self {
+            activity_turn_started_at_ms: None,
             store_id: None,
             format_version: RELAY_STATE_VERSION,
             idle_since_ms: None,
@@ -776,6 +782,7 @@ impl RelaySnapshot {
 
     pub(crate) fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            activity_turn_started_at_ms: self.activity_turn_started_at_ms,
             store_id: self.store_id.clone(),
             session_id: self.session_id.clone(),
             idle_since_ms: self.idle_since_ms,
@@ -1297,6 +1304,7 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
                         bail!("queued command {command_id} is not a prompt");
                     };
                     snapshot.execution = RelayExecutionState::Running;
+                    snapshot.activity_turn_started_at_ms = Some(*started_at_ms);
                     snapshot.active_prompt = Some(StoredActiveRelayPrompt {
                         command_id: queued.command_id,
                         prompt,
@@ -1692,6 +1700,7 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
             snapshot.checkpoint_ready_digest = Some(event.digest.clone());
         }
         RelayObservation::HarnessTurnStarted { started_at_ms } => {
+            snapshot.activity_turn_started_at_ms = Some(*started_at_ms);
             snapshot.harness_turn = Some(StoredHarnessTurn {
                 started_at_ms: *started_at_ms,
                 first_ordinal: event.ordinal,
@@ -1725,6 +1734,7 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
             snapshot.execution = RelayExecutionState::Closing;
         }
         RelayObservation::Closed => {
+            snapshot.activity_turn_started_at_ms = None;
             snapshot.harness_turn = None;
             snapshot.execution = RelayExecutionState::Closed;
             snapshot.active_prompt = None;

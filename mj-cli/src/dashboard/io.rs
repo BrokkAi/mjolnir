@@ -134,9 +134,6 @@ pub(crate) enum DashboardIoUpdate {
         model: Option<String>,
         choices: mj_controller::hel_review_settings::ReviewCapabilityChoices,
     },
-    ReviewSettingsSaved {
-        result: std::result::Result<HelConfig, String>,
-    },
     SpinnerStyleSaved {
         result: std::result::Result<HelConfig, String>,
     },
@@ -885,20 +882,6 @@ pub(crate) fn spawn_spinner_style_save(
             .map(|(config, ())| config)
         },
         |result| DashboardIoUpdate::SpinnerStyleSaved { result },
-    )
-}
-
-pub(crate) fn spawn_review_settings_save(
-    review: hel::hel_config::ReviewConfig,
-    updates: UnboundedSender<DashboardIoUpdate>,
-    tracker: CriticalOperationTracker,
-) -> JoinHandle<()> {
-    spawn_critical_io(
-        tracker,
-        "saving review settings",
-        updates,
-        move || HelConfig::save_review(review),
-        |result| DashboardIoUpdate::ReviewSettingsSaved { result },
     )
 }
 
@@ -2047,22 +2030,6 @@ impl DashboardContext {
                     self.dashboard.finish_spinner_style_save();
                     self.dashboard
                         .set_failure_notice(format!("Could not save spinner style: {error}"));
-                }
-            },
-            DashboardIoUpdate::ReviewSettingsSaved { result } => match result {
-                Ok(config) => {
-                    self.review_discovery_cancel = None;
-                    self.controller.config = config.clone();
-                    self.dashboard.set_config(config);
-                    self.refresh_chat_context();
-                    self.dashboard.cancel_modal();
-                    self.dashboard
-                        .set_notice("Review settings saved; they apply to subsequent reviews.");
-                }
-                Err(error) => {
-                    self.dashboard.review_settings_save_failed(error.clone());
-                    self.dashboard
-                        .set_notice(format!("Could not save review settings: {error}"));
                 }
             },
             DashboardIoUpdate::ClipboardWritten(result) => {
