@@ -1,6 +1,10 @@
 //! Worker binary acquisition, profile staging, and worker installation.
 
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -688,6 +692,21 @@ pub enum WorkerBinaryAvailability {
     },
 }
 
+/// Sources captured before the daemon starts its managers and coordinators.
+///
+/// Local sources are copied into an immutable, content-addressed cache during
+/// capture. Remote sources retain only their URL, digest, and target triple;
+/// the network fetch still happens when a target is provisioned.
+#[derive(Debug)]
+struct WorkerBinarySourceSnapshot {
+    entries: HashMap<
+        (String, WorkerBinaryRequirement),
+        std::result::Result<WorkerBinaryAvailability, String>,
+    >,
+}
+
+static PINNED_WORKER_BINARY_SOURCES: OnceLock<WorkerBinarySourceSnapshot> = OnceLock::new();
+
 fn packaged_worker_binary_path(directory: &Path, triple: &str) -> PathBuf {
     directory.join(format!("mj-worker-{triple}"))
 }
@@ -802,10 +821,179 @@ fn select_sibling_worker(
     candidates.into_iter().find(|(path, _)| is_file(path))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum WorkerBinaryRequirement {
     PortableLinux,
     LocalHost,
+}
+
+impl WorkerBinarySourceSnapshot {
+    fn capture<F>(cache_root: &Path, resolve: F) -> Self
+    where
+        F: Fn(&str, WorkerBinaryRequirement) -> Result<WorkerBinaryAvailability>,
+    {
+        let mut entries = HashMap::new();
+        let mut local_cache = HashMap::<PathBuf, PathBuf>::new();
+        let architectures = [
+            (std::env::consts::ARCH, WorkerBinaryRequirement::LocalHost),
+            ("x86_64", WorkerBinaryRequirement::PortableLinux),
+            ("aarch64", WorkerBinaryRequirement::PortableLinux),
+        ];
+
+        for (arch, requirement) in architectures {
+            let pinned = match resolve(arch, requirement) {
+                Ok(WorkerBinaryAvailability::Local { path, source }) => {
+                    match local_cache.get(&path).cloned().map(Ok).unwrap_or_else(|| {
+                        copy_worker_source_to_cache(&path, cache_root).inspect(|cached| {
+                            local_cache.insert(path.clone(), cached.clone());
+                        })
+                    }) {
+                        Ok(cached) => Ok(WorkerBinaryAvailability::Local {
+                            path: cached,
+                            source,
+                        }),
+                        Err(error) => {
+                            let error = format!(
+                                "pin worker source {} for {arch} ({requirement:?}): {error:#}",
+                                path.display()
+                            );
+                            tracing::warn!(arch, requirement = ?requirement, error = %error);
+                            Err(error)
+                        }
+                    }
+                }
+                Ok(WorkerBinaryAvailability::Remote {
+                    url,
+                    sha256,
+                    triple,
+                }) => Ok(WorkerBinaryAvailability::Remote {
+                    url,
+                    sha256,
+                    triple,
+                }),
+                Err(error) => {
+                    let error = format!("{error:#}");
+                    tracing::debug!(
+                        arch,
+                        requirement = ?requirement,
+                        error = %error,
+                        "worker source was unavailable when the daemon started"
+                    );
+                    Err(error)
+                }
+            };
+            entries.insert((arch.to_owned(), requirement), pinned);
+        }
+
+        Self { entries }
+    }
+
+    fn resolve(
+        &self,
+        arch: &str,
+        requirement: WorkerBinaryRequirement,
+    ) -> Result<WorkerBinaryAvailability> {
+        let Some(source) = self.entries.get(&(arch.to_owned(), requirement)) else {
+            bail!(
+                "worker source for {arch} ({requirement:?}) was not captured when the daemon started"
+            );
+        };
+        match source {
+            Ok(availability) => Ok(availability.clone()),
+            Err(error) => bail!(
+                "worker source for {arch} ({requirement:?}) was unavailable when the daemon started; install it and restart the daemon to retry: {error}"
+            ),
+        }
+    }
+}
+
+/// Capture the worker sources used by this daemon before its asynchronous
+/// managers start. Missing sources are retained as per-architecture errors so
+/// an unused architecture does not prevent daemon startup.
+pub fn pin_worker_binary_sources() -> Result<()> {
+    if PINNED_WORKER_BINARY_SOURCES.get().is_some() {
+        return Ok(());
+    }
+    let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
+    let cache_root = data_dir().join("workers").join("pinned");
+    let snapshot = WorkerBinarySourceSnapshot::capture(&cache_root, |arch, requirement| {
+        worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file())
+    });
+    // The daemon boot path calls this once. If a second caller races it, keep
+    // the first complete snapshot and never replace paths it may already use.
+    let _ = PINNED_WORKER_BINARY_SOURCES.set(snapshot);
+    Ok(())
+}
+
+fn copy_worker_source_to_cache(source: &Path, cache_root: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(cache_root)
+        .with_context(|| format!("create pinned worker cache {}", cache_root.display()))?;
+    let mut input =
+        File::open(source).with_context(|| format!("open worker source {}", source.display()))?;
+    let metadata = input
+        .metadata()
+        .with_context(|| format!("stat worker source {}", source.display()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(cache_root)
+        .with_context(|| format!("create pinned worker staging file {}", cache_root.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let count = input
+            .read(&mut buffer)
+            .with_context(|| format!("read worker source {}", source.display()))?;
+        if count == 0 {
+            break;
+        }
+        temporary
+            .write_all(&buffer[..count])
+            .with_context(|| format!("copy worker source {}", source.display()))?;
+        digest.update(&buffer[..count]);
+    }
+    temporary
+        .as_file_mut()
+        .sync_all()
+        .with_context(|| format!("flush pinned worker source {}", source.display()))?;
+    std::fs::set_permissions(temporary.path(), metadata.permissions())
+        .with_context(|| format!("preserve permissions for {}", source.display()))?;
+    let digest = format!("{:x}", digest.finalize());
+    publish_cached_worker(temporary, cache_root, &digest)
+}
+
+/// Publish one immutable cache artifact. persist_noclobber makes the final
+/// publication atomic and never replaces an artifact another daemon may have
+/// already captured.
+fn publish_cached_worker(
+    temporary: tempfile::NamedTempFile,
+    cache_root: &Path,
+    digest: &str,
+) -> Result<PathBuf> {
+    let directory = cache_root.join(digest);
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("create pinned worker cache {}", directory.display()))?;
+    let destination = directory.join("hel");
+    if destination.is_file() {
+        return Ok(destination);
+    }
+    match temporary.persist_noclobber(&destination) {
+        Ok(_) => {
+            #[cfg(unix)]
+            File::open(&directory)
+                .and_then(|directory| directory.sync_all())
+                .with_context(|| format!("flush pinned worker cache {}", directory.display()))?;
+            Ok(destination)
+        }
+        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
+            if destination.is_file() {
+                Ok(destination)
+            } else {
+                Err(error.error).with_context(|| {
+                    format!("publish pinned worker artifact {}", destination.display())
+                })
+            }
+        }
+        Err(error) => Err(error.error)
+            .with_context(|| format!("publish pinned worker artifact {}", destination.display())),
+    }
 }
 
 /// Find a worker source without downloading it.
@@ -822,6 +1010,9 @@ fn worker_binary_for_arch(
     arch: &str,
     requirement: WorkerBinaryRequirement,
 ) -> Result<WorkerBinaryAvailability> {
+    if let Some(snapshot) = PINNED_WORKER_BINARY_SOURCES.get() {
+        return snapshot.resolve(arch, requirement);
+    }
     let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
     worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file())
 }
@@ -1042,17 +1233,25 @@ fn target_architecture(
 
 fn download_worker(url: &str, expected_sha256: &str, triple: &str) -> Result<PathBuf> {
     validate_worker_sha256(expected_sha256)?;
-    let directory = data_dir()
-        .join("workers")
-        .join(env!("CARGO_PKG_VERSION"))
-        .join(triple);
-    std::fs::create_dir_all(&directory)?;
-    let destination = directory.join("hel");
+    let digest = expected_sha256.to_ascii_lowercase();
+    let directory = data_dir().join("workers").join("pinned");
+    let destination = directory.join(&digest).join("hel");
+    std::fs::create_dir_all(destination.parent().unwrap_or(&directory))?;
     if destination.is_file() {
-        let bytes = std::fs::read(&destination)?;
+        let bytes = std::fs::read(&destination).with_context(|| {
+            format!(
+                "read cached worker for {triple} from {}",
+                destination.display()
+            )
+        })?;
         if format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(expected_sha256) {
             return Ok(destination);
         }
+        bail!(
+            "content-addressed worker cache {} does not match {} checksum",
+            destination.display(),
+            expected_sha256
+        );
     }
     let bytes = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -1065,18 +1264,16 @@ fn download_worker(url: &str, expected_sha256: &str, triple: &str) -> Result<Pat
     if !actual.eq_ignore_ascii_case(expected_sha256) {
         bail!("downloaded worker checksum mismatch: expected {expected_sha256}, got {actual}");
     }
+    std::fs::create_dir_all(&directory)?;
     let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
     std::io::Write::write_all(&mut temporary, &bytes)?;
     temporary.as_file_mut().sync_all()?;
-    temporary
-        .persist(&destination)
-        .map_err(|error| error.error)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
     }
-    Ok(destination)
+    publish_cached_worker(temporary, &directory, &digest)
 }
 
 fn validate_worker_sha256(expected_sha256: &str) -> Result<()> {
@@ -2152,7 +2349,9 @@ fn worker_binary_refresh_plan(
     // materializes /proc/self/exe and can copy hundreds of megabytes; target
     // lists are assembled on UI/event loops, so leave refresh disabled until
     // the next controller start rather than doing that work here.
-    if !std::env::current_exe().is_ok_and(|path| path.is_file()) {
+    if PINNED_WORKER_BINARY_SOURCES.get().is_none()
+        && !std::env::current_exe().is_ok_and(|path| path.is_file())
+    {
         return Ok(None);
     }
     let requirement = if matches!(locator, hel_targets::TargetLocator::LocalBare { .. }) {
@@ -2619,6 +2818,158 @@ mod tests {
         assert_eq!(
             packaged_worker_binary_path(directory, "aarch64-unknown-linux-musl"),
             directory.join("mj-worker-aarch64-unknown-linux-musl")
+        );
+    }
+
+    #[test]
+    fn pinned_snapshot_keeps_native_and_portable_sources_stable() {
+        let directory = tempfile::tempdir().unwrap();
+        let native = directory.path().join("native-worker");
+        let x86 = directory.path().join("x86-worker");
+        let arm = directory.path().join("arm-worker");
+        std::fs::write(&native, b"native bytes").unwrap();
+        std::fs::write(&x86, b"x86 bytes").unwrap();
+        std::fs::write(&arm, b"arm bytes").unwrap();
+        let cache = directory.path().join("cache");
+        let snapshot = WorkerBinarySourceSnapshot::capture(&cache, |arch, requirement| {
+            let path = match requirement {
+                WorkerBinaryRequirement::LocalHost => &native,
+                WorkerBinaryRequirement::PortableLinux if arch == "x86_64" => &x86,
+                WorkerBinaryRequirement::PortableLinux => &arm,
+            };
+            Ok(WorkerBinaryAvailability::Local {
+                path: path.clone(),
+                source: format!("{arch}-{requirement:?}"),
+            })
+        });
+
+        let native = snapshot
+            .resolve(std::env::consts::ARCH, WorkerBinaryRequirement::LocalHost)
+            .unwrap();
+        let x86 = snapshot
+            .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
+            .unwrap();
+        let arm = snapshot
+            .resolve("aarch64", WorkerBinaryRequirement::PortableLinux)
+            .unwrap();
+        let WorkerBinaryAvailability::Local { path: native, .. } = native else {
+            panic!("native source should be local");
+        };
+        let WorkerBinaryAvailability::Local { path: x86, .. } = x86 else {
+            panic!("x86 source should be local");
+        };
+        let WorkerBinaryAvailability::Local { path: arm, .. } = arm else {
+            panic!("arm source should be local");
+        };
+        assert_eq!(std::fs::read(native).unwrap(), b"native bytes");
+        assert_eq!(std::fs::read(x86).unwrap(), b"x86 bytes");
+        assert_eq!(std::fs::read(arm).unwrap(), b"arm bytes");
+    }
+
+    #[test]
+    fn pinned_snapshot_survives_source_replacement_and_missing_candidate_install() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("worker");
+        std::fs::write(&source, b"before").unwrap();
+        let cache = directory.path().join("cache");
+        let resolve_source = |_: &str, _: WorkerBinaryRequirement| {
+            Ok(WorkerBinaryAvailability::Local {
+                path: source.clone(),
+                source: "test source".into(),
+            })
+        };
+        let pinned = WorkerBinarySourceSnapshot::capture(&cache, resolve_source);
+
+        std::fs::write(&source, b"in-place mutation").unwrap();
+        let WorkerBinaryAvailability::Local { path, .. } = pinned
+            .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
+            .unwrap()
+        else {
+            panic!("source should be local");
+        };
+        assert_eq!(std::fs::read(path).unwrap(), b"before");
+
+        let replacement = directory.path().join("replacement");
+        std::fs::write(&replacement, b"after").unwrap();
+        std::fs::rename(replacement, &source).unwrap();
+        let WorkerBinaryAvailability::Local { path, .. } = pinned
+            .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
+            .unwrap()
+        else {
+            panic!("source should be local");
+        };
+        assert_eq!(std::fs::read(path).unwrap(), b"before");
+        let fresh_replaced = WorkerBinarySourceSnapshot::capture(&cache, resolve_source);
+        let WorkerBinaryAvailability::Local { path, .. } = fresh_replaced
+            .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
+            .unwrap()
+        else {
+            panic!("source should be local");
+        };
+        assert_eq!(std::fs::read(path).unwrap(), b"after");
+
+        let missing = directory.path().join("missing-worker");
+        let missing_snapshot = WorkerBinarySourceSnapshot::capture(&cache, {
+            let missing = missing.clone();
+            move |_: &str, _: WorkerBinaryRequirement| {
+                if missing.is_file() {
+                    Ok(WorkerBinaryAvailability::Local {
+                        path: missing.clone(),
+                        source: "new source".into(),
+                    })
+                } else {
+                    Err(anyhow::anyhow!("candidate is unavailable"))
+                }
+            }
+        });
+        std::fs::write(&missing, b"now installed").unwrap();
+        assert!(
+            missing_snapshot
+                .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
+                .is_err()
+        );
+        let fresh_snapshot = WorkerBinarySourceSnapshot::capture(&cache, {
+            let missing = missing.clone();
+            move |_: &str, _: WorkerBinaryRequirement| {
+                Ok(WorkerBinaryAvailability::Local {
+                    path: missing.clone(),
+                    source: "new source".into(),
+                })
+            }
+        });
+        assert!(
+            fresh_snapshot
+                .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
+                .is_ok()
+        );
+
+        let remote_url = std::cell::RefCell::new("https://old.example/{target}".to_owned());
+        let remote_snapshot = WorkerBinarySourceSnapshot::capture(
+            &directory.path().join("remote-cache"),
+            |arch, _| {
+                Ok(WorkerBinaryAvailability::Remote {
+                    url: remote_url.borrow().replace("{target}", arch),
+                    sha256: "a".repeat(64),
+                    triple: format!("{arch}-unknown-linux-musl"),
+                })
+            },
+        );
+        *remote_url.borrow_mut() = "https://new.example/{target}".into();
+        let WorkerBinaryAvailability::Remote { url, .. } = remote_snapshot
+            .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
+            .unwrap()
+        else {
+            panic!("source should be remote");
+        };
+        assert_eq!(url, "https://old.example/x86_64");
+
+        let blocked_cache = directory.path().join("blocked-cache");
+        std::fs::write(&blocked_cache, b"not a directory").unwrap();
+        let failed_snapshot = WorkerBinarySourceSnapshot::capture(&blocked_cache, resolve_source);
+        assert!(
+            failed_snapshot
+                .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
+                .is_err()
         );
     }
 

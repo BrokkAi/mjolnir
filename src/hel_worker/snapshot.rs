@@ -442,9 +442,10 @@ impl RelayOperationalState {
     /// that replaces a worker in place has to wait for this. Every way the
     /// session can still be holding work is listed here, and each is a
     /// separate fact: the agent can be mid-turn, the harness can have started
-    /// a turn of its own, a terminal or a command it launched can still be
-    /// running, a prompt can be queued behind the current one, a user shell
-    /// can be open, and a checkpoint barrier can be waiting to capture.
+    /// a turn of its own, a foreground tool, a terminal or a command it
+    /// launched can still be running, a prompt can be queued behind the
+    /// current one, a user shell can be open, and a checkpoint barrier can be
+    /// waiting to capture.
     #[must_use]
     pub fn is_quiet(&self) -> bool {
         self.execution == RelayExecutionState::Idle
@@ -454,6 +455,7 @@ impl RelayOperationalState {
             && self.queued_prompts.is_empty()
             && self.active_user_shells.is_empty()
             && self.active_agent_terminals.is_empty()
+            && self.foreground_tool_started_at_ms.is_none()
             && self.background_commands.is_empty()
             && self.checkpoint_barrier.is_none()
     }
@@ -1934,6 +1936,10 @@ mod tests {
                         command: "sleep 600".into(),
                     }];
                 }),
+            ),
+            (
+                "a foreground tool is still in progress",
+                (|state| state.foreground_tool_started_at_ms = Some(1)),
             ),
             (
                 "a checkpoint barrier is waiting",

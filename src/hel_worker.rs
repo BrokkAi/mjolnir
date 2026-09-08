@@ -4753,23 +4753,85 @@ mod tests {
     fn an_unsettled_tool_call_is_foreground_work_even_without_a_turn_marker() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
 
         relay.record_session_update(tool_call_update()).unwrap();
+        let state = relay.operational_state();
         assert!(
-            relay
-                .operational_state()
-                .foreground_tool_started_at_ms
-                .is_some(),
+            state.foreground_tool_started_at_ms.is_some(),
             "a pending tool is positive foreground-work evidence"
+        );
+        assert!(
+            !state.is_quiet(),
+            "a pending foreground tool blocks replacement"
         );
 
         relay
             .record_session_update(exec_card("call-1", &["true"], Some(0)))
             .unwrap();
+        let state = relay.operational_state();
         assert_eq!(
-            relay.operational_state().foreground_tool_started_at_ms,
-            None,
+            state.foreground_tool_started_at_ms, None,
             "a settled tool no longer overrides background work"
+        );
+        assert!(
+            state.is_quiet(),
+            "a settled foreground tool permits replacement"
+        );
+    }
+
+    #[test]
+    fn completed_subagent_tool_update_keeps_a_parent_prompt_busy() {
+        use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        submit_relay(&mut relay, "parent-prompt", prompt("keep working"));
+        assert_eq!(
+            relay.claim_pending_commands(true).unwrap()[0].command_id,
+            "parent-prompt"
+        );
+
+        let mut subagent = ToolCall::new("m4_csharp", "Start subagent m4_csharp");
+        subagent.status = ToolCallStatus::Completed;
+        relay
+            .record_session_update(SessionUpdate::ToolCall(subagent))
+            .unwrap();
+
+        let state = relay.operational_state();
+        assert_eq!(
+            state
+                .active_prompt
+                .as_ref()
+                .map(|prompt| prompt.command_id.as_str()),
+            Some("parent-prompt")
+        );
+        assert!(state.harness_turn.is_none());
+        assert!(!state.is_quiet(), "the parent prompt is still in flight");
+
+        relay
+            .record_command_completed(
+                "parent-prompt",
+                RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                },
+            )
+            .unwrap();
+        let state = relay.operational_state();
+        assert!(state.active_prompt.is_none());
+        assert!(state.harness_turn.is_none());
+        assert!(
+            state.is_quiet(),
+            "prompt completion releases the busy guard"
         );
     }
 

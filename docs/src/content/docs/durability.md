@@ -196,15 +196,21 @@ flow in [Troubleshooting](/troubleshooting/).
 
 ## Upgrades wait for a quiet worker
 
-After the Mjolnir binary changes, the daemon compares each connected worker
-with the worker build it would install. An outdated worker is replaced in place
+At launch, the daemon captures the available worker binaries. It uses those
+same builds for new sessions, recovery, and upgrades until it restarts; rebuilding
+or replacing files on disk does not change a running daemon's workers. Restart
+the daemon to adopt newly installed worker builds.
+
+The daemon compares each connected worker with its captured build. An outdated
+worker is replaced in place
 only at a quiet moment: no active prompt, autonomous harness turn, queued
-prompt, user shell, agent terminal, background command, or checkpoint barrier.
+prompt, foreground tool, user shell, agent terminal, background command, or
+checkpoint barrier.
 
 Replacing a worker also ends its ACP bridge, so a session that never becomes
 quiet keeps its current worker rather than sacrificing live work. Failed
 upgrades retry with bounded backoff. The next stopped-session resume always
-provisions a fresh target and installs the current worker.
+provisions a fresh target and installs the daemon's captured worker.
 
 Relay protocols and archive schemas are versioned. A build that cannot safely
 understand a stored format reports an explicit compatibility error instead of

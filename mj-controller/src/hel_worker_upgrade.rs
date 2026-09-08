@@ -33,12 +33,6 @@ const WORKER_UPGRADE_RETRY_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// blipping is still probed, just rarely.
 const MAX_WORKER_UPGRADE_RETRY_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
 
-/// How long a worker that is already the current build stays trusted before
-/// the binary this controller would install is resolved again. The daemon
-/// normally restarts when it is upgraded, but the binary on disk can also be
-/// replaced under a daemon that keeps running.
-const INSTALLED_BUILD_FRESHNESS: Duration = Duration::from_secs(10 * 60);
-
 /// Upper bound on one upgrade. Stopping, installing, starting and waiting for
 /// a recovered journal all happen inside it; past this the attempt is a
 /// reported failure rather than a session whose upgrade never ends.
@@ -227,11 +221,9 @@ impl WorkerUpgradeCoordinator {
 /// What the coordinator remembers about one session between observations.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PolicyState {
-    /// The build an attempt found this session's worker already running, and
-    /// when. While the observed build still matches it, no attempt is needed
-    /// and nothing has to be hashed.
+    /// The build proved current for this coordinator. While the observed
+    /// build still matches it, no attempt is needed and nothing is hashed.
     current_build: Option<String>,
-    current_build_at: Option<DateTime<Utc>>,
     /// An attempt is running. The gate enforces this too, but it is shared, so
     /// the policy keeps its own record of what it started.
     attempt_in_flight: bool,
@@ -250,7 +242,7 @@ impl PolicyState {
         {
             return false;
         }
-        if self.worker_is_known_current(observation.worker_build.as_deref(), now) {
+        if self.worker_is_known_current(observation.worker_build.as_deref()) {
             return false;
         }
         self.failed_at.is_none_or(|failed_at| {
@@ -266,18 +258,14 @@ impl PolicyState {
         })
     }
 
-    /// Whether a previous attempt proved this exact build current, recently
-    /// enough to still believe it. A worker reporting no build is never
-    /// current: it predates the field, so it predates this controller.
-    fn worker_is_known_current(&self, worker_build: Option<&str>, now: DateTime<Utc>) -> bool {
-        let (Some(observed), Some(current), Some(checked_at)) = (
-            worker_build,
-            self.current_build.as_deref(),
-            self.current_build_at,
-        ) else {
+    /// Whether a previous attempt proved this exact build current. A worker
+    /// reporting no build is never current: it predates the field, so it
+    /// predates this controller.
+    fn worker_is_known_current(&self, worker_build: Option<&str>) -> bool {
+        let (Some(observed), Some(current)) = (worker_build, self.current_build.as_deref()) else {
             return false;
         };
-        observed == current && !elapsed_at_least(checked_at, now, INSTALLED_BUILD_FRESHNESS)
+        observed == current
     }
 
     /// Fold in what one observation proves, before deciding whether to act.
@@ -317,19 +305,17 @@ impl PolicyState {
                 self.failed_at = None;
                 self.consecutive_failures = 0;
                 self.current_build = outcome.build().map(str::to_owned);
-                self.current_build_at = Some(now);
             }
             Ok(outcome @ WorkerUpgradeOutcome::Upgraded { .. }) => {
                 // The worker this session runs now, so the next observation
                 // reporting it needs no attempt - and, through `observe`,
                 // clears the cooldown below.
                 self.current_build = outcome.build().map(str::to_owned);
-                self.current_build_at = Some(now);
                 // An upgrade that did not take would otherwise restart this
-                // worker every time the freshness window expired, forever. The
-                // same widening cooldown a failure gets bounds that; a worker
-                // that comes back reporting the installed build releases it
-                // immediately, so a healthy upgrade pays nothing.
+                // worker on every sync tick, forever. The same widening
+                // cooldown a failure gets bounds that; a worker that comes
+                // back reporting the installed build releases it immediately,
+                // so a healthy upgrade pays nothing.
                 self.consecutive_failures = self.consecutive_failures.saturating_add(1);
                 self.failed_at = Some(now);
             }
@@ -477,21 +463,26 @@ mod tests {
         assert!(!policy.due(&observation(Some("build-a"), true), now));
     }
 
-    /// A worker an attempt proved current stops being probed, until that proof
-    /// is old enough that the binary on disk may have moved on.
+    /// A worker an attempt proved current stays trusted for the coordinator's
+    /// lifetime, while a different observed build is checked immediately.
     #[test]
-    fn a_worker_proved_current_stops_being_probed_until_the_proof_goes_stale() {
+    fn a_worker_proved_current_stays_trusted_for_coordinator_lifetime() {
         let now = Utc::now();
         let mut policy = PolicyState::default();
         policy.record(&success(current("build-a")), now);
 
         assert!(!policy.due(&observation(Some("build-a"), true), now));
         assert!(
+            !policy.due(
+                &observation(Some("build-a"), true),
+                now + chrono::Duration::days(2)
+            ),
+            "the launched build remains trusted for the coordinator lifetime"
+        );
+        assert!(
             policy.due(&observation(Some("build-b"), true), now),
             "a different build is outdated however recently the last one was checked"
         );
-        let stale = now + chrono::Duration::from_std(INSTALLED_BUILD_FRESHNESS).unwrap();
-        assert!(policy.due(&observation(Some("build-a"), true), stale));
     }
 
     /// A failed upgrade waits, and waits longer each time, so a broken target

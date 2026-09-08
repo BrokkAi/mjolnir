@@ -3723,6 +3723,11 @@ pub(crate) async fn run_daemon_process() -> Result<()> {
 }
 
 async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
+    // Freeze worker sources before any session can be created or upgraded.
+    // Copying binaries belongs on a blocking task, never the runtime event loop.
+    tokio::task::spawn_blocking(mj_controller::hel_controller::pin_worker_binary_sources)
+        .await
+        .context("worker source snapshot task failed")??;
     Controller::recover_config_id_rename()?;
     HelConfig::migrate_legacy_localhost_target()?;
     let config = HelConfig::load()?;
