@@ -398,14 +398,26 @@ async fn refresh_profile(
             error: None,
             refreshed_at_epoch_seconds,
         }),
-        HarnessKind::Muse => Ok(ProfileQuota {
-            profile_id: profile_id.clone(),
-            harness,
-            windows: Vec::new(),
-            extra: Some("Quota unavailable".into()),
-            error: None,
-            refreshed_at_epoch_seconds,
-        }),
+        HarnessKind::Muse => crate::muse_usage::query(&source_home, &environment)
+            .await
+            .map(|windows| ProfileQuota {
+                profile_id: profile_id.clone(),
+                harness,
+                windows: windows
+                    .into_iter()
+                    .map(|window| QuotaWindow {
+                        label: window.label,
+                        remaining_percent: Some(window.remaining_percent),
+                        used: None,
+                        limit: None,
+                        resets: window.resets_at.and_then(format_reset_local_seconds),
+                        resets_at_epoch_seconds: window.resets_at,
+                    })
+                    .collect(),
+                extra: None,
+                error: None,
+                refreshed_at_epoch_seconds,
+            }),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
         profile_id,
@@ -1905,6 +1917,89 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
             report.error.as_deref(),
             Some("Grok Build executable not found")
         );
+    }
+
+    #[tokio::test]
+    async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let credentials = br#"{"providers":{"meta":{"access_token":"profile-token"}}}"#;
+        std::fs::write(directory.path().join("auth.json"), credentials).unwrap();
+        let rejected = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let app = Router::new()
+            .route(
+                "/muse-code/key",
+                post(
+                    |State(rejected): State<Arc<std::sync::atomic::AtomicBool>>,
+                     headers: HeaderMap,
+                     Json(body): Json<Value>| async move {
+                        assert_eq!(headers["authorization"], "Bearer profile-token");
+                        assert_eq!(body, serde_json::json!({"onboard": false}));
+                        if rejected.load(std::sync::atomic::Ordering::SeqCst) {
+                            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({})));
+                        }
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "api_key": "must-not-be-persisted",
+                                "subs_usage": {
+                                    "weekly": {"used_percent": 1, "resets_at": 1789344000},
+                                    "window": {
+                                        "used_percent": 3,
+                                        "window_duration_mins": 300,
+                                        "resets_at": 1788890595
+                                    }
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(rejected.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let request = QuotaRefreshRequest {
+            profile_id: "muse".into(),
+            harness: HarnessKind::Muse,
+            source_home: directory.path().to_path_buf(),
+            environment: BTreeMap::from([(
+                "TBH_MINT_BASE_URL".into(),
+                format!("http://{address}"),
+            )]),
+            cwd: directory.path().to_path_buf(),
+        };
+        let mut manager = QuotaManager::default();
+        manager
+            .refresh_profiles(vec![request.clone()], |_| async {})
+            .await;
+        assert!(manager.reports()["muse"].error.is_some());
+        rejected.store(false, std::sync::atomic::Ordering::SeqCst);
+        manager
+            .refresh_profiles(vec![request], |outcome| async move {
+                assert!(!outcome.credentials_changed);
+            })
+            .await;
+        let report = &manager.reports()["muse"];
+        assert_eq!(report.error, None);
+        assert_eq!(report.extra, None);
+        assert_eq!(report.weekly_window().unwrap().remaining_percent, Some(99));
+        assert_eq!(
+            report.five_hour_window().unwrap().remaining_percent,
+            Some(97)
+        );
+        assert_eq!(
+            report.weekly_window().unwrap().resets_at_epoch_seconds,
+            Some(1789344000)
+        );
+        assert!(report.weekly_window().unwrap().resets.is_some());
+        assert!(report.compact().contains("Week 99% left"));
+        assert_eq!(
+            std::fs::read(directory.path().join("auth.json")).unwrap(),
+            credentials
+        );
+        manager.shutdown().await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]
