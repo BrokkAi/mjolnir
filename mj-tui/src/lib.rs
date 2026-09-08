@@ -612,7 +612,7 @@ pub struct DashboardState {
     /// selects it.
     pub(crate) session_row_areas: Vec<(usize, Rect)>,
     pub(crate) project_heading_areas: Vec<(String, Rect)>,
-    /// Click targets for the three size controls in each support-pane title.
+    /// Click targets for the visible size controls in each support-pane title.
     pub(crate) pane_size_control_areas: Vec<(SupportPane, PaneSize, Rect)>,
     pub(crate) stopped_sessions_toggle_area: Option<Rect>,
     pub(crate) workspace_switcher_area: Option<Rect>,
@@ -1121,8 +1121,8 @@ impl DashboardState {
                 .find(|(_, _, area)| rect_contains(*area, mouse.column, mouse.row))
             {
                 if size == PaneSize::Maximized && !self.pane_maximize_enabled(pane) {
-                    // Keep the disabled control's hitbox consuming the click
-                    // so it cannot fall through to pane focus or row actions.
+                    // Defend against stale geometry if a resize arrives before
+                    // the next frame redraws the visible controls.
                     return DashboardAction::None;
                 }
                 self.set_pane_size(pane, size);

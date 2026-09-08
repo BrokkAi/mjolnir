@@ -13,7 +13,7 @@ Running Mj's tests must not leave detached controller processes behind or delete
 - [x] (2026-09-08) Push Muse as d324aaa0, then implement shared fixture ownership, process-exit completion for CLI stop, and bounded stop acknowledgement.
 - [x] (2026-09-08) Focused logging (normal and panic cleanup), concurrent-start/store-divergence, and PTY tests pass.
 - [x] (2026-09-08) Complete tests and Clippy pass, including bounded stop acknowledgement; final focused tests cover real PTY panic unwinding. Three repeated runs of each panic regression pass.
-- [ ] Commit, merge upstream, and push the cleanup fix separately.
+- [x] (2026-09-08) Commit cleanup as 63b2ec37, merge upstream, and push separately to origin/master.
 
 ## Surprises & Discoveries
 
@@ -51,4 +51,4 @@ Tests use isolated temporary homes. Preserve those homes when cleanup cannot pro
 
 ## Outcomes & Retrospective
 
-Diagnosis and authorized host cleanup are complete. Muse was pushed separately as d324aaa0. The source fix passes complete tests, Clippy, focused integration checks, and three repeated logging/PTY panic-cleanup runs. A read-only review confirmed fixture ownership, PTY destruction order, and portability of the lock/process checks. Seven additional confirmed deleted-fixture daemons were cleaned up, bringing the cleanup total to 97; task usage was roughly 7,600 afterward. The fix is ready for its separate commit and push.
+Diagnosis and authorized host cleanup are complete. Muse was pushed separately as d324aaa0. The source fix passes complete tests, Clippy, focused integration checks, and three repeated logging/PTY panic-cleanup runs. A read-only review confirmed fixture ownership, PTY destruction order, and portability of the lock/process checks. Seven additional confirmed deleted-fixture daemons were cleaned up, bringing the cleanup total to 97; task usage was roughly 7,600 afterward. The fix was committed and pushed separately as 63b2ec37; upstream was merged before the subsequent sidebar change.
