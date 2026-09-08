@@ -587,7 +587,10 @@ fn live_workspace_preview_terminates_without_reopening_the_fallback_dashboard() 
     wait_for_output(
         &mut master,
         &mut output,
-        b"No active sessions",
+        // Ratatui redraws only changed cells. The unchanged `o` and `s` in
+        // "No active sessions" remain on screen, while this changed span is
+        // emitted as one contiguous marker in the PTY stream.
+        b" active ",
         Instant::now() + TIMEOUT,
     );
     // PageDown and End are harmless even when there is no session to scroll.
