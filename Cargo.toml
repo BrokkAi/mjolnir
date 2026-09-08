@@ -101,6 +101,7 @@ regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+zstd = "0.13"
 serde_yaml = "0.9"
 sha2 = "0.10"
 similar = "2.7"

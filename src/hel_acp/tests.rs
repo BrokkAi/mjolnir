@@ -8,6 +8,33 @@ use agent_client_protocol::schema::v1::{
 };
 
 #[test]
+fn deepseek_new_session_sends_required_empty_mcp_list() {
+    let spec = LaunchSpec {
+        command: "dsh".into(),
+        args: vec!["--profile".into(), "acp".into()],
+        environment: BTreeMap::new(),
+        cwd: "/workspace/app".into(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Deepseek,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: StepClock::default(),
+    };
+    let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
+    assert_eq!(request.get("mcpServers"), Some(&serde_json::json!([])));
+    let resumed =
+        serde_json::to_value(resume_session_request(&spec, SessionId::from("native"))).unwrap();
+    assert!(
+        resumed.get("mcpServers").is_none(),
+        "resume must preserve the native server set"
+    );
+}
+
+#[test]
 fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
     let live_tool_calls = Mutex::new(BTreeSet::new());
     let metadata_only = SessionUpdate::ToolCallUpdate(

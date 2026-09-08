@@ -76,7 +76,7 @@ See [profiles and harnesses](/profiles/) for home directories, credential handli
 mj import <harness> (--session <uuid> | --latest) [options]
 ```
 
-`<harness>` is one of `claude`, `codex`, `kimi`, or `grok`. Native DeepSeek import is not available.
+`<harness>` is one of `claude`, `codex`, `kimi`, `grok`, `deepseek` (alias `dsh`), or `muse`.
 
 | Option | Meaning |
 | --- | --- |
@@ -173,6 +173,8 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `CLAUDE_CONFIG_DIR` | Claude Code home used by setup discovery and native import. |
 | `KIMI_CODE_HOME` | Kimi Code home used by setup discovery and native import. |
 | `GROK_HOME` | Grok Build home used by setup discovery and native import. |
+| `DSH_HOME` | DSH home used by setup discovery and native import. |
+| `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
 | `DSH_HOME` | DeepSeek Harness home used by setup discovery. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except `local-bare`. |
 | `GIT_SSH_COMMAND` | SSH command used by checkpoint/archive Git operations. |

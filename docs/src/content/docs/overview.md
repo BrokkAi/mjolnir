@@ -90,7 +90,7 @@ These are the integrations shipped with Mjolnir 2.x today:
 | Kimi Code | `kimi` | Yes | Yes | Yes | No |
 | Grok Build | `grok` | Yes | Yes | Yes | Yes |
 | DeepSeek Harness | `deepseek` | Yes | No subscription quota | Yes | No |
-| Muse Code | `muse` | Yes | Unavailable | Yes, same workspace path | Yes |
+| Muse Code | `muse` | Yes | Unavailable | Yes | Yes |
 
 “Native state” means Mjolnir can resume the harness's own session when the
 same harness is selected again. A cross-harness resume instead restores the

@@ -23,12 +23,10 @@ use mj_controller::hel_import::{
     BundleResolution, ClaudeImportRequest, ClaudeSessionSelection, ClaudeTranscript,
     CodexImportRequest, GrokImportRequest, ImportArchiveProgress, ImportControl,
     ImportedClaudeSession, KimiImportRequest, NativeImportRequest, SessionEditTargets,
-    claude_config_home, codex_config_home, grok_config_home, import_claude_session,
-    import_codex_session, import_grok_session, import_kimi_session,
-    import_native_session_with_control, import_safety_issues, kimi_config_home,
-    locate_claude_session, locate_codex_session, locate_grok_session, locate_kimi_session,
-    locate_native_session, read_native_transcript, resolve_bundle, scan_native_sessions,
-    session_edit_targets,
+    import_claude_session, import_codex_session, import_grok_session, import_kimi_session,
+    import_native_session_with_control, import_safety_issues, locate_claude_session,
+    locate_codex_session, locate_grok_session, locate_kimi_session, locate_native_session,
+    read_native_transcript, resolve_bundle, scan_native_sessions, session_edit_targets,
 };
 
 const IMPORT_CANCELLED_MESSAGE: &str = "Import cancelled; no Mjolnir files were changed.";
@@ -52,10 +50,15 @@ enum ImportCommand {
     Kimi(NativeImportArgs),
     /// Import a session created by vanilla Grok Build.
     Grok(NativeImportArgs),
+    /// Import a session created by DeepSeek Harness.
+    #[command(alias = "dsh")]
+    Deepseek(NativeImportArgs),
+    /// Import a session created by Muse Code.
+    Muse(NativeImportArgs),
 }
 
 /// The arguments every `mj import <harness>` subcommand takes. The harness is
-/// the subcommand name, so nothing else about the four differs.
+/// the subcommand name, so the remaining options are shared.
 #[derive(Debug, Args)]
 #[command(group(
     ArgGroup::new("import-session-selection")
@@ -91,6 +94,8 @@ impl ImportCommand {
             ImportCommand::Codex(args) => (HarnessKind::Codex, args),
             ImportCommand::Kimi(args) => (HarnessKind::Kimi, args),
             ImportCommand::Grok(args) => (HarnessKind::Grok, args),
+            ImportCommand::Deepseek(args) => (HarnessKind::Deepseek, args),
+            ImportCommand::Muse(args) => (HarnessKind::Muse, args),
         }
     }
 }
@@ -114,16 +119,7 @@ const fn import_label(harness: HarnessKind) -> &'static str {
 
 /// Where a harness keeps the sessions Mjolnir may read. Never modified.
 fn harness_config_home(harness: HarnessKind) -> Result<PathBuf> {
-    match harness {
-        HarnessKind::Muse => bail!("Muse Code native import is unavailable"),
-        HarnessKind::Claude => claude_config_home(),
-        HarnessKind::Codex => codex_config_home(),
-        HarnessKind::Kimi => kimi_config_home(),
-        HarnessKind::Grok => grok_config_home(),
-        HarnessKind::Deepseek => bail!(
-            "DeepSeek Harness sessions resume directly through ACP; native import is unavailable"
-        ),
-    }
+    mj_controller::hel_import::harness_config_home(harness)
 }
 
 /// The harness's own importer, already bound to the session that was located.
@@ -153,7 +149,31 @@ fn locate_for_import(
 ) -> Result<LocatedImport> {
     let archives = sessions_dir();
     Ok(match harness {
-        HarnessKind::Muse => bail!("Muse Code native import is unavailable"),
+        HarnessKind::Muse | HarnessKind::Deepseek => {
+            let source = locate_native_session(harness, &home, selection)?;
+            LocatedImport {
+                native_session_id: source.native_session_id.clone(),
+                source_path: source.source_path.clone(),
+                import: Box::new(move |config, state, transcript, bundle_id, title| {
+                    mj_controller::hel_import::import_native_session(
+                        config,
+                        state,
+                        NativeImportRequest {
+                            harness,
+                            harness_home: &home,
+                            native_session_id: &source.native_session_id,
+                            source_path: &source.source_path,
+                            transcript,
+                            bundle_id,
+                            profile_id: None,
+                            title,
+                            archive_directory: &archives,
+                        },
+                        None,
+                    )
+                }),
+            }
+        }
         HarnessKind::Claude => {
             let source = locate_claude_session(&home, selection)?;
             LocatedImport {
@@ -242,9 +262,6 @@ fn locate_for_import(
                 }),
             }
         }
-        HarnessKind::Deepseek => bail!(
-            "DeepSeek Harness sessions resume directly through ACP; native import is unavailable"
-        ),
     })
 }
 
@@ -785,7 +802,7 @@ mod tests {
         args.command.split()
     }
 
-    /// All four harnesses share one implementation, so each subcommand must
+    /// All harnesses share one implementation, so each subcommand must
     /// still name its own harness and take the same selection arguments.
     #[test]
     fn every_import_subcommand_names_its_harness_and_takes_the_same_arguments() {
@@ -794,6 +811,9 @@ mod tests {
             ("codex", HarnessKind::Codex),
             ("kimi", HarnessKind::Kimi),
             ("grok", HarnessKind::Grok),
+            ("deepseek", HarnessKind::Deepseek),
+            ("dsh", HarnessKind::Deepseek),
+            ("muse", HarnessKind::Muse),
         ] {
             let (harness, args) = parse_import(&[
                 "hel",

@@ -422,7 +422,9 @@ fn new_session_request(spec: &LaunchSpec, include_project_memory: bool) -> NewSe
     if include_project_memory {
         servers.extend(project_memory_mcp(spec));
     }
-    if servers.is_empty() {
+    // DSH's bundled ACP v1 server requires this field, including an empty
+    // array. Other bridges distinguish omission from an explicit MCP set.
+    if servers.is_empty() && spec.harness != HarnessKind::Deepseek {
         request
     } else {
         request.mcp_servers(servers)

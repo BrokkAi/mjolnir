@@ -543,9 +543,18 @@ fn restored_native_relative_path(
             rewritten.extend(components);
             Ok(rewritten)
         }
-        HarnessKind::Codex | HarnessKind::Deepseek | HarnessKind::Muse => {
-            Ok(relative_path.to_path_buf())
+        HarnessKind::Deepseek => {
+            if components.next() != Some(Component::Normal("sessions".as_ref()))
+                || components.next().is_none()
+            {
+                return Ok(relative_path.to_path_buf());
+            }
+            let mut rewritten = PathBuf::from("sessions");
+            rewritten.push(crate::hel_native::deepseek::project_key(target_cwd)?);
+            rewritten.extend(components);
+            Ok(rewritten)
         }
+        HarnessKind::Codex | HarnessKind::Muse => Ok(relative_path.to_path_buf()),
     }
 }
 
@@ -566,12 +575,24 @@ fn restored_native_artifact_bytes(
     target_cwd: Option<&Path>,
     harness_home: &Path,
 ) -> Result<Vec<u8>> {
-    if !matches!(harness, HarnessKind::Kimi | HarnessKind::Grok) {
-        return Ok(data.to_vec());
-    }
     let Some(target_cwd) = target_cwd else {
         return Ok(data.to_vec());
     };
+    if harness == HarnessKind::Deepseek
+        && crate::hel_native::deepseek::is_session_log(relative_path)
+    {
+        return crate::hel_native::deepseek::relocate(relative_path, data, target_cwd);
+    }
+    if harness == HarnessKind::Muse
+        && relative_path
+            .file_name()
+            .is_some_and(|name| name == "session.jsonl")
+    {
+        return crate::hel_native::muse::relocate(data, target_cwd);
+    }
+    if !matches!(harness, HarnessKind::Kimi | HarnessKind::Grok) {
+        return Ok(data.to_vec());
+    }
     if harness == HarnessKind::Grok {
         return if is_grok_session_summary(relative_path) {
             rewrite_grok_session_summary(data, target_cwd, harness_home)
@@ -1774,6 +1795,9 @@ pub fn collect_import_native_artifacts(
     session_id: &str,
     source_path: &Path,
 ) -> Result<Vec<NativeArtifact>> {
+    if harness == HarnessKind::Muse {
+        return collect_muse_import_artifacts(home, session_id, source_path);
+    }
     if harness != HarnessKind::Codex {
         return collect_native_artifacts(harness, home, session_id, false);
     }
@@ -1822,6 +1846,61 @@ pub fn collect_import_native_artifacts(
             .with_context(|| format!("read Codex rollout {}", source_path.display()))?,
         mode: file_mode(&metadata),
     }])
+}
+
+/// External Muse storage has a separate XDG root. Normalize the selected
+/// subtree into the same private layout used by ordinary worker checkpoints.
+fn collect_muse_import_artifacts(
+    home: &Path,
+    session_id: &str,
+    source_path: &Path,
+) -> Result<Vec<NativeArtifact>> {
+    validate_component(session_id, "Muse native session ID")?;
+    let sessions_root = crate::hel_native::muse_sessions_root(home)?;
+    let relative = source_path
+        .strip_prefix(&sessions_root)
+        .context("Muse session log is outside its native session root")?;
+    validate_relative_path(relative)?;
+    ensure_no_symlink_ancestors(&sessions_root, relative)?;
+    let directory = source_path
+        .parent()
+        .context("Muse session has no directory")?;
+    ensure!(
+        source_path
+            .file_name()
+            .is_some_and(|name| name == "session.jsonl")
+            && directory.file_name().is_some_and(|name| name == session_id),
+        "Muse native session ID does not match its source path"
+    );
+    let mut output = Vec::new();
+    collect_native_tree(
+        HarnessKind::Muse,
+        &sessions_root,
+        directory,
+        session_id,
+        false,
+        &mut CodexProbeContext::default(),
+        &mut output,
+    )?;
+    ensure!(
+        !output.is_empty(),
+        "Muse native session contains no durable artifacts"
+    );
+    let total = output
+        .iter()
+        .try_fold(0u64, |total, artifact| {
+            total.checked_add(artifact.data.len() as u64)
+        })
+        .context("Muse native artifact size overflow")?;
+    ensure!(
+        total <= MAX_NATIVE_TOTAL,
+        "Muse native session artifacts are too large"
+    );
+    for artifact in &mut output {
+        artifact.relative_path = Path::new(".data/muse/sessions").join(&artifact.relative_path);
+    }
+    output.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(output)
 }
 
 fn collect_kimi_registry_artifacts(
@@ -2034,8 +2113,8 @@ fn collect_native_tree(
         HarnessKind::Claude => inside || name == format!("{session_id}.jsonl"),
         HarnessKind::Kimi => inside && kimi_session_artifact(relative, session_id),
         HarnessKind::Grok => inside && grok_session_artifact(relative, session_id),
-        HarnessKind::Deepseek => inside && name.starts_with("session.jsonl"),
-        HarnessKind::Muse => inside,
+        HarnessKind::Deepseek => inside && crate::hel_native::deepseek::is_session_log(path),
+        HarnessKind::Muse => inside && name == "session.jsonl",
     };
     if !selected || is_secret_like_path(relative) {
         return Ok(());
@@ -3232,6 +3311,8 @@ mod tests {
         fs::create_dir_all(selected.join("subagent/child")).unwrap();
         fs::create_dir_all(root.join("other")).unwrap();
         fs::write(selected.join("session.jsonl"), vec![b'x'; 128 * 1024]).unwrap();
+        fs::write(selected.join("session.peer-history.sqlite3"), b"derived").unwrap();
+        fs::write(selected.join("runtime.lock"), b"ephemeral").unwrap();
         fs::write(
             selected.join("subagent/child/session.jsonl"),
             b"child history",
@@ -3268,6 +3349,45 @@ mod tests {
         assert!(
             collect_native_artifacts(HarnessKind::Muse, restored.path(), "missing", false).is_err()
         );
+    }
+
+    #[test]
+    fn muse_import_normalizes_selected_tree_to_worker_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("private/muse");
+        let root = home.join(".data/muse/sessions/2026/09/08");
+        let session = root.join(NATIVE);
+        fs::create_dir_all(session.join("subagent/child")).unwrap();
+        fs::create_dir_all(root.join("other")).unwrap();
+        fs::write(session.join("session.jsonl"), b"root").unwrap();
+        fs::write(session.join("subagent/child/session.jsonl"), b"child").unwrap();
+        fs::write(session.join("runtime.lock"), b"lock").unwrap();
+        fs::write(root.join("other/session.jsonl"), b"other").unwrap();
+        let artifacts = collect_import_native_artifacts(
+            HarnessKind::Muse,
+            &home,
+            NATIVE,
+            &session.join("session.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(
+            artifacts[0].relative_path,
+            PathBuf::from(format!(
+                ".data/muse/sessions/2026/09/08/{NATIVE}/session.jsonl"
+            ))
+        );
+        assert_eq!(artifacts[1].data, b"child");
+        assert!(
+            collect_import_native_artifacts(
+                HarnessKind::Muse,
+                &home,
+                "wrong",
+                &session.join("session.jsonl")
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(session.join("session.jsonl")).unwrap(), b"root");
     }
 
     #[test]
@@ -3727,7 +3847,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires pinned MJ_MUSE_ACP_TEST_BINARY, MJ_MUSE_TEST_BINARY and authenticated MJ_MUSE_TEST_HOME; uses two provider turns"]
-    async fn live_muse_checkpoint_restore_preserves_native_context_and_queued_work() {
+    async fn live_muse_checkpoint_restore_relocates_native_context_and_preserves_queued_work() {
         let required_path = |name| PathBuf::from(std::env::var_os(name).expect(name));
         let adapter = required_path("MJ_MUSE_ACP_TEST_BINARY");
         let muse = required_path("MJ_MUSE_TEST_BINARY");
@@ -3779,13 +3899,19 @@ mod tests {
         );
         let restored_home = temp.path().join("restored/muse");
         let restored_relay = temp.path().join("restored-relay");
+        let restored_workspace = temp.path().join("restored-workspace");
+        fs::create_dir_all(&restored_workspace).unwrap();
+        git(
+            &restored_workspace,
+            &["clone", "--quiet", cwd.to_str().unwrap(), "app"],
+        );
         restore_checkpoint(
             &CheckpointRestoreSpec {
                 archive_path: spec.output_path.clone(),
-                workspace_root: spec.workspace_root.clone(),
+                workspace_root: restored_workspace.clone(),
                 relay_root: restored_relay.clone(),
                 harness_home: restored_home.clone(),
-                restore_repositories: false,
+                restore_repositories: true,
                 restore_native: true,
                 discard_queued_prompts: false,
                 primary_repository_root: None,
@@ -3807,7 +3933,7 @@ mod tests {
         )
         .unwrap();
         let (resumed_id, reply) = crate::hel_acp::muse_tests::native_muse_turn(
-            &adapter, &muse, &restored_home, &cwd, Some(session_id.clone()),
+            &adapter, &muse, &restored_home, &restored_workspace.join("app"), Some(session_id.clone()),
             "What exact token did I ask you to remember in the previous turn? Reply only with the token. Do not use tools.",
         ).await;
         assert_eq!(resumed_id, session_id);

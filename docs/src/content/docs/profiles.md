@@ -257,11 +257,12 @@ advertised planning skill; it is not an approval-mode toggle. Guardian targets
 preserve Muse's configured sandbox and approval posture. On explicitly
 unconstrained targets Mjolnir uses auto approvals and `--disable-sandbox`.
 
-Muse accepts one workspace root, without attached directories. Resume must
-preserve the native workspace path: use the original target or a compatible
-container target. Native session archives include the selected session and
-its child streams, not other sessions or credentials. Importing sessions
-created outside Mjolnir is not supported yet. The adapter does not accept
+Muse accepts one workspace root, without attached directories. Native import
+and checkpoint restore can relocate that workspace while retaining the session
+identity. Archives include the selected session and its child streams, not
+other sessions or credentials. External Muse sessions normally come from
+`~/.local/share/muse/sessions` (`XDG_DATA_HOME/muse/sessions` when set); mj
+restores them into the destination profile’s isolated data directory. The adapter does not accept
 injected MCP servers, so Muse cannot act as a reviewer or use Mjolnir's
 project-memory tools. Another supported reviewer can still review a Muse
 primary session. Muse is not selected automatically for utility work.

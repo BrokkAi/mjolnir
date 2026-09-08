@@ -457,7 +457,8 @@ impl HarnessKind {
     pub fn bridge_args(self, policy: ExecutionPolicy) -> Vec<&'static str> {
         let flag = self.launch_flag_for(policy);
         match self {
-            Self::Codex | Self::Claude | Self::Deepseek | Self::Muse => Vec::new(),
+            Self::Codex | Self::Claude | Self::Muse => Vec::new(),
+            Self::Deepseek => vec!["--profile", "acp"],
             Self::Kimi => vec!["acp"],
             Self::Grok => ["agent"].into_iter().chain(flag).chain(["stdio"]).collect(),
         }
@@ -2085,7 +2086,10 @@ mod tests {
             assert!(HarnessKind::Codex.bridge_args(policy).is_empty());
             assert!(HarnessKind::Claude.bridge_args(policy).is_empty());
             assert_eq!(HarnessKind::Kimi.bridge_args(policy), ["acp"]);
-            assert!(HarnessKind::Deepseek.bridge_args(policy).is_empty());
+            assert_eq!(
+                HarnessKind::Deepseek.bridge_args(policy),
+                ["--profile", "acp"]
+            );
             assert_eq!(
                 HarnessKind::Grok.bridge_args(policy),
                 if policy.is_unconstrained() {

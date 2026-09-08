@@ -15,9 +15,7 @@ use hel::hel_config::{
     ExecutionPolicy, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write,
     data_dir,
 };
-use hel::hel_harness_runtime::{
-    CLAUDE_ACP_VERSION, CODEX_ACP_VERSION, DEEPSEEK_ACP_VERSION, DEEPSEEK_DSH_VERSION,
-};
+use hel::hel_harness_runtime::{CLAUDE_ACP_VERSION, CODEX_ACP_VERSION, DEEPSEEK_DSH_VERSION};
 use hel::hel_project_memory::{ProjectMemoryIdentity, RepositoryMemoryIdentity};
 use hel::hel_targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProcessExecutor, ProvisionStage, SshTarget,
@@ -1123,8 +1121,8 @@ fn workspace_paths(
     Ok((primary_path, additional))
 }
 
-// Package versions for ACP bridges. Keep these in lockstep with the global npm installs in
-// containers/Containerfile.agent-dev; bridge_pins_match_containerfile() below
+// Package versions for ACP bridges and their harnesses. Keep these in lockstep with the global
+// npm installs in containers/Containerfile.agent-dev; bridge_pins_match_containerfile() below
 // fails the build when they drift.
 // Codex 0.148 reuses pending MCP startups during runtime reconciliation. Older
 // releases could cancel the first project-memory startup while immediately
@@ -1189,16 +1187,21 @@ pub(super) fn bridge_launch(
                 ],
             )
         }
-        hel::hel_config::HarnessKind::Deepseek => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "{}; if command -v dsh >/dev/null 2>&1 && command -v dsh-acp-server >/dev/null 2>&1; then exec dsh-acp-server; fi; echo 'Mjolnir needs @deepseek-ai/dsh@{DEEPSEEK_DSH_VERSION} and dsh-acp-server@{DEEPSEEK_ACP_VERSION} installed on PATH' >&2; exit 127",
-                    ensure_node_22_script(),
-                ),
-            ],
-        ),
+        hel::hel_config::HarnessKind::Deepseek => {
+            let acp = hel::hel_config::HarnessKind::Deepseek
+                .bridge_args(policy)
+                .join(" ");
+            (
+                "sh".into(),
+                vec![
+                    "-c".into(),
+                    format!(
+                        "{}; if command -v dsh >/dev/null 2>&1 && [ \"$(dsh --version 2>/dev/null)\" = \"{DEEPSEEK_DSH_VERSION}\" ]; then exec dsh {acp}; fi; echo 'Mjolnir needs @deepseek-ai/dsh@{DEEPSEEK_DSH_VERSION} installed on PATH' >&2; exit 127",
+                        ensure_node_22_script(),
+                    ),
+                ],
+            )
+        }
     }
 }
 
@@ -3539,10 +3542,10 @@ mod tests {
         );
         assert_eq!(deepseek_command, "sh");
         assert_eq!(deepseek_arguments[0], "-c");
-        assert!(deepseek_arguments[1].contains("@deepseek-ai/dsh@0.1.1-rc.2"));
-        assert!(deepseek_arguments[1].contains("dsh-acp-server@0.10.0"));
+        assert!(deepseek_arguments[1].contains("@deepseek-ai/dsh@0.1.2-rc.1"));
+        assert!(deepseek_arguments[1].contains("dsh --profile acp"));
+        assert!(deepseek_arguments[1].contains("dsh --version"));
         assert!(!deepseek_arguments[1].contains("npx -y -p @deepseek-ai/dsh"));
-        assert!(deepseek_arguments[1].contains("exec dsh-acp-server"));
         assert!(deepseek_arguments[1].contains("Mjolnir needs @deepseek-ai/dsh"));
         assert!(!deepseek_arguments[1].contains("Hel"));
     }
@@ -3716,15 +3719,12 @@ mod tests {
                  session and an npx session run different adapter versions."
         );
 
-        for package in [
-            format!("@deepseek-ai/dsh@{DEEPSEEK_DSH_VERSION}"),
-            format!("dsh-acp-server@{DEEPSEEK_ACP_VERSION}"),
-        ] {
-            assert!(
-                CONTAINERFILE.contains(&package),
-                "containers/Containerfile.agent-dev must install {package}"
-            );
-        }
+        let deepseek = format!("@deepseek-ai/dsh@{DEEPSEEK_DSH_VERSION}");
+        assert!(
+            CONTAINERFILE.contains(&deepseek),
+            "containers/Containerfile.agent-dev must install {deepseek}"
+        );
+        assert!(!CONTAINERFILE.contains("dsh-acp-server"));
     }
     #[test]
     fn kimi_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
