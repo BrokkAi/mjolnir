@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
+mod controls;
 mod preview;
+use controls::WorkspaceControls;
 use preview::WorkspacePreview;
 
 use anyhow::{Context, Result};
@@ -14,7 +16,7 @@ use mj_chat::theme;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use tokio_stream::StreamExt;
 
 use crate::TerminalGuard;
@@ -67,24 +69,6 @@ fn confirm_delete_allows_enter(confirm: &ConfirmDelete, input: &TextInput) -> bo
     !confirm_delete_requires_typed_name(confirm) || input.trim() == confirm.name
 }
 
-fn delete_prompt(confirm: &ConfirmDelete, input: &TextInput) -> String {
-    if !confirm_delete_requires_typed_name(confirm) {
-        return format!(
-            "Delete workspace {}? Enter confirm · Esc cancel",
-            confirm.name
-        );
-    }
-    format!(
-        "Force-delete {} ({} active session{}, {} draft{})? Type the workspace name, then Enter: {}",
-        confirm.name,
-        confirm.active,
-        if confirm.active == 1 { "" } else { "s" },
-        confirm.drafts,
-        if confirm.drafts == 1 { "" } else { "s" },
-        input.with_cursor_marker("▌"),
-    )
-}
-
 pub(crate) async fn select_workspace(
     workspaces: &[WorkspaceListing],
     suggested_name: &str,
@@ -101,10 +85,10 @@ pub(crate) async fn select_workspace(
         .context("load workspace picker appearance task")??
         .theme;
     let mut terminal = TerminalGuard::enter()?;
-    let mut selected = initial_selection(workspaces, selected_workspace_id);
-    let mut editing: Option<EditMode> = None;
-    let mut confirming: Option<ConfirmDelete> = None;
-    let mut input = TextInput::new().with_max_chars(64);
+    let mut controls = WorkspaceControls::new(
+        initial_selection(workspaces, selected_workspace_id),
+        suggested_name,
+    );
 
     let mut events = event::EventStream::new();
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
@@ -117,16 +101,15 @@ pub(crate) async fn select_workspace(
     let mut preview_workspace_id = None;
     let mut preview_scroll = SessionsPreviewState::default();
     let mut preview_area = Rect::default();
-    let mut list_state = ListState::default();
 
     loop {
         let workspace_id = workspaces
-            .get(selected)
+            .get(controls.selected)
             .map(|candidate| candidate.workspace.id.clone());
         if preview_workspace_id != workspace_id {
             preview_workspace_id = workspace_id;
             preview_scroll = SessionsPreviewState::default();
-            preview = workspaces.get(selected).map(|candidate| {
+            preview = workspaces.get(controls.selected).map(|candidate| {
                 WorkspacePreview::new(
                     candidate.workspace.id.clone(),
                     candidate.workspace.name.clone(),
@@ -138,55 +121,26 @@ pub(crate) async fn select_workspace(
                 frame.render_widget(Block::default().style(theme::base()), frame.area());
                 let [body, footer] = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(4), Constraint::Length(1)])
+                    .constraints([
+                        Constraint::Min(4),
+                        Constraint::Length(WorkspaceControls::footer_height(frame.area().width)),
+                    ])
                     .areas(frame.area());
                 let [left, right] = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
                     .areas(body);
 
-                let mut items = workspaces
-                    .iter()
-                    .map(|candidate| {
-                        let attached = if candidate.attached_pids.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                " [attached to {}]",
-                                candidate
-                                    .attached_pids
-                                    .iter()
-                                    .map(u32::to_string)
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        };
-                        ListItem::new(Line::from(vec![
-                            Span::styled(
-                                candidate.workspace.name.clone(),
-                                Style::default().fg(theme::palette().text),
-                            ),
-                            Span::styled(attached, theme::muted()),
-                        ]))
-                    })
-                    .collect::<Vec<_>>();
-                items.push(
-                    ListItem::new("＋ Create new")
-                        .style(Style::default().fg(theme::palette().accent)),
-                );
-                list_state.select(Some(selected));
-                frame.render_stateful_widget(
-                    List::new(items)
-                        .block(theme::panel(true).title(" ✦ Workspaces "))
-                        .highlight_symbol("› ")
-                        .highlight_style(theme::selection(true)),
-                    left,
-                    &mut list_state,
-                );
+                let snapshot = preview
+                    .as_ref()
+                    .filter(|preview| preview.metadata_ready())
+                    .and_then(|preview| preview.metadata.as_ref());
+                controls.begin_frame(workspaces, snapshot);
+                controls.render_list(frame, left, workspaces);
 
                 preview_area = right;
                 if let (Some(candidate), Some(preview)) =
-                    (workspaces.get(selected), preview.as_ref())
+                    (workspaces.get(controls.selected), preview.as_ref())
                 {
                     let metadata = preview_lines(
                         candidate,
@@ -236,16 +190,8 @@ pub(crate) async fn select_workspace(
                     );
                 }
 
-                let (footer_text, footer_style) =
-                    selector_footer(editing.as_ref(), confirming.as_ref(), &input, notices);
-                frame.render_widget(
-                    Paragraph::new(footer_text).style(
-                        theme::muted()
-                            .bg(theme::palette().surface)
-                            .patch(footer_style),
-                    ),
-                    footer,
-                );
+                controls.render_footer(frame, footer, workspaces, snapshot, notices);
+                controls.render_modal(frame, frame.area());
             })
         })?;
 
@@ -262,10 +208,13 @@ pub(crate) async fn select_workspace(
             _ = animation_ticks.tick(), if preview.as_ref().is_some_and(|preview| preview.dashboard.needs_fast_tick()) => continue,
             _ = async { preview.as_mut().expect("guarded preview").update().await }, if preview.is_some() => continue,
         };
-        if editing.is_none()
-            && confirming.is_none()
+        if !controls.modal_open()
             && let Event::Mouse(mouse) = &event
             && preview_area.contains((mouse.column, mouse.row).into())
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
         {
             match mouse.kind {
                 MouseEventKind::ScrollUp => preview_scroll.scroll_lines(-3),
@@ -274,140 +223,36 @@ pub(crate) async fn select_workspace(
             }
             continue;
         }
-        let Event::Key(key) = event else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        notices.dismiss(std::time::Instant::now());
-        if let Some(mode) = &editing {
+        if !controls.modal_open()
+            && let Event::Key(key) = &event
+            && key.kind != KeyEventKind::Release
+        {
             match key.code {
-                KeyCode::Esc => {
-                    editing = None;
-                    input.clear();
+                KeyCode::PageUp => {
+                    preview_scroll.scroll_page(-1);
+                    continue;
                 }
-                KeyCode::Enter if !input.trim().is_empty() => {
-                    return Ok(match mode {
-                        EditMode::Create => SelectorOutcome::Create(input.into_value()),
-                        EditMode::Rename { workspace_id } => SelectorOutcome::Rename {
-                            workspace_id: workspace_id.clone(),
-                            name: input.into_value(),
-                        },
-                    });
+                KeyCode::PageDown => {
+                    preview_scroll.scroll_page(1);
+                    continue;
                 }
-                KeyCode::Char('c')
-                    if key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    editing = None;
-                    input.clear();
+                KeyCode::Home => {
+                    preview_scroll.home();
+                    continue;
                 }
-                _ => {
-                    input.handle_key(key);
-                }
-            }
-            continue;
-        }
-        if let Some(confirm) = &confirming {
-            match key.code {
-                KeyCode::Esc => {
-                    confirming = None;
-                    input.clear();
-                }
-                KeyCode::Char('c')
-                    if key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    confirming = None;
-                    input.clear();
-                }
-                KeyCode::Enter if confirm_delete_allows_enter(confirm, &input) => {
-                    let workspace_id = confirm.workspace_id.clone();
-                    let force = confirm_delete_requires_typed_name(confirm);
-                    return Ok(if force {
-                        SelectorOutcome::ForceDelete(workspace_id)
-                    } else {
-                        SelectorOutcome::Delete(workspace_id)
-                    });
-                }
-                // A mismatched Enter keeps the confirm state; the footer keeps
-                // showing what has to be typed.
-                KeyCode::Enter => {}
-                _ if confirm_delete_requires_typed_name(confirm) => {
-                    input.handle_key(key);
+                KeyCode::End => {
+                    preview_scroll.end();
+                    continue;
                 }
                 _ => {}
             }
-            continue;
         }
-
-        match key.code {
-            KeyCode::Esc => return Ok(SelectorOutcome::Cancel),
-            KeyCode::Char('c')
-                if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
-                return Ok(SelectorOutcome::Cancel);
-            }
-            KeyCode::PageUp => preview_scroll.scroll_page(-1),
-            KeyCode::PageDown => preview_scroll.scroll_page(1),
-            KeyCode::Home => preview_scroll.home(),
-            KeyCode::End => preview_scroll.end(),
-            KeyCode::Up | KeyCode::Char('k') => {
-                selected = selected.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                selected = (selected + 1).min(workspaces.len());
-            }
-            KeyCode::Enter if selected < workspaces.len() => {
-                return Ok(SelectorOutcome::Select(
-                    workspaces[selected].workspace.id.clone(),
-                ));
-            }
-            KeyCode::Enter | KeyCode::Char('n' | 'N') => {
-                editing = Some(EditMode::Create);
-                input.set_value(suggested_name);
-            }
-            KeyCode::Char('r' | 'R') if selected < workspaces.len() => {
-                editing = Some(EditMode::Rename {
-                    workspace_id: workspaces[selected].workspace.id.clone(),
-                });
-                input.set_value(&workspaces[selected].workspace.name);
-            }
-            KeyCode::Char('d' | 'D' | 'v' | 'V') if selected < workspaces.len() => {
-                let Some(preview) = preview.as_ref().filter(|preview| preview.metadata_ready())
-                else {
-                    notices
-                        .set("Workspace details are unavailable or still loading; retry shortly.");
-                    continue;
-                };
-                let snapshot = preview.metadata.as_ref().expect("ready metadata");
-                let candidate = &workspaces[selected];
-                if matches!(key.code, KeyCode::Char('d' | 'D')) {
-                    confirming = Some(ConfirmDelete {
-                        workspace_id: candidate.workspace.id.clone(),
-                        name: candidate.workspace.name.clone(),
-                        active: snapshot
-                            .sessions
-                            .iter()
-                            .filter(|session| session.active)
-                            .count(),
-                        drafts: snapshot.drafts.len(),
-                    });
-                } else if let Some(draft) = snapshot.drafts.first() {
-                    return Ok(SelectorOutcome::RecoverDraft {
-                        workspace_id: candidate.workspace.id.clone(),
-                        draft_id: draft.id.clone(),
-                    });
-                } else {
-                    notices.set("This workspace has no recoverable drafts.");
-                }
-            }
-            _ => {}
+        let snapshot = preview
+            .as_ref()
+            .filter(|preview| preview.metadata_ready())
+            .and_then(|preview| preview.metadata.as_ref());
+        if let Some(outcome) = controls.handle(event, workspaces, snapshot, notices) {
+            return Ok(outcome);
         }
     }
 }
@@ -423,31 +268,6 @@ fn initial_selection(
                 .position(|candidate| candidate.workspace.id == workspace_id)
         })
         .unwrap_or(0)
-}
-
-fn selector_footer(
-    editing: Option<&EditMode>,
-    confirming: Option<&ConfirmDelete>,
-    input: &TextInput,
-    notices: &Notices,
-) -> (String, Style) {
-    match editing {
-        Some(EditMode::Create) => (
-            format!("Create workspace: {}", input.with_cursor_marker("▌")),
-            Style::default(),
-        ),
-        Some(EditMode::Rename { .. }) => (
-            format!("Rename workspace: {}", input.with_cursor_marker("▌")),
-            Style::default(),
-        ),
-        None => match confirming {
-            Some(confirm) => (delete_prompt(confirm, input), Style::default()),
-            None => match notices.current() {
-                Some(notice) => (notice, Style::default().fg(theme::palette().warning)),
-                None => (SELECTOR_HINTS.into(), Style::default()),
-            },
-        },
-    }
 }
 
 fn preview_lines(
@@ -509,20 +329,6 @@ mod tests {
     }
 
     #[test]
-    fn a_delete_failure_uses_the_standard_notice_footer() {
-        let notices = Notices::default();
-        notices.set_failure(
-            "Could not delete workspace: workspace is not empty (1 active sessions, 0 drafts)",
-        );
-
-        let (text, style) = selector_footer(None, None, &TextInput::new(), &notices);
-
-        assert!(text.starts_with("Could not delete workspace:"));
-        assert_eq!(style.fg, Some(theme::palette().warning));
-        assert!(!notices.dismiss(std::time::Instant::now()));
-    }
-
-    #[test]
     fn retrying_the_selector_keeps_the_failed_workspace_selected() {
         let workspaces = [
             candidate("first"),
@@ -541,25 +347,6 @@ mod tests {
             active,
             drafts,
         }
-    }
-
-    #[test]
-    fn delete_prompt_distinguishes_empty_and_force_workspaces() {
-        let empty = confirm_for("Bifrost", 0, 0);
-        assert_eq!(
-            delete_prompt(&empty, &TextInput::new()),
-            "Delete workspace Bifrost? Enter confirm · Esc cancel"
-        );
-
-        let force = confirm_for("Bifrost", 2, 1);
-        let prompt = delete_prompt(&force, &TextInput::new());
-        assert!(
-            prompt.starts_with(
-                "Force-delete Bifrost (2 active sessions, 1 draft)? \
-                 Type the workspace name, then Enter: "
-            ),
-            "{prompt}"
-        );
     }
 
     #[test]
@@ -585,14 +372,5 @@ mod tests {
         let empty = confirm_for("Bifrost", 0, 0);
         assert!(!confirm_delete_requires_typed_name(&empty));
         assert!(confirm_delete_allows_enter(&empty, &TextInput::new()));
-    }
-
-    #[test]
-    fn a_pending_delete_confirmation_uses_the_prompt_footer() {
-        let notices = Notices::default();
-        let confirm = confirm_for("Bifrost", 0, 0);
-        let (text, style) = selector_footer(None, Some(&confirm), &TextInput::new(), &notices);
-        assert_eq!(text, "Delete workspace Bifrost? Enter confirm · Esc cancel");
-        assert_eq!(style.fg, None);
     }
 }

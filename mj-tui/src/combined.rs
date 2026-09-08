@@ -341,6 +341,7 @@ fn render_combined_themed(
     transcript_selected: bool,
 ) {
     dashboard.reset_component_geometry();
+    dashboard.begin_surface_frame();
     if let Some(chat) = chat.as_deref_mut() {
         chat.reset_component_geometry();
     }
@@ -361,6 +362,7 @@ fn render_combined_themed(
             area,
             TerminalSizeRequirement::Width(MINIMUM_TERMINAL_WIDTH),
         );
+        dashboard.end_surface_frame();
         return;
     }
     dashboard.resume_sessions_area =
@@ -399,11 +401,20 @@ fn render_combined_themed(
         sidebar_area.width,
         WORKSPACE_SWITCHER_HEIGHT.min(sidebar_area.height),
     );
-    let sessions_area = Rect::new(
+    let actions_area = Rect::new(
         sidebar_area.x,
         workspace_area.bottom(),
         sidebar_area.width,
-        sidebar_area.height.saturating_sub(workspace_area.height),
+        sidebar_area
+            .height
+            .saturating_sub(workspace_area.height)
+            .min(2),
+    );
+    let sessions_area = Rect::new(
+        sidebar_area.x,
+        actions_area.bottom(),
+        sidebar_area.width,
+        sidebar_area.bottom().saturating_sub(actions_area.bottom()),
     );
     let selected_transition = dashboard.selected_session().and_then(|session| {
         dashboard
@@ -499,6 +510,7 @@ fn render_combined_themed(
                 area,
                 TerminalSizeRequirement::Height(required_frame_height),
             );
+            dashboard.end_surface_frame();
             return;
         }
     };
@@ -530,10 +542,12 @@ fn render_combined_themed(
 
     render_workspace_switcher(frame, workspace_area, &dashboard.workspace_name);
     dashboard.workspace_switcher_area = Some(workspace_area);
+    crate::surface_controls::render_sidebar_actions(frame, actions_area, dashboard);
     let rendered = render_sessions(frame, sessions_area, dashboard);
     dashboard.session_row_areas = rendered.session_row_areas;
     dashboard.project_heading_areas = rendered.project_heading_areas;
     dashboard.stopped_sessions_toggle_area = rendered.stopped_toggle_area;
+    crate::surface_controls::render_session_actions(frame, dashboard);
     let sessions_content = bordered_content(sessions_area);
     dashboard.frame_surfaces.push(SurfaceFrame::fixed(
         SurfaceId::DashboardPane(0),
@@ -558,11 +572,20 @@ fn render_combined_themed(
         match chat {
             Some(chat) => {
                 let chords =
-                    crate::render::footer_hints(dashboard, crate::actions::FooterGroup::Chord);
-                let functions =
-                    crate::render::footer_hints(dashboard, crate::actions::FooterGroup::Function);
-                let chords = chords.iter().map(String::as_str).collect::<Vec<_>>();
-                let functions = functions.iter().map(String::as_str).collect::<Vec<_>>();
+                    crate::render::footer_commands(dashboard, crate::actions::FooterGroup::Chord);
+                let functions = crate::render::footer_commands(
+                    dashboard,
+                    crate::actions::FooterGroup::Function,
+                );
+                let commands = chords.iter().chain(&functions).cloned().collect::<Vec<_>>();
+                let chords = chords
+                    .iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect::<Vec<_>>();
+                let functions = functions
+                    .iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect::<Vec<_>>();
                 chat.draw_in(
                     frame,
                     ChatRegions {
@@ -578,6 +601,15 @@ fn render_combined_themed(
                     prompt_focused,
                     transcript_selected,
                 );
+                if prompt_focused {
+                    for (index, area) in chat.footer_command_areas() {
+                        if let Some((id, text)) = commands.get(index) {
+                            crate::surface_controls::render_footer_command(
+                                frame, area, dashboard, *id, text,
+                            );
+                        }
+                    }
+                }
                 // A chat-local modal may own the frame's interaction. Questions
                 // deliberately leave this flag clear so the navigator and other
                 // dashboard panes remain selectable beside the question area.
@@ -670,6 +702,7 @@ fn render_combined_themed(
     if !chat_drew_footer {
         render_footer(frame, footer_area, dashboard);
     }
+    dashboard.end_surface_frame();
     render_modal(frame, area, dashboard);
 }
 

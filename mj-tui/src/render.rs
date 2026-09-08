@@ -124,19 +124,34 @@ pub(crate) fn render_onboarding_surface(frame: &mut Frame, dashboard: &mut Dashb
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(8),
             Constraint::Length(5),
             Constraint::Length(8),
             Constraint::Length(1),
         ])
         .split(area);
-    render_dashboard_title(frame, layout[0], &dashboard.workspace_name);
+    render_dashboard_title(
+        frame,
+        Rect::new(layout[0].x, layout[0].y, layout[0].width, 1),
+        &dashboard.workspace_name,
+    );
+    crate::surface_controls::render_onboarding_actions(
+        frame,
+        Rect::new(
+            layout[0].x,
+            layout[0].y + 1,
+            layout[0].width,
+            layout[0].height.saturating_sub(1),
+        ),
+        dashboard,
+    );
 
     render_onboarding(frame, layout[1], dashboard);
     render_capacity(frame, layout[2], dashboard, None);
     render_quotas(frame, layout[3], dashboard, None);
     render_footer(frame, layout[4], dashboard);
+    dashboard.end_surface_frame();
     render_modal(frame, area, dashboard);
 }
 
@@ -2494,11 +2509,11 @@ pub(crate) fn render_quotas(
     );
 }
 
-/// One group of registry hints, shared by pane and composer footers.
-pub(crate) fn footer_hints(
+/// Registry commands shared by pane and composer footers, retaining their identities.
+pub(crate) fn footer_commands(
     dashboard: &DashboardState,
     group: crate::actions::FooterGroup,
-) -> Vec<String> {
+) -> Vec<(crate::CommandId, String)> {
     let mut hints = crate::actions::available(dashboard, None)
         .into_iter()
         .filter_map(|id| {
@@ -2508,12 +2523,11 @@ pub(crate) fn footer_hints(
             }
             let word = (spec.footer)(dashboard)?;
             let hint = spec.keys.first()?;
-            Some((spec.footer_rank, format!("{} {word}", hint.label)))
+            Some((spec.footer_rank, id, format!("{} {word}", hint.label)))
         })
         .collect::<Vec<_>>();
-    // Stable, so commands sharing a rank keep the table's order.
-    hints.sort_by_key(|(rank, _)| *rank);
-    hints.into_iter().map(|(_, text)| text).collect()
+    hints.sort_by_key(|(rank, _, _)| *rank);
+    hints.into_iter().map(|(_, id, text)| (id, text)).collect()
 }
 
 /// The hotkey hints for whatever applies right now.
@@ -2538,17 +2552,22 @@ pub(crate) fn footer_hints(
 /// The composer's own hints come from the chat itself, because they depend on
 /// what it is doing (a queued prompt, dictation, a history search); this text
 /// is only drawn when a pane has the keyboard.
+#[cfg(test)]
 pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> String {
+    theme::footer_items_text(&combined_footer_items(dashboard, width), |(_, text)| text)
+}
+
+fn combined_footer_items(
+    dashboard: &DashboardState,
+    width: u16,
+) -> [Vec<(crate::CommandId, String)>; 3] {
     let groups = [
         crate::actions::FooterGroup::Pane,
         crate::actions::FooterGroup::Chord,
         crate::actions::FooterGroup::Function,
     ]
-    .map(|group| footer_hints(dashboard, group));
-    let [pane, chords, functions] = groups
-        .each_ref()
-        .map(|hints| hints.iter().map(String::as_str).collect::<Vec<_>>());
-    theme::fit_footer(&pane, &chords, &functions, width)
+    .map(|group| footer_commands(dashboard, group));
+    theme::fit_footer_items(groups, width, |(_, text)| text)
 }
 
 /// Draws the shared footer row.
@@ -2557,21 +2576,48 @@ pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> St
 /// composer's own footer works, so the two are interchangeable and the row
 /// costs one line whichever surface drew it.
 pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
-    let notice = dashboard.notices.current();
-    let line = match notice.as_deref() {
-        Some(notice) => Line::styled(
-            notice.to_owned(),
-            Style::default().fg(theme::palette().warning),
-        ),
-        None => {
-            let text = combined_footer_text(dashboard, area.width);
-            theme::hints(&text)
-        }
-    };
     frame.render_widget(
-        Paragraph::new(line).style(theme::muted().bg(theme::palette().surface)),
+        Paragraph::new("").style(theme::muted().bg(theme::palette().surface)),
         area,
     );
+    if let Some(notice) = dashboard.notices.current() {
+        frame.render_widget(
+            Paragraph::new(notice).style(Style::default().fg(theme::palette().warning)),
+            area,
+        );
+        return;
+    }
+    let mut x = area.x;
+    for group in combined_footer_items(dashboard, area.width)
+        .iter()
+        .filter(|group| !group.is_empty())
+    {
+        if x > area.x {
+            frame.render_widget(
+                Paragraph::new(theme::FOOTER_GROUP_SEPARATOR).style(theme::muted()),
+                Rect::new(x, area.y, 3, area.height),
+            );
+            x += 3;
+        }
+        for (index, (id, text)) in group.iter().enumerate() {
+            if index > 0 {
+                frame.render_widget(
+                    Paragraph::new(theme::FOOTER_SEPARATOR).style(theme::muted()),
+                    Rect::new(x, area.y, 3, area.height),
+                );
+                x += 3;
+            }
+            let width = Line::raw(text.as_str()).width() as u16;
+            crate::surface_controls::render_footer_command(
+                frame,
+                Rect::new(x, area.y, width, area.height),
+                dashboard,
+                *id,
+                text,
+            );
+            x += width;
+        }
+    }
 }
 
 fn refresh_age(now: u64, refreshed: u64) -> String {
@@ -3017,7 +3063,7 @@ mod tests {
                         .workspace_switcher_area
                         .expect("workspace switcher");
                     let sessions = dashboard.pane_areas.unwrap()[0];
-                    assert_eq!(switcher.bottom(), sessions.y);
+                    assert_eq!(switcher.bottom() + 2, sessions.y);
                     assert_eq!((switcher.x, switcher.width), (sessions.x, sessions.width));
                     let title: String = lines[usize::from(switcher.y)]
                         .chars()
@@ -3150,7 +3196,7 @@ mod tests {
 
     #[test]
     fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
-        for (height, expected_sessions_height) in [(32, 28), (44, 40)] {
+        for (height, expected_sessions_height) in [(32, 26), (44, 38)] {
             let mut dashboard = minimized_sessions_dashboard(3, 2);
             dashboard
                 .restore_pane_sizes(crate::PaneSizes::default())
@@ -3912,7 +3958,7 @@ mod tests {
         let hotkeys = (buffer.area.x..buffer.area.right())
             .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
             .collect::<String>();
-        assert!(hotkeys.contains("Alt-N new"), "{hotkeys:?}");
+        assert!(hotkeys.contains("Alt-N quick new"), "{hotkeys:?}");
         assert!(hotkeys.contains("Alt-A read"), "{hotkeys:?}");
         assert!(!hotkeys.contains("[S]ort"));
     }
@@ -4007,7 +4053,7 @@ mod tests {
         dashboard.focus_sessions();
         assert_eq!(
             combined_footer_text(&dashboard, 200),
-            "Enter open · s stop · Del delete │ Alt-N new · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
+            "Enter open · s stop · Del delete │ Alt-N quick new · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
              · Alt-Q detach │ F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help"
         );
 
@@ -4047,7 +4093,7 @@ mod tests {
         // Narrow enough to lose the pane group, wide enough to keep chords.
         let squeezed = combined_footer_text(&dashboard, 90);
         assert!(!squeezed.contains("Enter open"), "{squeezed}");
-        assert!(squeezed.contains("Alt-N new"), "{squeezed}");
+        assert!(squeezed.contains("Alt-N quick new"), "{squeezed}");
         assert!(squeezed.ends_with(FUNCTION_KEYS), "{squeezed}");
 
         assert_eq!(combined_footer_text(&dashboard, 32), "F2 palette · F1 help");
@@ -4211,7 +4257,7 @@ mod tests {
                 let prompt = dashboard.chat_prompt_area.unwrap();
                 let workspace = dashboard.workspace_switcher_area.unwrap();
                 assert_eq!(workspace.y, 0);
-                assert_eq!(workspace.bottom(), sessions.y);
+                assert_eq!(workspace.bottom() + 2, sessions.y);
                 assert_eq!(sessions.bottom(), height - 1);
                 assert!(sessions.width > 0 && transcript.width > 0);
                 for pane in [transcript, prompt, targets, quota] {
@@ -4746,7 +4792,7 @@ mod tests {
     fn minimized_sessions_bound_the_viewport_to_preserve_the_conversation() {
         let mut dashboard = minimized_sessions_dashboard(3, 3);
         let lines = drawn(&mut dashboard, 120, 20);
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 16);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 14);
         assert!(
             dashboard
                 .session_row_areas
@@ -4765,7 +4811,7 @@ mod tests {
             !lines.iter().any(|line| line.contains("more")),
             "no marker expected when all sessions fit: {lines:?}"
         );
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 40);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 38);
     }
 
     /// The minimized row is the same top line as the expanded session.
@@ -4923,7 +4969,7 @@ mod tests {
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized selection surface");
         assert_eq!(selection.rect, pane.inner(Margin::new(1, 1)));
-        assert_eq!(selection.rect.height, 14);
+        assert_eq!(selection.rect.height, 12);
     }
 
     #[test]
@@ -4933,17 +4979,17 @@ mod tests {
         let tall = drawn(&mut dashboard, 120, 44);
         let pane = dashboard.pane_areas.expect("tall panes")[0];
         assert!(tall[usize::from(pane.y)].contains("Sessions"));
-        assert_eq!(pane.height, 40);
+        assert_eq!(pane.height, 38);
 
         let short = drawn(&mut dashboard, 120, 20);
         let pane = dashboard.pane_areas.expect("short panes")[0];
         assert!(short[usize::from(pane.y)].contains("Sessions"));
-        assert_eq!(pane.height, 16);
+        assert_eq!(pane.height, 14);
 
         drawn(&mut dashboard, 120, 44);
         assert_eq!(
             dashboard.pane_areas.expect("tall panes again")[0].height,
-            40
+            38
         );
     }
 
@@ -5006,7 +5052,7 @@ mod tests {
             lines[0].contains('╭') && dashboard.pane_areas.unwrap()[0].width > 0,
             "the portrait list keeps its bordered Sessions title: {lines:?}"
         );
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 34);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 32);
         for visible in ["Tar", "Quo"] {
             assert!(
                 lines.iter().any(|line| line.contains(visible)),

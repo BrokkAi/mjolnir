@@ -13,6 +13,7 @@ Users can choose Midnight (the current appearance), Light, or Dracula in F7 Setu
 - [x] (2026-09-08) Replaced fixed color reads with a shared selectable palette, scoped dashboard/workspace-picker rendering, and invalidated conversation and reviewer rows on theme changes.
 - [x] (2026-09-08) Verified save/cancel/failure behavior, persistence, rendering, contrast, and cache refresh. Full Cargo tests, Clippy with warnings denied, formatting, and diff checks pass.
 - [x] (2026-09-08) Reviewed and staged the validated implementation for the required commit on the current branch, `master`.
+- [x] (2026-09-08) Validated the integration with origin's newer mouse controls: the full Cargo suite and Clippy pass on the combined tree.
 
 ## Surprises & Discoveries
 
@@ -21,6 +22,10 @@ The web viewer has no Setup modal. The requested control exists in `mj-tui/src/s
 Reviewer conversations maintain a separate styled-row cache in `mj-chat/src/hel_chat/second_opinion.rs::ReviewerPane`. Both caches now include the theme. Shared control styles were also constants and must be evaluated at render time. Dracula's red was brightened so status text maintains at least a 4.5 contrast ratio on every painted panel background.
 
 The full-height Setup modal covers all underlying panels at the 100-column test size. Rendering assertions must inspect modal text against its raised surface while Setup is open, and panel text against its normal surface after dismissal. The first suite run exposed incorrect assumptions in the new assertions; correcting them made all seven Setup tests pass without changing production rendering.
+
+The requested push encountered newer mouse-control work on origin/master. Integration preserves the structured clickable footer and the extracted workspace controls, wraps their complete rendering in the selected theme, and converts the added sidebar/workspace control colors to palette reads. The merge required conflicts to be resolved in the shared theme helpers, dashboard footer, and workspace selector.
+
+The combined tree passed `cargo test` and `cargo clippy --all-targets -- -D warnings`, including all theme tests and the mouse-control behavior tests. The integration preserves both features without rebasing or changing branches.
 
 ## Decision Log
 
@@ -96,3 +101,5 @@ Final validation succeeded with:
 Use existing serde, ratatui, and standard-library facilities. Define `hel::hel_config::UiTheme` and `HelConfig.theme`. Expose `mj_chat::theme::palette()` for the current `Palette`, `palette_for(UiTheme)` for explicit lookup, and `with_theme(UiTheme, impl FnOnce() -> R)` for synchronous rendering. Do not hold a theme scope across asynchronous work. No new crates or dependencies are needed.
 
 Revision note: Final update records the completed behavior, passing full-suite validation, and reviewed changes staged for the required current-branch commit.
+
+Revision note: Delivery integration records the newer upstream mouse controls and successful full validation of the combined tree before the authorized push.
