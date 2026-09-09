@@ -106,6 +106,19 @@ the overlap cannot republish over a shipped version.
 To package and smoke-test a tag without publishing, run the workflow manually
 with `publish` off and inspect its tarball artifact and Linux smoke test.
 
+## Homebrew tap
+
+The `BrokkAi/homebrew-tap` repository holds the `mjolnir` formula; it is
+bumped per release outside this repository's workflows, so it is a manual
+step in the release runbook. The formula installs into the Cellar and exposes
+a wrapper script named `mj`. That wrapper must export
+`MJOLNIR_MANAGED_BY_HOMEBREW` before exec-ing the real binary, and must not
+export `MJOLNIR_NO_UPDATE_CHECK`: mj reads that marker to choose
+`brew update && brew upgrade mjolnir` over its curl-installer self-replace
+path, and treating a Homebrew install as a direct install would have mj
+overwriting files brew owns. Until the formula lands, Homebrew users simply
+see no update prompt, which matches the pre-update-check status quo.
+
 ## Before tagging
 
 Confirm that:
