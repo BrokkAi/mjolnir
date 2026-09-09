@@ -15,7 +15,6 @@ use hel::hel_review::lanes::ReviewTier;
 use mj_chat::components::{
     ButtonRow, Checkbox, ControlKind, Form, FormViewport, Interaction, TabStrip,
 };
-use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -23,7 +22,7 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::widgets::{centered_modal, centered_rect, dismissible_modal_title};
+use crate::widgets::dismissible_modal_title;
 use crate::{DashboardAction, DashboardState, Mode};
 
 /// Selectors advertised by one successful reviewer discovery.
@@ -827,9 +826,8 @@ fn review_settings_dialog_mut(mode: &mut Mode) -> Option<&mut ReviewSettingsDial
 
 pub(crate) fn render_review_settings(
     frame: &mut Frame,
-    area: Rect,
+    popup: Rect,
     dialog: &ReviewSettingsDialog,
-    surfaces: &mut FrameSurfaces,
     setup_saving: bool,
 ) {
     use ReviewSettingsFocus::*;
@@ -919,26 +917,9 @@ pub(crate) fn render_review_settings(
     })
     .style(Style::default().fg(theme::palette().muted))
     .wrap(Wrap { trim: true });
-    let description_width = centered_rect(86, 1, area).width.saturating_sub(12);
+    let description_width = popup.width.saturating_sub(12);
     let description_height =
         u16::try_from(description.line_count(description_width.max(1))).unwrap_or(u16::MAX);
-    let popup = centered_modal(
-        frame,
-        surfaces,
-        86,
-        (notes.len() as u16)
-            .saturating_add(10)
-            .saturating_add(description_height)
-            .max(20),
-        area,
-    );
-    let inner = theme::modal().inner(popup);
-    let body = Rect::new(
-        inner.x,
-        inner.y,
-        inner.width,
-        inner.height.saturating_sub(2),
-    );
     let focus_row = match dialog.focused() {
         Enabled => 0,
         Tier => 1,
@@ -947,16 +928,6 @@ pub(crate) fn render_review_settings(
         Effort => 4 + description_height,
         _ => 0,
     };
-    let viewport = FormViewport::new(
-        body,
-        (notes.len() as u16)
-            .saturating_add(6)
-            .saturating_add(description_height),
-        dialog.scroll.get(),
-        Some(focus_row),
-    );
-    dialog.scroll.set(viewport.offset());
-    let row = |index: u16| viewport.row(index, 1);
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
     let title = dismissible_modal_title(
@@ -967,6 +938,23 @@ pub(crate) fn render_review_settings(
         !setup_saving && !dialog.saving,
     );
     frame.render_widget(theme::modal().title(title), popup);
+    let inner = theme::modal().inner(popup);
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    let viewport = FormViewport::new(
+        body,
+        (notes.len() as u16)
+            .saturating_add(6)
+            .saturating_add(description_height),
+        dialog.scroll.get(),
+        Some(focus_row),
+    );
+    dialog.scroll.set(viewport.offset());
+    let row = |index: u16| viewport.row(index, 1);
     Checkbox::render(
         frame,
         row(0),

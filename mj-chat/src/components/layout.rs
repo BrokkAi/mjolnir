@@ -1,8 +1,74 @@
 //! Layout helpers for forms and dialogs.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::Clear;
 
 use crate::hel_modal::{bordered_content, centered_rect, modal_area};
+use crate::theme;
+
+/// Which side of an anchor an inline popup should prefer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupSide {
+    /// Place the popup below the anchor when there is room.
+    Below,
+    /// Place the popup above the anchor when there is room.
+    Above,
+}
+
+/// The shared framed shell for compact, anchored choice popups.
+pub struct AutocompletePopup;
+
+impl AutocompletePopup {
+    /// Draws an anchored popup shell and returns its outer and inner regions.
+    ///
+    /// The caller owns the rows and selection. This helper only chooses a
+    /// clipped rectangle, clears it, and draws the modal frame. At most eight
+    /// rows are visible, matching chat autocomplete's compact surface.
+    #[must_use]
+    pub fn render(
+        frame: &mut Frame<'_>,
+        bounds: Rect,
+        anchor: Rect,
+        width: u16,
+        rows: usize,
+        title: &str,
+        preferred: PopupSide,
+    ) -> Option<(Rect, Rect)> {
+        let visible = rows.min(8);
+        if visible == 0 || bounds.width == 0 || bounds.height == 0 {
+            return None;
+        }
+        let height = u16::try_from(visible)
+            .unwrap_or(u16::MAX)
+            .saturating_add(2)
+            .min(bounds.height);
+        let width = width.max(4).min(bounds.width);
+        let x = anchor
+            .x
+            .min(bounds.right().saturating_sub(width))
+            .max(bounds.x);
+        let below = anchor.bottom().min(bounds.bottom());
+        let above = anchor.y.saturating_sub(height);
+        let fits_below = below.saturating_add(height) <= bounds.bottom();
+        let fits_above = anchor.y >= bounds.y.saturating_add(height);
+        let y = match preferred {
+            PopupSide::Below if fits_below => below,
+            PopupSide::Above if fits_above => above,
+            _ if fits_below => below,
+            _ if fits_above => above,
+            _ => bounds
+                .y
+                .saturating_add(bounds.height.saturating_sub(height) / 2),
+        };
+        let outer = Rect::new(x, y, width, height);
+        frame.render_widget(Clear, outer);
+        let block = theme::modal().title(title);
+        let inner = block.inner(outer);
+        frame.render_widget(block, outer);
+        Some((outer, inner))
+    }
+}
 
 /// Returns a centered dialog rectangle using the shared modal margin rules.
 #[must_use]
@@ -96,5 +162,49 @@ impl FormViewport {
             self.area.width,
             bottom - top,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn anchored_popup_prefers_below_and_falls_back_above_with_clipping() {
+        let bounds = Rect::new(2, 2, 30, 16);
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let below = AutocompletePopup::render(
+                    frame,
+                    bounds,
+                    Rect::new(8, 4, 1, 1),
+                    14,
+                    2,
+                    " choices ",
+                    PopupSide::Below,
+                )
+                .expect("below popup");
+                assert_eq!(below.0.y, 5);
+                assert_eq!(below.0.height, 4);
+
+                let above = AutocompletePopup::render(
+                    frame,
+                    bounds,
+                    Rect::new(8, 15, 1, 1),
+                    40,
+                    20,
+                    " choices ",
+                    PopupSide::Below,
+                )
+                .expect("clipped popup");
+                assert!(above.0.y >= bounds.y);
+                assert!(above.0.bottom() <= bounds.bottom());
+                assert_eq!(above.0.height, 10);
+                assert!(above.0.x >= bounds.x);
+                assert!(above.0.right() <= bounds.right());
+            })
+            .expect("draw popup");
     }
 }

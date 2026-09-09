@@ -97,6 +97,7 @@ pub(super) fn expand(value: &mut Value, path: &mut Vec<String>) {
 pub(super) fn label(key: &str) -> String {
     match key {
         "startup" => "New session defaults",
+        "interface" => "Interface",
         "sessions_side" => "Session sidebar position",
         "spinner" => "Activity animation",
         "advanced" => "Advanced",

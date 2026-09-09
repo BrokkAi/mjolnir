@@ -6,13 +6,14 @@ use agent_client_protocol::schema::v1::{AvailableCommandInput, SessionConfigOpti
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::widgets::{Clear, List, ListItem};
+use ratatui::widgets::{List, ListItem};
 
 use hel::hel_acp::{SessionConfigChoice, session_config_choices};
 use hel::hel_transcript::{ChatEntry, ChatRole};
 
 use super::ChatState;
 use super::rendering::truncate_to_width;
+use crate::components::{AutocompletePopup, PopupSide};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LocalCommand {
@@ -394,21 +395,19 @@ pub(super) fn render_autocomplete(
     if visible == 0 {
         return None;
     }
-    let height = (visible as u16).saturating_add(2);
-    let area = Rect::new(
-        prompt_area.x,
-        prompt_area.y.saturating_sub(height),
-        prompt_area.width,
-        height,
-    );
-    frame.render_widget(Clear, area);
     let title = match autocomplete.kind {
         AutocompleteKind::Commands => " commands · ↑/↓ select · Tab/Enter accept ",
         AutocompleteKind::ConfigValues { .. } => " values · ↑/↓ select · Tab/Enter accept ",
     };
-    let block = theme::modal().title(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let (_, inner) = AutocompletePopup::render(
+        frame,
+        frame.area(),
+        prompt_area,
+        prompt_area.width,
+        autocomplete.matches.len(),
+        title,
+        PopupSide::Above,
+    )?;
     let start = autocomplete
         .selected
         .saturating_sub(visible.saturating_sub(1));

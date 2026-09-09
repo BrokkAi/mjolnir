@@ -7,11 +7,13 @@ use crate::{
         ReviewSettingsDialog, ReviewSettingsOutcome, ReviewSettingsValidation,
         render_review_settings,
     },
-    widgets::{centered_modal, dismissible_modal_title},
+    widgets::{centered_modal_fixed, dismissible_modal_title},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use hel::hel_config::HelConfig;
-use mj_chat::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
+use mj_chat::components::{
+    AutocompletePopup, ButtonRow, ChoiceList, ControlKind, Form, Interaction, PopupSide, TextField,
+};
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 use mj_chat::theme;
@@ -19,7 +21,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::Line,
-    widgets::{Paragraph, Wrap},
+    widgets::{List as RatatuiList, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -48,6 +50,12 @@ struct Editor {
     adding: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SetupSize {
+    width: u16,
+    height: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SetupDialog {
     generation: u64,
@@ -63,12 +71,177 @@ pub(crate) struct SetupDialog {
     discovering: bool,
     pub(crate) notice: Option<String>,
     read_only: Option<String>,
+    preferred_width: u16,
+    preferred_height: u16,
+}
+
+fn storage_path(path: &[String]) -> Vec<String> {
+    if path.first().is_some_and(|key| key == "interface") {
+        path.iter().skip(1).cloned().collect()
+    } else {
+        path.to_vec()
+    }
 }
 
 fn pointer(path: &[String]) -> String {
-    path.iter()
+    storage_path(path)
+        .iter()
         .map(|key| format!("/{}", key.replace('~', "~0").replace('/', "~1")))
         .collect()
+}
+
+fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
+    if path.is_empty() {
+        let mut keys = vec!["interface".to_owned(), "advanced".to_owned()];
+        keys.extend(
+            value
+                .as_object()
+                .into_iter()
+                .flat_map(|entries| {
+                    entries.keys().filter(|key| {
+                        key.as_str() != "version"
+                            && !matches!(
+                                key.as_str(),
+                                "advanced" | "sessions_side" | "spinner" | "theme"
+                            )
+                            && key.as_str() != "show_stopped_sessions"
+                    })
+                })
+                .cloned(),
+        );
+        return keys;
+    }
+    if path == ["interface"] {
+        return vec![
+            "sessions_side".to_owned(),
+            "spinner".to_owned(),
+            "theme".to_owned(),
+        ];
+    }
+    match value {
+        Value::Object(entries) => entries
+            .keys()
+            .filter(|key| {
+                key.as_str() != "version"
+                    && !(path.len() == 1 && path[0] == "startup" && key.as_str() == "enabled")
+            })
+            .cloned()
+            .collect(),
+        Value::Array(entries) => (0..entries.len()).map(|i| i.to_string()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn value_summary(path: &[String], key: &str, value: &Value, draft: &Value) -> String {
+    let mut child_path = path.to_vec();
+    child_path.push(key.to_owned());
+    let summary = match value {
+        Value::Object(entries) => format!("{} settings  ›", entries.len()),
+        Value::Array(entries) => format!("{} entries  ›", entries.len()),
+        Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
+        Value::Null => "Automatic / default".to_owned(),
+        _ => schema::choice_label(value),
+    };
+    if !value.is_object()
+        && !value.is_array()
+        && !value.is_boolean()
+        && !schema::choices(&storage_path(&child_path), draft).is_empty()
+    {
+        format!("{summary} ▾")
+    } else {
+        summary
+    }
+}
+
+fn preferred_size(draft: &Value) -> SetupSize {
+    fn walk(
+        path: &[String],
+        value: &Value,
+        draft: &Value,
+        max_width: &mut usize,
+        max_height: &mut u16,
+    ) {
+        let keys = visible_keys(path, value);
+        let breadcrumb = std::iter::once("Setup".to_owned())
+            .chain(path.iter().map(|key| schema::label(key)))
+            .collect::<Vec<_>>()
+            .join(" › ");
+        *max_width = (*max_width).max(Line::raw(breadcrumb).width());
+        *max_height = (*max_height).max(
+            u16::try_from(keys.len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(10),
+        );
+        for key in keys {
+            let child = if let Some(entries) = value.as_object() {
+                entries.get(&key)
+            } else {
+                key.parse::<usize>().ok().and_then(|index| value.get(index))
+            };
+            if path.is_empty() && key == "interface" {
+                let interface = json!({
+                    "sessions_side": draft["sessions_side"].clone(),
+                    "spinner": draft["spinner"].clone(),
+                    "theme": draft["theme"].clone(),
+                });
+                walk(
+                    &["interface".to_owned()],
+                    &interface,
+                    draft,
+                    max_width,
+                    max_height,
+                );
+                continue;
+            }
+            let Some(child) = child else { continue };
+            let name = if value.is_array() {
+                child
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("Item {}", key.parse::<usize>().unwrap_or(0) + 1))
+            } else {
+                schema::label(&key)
+            };
+            let mut child_path = path.to_vec();
+            child_path.push(key.clone());
+            let mut summary = value_summary(path, &key, child, draft);
+            if !child.is_object()
+                && !child.is_array()
+                && !child.is_boolean()
+                && schema::choices(&storage_path(&child_path), draft).is_empty()
+            {
+                summary = summary.chars().take(24).collect();
+            }
+            let line = format!("{name:<32}  {summary}");
+            *max_width = (*max_width).max(Line::raw(line).width());
+            if child.is_object() || child.is_array() {
+                walk(&child_path, child, draft, max_width, max_height);
+            }
+        }
+    }
+
+    let mut max_width = 0usize;
+    let mut max_height = 20;
+    walk(&[], draft, draft, &mut max_width, &mut max_height);
+    for labels in [
+        ["Back", "Add", "Remove", "Detect machine"].as_slice(),
+        ["Cancel", "Save (Ctrl-S)"].as_slice(),
+        ["Back", "Use default", "Apply"].as_slice(),
+    ] {
+        let width = labels
+            .iter()
+            .map(|label| Line::raw(*label).width() + 4)
+            .sum::<usize>()
+            .saturating_add(labels.len().saturating_sub(1));
+        max_width = max_width.max(width);
+    }
+    SetupSize {
+        width: u16::try_from(max_width.saturating_add(4))
+            .unwrap_or(u16::MAX)
+            .clamp(64, 96),
+        height: max_height.clamp(20, 32),
+    }
 }
 
 fn changed_profile_ids(
@@ -90,6 +263,7 @@ impl SetupDialog {
         let original = draft.to_string();
         schema::expand(&mut draft, &mut Vec::new());
         static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let preferred = preferred_size(&draft);
         let mut dialog = Self {
             generation: NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             original,
@@ -104,6 +278,8 @@ impl SetupDialog {
             discovering: false,
             notice: None,
             read_only: config.newer_build_notice(),
+            preferred_width: preferred.width,
+            preferred_height: preferred.height,
         };
         dialog.prepare();
         dialog
@@ -116,20 +292,7 @@ impl SetupDialog {
     }
 
     fn keys(&self) -> Vec<String> {
-        match self.current() {
-            Value::Object(entries) => entries
-                .keys()
-                .filter(|key| {
-                    key.as_str() != "version"
-                        && !(self.path.len() == 1
-                            && self.path[0] == "startup"
-                            && key.as_str() == "enabled")
-                })
-                .cloned()
-                .collect(),
-            Value::Array(entries) => (0..entries.len()).map(|i| i.to_string()).collect(),
-            _ => Vec::new(),
-        }
+        visible_keys(&self.path, self.current())
     }
 
     fn selected_path(&self) -> Option<Vec<String>> {
@@ -211,7 +374,7 @@ impl SetupDialog {
         } else if let Some(value) = value.as_bool() {
             *self.draft.pointer_mut(&pointer(&path)).unwrap() = Value::Bool(!value);
         } else {
-            let choices = schema::choices(&path, &self.draft);
+            let choices = schema::choices(&storage_path(&path), &self.draft);
             let selected = choices
                 .iter()
                 .position(|choice| choice == value)
@@ -605,6 +768,44 @@ impl DashboardState {
             self.mode = Mode::Setup(dialog);
             return action;
         }
+        let choice_editor = dialog
+            .editor
+            .as_ref()
+            .is_some_and(|editor| !editor.choices.is_empty());
+        if choice_editor
+            && let Event::Key(key) = &event
+            && key.kind != KeyEventKind::Release
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            match key.code {
+                KeyCode::Tab | KeyCode::Enter => {
+                    dialog.notice = dialog.apply_editor(false).err();
+                    self.mark_render_changed();
+                    dialog.prepare();
+                    self.mode = Mode::Setup(dialog);
+                    return DashboardAction::None;
+                }
+                KeyCode::Esc => {
+                    dialog.editor = None;
+                    dialog.form = RefCell::new(Form::default());
+                    self.mark_render_changed();
+                    dialog.prepare();
+                    self.mode = Mode::Setup(dialog);
+                    return DashboardAction::None;
+                }
+                _ => {}
+            }
+        }
+        let choice_mouse_release = choice_editor
+            && matches!(
+                event,
+                Event::Mouse(mouse)
+                    if mouse.kind == crossterm::event::MouseEventKind::Up(
+                        crossterm::event::MouseButton::Left,
+                )
+            );
         let shortcut = match &event {
             Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -672,6 +873,10 @@ impl DashboardState {
                 {
                     editor.selected = index;
                     self.record_visible_event_change();
+                }
+                if choice_mouse_release {
+                    dialog.notice = dialog.apply_editor(false).err();
+                    self.mark_render_changed();
                 }
             }
             Some(Interaction::Activate(Field | Choices | Apply)) => {
@@ -804,15 +1009,22 @@ pub(crate) fn render_setup(
     surfaces: &mut FrameSurfaces,
 ) {
     if let Some(review) = &dialog.review_editor {
-        render_review_settings(frame, area, review, surfaces, dialog.saving);
+        let popup = centered_modal_fixed(
+            frame,
+            surfaces,
+            dialog.preferred_width,
+            dialog.preferred_height,
+            area,
+        );
+        render_review_settings(frame, popup, review, dialog.saving);
         return;
     }
     use SetupControl::*;
-    let popup = centered_modal(
+    let popup = centered_modal_fixed(
         frame,
         surfaces,
-        100,
-        area.height.saturating_sub(2).min(32),
+        dialog.preferred_width,
+        dialog.preferred_height,
         area,
     );
     let inner = popup.inner(ratatui::layout::Margin {
@@ -823,11 +1035,19 @@ pub(crate) fn render_setup(
         dialog.form.borrow_mut().reset_geometry();
         return;
     }
-    let path = dialog
+    let text_editor = dialog
         .editor
         .as_ref()
-        .map(|editor| &editor.path)
-        .unwrap_or(&dialog.path);
+        .is_some_and(|editor| editor.choices.is_empty());
+    let choice_editor = dialog
+        .editor
+        .as_ref()
+        .is_some_and(|editor| !editor.choices.is_empty());
+    let path = if text_editor {
+        &dialog.editor.as_ref().expect("text editor").path
+    } else {
+        &dialog.path
+    };
     let nested = !path.is_empty();
     if nested {
         let breadcrumb = std::iter::once("Setup".to_owned())
@@ -860,38 +1080,30 @@ pub(crate) fn render_setup(
         popup,
         "Setup",
         theme::title(true),
-        !dialog.saving,
+        !dialog.saving && !choice_editor,
     );
     frame.render_widget(theme::modal().title(title), popup);
-    let initial;
-    if let Some(editor) = &dialog.editor {
-        if editor.choices.is_empty() {
-            let label = if editor.adding {
-                "Name for the new entry".to_owned()
-            } else {
-                schema::label(editor.path.last().unwrap())
-            };
-            frame.render_widget(
-                Paragraph::new(label),
-                Rect::new(body.x, body.y, body.width, 1),
-            );
-            TextField::render(
-                frame,
-                Rect::new(body.x, body.y + 1, body.width, 1),
-                &editor.input,
-                &mut form,
-                Field,
-            );
-            initial = Field;
+    let mut initial;
+    let mut background_offset = form.list_offset(List);
+    if text_editor {
+        let editor = dialog.editor.as_ref().expect("text editor");
+        let label = if editor.adding {
+            "Name for the new entry".to_owned()
         } else {
-            let rows = editor
-                .choices
-                .iter()
-                .map(|value| Line::raw(schema::choice_label(value)))
-                .collect::<Vec<_>>();
-            ChoiceList::render(frame, body, &rows, editor.selected, &mut form, Choices);
-            initial = Choices;
-        }
+            schema::label(editor.path.last().unwrap())
+        };
+        frame.render_widget(
+            Paragraph::new(label),
+            Rect::new(body.x, body.y, body.width, 1),
+        );
+        TextField::render(
+            frame,
+            Rect::new(body.x, body.y + 1, body.width, 1),
+            &editor.input,
+            &mut form,
+            Field,
+        );
+        initial = Field;
         ButtonRow::render(
             frame,
             Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
@@ -907,70 +1119,148 @@ pub(crate) fn render_setup(
             .keys()
             .iter()
             .map(|key| {
-                let value = if let Some(object) = dialog.current().as_object() {
-                    &object[key]
-                } else {
-                    &dialog.current()[key.parse::<usize>().unwrap()]
-                };
-                let summary = match value {
-                    Value::Object(v) => format!("{} settings  ›", v.len()),
-                    Value::Array(v) => format!("{} entries  ›", v.len()),
-                    Value::Bool(v) => {
-                        if *v {
-                            "On".into()
-                        } else {
-                            "Off".into()
-                        }
-                    }
-                    Value::Null => "Automatic / default".into(),
-                    _ => schema::choice_label(value),
-                };
+                let value = dialog
+                    .current()
+                    .as_object()
+                    .and_then(|object| object.get(key))
+                    .or_else(|| {
+                        key.parse::<usize>()
+                            .ok()
+                            .and_then(|index| dialog.current().get(index))
+                    });
+                let interface = dialog.path.is_empty() && key == "interface";
                 let name = if dialog.current().is_array() {
                     value
-                        .get("id")
+                        .and_then(|value| value.get("id"))
                         .and_then(Value::as_str)
                         .map(str::to_owned)
-                        .unwrap_or_else(|| format!("Item {}", key.parse::<usize>().unwrap() + 1))
+                        .unwrap_or_else(|| {
+                            format!("Item {}", key.parse::<usize>().unwrap_or(0) + 1)
+                        })
                 } else {
                     schema::label(key)
                 };
-                Line::raw(format!("{name:<32}  {summary}"))
+                Line::raw(format!(
+                    "{name:<32}  {}",
+                    if interface {
+                        "3 settings  ›".to_owned()
+                    } else if let Some(value) = value {
+                        value_summary(&dialog.path, key, value, &dialog.draft)
+                    } else {
+                        String::new()
+                    }
+                ))
             })
             .collect::<Vec<_>>();
-        ChoiceList::render(frame, body, &rows, dialog.selected, &mut form, List);
+        if choice_editor {
+            // The page remains visible behind a choice popup, but its controls
+            // must not remain interactive through the overlay.
+            let mut state = ListState::default()
+                .with_offset(background_offset)
+                .with_selected(Some(dialog.selected));
+            frame.render_stateful_widget(
+                RatatuiList::new(rows.iter().cloned().map(ListItem::new).collect::<Vec<_>>())
+                    .highlight_style(theme::selection(false)),
+                body,
+                &mut state,
+            );
+            background_offset = state.offset();
+        } else {
+            ChoiceList::render(frame, body, &rows, dialog.selected, &mut form, List);
+        }
         initial = List;
-        ButtonRow::render(
-            frame,
-            Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
-            &[
-                (Back, "Back", !dialog.path.is_empty()),
-                (Add, "Add", dialog.collection()),
-                (Remove, "Remove", dialog.collection() && !rows.is_empty()),
-                (
-                    Detect,
-                    "Detect machine",
-                    !dialog.discovering && !dialog.saving,
-                ),
-            ],
-            &mut form,
+        let top_footer = Rect::new(inner.x, inner.bottom() - 2, inner.width, 1);
+        let bottom_footer = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+        if choice_editor {
+            frame.render_widget(
+                Paragraph::new("  Back   Add   Remove   Detect machine").style(theme::muted()),
+                top_footer,
+            );
+            frame.render_widget(
+                Paragraph::new("  Cancel   Save (Ctrl-S)").style(theme::muted()),
+                bottom_footer,
+            );
+        } else {
+            ButtonRow::render(
+                frame,
+                top_footer,
+                &[
+                    (Back, "Back", !dialog.path.is_empty()),
+                    (Add, "Add", dialog.collection()),
+                    (Remove, "Remove", dialog.collection() && !rows.is_empty()),
+                    (
+                        Detect,
+                        "Detect machine",
+                        !dialog.discovering && !dialog.saving,
+                    ),
+                ],
+                &mut form,
+            );
+            ButtonRow::render(
+                frame,
+                bottom_footer,
+                &[
+                    (Cancel, "Cancel", !dialog.saving),
+                    (
+                        Save,
+                        if dialog.saving {
+                            "Saving…"
+                        } else {
+                            "Save (Ctrl-S)"
+                        },
+                        !dialog.saving && dialog.read_only.is_none(),
+                    ),
+                ],
+                &mut form,
+            );
+        }
+    }
+    if choice_editor {
+        let editor = dialog.editor.as_ref().expect("choice editor");
+        let selected_row = dialog.selected.saturating_sub(background_offset);
+        let anchor = Rect::new(
+            body.x.saturating_add(34.min(body.width.saturating_sub(1))),
+            body.y.saturating_add(
+                u16::try_from(selected_row)
+                    .unwrap_or(u16::MAX)
+                    .min(body.height.saturating_sub(1)),
+            ),
+            1,
+            1,
         );
-        ButtonRow::render(
+        let title = " values · ↑/↓ select · Tab/Enter accept ";
+        let row_width = editor
+            .choices
+            .iter()
+            .map(|value| Line::raw(schema::choice_label(value)).width())
+            .max()
+            .unwrap_or(0)
+            .saturating_add(4)
+            .max(Line::raw(title).width().saturating_add(2));
+        if let Some((_, popup_inner)) = AutocompletePopup::render(
             frame,
-            Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
-            &[
-                (Cancel, "Cancel", !dialog.saving),
-                (
-                    Save,
-                    if dialog.saving {
-                        "Saving…"
-                    } else {
-                        "Save (Ctrl-S)"
-                    },
-                    !dialog.saving && dialog.read_only.is_none(),
-                ),
-            ],
-            &mut form,
-        );
+            inner,
+            anchor,
+            u16::try_from(row_width).unwrap_or(u16::MAX),
+            editor.choices.len(),
+            title,
+            PopupSide::Below,
+        ) {
+            let rows = editor
+                .choices
+                .iter()
+                .map(|value| Line::raw(schema::choice_label(value)))
+                .collect::<Vec<_>>();
+            ChoiceList::render(
+                frame,
+                popup_inner,
+                &rows,
+                editor.selected,
+                &mut form,
+                Choices,
+            );
+        }
+        initial = Choices;
     }
     if let Some(notice) = dialog.read_only.as_ref().or(dialog.notice.as_ref()) {
         frame.render_widget(
@@ -985,7 +1275,7 @@ pub(crate) fn render_setup(
 mod tests {
     use super::*;
     use crate::test_support::{buffer_lines, config, dashboard_with_session, key, stopped_session};
-    use crossterm::event::KeyEvent;
+    use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn choose(dashboard: &mut DashboardState, name: &str) {
@@ -998,11 +1288,21 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Enter));
     }
 
+    fn activate(dashboard: &mut DashboardState, control: SetupControl) {
+        let Mode::Setup(dialog) = &mut dashboard.mode else {
+            panic!("setup");
+        };
+        dialog.form.get_mut().focus(control);
+        dashboard.handle_key(key(KeyCode::Enter));
+    }
+
     fn choose_light_theme(dashboard: &mut DashboardState) {
         dashboard.handle_key(key(KeyCode::F(7)));
+        choose(dashboard, "interface");
         choose(dashboard, "theme");
         dashboard.handle_key(key(KeyCode::Down));
         dashboard.handle_key(key(KeyCode::Enter));
+        dashboard.handle_key(key(KeyCode::Backspace));
     }
 
     fn assert_rendered_theme(dashboard: &mut DashboardState, selected: theme::UiTheme) {
@@ -1023,6 +1323,190 @@ mod tests {
             })
         );
         assert!(buffer.content.iter().any(|cell| cell.fg == colors.accent));
+    }
+
+    #[test]
+    fn setup_root_renders_virtual_interface_without_physical_interface_rows() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let text = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(text.contains("Interface"), "{text}");
+        assert!(text.contains("Advanced"), "{text}");
+        assert!(!text.contains("Session sidebar position"), "{text}");
+        assert!(!text.contains("Activity animation"), "{text}");
+        assert!(!text.contains("Theme"), "{text}");
+    }
+
+    #[test]
+    fn interface_choice_commits_to_the_existing_root_storage_path() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        choose(&mut dashboard, "interface");
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup");
+        };
+        assert_eq!(dialog.keys(), ["sessions_side", "spinner", "theme"]);
+        assert_eq!(dialog.draft["theme"], "midnight");
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let interface = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert_eq!(interface.matches('▾').count(), 3, "{interface}");
+
+        choose(&mut dashboard, "theme");
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let popup = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(popup.contains("values"), "{popup}");
+        dashboard.handle_key(key(KeyCode::Down));
+        dashboard.handle_key(key(KeyCode::Tab));
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup");
+        };
+        assert!(dialog.editor.is_none());
+        assert_eq!(dialog.path, ["interface"]);
+        assert_eq!(dialog.draft["theme"], "light");
+
+        dashboard.handle_key(key(KeyCode::Backspace));
+        choose(&mut dashboard, "phone");
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let free_text = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(!free_text.contains('▾'), "{free_text}");
+    }
+
+    #[test]
+    fn choice_popup_escape_preserves_the_draft_and_background_click_is_inert() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        choose(&mut dashboard, "interface");
+        choose(&mut dashboard, "theme");
+        dashboard.handle_key(key(KeyCode::Down));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+
+        // A click away from the popup must not activate the visible page
+        // controls behind it or commit the pending choice.
+        let modal = {
+            let Mode::Setup(dialog) = &dashboard.mode else {
+                panic!("setup");
+            };
+            mj_chat::hel_modal::centered_rect_fixed(
+                dialog.preferred_width,
+                dialog.preferred_height,
+                Rect::new(0, 0, 100, 30),
+            )
+        };
+        let background_button = (modal.x + 2, modal.bottom() - 2);
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            dashboard.handle_event_result(Event::Mouse(MouseEvent {
+                kind,
+                column: background_button.0,
+                row: background_button.1,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup");
+        };
+        assert!(dialog.editor.is_some());
+        assert_eq!(dialog.draft["theme"], "midnight");
+        dashboard.handle_key(key(KeyCode::Esc));
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup");
+        };
+        assert!(dialog.editor.is_none(), "escape closes the popup");
+        assert_eq!(dialog.draft["theme"], "midnight");
+
+        // Reopen it for the pointer-commit part of the behavior.
+        choose(&mut dashboard, "theme");
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+
+        // Find one popup content cell from the rendered form and click it.
+        let (row, column) = buffer_lines(terminal.backend().buffer())
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| line.find("Light").map(|column| (row, column)))
+            .expect("Light popup row");
+        let point = (column as u16, row as u16);
+        assert!(
+            setup_dialog_mut(&mut dashboard.mode)
+                .is_some_and(|dialog| dialog.form.borrow().contains(point.0, point.1))
+        );
+        dashboard.handle_event_result(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: point.0,
+            row: point.1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        dashboard.handle_event_result(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: point.0,
+            row: point.1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup");
+        };
+        assert!(dialog.editor.is_none(), "click commits the popup choice");
+        assert_eq!(dialog.draft["theme"], "light");
+    }
+
+    #[test]
+    fn setup_keeps_one_content_size_across_pages_editors_and_code_review() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let mut expected = None;
+        let mut assert_rect = |dashboard: &mut DashboardState| {
+            terminal
+                .draw(|frame| crate::render::render(frame, dashboard))
+                .unwrap();
+            let rect = dashboard
+                .frame_surfaces()
+                .surface(mj_chat::hel_selection::SurfaceId::ModalBody)
+                .expect("rendered Setup modal surface")
+                .rect;
+            assert!(
+                rect.width < mj_chat::hel_modal::modal_area(area).width,
+                "setup should be compact: {rect:?}"
+            );
+            assert_eq!(expected.get_or_insert(rect), &rect);
+        };
+
+        assert_rect(&mut dashboard); // root
+        choose(&mut dashboard, "interface");
+        assert_rect(&mut dashboard);
+        choose(&mut dashboard, "theme");
+        assert_rect(&mut dashboard); // inline choice popup
+        dashboard.handle_key(key(KeyCode::Esc));
+        dashboard.handle_key(key(KeyCode::Backspace));
+        choose(&mut dashboard, "advanced");
+        assert_rect(&mut dashboard);
+        dashboard.handle_key(key(KeyCode::Backspace));
+        choose(&mut dashboard, "phone");
+        choose(&mut dashboard, "bind");
+        assert_rect(&mut dashboard); // free text editor
+        activate(&mut dashboard, SetupControl::Back);
+        dashboard.handle_key(key(KeyCode::Backspace));
+        choose(&mut dashboard, "review");
+        assert_rect(&mut dashboard); // Code Review child
     }
 
     #[test]
@@ -1052,6 +1536,7 @@ mod tests {
 
         dashboard.begin_setup();
         assert_rendered_theme(&mut dashboard, theme::UiTheme::Light);
+        choose(&mut dashboard, "interface");
         choose(&mut dashboard, "theme");
         let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
         let editor = dialog.editor.as_ref().unwrap();

@@ -51,6 +51,10 @@ The only accepted top-level keys are:
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
 | `targets` | table of named tables | no | empty | Named places where sessions run. |
 
+The terminal Setup screen groups `sessions_side`, `spinner`, and `theme` under
+**Interface**. This is only a presentation grouping; the fields remain at the
+top level in `config.toml`.
+
 A missing or empty file is treated as an empty version 7 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
