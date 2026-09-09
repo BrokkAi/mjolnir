@@ -11,7 +11,7 @@
 //! `npx` run is not something to start from inside mj.
 
 use std::ffi::OsString;
-use std::io::{self, Cursor, IsTerminal, Read, Write};
+use std::io::{self, BufRead, Cursor, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -29,7 +29,6 @@ const HOMEBREW_FORMULA_URL: &str =
 const BIN_NAME: &str = "mj";
 const WINDOWS_BIN_NAME: &str = "mj.exe";
 const VOICE_WORKER_NAME: &str = "mj-voice-worker";
-const WINDOWS_VOICE_WORKER_NAME: &str = "mj-voice-worker.exe";
 const NPM_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPM";
 const NPX_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPX";
 const HOMEBREW_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_HOMEBREW";
@@ -592,8 +591,7 @@ pub enum StartupUpdateOutcome {
 ///   writes into `node_modules` or the Cellar itself, because those trees
 ///   belong to the package managers.
 /// - curl installs download the release archive, verify its SHA-256 sidecar,
-///   replace the running executable, and re-exec (the 1.x mechanism,
-///   unchanged).
+///   update the controller and every bundled application helper, and re-exec.
 /// - npx and cargo installs are notice-only.
 ///
 /// Runs before the dashboard's event loop exists: the version fetch is
@@ -647,8 +645,8 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
                 if !prompt_for_update(&version, &method).unwrap_or(false) {
                     return StartupUpdateOutcome::Declined;
                 }
-                let upgraded = run_managed_upgrade(&version, &method)
-                    .and_then(|()| restart_after_managed_upgrade(&method));
+                let upgraded =
+                    run_managed_upgrade(&version, &method).and_then(restart_current_process);
                 if let Err(error) = upgraded {
                     eprintln!("mj: upgrade failed: {error:#}");
                     eprintln!("mj: continuing with {}", env!("CARGO_PKG_VERSION"));
@@ -676,11 +674,15 @@ fn prompt_for_update(version: &Version, method: &InstallMethod) -> Result<bool> 
     );
     io::stdout().flush().context("flush update prompt")?;
 
+    read_update_answer(&mut io::stdin().lock())
+}
+
+fn read_update_answer(input: &mut impl BufRead) -> Result<bool> {
     let mut answer = String::new();
-    io::stdin()
+    let bytes_read = input
         .read_line(&mut answer)
         .context("read update prompt answer")?;
-    Ok(prompt_answer_is_yes(&answer))
+    Ok(bytes_read != 0 && prompt_answer_is_yes(&answer))
 }
 
 /// An empty answer accepts, matching the 1.x prompt's default.
@@ -721,7 +723,11 @@ fn brew_upgrade_command() -> Command {
 /// Runs the channel's own upgrade command in the foreground with its live
 /// output on the terminal. `run_inherited` keeps stdin closed so neither
 /// package manager can stop to ask a question nobody is there to answer.
-fn run_managed_upgrade(version: &Version, method: &InstallMethod) -> Result<()> {
+fn run_managed_upgrade(version: &Version, method: &InstallMethod) -> Result<RestartTarget> {
+    // npm moves and unlinks the old package. Resolve this before the upgrade,
+    // while current_exe still identifies the installation's stable path.
+    let current_exe = std::env::current_exe().context("resolve current executable")?;
+    let restart = managed_restart_target(method, &current_exe)?;
     match method {
         InstallMethod::Npm => {
             println!("mj: running npm install -g @brokkai/mjolnir@latest");
@@ -749,7 +755,7 @@ fn run_managed_upgrade(version: &Version, method: &InstallMethod) -> Result<()> 
         other => bail!("{other:?} installs do not support delegated upgrades"),
     }
     println!("mj: upgraded to {version}; restarting");
-    Ok(())
+    Ok(restart)
 }
 
 /// How the process re-execs after a successful managed upgrade.
@@ -772,11 +778,6 @@ fn managed_restart_target(method: &InstallMethod, current_exe: &Path) -> Result<
         InstallMethod::Homebrew => Ok(RestartTarget::Wrapper),
         other => bail!("{other:?} installs do not support delegated upgrades"),
     }
-}
-
-fn restart_after_managed_upgrade(method: &InstallMethod) -> Result<()> {
-    let current_exe = std::env::current_exe().context("resolve current executable")?;
-    restart_current_process(managed_restart_target(method, &current_exe)?)
 }
 
 #[cfg(unix)]
@@ -804,16 +805,9 @@ async fn download_apply_and_restart(update: &UpdateInfo) -> Result<()> {
         .with_context(|| format!("download {}", update.asset.name))?;
     verify_checksum(update, &archive).await?;
 
-    let new_binary =
-        extract_mj_binary(&update.asset.name, &archive).context("extract mj binary")?;
     let current_exe = std::env::current_exe().context("resolve current executable")?;
-    if !cfg!(target_os = "android")
-        && let Some(worker) = extract_optional_voice_worker(&update.asset.name, &archive)
-    {
-        install_voice_worker(&current_exe, &worker).context("install voice worker")?;
-    }
-    let replacement =
-        replace_current_exe(&current_exe, &new_binary).context("replace current executable")?;
+    let replacement = install_release_archive(&current_exe, &update.asset.name, &archive)
+        .context("install release bundle")?;
 
     println!("mj: upgraded to {}; restarting", update.tag);
     restart_current_process(RestartTarget::SameExe(replacement))
@@ -865,164 +859,125 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn extract_mj_binary(archive_name: &str, archive_bytes: &[u8]) -> Result<Vec<u8>> {
-    extract_named_binary(archive_name, archive_bytes, BIN_NAME, WINDOWS_BIN_NAME)
-}
-
-fn extract_voice_worker_binary(archive_name: &str, archive_bytes: &[u8]) -> Result<Vec<u8>> {
-    extract_named_binary(
-        archive_name,
-        archive_bytes,
-        VOICE_WORKER_NAME,
-        WINDOWS_VOICE_WORKER_NAME,
-    )
-}
-
-/// Sidecar binaries are optional in release archives: a future release that
-/// retires the voice worker must not strand older updaters. Only `mj` itself
-/// is mandatory.
-fn extract_optional_voice_worker(archive_name: &str, archive_bytes: &[u8]) -> Option<Vec<u8>> {
-    match extract_voice_worker_binary(archive_name, archive_bytes) {
-        Ok(worker) => Some(worker),
-        Err(e) => {
-            eprintln!("mj: skipping voice worker update: {e:#}");
-            None
-        }
-    }
-}
-
-fn extract_named_binary(
+/// Extract the complete application bundle before changing any installed file.
+/// Companions can be retired in future releases, but mj itself is mandatory.
+fn install_release_archive(
+    current_exe: &Path,
     archive_name: &str,
     archive_bytes: &[u8],
-    unix_name: &str,
-    windows_name: &str,
-) -> Result<Vec<u8>> {
-    if archive_name.ends_with(".zip") {
-        return extract_named_binary_from_zip(archive_bytes, windows_name);
-    }
-    extract_named_binary_from_tar_gz(archive_bytes, unix_name)
-}
-
-fn extract_named_binary_from_tar_gz(archive_bytes: &[u8], expected_name: &str) -> Result<Vec<u8>> {
-    let gz = GzDecoder::new(archive_bytes);
-    let mut archive = tar::Archive::new(gz);
-    for entry in archive.entries().context("read tar entries")? {
-        let mut entry = entry.context("read tar entry")?;
-        let path = entry.path().context("read tar entry path")?;
-        if path.file_name().and_then(|name| name.to_str()) != Some(expected_name) {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
-            .context("read binary from archive")?;
-        if bytes.is_empty() {
-            bail!("archive contained an empty {expected_name} binary");
-        }
-        return Ok(bytes);
-    }
-    bail!("archive did not contain expected binary: {expected_name}")
-}
-
-fn extract_named_binary_from_zip(archive_bytes: &[u8], expected_name: &str) -> Result<Vec<u8>> {
-    let cursor = Cursor::new(archive_bytes);
-    let mut archive = zip::ZipArchive::new(cursor).context("open zip archive")?;
-    for index in 0..archive.len() {
-        let mut file = archive
-            .by_index(index)
-            .with_context(|| format!("read zip entry {index}"))?;
-        let path = file
-            .enclosed_name()
-            .ok_or_else(|| anyhow::anyhow!("zip entry escapes destination: {}", file.name()))?;
-        if path.file_name().and_then(|name| name.to_str()) != Some(expected_name) {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .with_context(|| format!("read {expected_name} binary from archive"))?;
-        if bytes.is_empty() {
-            bail!("archive contained an empty {expected_name} binary");
-        }
-        return Ok(bytes);
-    }
-    bail!("archive did not contain expected binary: {expected_name}")
-}
-
-fn install_voice_worker(current_exe: &Path, bytes: &[u8]) -> Result<()> {
-    install_sibling_binary(
-        current_exe,
-        VOICE_WORKER_NAME,
-        WINDOWS_VOICE_WORKER_NAME,
-        bytes,
-    )
-}
-
-fn install_sibling_binary(
-    current_exe: &Path,
-    unix_name: &str,
-    windows_name: &str,
-    bytes: &[u8],
-) -> Result<()> {
-    let current_exe = current_exe
-        .canonicalize()
-        .with_context(|| format!("resolve executable target {}", current_exe.display()))?;
-    let parent = current_exe
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("executable has no parent: {}", current_exe.display()))?;
-    let name = if cfg!(windows) {
-        windows_name
-    } else {
-        unix_name
-    };
-    let target = parent.join(name);
-    let tmp = parent.join(format!(".{name}.self-update.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("chmod {}", tmp.display()))?;
-    }
-    std::fs::rename(&tmp, &target)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
-    strip_quarantine(&target);
-    Ok(())
-}
-
-/// Writes the new binary next to the running one and renames it into place,
-/// which on Unix atomically replaces the file even while this process is
-/// still executing its old contents. Returns the resolved replacement path.
-#[cfg(unix)]
-fn replace_current_exe(current_exe: &Path, new_binary: &[u8]) -> Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-
+) -> Result<PathBuf> {
+    ensure!(
+        cfg!(unix),
+        "self-update replacement is only supported on Unix platforms"
+    );
     let target_exe = current_exe
         .canonicalize()
         .with_context(|| format!("resolve executable target {}", current_exe.display()))?;
     let parent = target_exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("executable has no parent: {}", target_exe.display()))?;
-    let tmp_path = parent.join(format!(
-        ".{}.self-update.{}.tmp",
-        BIN_NAME,
-        std::process::id()
-    ));
-
-    std::fs::write(&tmp_path, new_binary)
-        .with_context(|| format!("write {}", tmp_path.display()))?;
-    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("chmod {}", tmp_path.display()))?;
-
-    strip_quarantine(&tmp_path);
-    std::fs::rename(&tmp_path, &target_exe)
-        .with_context(|| format!("rename {} -> {}", tmp_path.display(), target_exe.display()))?;
-    strip_quarantine(&target_exe);
+    // Keep staging on the destination filesystem so each replacement is an
+    // atomic rename, including binaries that are currently running.
+    let staging = tempfile::Builder::new()
+        .prefix(".mj-self-update-")
+        .tempdir_in(parent)
+        .context("create update staging directory")?;
+    let mut binaries = stage_release_archive(archive_name, archive_bytes, staging.path())?;
+    let executable_name = if archive_name.ends_with(".zip") {
+        WINDOWS_BIN_NAME
+    } else {
+        BIN_NAME
+    };
+    ensure!(
+        staging.path().join(executable_name).is_file(),
+        "archive did not contain expected binary: {executable_name}"
+    );
+    // Replace the controller last, once every packaged companion is installed.
+    binaries.sort_by_key(|path| path.file_name() == Some(executable_name.as_ref()));
+    strip_quarantine(staging.path());
+    for binary in binaries {
+        let name = binary
+            .file_name()
+            .context("staged binary has no file name")?;
+        let target = if name == executable_name {
+            target_exe.clone()
+        } else {
+            parent.join(name)
+        };
+        std::fs::rename(&binary, &target)
+            .with_context(|| format!("install {}", target.display()))?;
+    }
     Ok(target_exe)
 }
 
-#[cfg(not(unix))]
-fn replace_current_exe(_current_exe: &Path, _new_binary: &[u8]) -> Result<PathBuf> {
-    bail!("self-update replacement is only supported on Unix platforms")
+fn stage_release_archive(
+    archive_name: &str,
+    archive_bytes: &[u8],
+    directory: &Path,
+) -> Result<Vec<PathBuf>> {
+    let mut binaries = Vec::new();
+    if archive_name.ends_with(".zip") {
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(archive_bytes)).context("open zip archive")?;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).context("read zip entry")?;
+            let path = entry.enclosed_name().ok_or_else(|| {
+                anyhow::anyhow!("zip entry escapes destination: {}", entry.name())
+            })?;
+            let is_file = entry.is_file() && !entry.is_symlink();
+            if let Some(binary) = stage_archive_binary(directory, &path, is_file, &mut entry)? {
+                binaries.push(binary);
+            }
+        }
+    } else {
+        let mut archive = tar::Archive::new(GzDecoder::new(archive_bytes));
+        for entry in archive.entries().context("read tar entries")? {
+            let mut entry = entry.context("read tar entry")?;
+            let path = entry.path().context("read tar entry path")?.into_owned();
+            let is_file = entry.header().entry_type().is_file();
+            if let Some(binary) = stage_archive_binary(directory, &path, is_file, &mut entry)? {
+                binaries.push(binary);
+            }
+        }
+    }
+    Ok(binaries)
+}
+
+fn stage_archive_binary(
+    directory: &Path,
+    path: &Path,
+    is_file: bool,
+    mut contents: impl Read,
+) -> Result<Option<PathBuf>> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    let stem = name.strip_suffix(".exe").unwrap_or(name);
+    if !matches!(
+        stem,
+        BIN_NAME | "mj-desktop" | VOICE_WORKER_NAME | "mj-worker"
+    ) && !stem.starts_with("mj-worker-")
+    {
+        return Ok(None);
+    }
+    ensure!(
+        is_file,
+        "archive binary is not a regular file: {}",
+        path.display()
+    );
+    let target = directory.join(name);
+    let mut output = std::fs::File::create_new(&target)
+        .with_context(|| format!("stage {name}; each binary must appear only once"))?;
+    let size = io::copy(&mut contents, &mut output).with_context(|| format!("extract {name}"))?;
+    ensure!(size != 0, "archive contained an empty {name} binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        output
+            .set_permissions(std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("chmod {name}"))?;
+    }
+    Ok(Some(target))
 }
 
 #[cfg(unix)]
@@ -1374,6 +1329,14 @@ end
     }
 
     #[test]
+    fn prompt_eof_declines_but_enter_accepts() {
+        assert!(!read_update_answer(&mut Cursor::new(b"")).expect("read EOF"));
+        assert!(read_update_answer(&mut Cursor::new(b"\n")).expect("read Enter"));
+        assert!(read_update_answer(&mut Cursor::new(b"yes\n")).expect("read yes"));
+        assert!(!read_update_answer(&mut Cursor::new(b"n\n")).expect("read no"));
+    }
+
+    #[test]
     fn managed_update_notice_names_channel_version_and_command() {
         assert_eq!(
             managed_update_notice(
@@ -1427,8 +1390,8 @@ end
 
     #[test]
     fn managed_restart_retargets_homebrew_to_its_wrapper() {
-        // SameExe is correct for npm because `npm install -g` replaces the
-        // bundle files in place; Homebrew must re-resolve the wrapper or the
+        // npm must save its installation path before the old bundle is removed.
+        // Homebrew must re-resolve the wrapper or the
         // restart would relaunch the old Cellar version.
         let exe = Path::new("/opt/homebrew/Cellar/mjolnir/2.4.0/libexec/mj");
         assert_eq!(
@@ -1440,6 +1403,204 @@ end
             RestartTarget::Wrapper
         );
         assert!(managed_restart_target(&InstallMethod::Npx, exe).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn npm_upgrade_restarts_after_the_running_package_is_removed() {
+        const FIXTURE_ENV: &str = "MJ_UPDATE_RESTART_FIXTURE";
+        if std::env::var_os(FIXTURE_ENV).is_some() {
+            let target = run_managed_upgrade(
+                &Version::parse("9.9.9").expect("version"),
+                &InstallMethod::Npm,
+            )
+            .expect("fake npm upgrade");
+            restart_current_process(target).expect("restart updated binary");
+            unreachable!("exec does not return on success");
+        }
+
+        let root = tempfile::tempdir().expect("fixture directory");
+        let package_bin = root.path().join("package/bin");
+        let manager_bin = root.path().join("manager");
+        std::fs::create_dir_all(&package_bin).expect("package bin");
+        std::fs::create_dir(&manager_bin).expect("manager bin");
+        let executable = package_bin.join("mj");
+        std::fs::copy(std::env::current_exe().expect("test binary"), &executable)
+            .expect("copy test executable into package");
+        let replacement = root.path().join("replacement");
+        std::fs::write(&replacement, "#!/bin/sh\necho UPDATED_MJ_RESTARTED\n")
+            .expect("replacement script");
+        let npm = manager_bin.join("npm");
+        std::fs::write(
+            &npm,
+            r#"#!/bin/sh
+set -eu
+mv "$MJ_UPDATE_RESTART_FIXTURE/package" "$MJ_UPDATE_RESTART_FIXTURE/retired"
+mkdir -p "$MJ_UPDATE_RESTART_FIXTURE/package/bin"
+cp "$MJ_UPDATE_RESTART_FIXTURE/replacement" "$MJ_UPDATE_RESTART_FIXTURE/package/bin/mj"
+rm "$MJ_UPDATE_RESTART_FIXTURE/retired/bin/mj"
+"#,
+        )
+        .expect("fake npm script");
+        use std::os::unix::fs::PermissionsExt;
+        for script in [&npm, &replacement] {
+            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755))
+                .expect("executable script");
+        }
+        let mut paths = vec![manager_bin];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let mut child = Command::new(executable);
+        child.args([
+            "--exact",
+            "hel_controller::update::tests::npm_upgrade_restarts_after_the_running_package_is_removed",
+            "--nocapture",
+        ]);
+        child.env(FIXTURE_ENV, root.path());
+        child.env("PATH", std::env::join_paths(paths).expect("fixture PATH"));
+        let output = hel::hel_subprocess::run_with_input(&mut child, b"")
+            .expect("run copied test executable");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("UPDATED_MJ_RESTARTED"));
+    }
+
+    #[cfg(unix)]
+    fn release_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut archive = tar::Builder::new(gz);
+        for (name, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, name, *bytes)
+                .expect("tar entry");
+        }
+        archive
+            .into_inner()
+            .expect("tar archive")
+            .finish()
+            .expect("gzip archive")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_upgrade_replaces_every_packaged_binary_and_preserves_unrelated_files() {
+        let root = tempfile::tempdir().expect("install directory");
+        let executable = root.path().join("custom-mj-name");
+        std::fs::write(&executable, b"old controller").expect("old controller");
+        std::fs::write(root.path().join("README.md"), b"user notes").expect("unrelated file");
+        let new_binary = vec![b'n'; 128 * 1024];
+        let entries: Vec<(&str, &[u8])> = [
+            "release/mj",
+            "release/mj-desktop",
+            "release/mj-voice-worker",
+            "release/mj-worker",
+            "release/mj-worker-x86_64-unknown-linux-musl",
+            "release/mj-worker-aarch64-unknown-linux-musl",
+        ]
+        .into_iter()
+        .map(|name| (name, new_binary.as_slice()))
+        .collect();
+        for (name, _) in &entries[1..] {
+            std::fs::write(
+                root.path().join(Path::new(name).file_name().unwrap()),
+                b"old helper",
+            )
+            .expect("old helper");
+        }
+        let mut archive_entries = entries.clone();
+        archive_entries.push(("release/README.md", b"release notes"));
+        let archive = release_tar(&archive_entries);
+        let installed = install_release_archive(&executable, "release.tar.gz", &archive)
+            .expect("install complete release");
+        assert_eq!(
+            installed,
+            executable.canonicalize().expect("resolved controller")
+        );
+        assert_eq!(std::fs::read(&executable).unwrap(), new_binary);
+        use std::os::unix::fs::PermissionsExt;
+        for (name, _) in &entries[1..] {
+            let helper = root.path().join(Path::new(name).file_name().unwrap());
+            assert_eq!(std::fs::read(&helper).unwrap(), new_binary);
+            assert_eq!(
+                std::fs::metadata(&helper).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        assert_eq!(
+            std::fs::read(root.path().join("README.md")).unwrap(),
+            b"user notes"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            entries.len() + 1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_release_leaves_installed_binaries_unchanged() {
+        let root = tempfile::tempdir().expect("install directory");
+        let executable = root.path().join("mj");
+        let worker = root.path().join("mj-worker");
+        for archive in [
+            release_tar(&[("mj", b"new controller"), ("mj-worker", b"")]),
+            release_tar(&[("mj", b"new controller"), ("mj", b"duplicate")]),
+            release_tar(&[("mj-worker", b"new worker")]),
+        ] {
+            std::fs::write(&executable, b"old controller").unwrap();
+            std::fs::write(&worker, b"old worker").unwrap();
+            assert!(install_release_archive(&executable, "release.tar.gz", &archive).is_err());
+            assert_eq!(std::fs::read(&executable).unwrap(), b"old controller");
+            assert_eq!(std::fs::read(&worker).unwrap(), b"old worker");
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_upgrade_allows_retired_companions() {
+        let root = tempfile::tempdir().expect("install directory");
+        let executable = root.path().join("mj");
+        std::fs::write(&executable, b"old controller").unwrap();
+        let archive = release_tar(&[("mj", b"new controller")]);
+        install_release_archive(&executable, "release.tar.gz", &archive)
+            .expect("main-only release");
+        assert_eq!(std::fs::read(&executable).unwrap(), b"new controller");
+    }
+
+    #[test]
+    fn zip_release_stages_application_binaries_without_extracting_documents() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for name in [
+            "release/mj.exe",
+            "release/mj-worker.exe",
+            "release/mj-desktop.exe",
+            "release/LICENSE",
+        ] {
+            archive.start_file(name, options).expect("zip entry");
+            archive.write_all(b"binary contents").expect("zip contents");
+        }
+        let bytes = archive.finish().expect("zip archive").into_inner();
+        let root = tempfile::tempdir().expect("staging directory");
+        let binaries =
+            stage_release_archive("release.zip", &bytes, root.path()).expect("stage zip");
+        assert_eq!(binaries.len(), 3);
+        for name in ["mj.exe", "mj-worker.exe", "mj-desktop.exe"] {
+            assert_eq!(
+                std::fs::read(root.path().join(name)).unwrap(),
+                b"binary contents"
+            );
+        }
+        assert!(!root.path().join("LICENSE").exists());
     }
 
     /// Serves canned bodies per path prefix from a loopback port and returns
