@@ -473,6 +473,45 @@ def dashboard_dimensions(tmux: TmuxController, evidence: Evidence) -> None:
         )
 
 
+def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
+    """Changing only the sidebar size moves both support panes together."""
+    tmux.resize(100, 40)
+    tmux.wait_until(
+        lambda: len(tmux.capture().splitlines()[0]) == 100
+        and tmux.capture().splitlines()[0].endswith("╮"),
+        "dashboard rendered at 100 columns",
+    )
+    for glyph, sidebar_width, support_x, label in [
+        ("□", 50, 0, "wide"),
+        ("▁", 20, 20, "narrow"),
+        ("□", 50, 0, "wide-again"),
+    ]:
+        screen = tmux.capture().splitlines()
+        y = next(i for i, line in enumerate(screen) if "▁" in line)
+        tmux.mouse_click(screen[y].index(glyph), y)
+
+        def positioned():
+            lines = tmux.capture().splitlines()
+            sessions = next((line for line in lines if "▁" in line), "")
+            targets = next((line for line in lines if " Targets " in line), "")
+            quota = next((line for line in lines if " Quota " in line), "")
+            return (
+                sessions.find("╮") == sidebar_width - 1
+                and targets.find("╭ Targets ") == support_x
+                and quota.find("╭ Quota ") == support_x
+            )
+
+        tmux.wait_until(positioned, f"support panes relayout with {label} sidebar")
+        screen = tmux.capture()
+        evidence.event(
+            f"sidebar-relayout-{label}",
+            f"click Sessions {glyph} at fixed 100x40",
+            f"Targets and Quota begin at column {support_x}",
+            f"Targets and Quota begin at column {support_x}",
+            evidence.capture(f"sidebar-relayout-{label}", screen),
+        )
+
+
 def run_workflow(
     lab: Lab, tmux: TmuxController, evidence: Evidence, seed: int, port: int
 ) -> None:
@@ -489,6 +528,7 @@ def run_workflow(
     tmux.wait_for_any(("Sessions", "live-components"), "dashboard after direct reattach")
 
     dashboard_dimensions(tmux, evidence)
+    sidebar_relayout(tmux, evidence)
     tmux.resize(140, 40)
     tmux.wait_for("Sessions", "dashboard restored to 140x40")
 
