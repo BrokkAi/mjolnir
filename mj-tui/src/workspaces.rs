@@ -14,7 +14,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::widgets::centered_modal;
+use crate::widgets::{centered_modal, dismissible_modal_title};
 use crate::{DashboardAction, DashboardState, Mode};
 
 /// A detached composer draft shown by the workspace manager.
@@ -76,7 +76,6 @@ pub(crate) enum WorkspaceControl {
     Recover,
     Cancel,
     Back,
-    Close,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +134,6 @@ fn manager_form() -> RefCell<Form<WorkspaceControl>> {
     form.declare(WorkspaceControl::Recover, ControlKind::Button);
     form.declare(WorkspaceControl::Cancel, ControlKind::Button);
     form.declare(WorkspaceControl::Back, ControlKind::Button);
-    form.declare(WorkspaceControl::Close, ControlKind::Button);
     form.end_frame(WorkspaceControl::List);
     RefCell::new(form)
 }
@@ -266,7 +264,6 @@ impl WorkspaceManager {
         form.declare(WorkspaceControl::Recover, ControlKind::Button);
         form.declare(WorkspaceControl::Cancel, ControlKind::Button);
         form.declare(WorkspaceControl::Back, ControlKind::Button);
-        form.declare(WorkspaceControl::Close, ControlKind::Button);
         form.end_frame(WorkspaceControl::List);
     }
 }
@@ -531,11 +528,11 @@ impl DashboardState {
         );
         match result.action {
             Some(Interaction::Cancel) => {
-                if matches!(manager.view, WorkspaceManagerView::List) {
+                let locked = manager
+                    .busy
+                    .is_some_and(|mutation| mutation != WorkspaceMutation::Load);
+                if !locked {
                     self.cancel_modal();
-                } else {
-                    manager.reset_to_list();
-                    self.mark_render_changed();
                 }
             }
             Some(Interaction::Edit(WorkspaceControl::Name, edit)) => {
@@ -634,7 +631,7 @@ impl DashboardState {
                         self.mark_render_changed();
                     }
                 }
-                WorkspaceControl::Close | WorkspaceControl::Back => {
+                WorkspaceControl::Back => {
                     if matches!(manager.view, WorkspaceManagerView::List) {
                         self.cancel_modal();
                     } else {
@@ -667,8 +664,12 @@ impl DashboardState {
                     return self.workspace_manager_mutation(WorkspaceMutation::Recover);
                 }
                 WorkspaceControl::Cancel => {
-                    manager.reset_to_list();
-                    self.mark_render_changed();
+                    if matches!(manager.view, WorkspaceManagerView::Delete { .. }) {
+                        manager.reset_to_list();
+                        self.mark_render_changed();
+                    } else {
+                        self.cancel_modal();
+                    }
                 }
                 _ => {}
             },
@@ -906,7 +907,6 @@ pub(crate) fn render_workspace_manager(
         WorkspaceManagerView::Delete { .. } => " Workspaces · Delete ",
         WorkspaceManagerView::Drafts { .. } => " Workspaces · Drafts ",
     };
-    frame.render_widget(theme::modal().title(title), popup);
     let inner = popup.inner(Margin {
         horizontal: 1,
         vertical: 1,
@@ -936,16 +936,16 @@ pub(crate) fn render_workspace_manager(
                 "Enter opens the selected workspace · Tab moves between controls".into()
             }
             WorkspaceManagerView::Create => {
-                "Enter creates the workspace · Esc returns to the list".into()
+                "Enter creates the workspace · Esc closes manager".into()
             }
             WorkspaceManagerView::Rename { .. } => {
-                "Enter saves the new name · Esc returns to the list".into()
+                "Enter saves the new name · Esc closes manager".into()
             }
             WorkspaceManagerView::Delete { .. } => {
-                "Every deletion requires confirmation · Esc returns to the list".into()
+                "Every deletion requires confirmation · Esc closes manager".into()
             }
             WorkspaceManagerView::Drafts { .. } => {
-                "Enter recovers the selected draft · Esc returns to the list".into()
+                "Enter recovers the selected draft · Esc closes manager".into()
             }
         }
     };
@@ -961,6 +961,17 @@ pub(crate) fn render_workspace_manager(
     );
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    let dismiss_enabled = dialog
+        .busy
+        .is_none_or(|mutation| mutation == WorkspaceMutation::Load);
+    let title_line = dismissible_modal_title(
+        &mut form,
+        popup,
+        title.trim(),
+        theme::title(true),
+        dismiss_enabled,
+    );
+    frame.render_widget(theme::modal().title(title_line), popup);
     match &dialog.view {
         WorkspaceManagerView::List => render_manager_list(frame, &rows, dialog, &mut form),
         WorkspaceManagerView::Create => render_manager_name_view(
@@ -1111,7 +1122,6 @@ fn render_manager_list(
     if selected.is_some_and(|entry| !entry.drafts.is_empty()) {
         actions.push((WorkspaceControl::Drafts, "Drafts", dialog.can_mutate()));
     }
-    actions.push((WorkspaceControl::Close, "Close", dialog.busy.is_none()));
     ButtonRow::render(frame, rows[2], &actions, form);
 }
 
@@ -1150,6 +1160,7 @@ fn render_manager_name_view(
         rows[2],
         &[
             (submit, submit_label, dialog.can_mutate()),
+            (WorkspaceControl::Back, "Back", dialog.busy.is_none()),
             (WorkspaceControl::Cancel, "Cancel", dialog.busy.is_none()),
         ],
         form,
@@ -1632,8 +1643,11 @@ mod tests {
         assert!(create.contains("Workspaces · New"), "{create}");
         assert!(create.contains("Create"), "{create}");
         assert!(create.contains("Cancel"), "{create}");
+        if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+            manager.form.get_mut().focus(WorkspaceControl::Back);
+        }
         assert_eq!(
-            dashboard.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             DashboardAction::None
         );
         let _ = draw_manager(&dashboard);

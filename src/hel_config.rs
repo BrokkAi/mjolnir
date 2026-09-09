@@ -156,7 +156,7 @@ impl ReviewConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 6;
+pub const CONFIG_VERSION: u32 = 7;
 pub const PRODUCT_DIR: &str = "mjolnir";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1175,6 +1175,8 @@ impl SessionsSide {
 pub struct AdvancedConfig {
     #[serde(skip_serializing_if = "is_false")]
     pub detailed_activity_clocks: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub show_stopped_sessions: bool,
 }
 
 impl AdvancedConfig {
@@ -1186,9 +1188,9 @@ impl AdvancedConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelConfig {
-    /// Deprecated session filtering preference retained for config compatibility.
-    /// The Setup editor no longer exposes this setting.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    /// Deprecated session filtering preference retained for read compatibility.
+    /// It is ignored and omitted from newly written configurations.
+    #[serde(default, skip_serializing)]
     pub show_stopped_sessions: bool,
     #[serde(default, skip_serializing_if = "SessionsSide::is_default")]
     pub sessions_side: SessionsSide,
@@ -1225,7 +1227,7 @@ impl Default for HelConfig {
         Self {
             sessions_side: SessionsSide::default(),
             advanced: AdvancedConfig::default(),
-            show_stopped_sessions: true,
+            show_stopped_sessions: false,
             version: CONFIG_VERSION,
             newer_config_version: None,
             spinner: SpinnerStyle::default(),
@@ -1307,9 +1309,10 @@ impl HelConfig {
         // Version 2 adds Podman workspace storage; version 3 restores the
         // spinner preference; version 4 adds stopped-session visibility;
         // version 5 adds the terminal theme preference; version 6 adds
-        // optional advanced settings. Earlier configs acquire defaults in
-        // memory and upgrade on the next ordinary save.
-        if matches!(config.version, 1..=5) {
+        // optional advanced settings; version 7 restores stopped-session
+        // visibility as an advanced setting. Earlier configs acquire defaults
+        // in memory and upgrade on the next ordinary save.
+        if matches!(config.version, 1..=6) {
             config.version = CONFIG_VERSION;
         }
         config.validate()?;
@@ -1339,9 +1342,6 @@ impl HelConfig {
     /// written in a future shape costs only that target.
     fn salvage(document: &toml::Value) -> Self {
         let mut config = Self::default();
-        if let Some(show) = salvage_section::<bool>(document, "show_stopped_sessions") {
-            config.show_stopped_sessions = show;
-        }
         if let Some(side) = salvage_section::<SessionsSide>(document, "sessions_side") {
             config.sessions_side = side;
         }
@@ -1862,20 +1862,30 @@ mod tests {
     }
 
     #[test]
-    fn stopped_session_visibility_defaults_on_and_is_remembered_when_disabled() {
+    fn stopped_session_visibility_defaults_off_and_uses_the_advanced_section() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        fs::write(&path, "version = 3\n").unwrap();
+        let legacy = "version = 6\nshow_stopped_sessions = true\n";
+        fs::write(&path, legacy).unwrap();
         let config = HelConfig::load_from(&path).unwrap();
         assert!(config.show_stopped_sessions);
-        assert_eq!(fs::read_to_string(&path).unwrap(), "version = 3\n");
+        assert!(!config.advanced.show_stopped_sessions);
+        assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+
+        config.save_to(&path).unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("show_stopped_sessions"));
+
         let (saved, ()) = HelConfig::update_to(&path, |config| {
-            config.show_stopped_sessions = false;
+            config.advanced.show_stopped_sessions = true;
             Ok(())
         })
         .unwrap();
         assert_eq!(HelConfig::load_from(&path).unwrap(), saved);
-        assert!(!saved.show_stopped_sessions);
+        assert!(saved.advanced.show_stopped_sessions);
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("[advanced]"));
+        assert!(body.contains("show_stopped_sessions = true"));
         assert_eq!(saved.version, CONFIG_VERSION);
     }
 
@@ -1927,7 +1937,7 @@ mod tests {
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
             advanced: Default::default(),
-            show_stopped_sessions: true,
+            show_stopped_sessions: false,
             newer_config_version: None,
             spinner: SpinnerStyle::default(),
             theme: Default::default(),
@@ -2582,9 +2592,10 @@ mod tests {
             fs::write(&path, format!("version = {version}\n")).unwrap();
             let config = HelConfig::load_from(&path).unwrap();
             assert_eq!(config.version, CONFIG_VERSION);
-            assert!(config.show_stopped_sessions);
+            assert!(!config.show_stopped_sessions);
             assert_eq!(config.theme, UiTheme::Midnight);
             assert!(!config.advanced.detailed_activity_clocks);
+            assert!(!config.advanced.show_stopped_sessions);
         }
     }
 

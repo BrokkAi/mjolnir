@@ -981,10 +981,43 @@ fn render_elicitation_at(
     frame.render_widget(Clear, area);
     dialog.rendered_area.set(Some(area));
     let title = dialog.request.title.as_deref().unwrap_or("Agent question");
-    let block = theme::panel(focused).title(format!(" {title} "));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
     let focus = focus_content(dialog);
+    let focused_field = dialog.focus_index();
+    let inner = {
+        let mut form = dialog.form.borrow_mut();
+        form.begin_frame();
+        let title_line = crate::hel_modal::dismissible_modal_title(
+            &mut form,
+            area,
+            title,
+            theme::title(focused),
+            true,
+        );
+        let block = theme::panel(focused).title(title_line);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    };
+    render_elicitation_body(
+        frame,
+        dialog,
+        surfaces,
+        inner,
+        focused,
+        focus,
+        focused_field,
+    );
+}
+
+fn render_elicitation_body(
+    frame: &mut Frame,
+    dialog: &ElicitationDialog,
+    surfaces: &mut FrameSurfaces,
+    inner: Rect,
+    focused: bool,
+    focus: FocusContent<'_>,
+    focused_field: usize,
+) {
     let natural_focus_height = u16::try_from(
         Paragraph::new(focus.lines.clone())
             .wrap(Wrap { trim: false })
@@ -1063,11 +1096,9 @@ fn render_elicitation_at(
         usize::from(total_lines),
     ));
     surfaces.push(SurfaceFrame::fixed(SurfaceId::ModalBody, chunks[1]));
-    let focused_field = dialog.focus_index();
     let field_index = focused_field.min(dialog.display_fields.len().saturating_sub(1));
     {
         let mut form = dialog.form.borrow_mut();
-        form.begin_frame();
         for (index, display) in dialog.display_fields.iter().copied().enumerate() {
             let field_area = if index == focused_field {
                 chunks[1]
@@ -1141,7 +1172,7 @@ fn render_elicitation_at(
             .min(focus_max_scroll);
     }
     dialog.focus_scroll.set(focus_scroll);
-    if let Some(display) = dialog.display_fields.get(dialog.focus_index()).copied() {
+    if let Some(display) = dialog.display_fields.get(focused_field).copied() {
         let id = ElicitationControl::Field(field_index);
         let mut form = dialog.form.borrow_mut();
         if select_option_count(&dialog.request.fields[display.field]).is_some() {
@@ -1585,6 +1616,7 @@ fn render_custom_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use hel::hel_elicitation::ElicitationOption;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2345,6 +2377,49 @@ mod tests {
         ));
         assert_eq!(
             dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE),
+            Some(ElicitationResponse::Cancel)
+        );
+    }
+
+    #[test]
+    fn dismiss_glyph_returns_the_same_cancel_response_as_escape() {
+        let mut clicked = ElicitationDialog::new(request(
+            ElicitationFieldKind::Boolean { default: None },
+            false,
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(60, 18)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_elicitation_in(frame, &clicked, &mut FrameSurfaces::new(), area, true);
+            })
+            .expect("draw elicitation");
+        let buffer = terminal.backend().buffer();
+        let (column, row) = (0..buffer.area.right())
+            .flat_map(|column| (0..buffer.area.bottom()).map(move |row| (column, row)))
+            .find(|&(column, row)| buffer[(column, row)].symbol() == "×")
+            .expect("elicitation dismiss glyph");
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(clicked.handle_mouse(press), None);
+        assert_eq!(
+            clicked.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                ..press
+            }),
+            Some(ElicitationResponse::Cancel)
+        );
+
+        let mut escaped = ElicitationDialog::new(request(
+            ElicitationFieldKind::Boolean { default: None },
+            false,
+        ));
+        assert_eq!(
+            escaped.handle_key(KeyCode::Esc, KeyModifiers::NONE),
             Some(ElicitationResponse::Cancel)
         );
     }

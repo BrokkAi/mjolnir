@@ -23,7 +23,7 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::widgets::{centered_modal, centered_rect};
+use crate::widgets::{centered_modal, centered_rect, dismissible_modal_title};
 use crate::{DashboardAction, DashboardState, Mode};
 
 /// Selectors advertised by one successful reviewer discovery.
@@ -476,6 +476,18 @@ impl ReviewSettingsDialog {
         }
     }
 
+    /// Invalidates a request before the parent Setup draft is parked behind a
+    /// dismissal confirmation. A restored draft must never resume a spinner
+    /// whose cancellation result can no longer reach the visible editor.
+    pub(crate) fn cancel_discovery(&mut self, dashboard: &mut DashboardState) {
+        if self.probing || self.choices_loading || self.request_key.is_some() {
+            self.generation = dashboard.next_review_settings_generation();
+        }
+        self.probing = false;
+        self.choices_loading = false;
+        self.request_key = None;
+    }
+
     pub(crate) fn start_initial_discovery(
         &mut self,
         dashboard: &mut DashboardState,
@@ -564,10 +576,8 @@ impl ReviewSettingsDialog {
         );
         let interaction = result.action;
         let changed = interaction.is_some();
-        let back = matches!(
-            &interaction,
-            Some(Interaction::Cancel | Interaction::Activate(Back))
-        );
+        let dismiss = matches!(&interaction, Some(Interaction::Cancel));
+        let back = matches!(&interaction, Some(Interaction::Activate(Back)));
         let cancel_setup = matches!(&interaction, Some(Interaction::Activate(Cancel)));
         let apply = matches!(&interaction, Some(Interaction::Activate(Save))) && self.can_save();
         let action = match interaction {
@@ -662,10 +672,10 @@ impl ReviewSettingsDialog {
         if changed {
             self.prepare();
         }
-        let outcome = if back {
-            ReviewSettingsOutcome::Back
-        } else if cancel_setup {
+        let outcome = if cancel_setup || dismiss {
             ReviewSettingsOutcome::CancelSetup
+        } else if back {
+            ReviewSettingsOutcome::Back
         } else if apply {
             ReviewSettingsOutcome::Save
         } else {
@@ -820,6 +830,7 @@ pub(crate) fn render_review_settings(
     area: Rect,
     dialog: &ReviewSettingsDialog,
     surfaces: &mut FrameSurfaces,
+    setup_saving: bool,
 ) {
     use ReviewSettingsFocus::*;
     let spinner = dialog.animation_frame().unwrap_or("");
@@ -921,9 +932,7 @@ pub(crate) fn render_review_settings(
             .max(20),
         area,
     );
-    let block = theme::modal().title(" Setup › Code review ");
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = theme::modal().inner(popup);
     let body = Rect::new(
         inner.x,
         inner.y,
@@ -950,6 +959,14 @@ pub(crate) fn render_review_settings(
     let row = |index: u16| viewport.row(index, 1);
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Setup › Code review",
+        theme::title(true),
+        !setup_saving && !dialog.saving,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
     Checkbox::render(
         frame,
         row(0),
@@ -1010,7 +1027,7 @@ pub(crate) fn render_review_settings(
     if inner.height > 1 {
         frame.render_widget(
             Line::styled(
-                "Tab moves · arrows select · Space toggles · Esc back",
+                "Tab moves · arrows select · Space toggles · Esc closes Setup",
                 Style::default().fg(theme::palette().muted),
             ),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
@@ -1165,10 +1182,15 @@ mod tests {
         assert!(dialog(&dashboard).review.profile.is_none());
         assert!(dialog(&dashboard).review.enabled);
         assert!(!dialog(&dashboard).can_save());
-        assert!(matches!(
+        assert_eq!(
             dashboard.handle_key(key(KeyCode::Esc)),
             DashboardAction::CancelReviewSettingsDiscovery
-        ));
+        );
+        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::None
+        );
         assert!(matches!(dashboard.mode, Mode::Setup(_)));
     }
 
@@ -1372,8 +1394,19 @@ mod tests {
         else {
             panic!("expected initial probe")
         };
+        if let Mode::Setup(setup) = &mut dashboard.mode {
+            setup
+                .review_editor
+                .as_mut()
+                .expect("review editor")
+                .form
+                .get_mut()
+                .focus(ReviewSettingsFocus::Back);
+        } else {
+            panic!("setup remains open after discovery");
+        }
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Esc)),
+            dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::CancelReviewSettingsDiscovery
         );
         dashboard.cancel_modal();
@@ -1599,8 +1632,19 @@ mod tests {
             Ok(available(&["tiny"], &["high"], true)),
         ));
         assert!(!dialog(&dashboard).can_save());
+        if let Mode::Setup(setup) = &mut dashboard.mode {
+            setup
+                .review_editor
+                .as_mut()
+                .expect("review editor")
+                .form
+                .get_mut()
+                .focus(ReviewSettingsFocus::Back);
+        } else {
+            panic!("setup remains open after discovery");
+        }
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Esc)),
+            dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::CancelReviewSettingsDiscovery
         );
         let action = dashboard.handle_key(crossterm::event::KeyEvent::new(

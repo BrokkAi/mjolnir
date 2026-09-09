@@ -1642,7 +1642,7 @@ mod tests {
             version: hel::hel_config::CONFIG_VERSION,
             sessions_side: Default::default(),
             advanced: Default::default(),
-            show_stopped_sessions: true,
+            show_stopped_sessions: false,
             newer_config_version: None,
             spinner: Default::default(),
             theme: Default::default(),

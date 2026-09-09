@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 
+use crate::widgets::dismissible_modal_title;
 use crossterm::event::{Event, KeyEventKind};
 use mj_chat::components::{
     ButtonRow, Checkbox, ChoiceList, ControlKind, Form, FormViewport, Interaction, Outcome,
@@ -296,10 +297,6 @@ pub(crate) fn render_container_editor(
         .iter()
         .fold(0_u16, |height, row| height.saturating_add(row.height()));
     let popup = centered_modal(frame, surfaces, 70, total.saturating_add(5).max(18), area);
-    frame.render_widget(
-        theme::modal().title(" Edit container size and mounts "),
-        popup,
-    );
     let inner = popup.inner(Margin {
         horizontal: 1,
         vertical: 1,
@@ -327,6 +324,14 @@ pub(crate) fn render_container_editor(
     editor.scroll.set(viewport.offset());
     let mut form = editor.form.borrow_mut();
     form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Edit container size and mounts",
+        theme::title(true),
+        true,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
     row_y = 0;
     for row in rows {
         let height = row.height();
