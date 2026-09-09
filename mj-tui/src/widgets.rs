@@ -6,7 +6,8 @@ use ratatui::widgets::Paragraph;
 // Modal geometry is shared with the chat view, so it lives in `mj-chat`. These
 // re-exports keep `crate::widgets` the single import site for dashboard code.
 pub(crate) use mj_chat::hel_modal::{
-    bordered_content, centered_modal, centered_modal_fixed, centered_rect, modal_area,
+    bordered_content, centered_modal, centered_modal_fixed, centered_rect, dismissible_modal_title,
+    modal_area,
 };
 
 pub(crate) fn truncate_text(text: &str, width: usize) -> String {

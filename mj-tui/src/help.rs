@@ -11,7 +11,7 @@
 use std::cell::{Cell, RefCell};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseEvent, MouseEventKind};
-use mj_chat::components::{Button, Form, Interaction};
+use mj_chat::components::{Form, Interaction};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -23,7 +23,7 @@ use mj_chat::hel_selection::FrameSurfaces;
 
 use crate::actions::{Availability, COMMANDS, SCOPE_ORDER};
 use crate::mark_render_changed_cells;
-use crate::widgets::centered_modal;
+use crate::widgets::{centered_modal, dismissible_modal_title};
 use crate::{DashboardAction, DashboardState, Mode};
 
 /// How many lines PageUp and PageDown move the list.
@@ -36,13 +36,8 @@ pub(crate) struct HelpOverlay {
     pub(crate) scroll: usize,
     /// The mode help opened over, restored when it closes.
     pub(crate) return_to: Box<Mode>,
-    pub(crate) form: RefCell<Form<HelpControl>>,
+    pub(crate) form: RefCell<Form<()>>,
     pub(crate) area: Cell<Rect>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HelpControl {
-    Close,
 }
 
 /// The composer's own keys, which the chat handles rather than the dashboard,
@@ -126,10 +121,7 @@ impl DashboardState {
             &self.render_change_revision,
             &result,
         );
-        if matches!(
-            result.action,
-            Some(Interaction::Activate(HelpControl::Close))
-        ) {
+        if matches!(result.action, Some(Interaction::Cancel)) {
             self.close_help();
         } else if overlay
             .area
@@ -312,35 +304,24 @@ pub(crate) fn render_help(
     let lines = help_lines(dashboard);
     let height = (lines.len() as u16).saturating_add(2).min(area.height);
     let popup = centered_modal(frame, surfaces, 90, height, area);
-    let paragraph = Paragraph::new(lines)
-        .scroll((overlay.scroll as u16, 0))
-        .block(
-            theme::modal()
-                .title(" Keyboard shortcuts ")
-                .title_bottom(Line::styled(
-                    " ↑↓ scroll · Esc or F1 closes ",
-                    theme::muted(),
-                )),
-        );
-    frame.render_widget(paragraph, popup);
-    overlay.area.set(popup);
     let mut form = overlay.form.borrow_mut();
     form.begin_frame();
-    let width = popup.width.min(9);
-    Button::render(
-        frame,
-        Rect::new(
-            popup.right().saturating_sub(width + 1).max(popup.x),
-            popup.y,
-            width,
-            u16::from(popup.height > 0),
-        ),
-        "Close",
-        true,
+    let title = dismissible_modal_title(
         &mut form,
-        HelpControl::Close,
+        popup,
+        "Keyboard shortcuts",
+        theme::title(true),
+        true,
     );
-    form.end_frame(HelpControl::Close);
+    let paragraph = Paragraph::new(lines)
+        .scroll((overlay.scroll as u16, 0))
+        .block(theme::modal().title(title).title_bottom(Line::styled(
+            " ↑↓ scroll · Esc or F1 closes ",
+            theme::muted(),
+        )));
+    frame.render_widget(paragraph, popup);
+    overlay.area.set(popup);
+    form.end_frame(());
 }
 
 #[cfg(test)]

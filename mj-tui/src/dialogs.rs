@@ -30,7 +30,8 @@ use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 
 use crate::widgets::{
-    centered_modal, centered_modal_fixed, modal_area, popup_height, truncate_text,
+    centered_modal, centered_modal_fixed, dismissible_modal_title, modal_area, popup_height,
+    truncate_text,
 };
 use crate::wizards::read_only_marker;
 use crate::{
@@ -52,12 +53,10 @@ pub(crate) enum DialogControl {
     TargetList,
     TargetRename,
     TargetTest,
-    TargetClose,
     ConfirmButton(usize),
     ImportIgnore,
     ImportCancel,
     ImportContinue,
-    WebClose,
     WebRetry,
     WebAnotherPort,
     WebInspect,
@@ -121,7 +120,6 @@ pub(crate) struct ConfigIdEditor {
     pub(crate) old_id: String,
     pub(crate) value: TextInput,
     pub(crate) form: RefCell<Form<DialogControl>>,
-    pub(crate) return_to_targets: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,7 +165,7 @@ impl WebDialog {
             listener_index: 0,
             inspection_message: None,
             confirm_stop: None,
-            form: dialog_form(&[DialogControl::WebClose], DialogControl::WebClose),
+            form: dialog_form(&[DialogControl::WebRetry], DialogControl::WebRetry),
         }
     }
 }
@@ -182,7 +180,7 @@ impl WebDialog {
             ]];
         }
         if self.loading || self.failed_address.is_none() {
-            return vec![vec![(WebClose, "Close", true)]];
+            return vec![Vec::new()];
         }
         let mut rows = vec![vec![
             (WebAnotherPort, "Use another port", !self.inspecting),
@@ -203,7 +201,6 @@ impl WebDialog {
         if self.port_conflict {
             footer.push((WebInspect, "Inspect port", !self.inspecting));
         }
-        footer.push((WebClose, "Close", true));
         rows.push(footer);
         rows
     }
@@ -214,7 +211,7 @@ impl WebDialog {
         } else if self.failed_address.is_some() && !self.loading && !self.inspecting {
             DialogControl::WebAnotherPort
         } else {
-            DialogControl::WebClose
+            DialogControl::WebRetry
         }
     }
 
@@ -244,6 +241,12 @@ pub(crate) struct RepositoryOriginDialog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Confirmation {
+    /// A standard modal dismissal that may need to protect an in-memory draft
+    /// or a running operation. The boxed mode is restored by the safe answer.
+    Dismiss {
+        mode: Box<Mode>,
+        intent: DismissalIntent,
+    },
     DirtyLocal {
         action: DashboardAction,
         repositories: Vec<String>,
@@ -277,6 +280,12 @@ pub(crate) enum Confirmation {
     RecoverMove {
         operation: Box<MoveOperation>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DismissalIntent {
+    DiscardSetup,
+    CancelImport,
 }
 
 /// A confirmation dialog and its persistent standard-control state.
@@ -339,7 +348,8 @@ fn confirmation_form(confirmation: &Confirmation) -> RefCell<Form<DialogControl>
     for index in 0..buttons.len() {
         form.declare(DialogControl::ConfirmButton(index), ControlKind::Button);
     }
-    form.end_frame(DialogControl::ConfirmButton(primary_button(buttons)));
+    let initial = initial_confirmation_button(confirmation, buttons);
+    form.end_frame(DialogControl::ConfirmButton(initial));
     RefCell::new(form)
 }
 
@@ -358,7 +368,6 @@ fn target_actions_form(
     );
     form.declare(DialogControl::TargetRename, ControlKind::Button);
     form.declare(DialogControl::TargetTest, ControlKind::Button);
-    form.declare(DialogControl::TargetClose, ControlKind::Button);
     form.end_frame(initial);
     RefCell::new(form)
 }
@@ -378,7 +387,6 @@ fn sync_target_actions_form(dialog: &mut TargetActionsDialog) {
         ControlKind::Button,
         dialog.testing.is_none(),
     );
-    form.declare(DialogControl::TargetClose, ControlKind::Button);
     form.end_frame(DialogControl::TargetList);
 }
 
@@ -394,6 +402,14 @@ fn clear_dialog_form_geometry(form: &mut Form<DialogControl>) {
 /// rendering.
 pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
     match confirmation {
+        Confirmation::Dismiss {
+            intent: DismissalIntent::DiscardSetup,
+            ..
+        } => &["Keep editing", "Discard setup"],
+        Confirmation::Dismiss {
+            intent: DismissalIntent::CancelImport,
+            ..
+        } => &["Keep importing", "Cancel import"],
         Confirmation::DirtyLocal { .. } => &["Cancel", "Continue"],
         Confirmation::DestroyStopped { .. } => &["No", "Yes"],
         Confirmation::CloseFailed { .. } => &["Cancel", "Force stop", "Retry stop"],
@@ -421,6 +437,14 @@ fn primary_button(labels: &[&str]) -> usize {
     labels.len().saturating_sub(1)
 }
 
+fn initial_confirmation_button(confirmation: &Confirmation, labels: &[&str]) -> usize {
+    if matches!(confirmation, Confirmation::Dismiss { .. }) {
+        0
+    } else {
+        primary_button(labels)
+    }
+}
+
 pub(crate) fn import_progress_status(progress: &ImportProgress) -> Line<'static> {
     let stalled_for = progress.last_updated.elapsed();
     if stalled_for >= IMPORT_STALL_WARNING_AFTER {
@@ -436,6 +460,21 @@ pub(crate) fn import_progress_status(progress: &ImportProgress) -> Line<'static>
             "The dashboard remains responsive while the import runs.",
             Style::default().fg(theme::palette().muted),
         )
+    }
+}
+
+/// Finds an active import even while a cancellation confirmation temporarily
+/// owns the foreground. Progress replies must keep updating the preserved
+/// dialog so rejecting the confirmation returns to current state.
+pub(crate) fn import_progress_mut(mode: &mut Mode) -> Option<&mut ImportProgress> {
+    match mode {
+        Mode::Importing(progress) => Some(progress),
+        Mode::Help(overlay) => import_progress_mut(overlay.return_to.as_mut()),
+        Mode::Confirm(dialog) => match &mut dialog.confirmation {
+            Confirmation::Dismiss { mode, .. } => import_progress_mut(mode.as_mut()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -467,13 +506,6 @@ pub(crate) fn render_import_progress(
         popup_height(&paragraph, 76, 11, area),
         area,
     );
-    frame.render_widget(
-        theme::modal().title(format!(
-            " Importing session · progress {}/{total} ",
-            progress.step
-        )),
-        popup,
-    );
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -493,6 +525,14 @@ pub(crate) fn render_import_progress(
     );
     let mut form = progress.form.borrow_mut();
     form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        format!("Importing session · progress {}/{}", progress.step, total),
+        theme::title(true),
+        true,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
     Button::render(
         frame,
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
@@ -563,7 +603,6 @@ pub(crate) fn render_import_bundle_confirmation(
         area,
     );
     let popup = centered_modal(frame, surfaces, 76, height, area);
-    frame.render_widget(theme::modal().title(" Import safety warning "), popup);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -581,6 +620,14 @@ pub(crate) fn render_import_bundle_confirmation(
     );
     let mut form = confirmation.form.borrow_mut();
     form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Import safety warning",
+        theme::title(true),
+        true,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
     let y = inner.y.saturating_add(body_height);
     if confirmation.has_untracked_files {
         Checkbox::render(
@@ -615,7 +662,6 @@ pub(crate) fn render_rename_editor(
     surfaces: &mut FrameSurfaces,
 ) {
     let popup = centered_modal(frame, surfaces, 60, 8, area);
-    frame.render_widget(theme::modal().title(" Rename session "), popup);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -632,6 +678,9 @@ pub(crate) fn render_rename_editor(
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
     let mut form = editor.form.borrow_mut();
     form.begin_frame();
+    let title =
+        dismissible_modal_title(&mut form, popup, "Rename session", theme::title(true), true);
+    frame.render_widget(theme::modal().title(title), popup);
     TextField::render(frame, field, &editor.title, &mut form, DialogControl::Field);
     ButtonRow::render(
         frame,
@@ -652,10 +701,6 @@ pub(crate) fn render_config_id_editor(
     surfaces: &mut FrameSurfaces,
 ) {
     let popup = centered_modal(frame, surfaces, 60, 8, area);
-    frame.render_widget(
-        theme::modal().title(format!(" Rename {} ID ", editor.kind.label())),
-        popup,
-    );
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -676,6 +721,14 @@ pub(crate) fn render_config_id_editor(
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
     let mut form = editor.form.borrow_mut();
     form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        format!("Rename {} ID", editor.kind.label()),
+        theme::title(true),
+        true,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
     TextField::render(frame, field, &editor.value, &mut form, DialogControl::Field);
     ButtonRow::render(
         frame,
@@ -725,7 +778,6 @@ pub(crate) fn render_target_actions(
         .saturating_add(8)
         .max(12);
     let popup = centered_modal(frame, surfaces, 72, height, area);
-    frame.render_widget(theme::modal().title(" Target actions "), popup);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -777,6 +829,9 @@ pub(crate) fn render_target_actions(
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    let title =
+        dismissible_modal_title(&mut form, popup, "Target actions", theme::title(true), true);
+    frame.render_widget(theme::modal().title(title), popup);
     ChoiceList::render(
         frame,
         list_area,
@@ -791,7 +846,6 @@ pub(crate) fn render_target_actions(
         &[
             (DialogControl::TargetRename, "Rename", true),
             (DialogControl::TargetTest, "Test", dialog.testing.is_none()),
-            (DialogControl::TargetClose, "Close", true),
         ],
         &mut form,
     );
@@ -949,7 +1003,6 @@ pub(crate) fn render_web_dialog(
         .saturating_add(2 + footer_height)
         .min(inner_area.height);
     let popup = centered_modal_fixed(frame, surfaces, box_width, box_height, area);
-    frame.render_widget(theme::modal().title(" Web viewer "), popup);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -967,6 +1020,8 @@ pub(crate) fn render_web_dialog(
     frame.render_widget(paragraph, body);
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    let title = dismissible_modal_title(&mut form, popup, "Web viewer", theme::title(true), true);
+    frame.render_widget(theme::modal().title(title), popup);
     let footer_top = inner.bottom().saturating_sub(footer_height).max(inner.y);
     for (index, buttons) in button_rows.iter().enumerate() {
         let y = footer_top.saturating_add(index as u16);
@@ -1039,10 +1094,6 @@ pub(crate) fn render_repository_origin(
     let body_paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
     let popup_height = popup_height(&body_paragraph, 76, 14, area);
     let popup = centered_modal(frame, surfaces, 76, popup_height, area);
-    frame.render_widget(
-        theme::modal().title(" Repository history is missing "),
-        popup,
-    );
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -1075,6 +1126,14 @@ pub(crate) fn render_repository_origin(
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Repository history is missing",
+        theme::title(true),
+        true,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
     TextField::render(
         frame,
         field,
@@ -1100,6 +1159,26 @@ pub(crate) fn render_repository_origin(
 /// rendering a frame and reading cells back.
 fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'static>>) {
     match confirmation {
+        Confirmation::Dismiss {
+            intent: DismissalIntent::DiscardSetup,
+            ..
+        } => (
+            " Discard Setup changes? ",
+            vec![
+                Line::raw("Setup has unsaved changes."),
+                Line::raw("Keep editing to preserve them, or discard the draft."),
+            ],
+        ),
+        Confirmation::Dismiss {
+            intent: DismissalIntent::CancelImport,
+            ..
+        } => (
+            " Cancel import? ",
+            vec![
+                Line::raw("The active import has not finished."),
+                Line::raw("Keep importing, or cancel the operation?"),
+            ],
+        ),
         Confirmation::DirtyLocal { repositories, .. } => {
             let mut lines = vec![
                 Line::raw("The initial worker will include these uncommitted changes:"),
@@ -1246,6 +1325,7 @@ pub(crate) fn render_confirmation(
     let confirmation = &dialog.confirmation;
     // Minimum height per dialog; `popup_height` grows it to fit wrapped content.
     let nominal: u16 = match confirmation {
+        Confirmation::Dismiss { .. } => 8,
         Confirmation::DirtyLocal { .. } => 11,
         Confirmation::CloseFailed { .. } => 12,
         Confirmation::DestroyStopped { .. } => 10,
@@ -1260,17 +1340,6 @@ pub(crate) fn render_confirmation(
     let extra = 1;
     let height = popup_height(&paragraph, 72, nominal.saturating_add(extra), area);
     let popup = centered_modal(frame, surfaces, 72, height, area);
-    frame.render_widget(
-        theme::modal()
-            .border_style(Style::default().fg(theme::palette().error))
-            .title_style(
-                Style::default()
-                    .fg(theme::palette().error)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .title(title),
-        popup,
-    );
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
@@ -1289,6 +1358,26 @@ pub(crate) fn render_confirmation(
     frame.render_widget(paragraph, body);
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    let title_line = dismissible_modal_title(
+        &mut form,
+        popup,
+        title.trim(),
+        Style::default()
+            .fg(theme::palette().error)
+            .add_modifier(Modifier::BOLD),
+        true,
+    );
+    frame.render_widget(
+        theme::modal()
+            .border_style(Style::default().fg(theme::palette().error))
+            .title_style(
+                Style::default()
+                    .fg(theme::palette().error)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .title(title_line),
+        popup,
+    );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
     ButtonRow::render(
         frame,
@@ -1300,7 +1389,10 @@ pub(crate) fn render_confirmation(
             .collect::<Vec<_>>(),
         &mut form,
     );
-    form.end_frame(DialogControl::ConfirmButton(primary_button(buttons)));
+    form.end_frame(DialogControl::ConfirmButton(initial_confirmation_button(
+        confirmation,
+        buttons,
+    )));
 }
 
 impl DashboardState {
@@ -1442,7 +1534,7 @@ impl DashboardState {
                 dialog.confirm_stop = None;
                 dialog.reset_form();
             }
-            Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::WebClose)) => {
+            Some(Interaction::Cancel) => {
                 self.cancel_modal();
                 return DashboardAction::CancelWebAccess;
             }
@@ -1510,7 +1602,6 @@ impl DashboardState {
                 ],
                 DialogControl::Field,
             ),
-            return_to_targets: false,
         });
         self.mark_render_changed();
     }
@@ -1583,7 +1674,11 @@ impl DashboardState {
         let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) => {
+                let cancel_test = dialog.testing.is_some();
                 self.cancel_modal();
+                if cancel_test {
+                    return DashboardAction::CancelTargetTest;
+                }
             }
             Some(Interaction::Select(DialogControl::TargetList, index)) => {
                 dialog.target_index = index.min(dialog.target_ids.len().saturating_sub(1));
@@ -1608,7 +1703,6 @@ impl DashboardState {
                                 ],
                                 DialogControl::Field,
                             ),
-                            return_to_targets: true,
                         });
                         self.mark_render_changed();
                         return DashboardAction::None;
@@ -1620,10 +1714,6 @@ impl DashboardState {
                         self.mode = Mode::TargetActions(dialog);
                         self.mark_render_changed();
                         return DashboardAction::TestTarget { target_id };
-                    }
-                    DialogControl::TargetClose => {
-                        self.cancel_modal();
-                        return DashboardAction::None;
                     }
                     _ => {}
                 }
@@ -1648,13 +1738,10 @@ impl DashboardState {
         );
         let interaction = result.action;
         match interaction {
-            Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
-                if editor.return_to_targets {
-                    self.begin_target_actions();
-                } else {
-                    self.cancel_modal();
-                }
+            Some(Interaction::Cancel) => {
+                self.cancel_modal();
             }
+            Some(Interaction::Activate(DialogControl::Cancel)) => self.cancel_modal(),
             Some(Interaction::Edit(DialogControl::Field, edit)) => {
                 if TextField::apply(&mut editor.value, edit) == Outcome::Changed {
                     crate::mark_render_changed_cells(
@@ -1831,7 +1918,7 @@ impl DashboardState {
     }
 
     pub fn update_import_progress(&mut self, step: usize, total: Option<usize>, message: String) {
-        let Mode::Importing(progress) = &mut self.mode else {
+        let Some(progress) = import_progress_mut(&mut self.mode) else {
             return;
         };
         let previous_status = import_progress_status(progress);
@@ -1910,8 +1997,12 @@ impl DashboardState {
         let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
-                self.mode = Mode::Importing(progress);
-                DashboardAction::CancelImport
+                self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::Dismiss {
+                    mode: Box::new(Mode::Importing(progress)),
+                    intent: DismissalIntent::CancelImport,
+                }));
+                self.mark_render_changed();
+                DashboardAction::None
             }
             _ => {
                 self.mode = Mode::Importing(progress);
@@ -2064,13 +2155,15 @@ impl DashboardState {
         );
         let interaction = result.action;
         match interaction {
-            Some(Interaction::Cancel) => {
-                if let Confirmation::DestroyStopped { reopen, .. } = dialog.confirmation {
-                    self.restore_after_confirmation(reopen);
-                } else {
-                    self.cancel_modal();
+            Some(Interaction::Cancel) => match dialog.confirmation {
+                Confirmation::Dismiss { mode, .. } => {
+                    self.restore_dismissed_mode(mode);
                 }
-            }
+                Confirmation::DestroyStopped { reopen, .. } => {
+                    self.restore_after_confirmation(reopen);
+                }
+                _ => self.cancel_modal(),
+            },
             Some(Interaction::Activate(DialogControl::ConfirmButton(index))) => {
                 return self.activate_confirmation_button(dialog.confirmation, index);
             }
@@ -2086,6 +2179,14 @@ impl DashboardState {
         index: usize,
     ) -> DashboardAction {
         match (confirmation, index) {
+            (Confirmation::Dismiss { mode, intent: _ }, 0) => self.restore_dismissed_mode(mode),
+            (Confirmation::Dismiss { intent, .. }, 1) => {
+                self.cancel_modal();
+                match intent {
+                    DismissalIntent::DiscardSetup => DashboardAction::None,
+                    DismissalIntent::CancelImport => DashboardAction::CancelImport,
+                }
+            }
             (Confirmation::DirtyLocal { mut action, .. }, 1) => {
                 if let DashboardAction::CreateSession {
                     allow_dirty_local, ..
@@ -2138,6 +2239,12 @@ impl DashboardState {
                 DashboardAction::None
             }
         }
+    }
+
+    fn restore_dismissed_mode(&mut self, mode: Box<Mode>) -> DashboardAction {
+        self.mode = *mode;
+        self.mark_render_changed();
+        DashboardAction::None
     }
 
     /// Returns to the resume dialog a confirmation interrupted, or to the
@@ -2204,7 +2311,7 @@ mod tests {
         assert!(rendered.contains("Web viewer"));
         assert!(rendered.contains("http://127.0.0.1:37650"));
         assert!(rendered.contains("Viewer code: 022160"));
-        assert!(rendered.contains("  Close  "));
+        assert!(rendered.contains("× Web viewer"));
     }
 
     #[test]
@@ -2268,7 +2375,7 @@ mod tests {
     }
 
     #[test]
-    fn web_port_conflict_offers_recovery_and_keeps_the_address_and_close_visible() {
+    fn web_port_conflict_offers_recovery_and_keeps_the_address_and_dismiss_visible() {
         let dashboard = failed_web_dashboard();
         let Mode::Web(dialog) = &dashboard.mode else {
             unreachable!()
@@ -2281,7 +2388,7 @@ mod tests {
             assert!(text.contains("  Use another port  "));
             assert!(text.contains("  Inspect port  "));
             assert!(text.contains("  Retry  "));
-            assert!(text.contains("  Close  "));
+            assert!(text.contains("× Web viewer"));
             assert!(
                 rendered
                     .iter()
@@ -2291,7 +2398,7 @@ mod tests {
     }
 
     #[test]
-    fn web_recovery_enters_loading_immediately_and_close_cancels_status_polling() {
+    fn web_recovery_enters_loading_immediately_and_dismiss_cancels_status_polling() {
         let mut dashboard = failed_web_dashboard();
         assert_eq!(
             activate_web(&mut dashboard, DialogControl::WebAnotherPort),
@@ -2303,10 +2410,10 @@ mod tests {
         assert!(dialog.loading);
         let rendered = draw_web_dialog(dialog, 80, 24).join("\n");
         assert!(rendered.contains("Starting web viewer"));
-        assert!(rendered.contains("  Close  "));
+        assert!(rendered.contains("× Web viewer"));
         assert!(!rendered.contains("  Use another port  "));
         assert_eq!(
-            activate_web(&mut dashboard, DialogControl::WebClose),
+            dashboard.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             DashboardAction::CancelWebAccess
         );
         dashboard.apply_web_access(WebViewerAccess::Starting);
@@ -2908,7 +3015,7 @@ mod tests {
     }
 
     #[test]
-    fn import_progress_renders_a_focused_cancel_button_that_enter_presses() {
+    fn import_progress_renders_a_focused_cancel_button_that_confirms_cancellation() {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.show_import_progress("Chosen session".into());
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
@@ -2926,6 +3033,15 @@ mod tests {
         assert_eq!(buffer[(cancel_x, y)].bg, theme::palette().accent);
         assert_eq!(buffer[(cancel_x - 1, y)].bg, theme::palette().accent);
         assert!(!lines.iter().any(|line| line.contains("Esc cancels this")));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Right)),
+            DashboardAction::None
+        );
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::CancelImport
@@ -3124,6 +3240,15 @@ mod tests {
         assert!(rendered.contains("filesystem may be stalled"));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Right)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::CancelImport
         );
     }

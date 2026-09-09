@@ -187,11 +187,24 @@ struct Control<K> {
     row_enabled: Vec<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointerOwner<K> {
+    Control(K),
+    Dismiss,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointerHit<K> {
+    Control(K),
+    Dismiss,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FormVisualState<K> {
     focused: Option<K>,
     focused_kind: Option<ControlKind>,
     armed: Option<K>,
+    dismiss_armed: bool,
 }
 
 impl<K> Control<K> {
@@ -246,7 +259,10 @@ pub struct Form<K: Copy + Eq> {
     order: Vec<K>,
     last_order: Vec<K>,
     focus_tree: Focus,
-    pointer_owner: Option<K>,
+    pointer_owner: Option<PointerOwner<K>>,
+    dismiss_area: Rect,
+    dismiss_enabled: bool,
+    dismiss_active: bool,
     pending_focus: Option<K>,
 }
 
@@ -266,6 +282,9 @@ impl<K: Copy + Eq> Form<K> {
             last_order: Vec::new(),
             focus_tree: Focus::default(),
             pointer_owner: None,
+            dismiss_area: Rect::default(),
+            dismiss_enabled: false,
+            dismiss_active: false,
             pending_focus: None,
         }
     }
@@ -273,6 +292,7 @@ impl<K: Copy + Eq> Form<K> {
     /// Begins a metadata update between frames, preserving the drawn hitboxes.
     pub fn begin_update(&mut self) {
         self.order.clear();
+        self.dismiss_active = false;
         for control in &mut self.controls {
             control.active = false;
         }
@@ -291,6 +311,16 @@ impl<K: Copy + Eq> Form<K> {
     /// Registers a control with its exact drawn hitbox.
     pub fn register(&mut self, id: K, kind: ControlKind, area: Rect, enabled: bool) {
         self.register_with_cursor_map(id, kind, area, enabled, Vec::new());
+    }
+
+    /// Registers the non-focusable upper-left dismissal target for a modal.
+    ///
+    /// The target is independent of regular controls so a footer Cancel button
+    /// can retain its own hitbox and keyboard focus.
+    pub fn register_dismiss(&mut self, area: Rect, enabled: bool) {
+        self.dismiss_area = area;
+        self.dismiss_enabled = enabled;
+        self.dismiss_active = true;
     }
 
     /// Registers a control and the screen columns corresponding to field cursors.
@@ -458,6 +488,9 @@ impl<K: Copy + Eq> Form<K> {
         self.last_order.clear();
         self.pending_focus = None;
         self.pointer_owner = None;
+        self.dismiss_area = Rect::default();
+        self.dismiss_enabled = false;
+        self.dismiss_active = false;
         for control in &mut self.controls {
             control.active = false;
             control.flag.clear();
@@ -473,6 +506,7 @@ impl<K: Copy + Eq> Form<K> {
             control.multiline_cursor_map.clear();
             control.editor_area = Rect::default();
         }
+        self.dismiss_area = Rect::default();
     }
 
     /// Rebuilds the focus tree and repairs focus after controls appeared or disappeared.
@@ -490,7 +524,9 @@ impl<K: Copy + Eq> Form<K> {
         self.last_order.clone_from(&self.order);
         // Hosts clear geometry before rendering. Metadata reconciliation can run
         // in that interval; only removal or disabling cancels a captured press.
-        self.pointer_owner = self.pointer_owner.filter(|id| self.is_eligible(*id));
+        self.pointer_owner = self
+            .pointer_owner
+            .filter(|owner| self.pointer_owner_is_eligible(*owner));
 
         let preserved = previous_focus.filter(|id| self.is_eligible(*id));
         let wanted = self
@@ -577,10 +613,14 @@ impl<K: Copy + Eq> Form<K> {
         FormVisualState {
             focused,
             focused_kind: focused.and_then(|id| self.control(id).map(|control| control.kind)),
-            armed: self.pointer_owner.filter(|id| {
-                self.active_control(*id)
-                    .is_some_and(|control| control.enabled && !control.kind.is_field())
-            }),
+            armed: match self.pointer_owner {
+                Some(PointerOwner::Control(id)) => Some(id).filter(|id| {
+                    self.active_control(*id)
+                        .is_some_and(|control| control.enabled && !control.kind.is_field())
+                }),
+                Some(PointerOwner::Dismiss) | None => None,
+            },
+            dismiss_armed: self.dismiss_is_armed(),
         }
     }
 
@@ -628,7 +668,13 @@ impl<K: Copy + Eq> Form<K> {
     /// Returns whether a control currently owns a mouse press/release gesture.
     #[must_use]
     pub fn is_armed(&self, id: K) -> bool {
-        self.pointer_owner == Some(id)
+        self.pointer_owner == Some(PointerOwner::Control(id))
+    }
+
+    /// Returns whether the modal dismissal target owns an active press.
+    #[must_use]
+    pub fn dismiss_is_armed(&self) -> bool {
+        self.pointer_owner == Some(PointerOwner::Dismiss)
     }
 
     /// Returns the current selection metadata for a list or tab strip.
@@ -697,6 +743,17 @@ impl<K: Copy + Eq> Form<K> {
             .is_some_and(|control| control.enabled)
     }
 
+    fn dismiss_is_eligible(&self) -> bool {
+        self.dismiss_active && self.dismiss_enabled
+    }
+
+    fn pointer_owner_is_eligible(&self, owner: PointerOwner<K>) -> bool {
+        match owner {
+            PointerOwner::Control(id) => self.is_eligible(id),
+            PointerOwner::Dismiss => self.dismiss_is_eligible(),
+        }
+    }
+
     fn fallback(&self, previous_focus: Option<K>, previous_order: &[K]) -> Option<K> {
         let start = previous_focus
             .and_then(|id| previous_order.iter().position(|candidate| *candidate == id))
@@ -709,12 +766,16 @@ impl<K: Copy + Eq> Form<K> {
             .find(|id| self.is_eligible(*id))
     }
 
-    fn hit(&self, x: u16, y: u16) -> Option<&Control<K>> {
+    fn hit(&self, x: u16, y: u16) -> Option<PointerHit<K>> {
+        if self.dismiss_active && self.dismiss_area.contains((x, y).into()) {
+            return Some(PointerHit::Dismiss);
+        }
         self.order
             .iter()
             .rev()
             .filter_map(|id| self.active_control(*id))
             .find(|control| control.area.contains((x, y).into()))
+            .map(|control| PointerHit::Control(control.id))
     }
 
     fn handle_key(&mut self, event: &Event) -> Option<EventResult<Interaction<K>>> {
@@ -942,20 +1003,23 @@ impl<K: Copy + Eq> Form<K> {
                 let (x, y) = (mouse.column, mouse.row);
                 if self.pointer_owner.is_some() {
                     match mouse.kind {
-                        MouseEventKind::Drag(MouseButton::Left) => {
+                        MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved => {
+                            let owner = self.pointer_owner?;
+                            if !self.pointer_owner_contains(owner, x, y) {
+                                self.pointer_owner = None;
+                                return Some(EventResult::changed(None));
+                            }
                             return Some(EventResult::handled());
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
                             let owner = self.pointer_owner.take()?;
-                            let inside = self.control(owner).is_some_and(|control| {
-                                control.active
-                                    && control.enabled
-                                    && control.area.contains((x, y).into())
-                            });
-                            if !inside {
+                            if !self.pointer_owner_contains(owner, x, y) {
                                 return Some(EventResult::changed(None));
                             }
-                            let interaction = self.pointer_interaction(owner, x, y);
+                            let interaction = match owner {
+                                PointerOwner::Control(id) => self.pointer_interaction(id, x, y),
+                                PointerOwner::Dismiss => Some(Interaction::Cancel),
+                            };
                             return Some(match interaction {
                                 Some(action) => EventResult::changed(Some(action)),
                                 None => EventResult::handled(),
@@ -968,13 +1032,17 @@ impl<K: Copy + Eq> Form<K> {
                     mouse.kind,
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 ) {
-                    let (id, len, selected) =
-                        self.hit(x, y).and_then(|control| match control.kind {
-                            ControlKind::ChoiceList { len, selected } if control.enabled => {
-                                Some((control.id, len, selected))
-                            }
-                            _ => None,
-                        })?;
+                    let (id, len, selected) = self.hit(x, y).and_then(|hit| match hit {
+                        PointerHit::Control(id) => {
+                            self.control(id).and_then(|control| match control.kind {
+                                ControlKind::ChoiceList { len, selected } if control.enabled => {
+                                    Some((id, len, selected))
+                                }
+                                _ => None,
+                            })
+                        }
+                        PointerHit::Dismiss => None,
+                    })?;
                     let code = if mouse.kind == MouseEventKind::ScrollUp {
                         KeyCode::Up
                     } else {
@@ -988,50 +1056,69 @@ impl<K: Copy + Eq> Form<K> {
                     return Some(EventResult::handled());
                 }
                 if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                    let (id, enabled, kind, cursor, editor) = self.hit(x, y).map(|control| {
-                        (
-                            control.id,
-                            control.enabled,
-                            control.kind,
-                            cursor_at(control, x, y),
-                            control
-                                .editor_area
-                                .contains(ratatui::layout::Position::new(x, y)),
-                        )
-                    })?;
-                    if !enabled {
-                        return Some(EventResult::handled());
-                    }
-                    if kind.is_choice_list() && !editor {
-                        let control = self.control(id)?;
-                        let row =
-                            usize::from(y.saturating_sub(control.area.y)) + control.list_offset;
-                        if !control.row_enabled.get(row).copied().unwrap_or(true)
-                            || (!control.row_map.is_empty()
-                                && control.row_map.get(row).copied().flatten().is_none())
-                        {
-                            return Some(EventResult::handled());
+                    match self.hit(x, y)? {
+                        PointerHit::Dismiss => {
+                            if !self.dismiss_enabled {
+                                return Some(EventResult::handled());
+                            }
+                            self.pointer_owner = Some(PointerOwner::Dismiss);
+                            return Some(EventResult::changed(None));
                         }
-                    }
-                    self.focus(id);
-                    if kind.is_field() || editor {
-                        return Some(EventResult::changed(Some(Interaction::Edit(
-                            id,
-                            FieldEdit::Cursor(cursor),
-                        ))));
-                    }
-                    if kind.is_button()
-                        || kind.is_checkbox()
-                        || kind.is_choice_list()
-                        || kind.is_tab_strip()
-                    {
-                        self.pointer_owner = Some(id);
-                        return Some(EventResult::changed(None));
+                        PointerHit::Control(id) => {
+                            let control = self.control(id)?;
+                            let (enabled, kind, cursor, editor) = (
+                                control.enabled,
+                                control.kind,
+                                cursor_at(control, x, y),
+                                control
+                                    .editor_area
+                                    .contains(ratatui::layout::Position::new(x, y)),
+                            );
+                            if !enabled {
+                                return Some(EventResult::handled());
+                            }
+                            if kind.is_choice_list() && !editor {
+                                let row = usize::from(y.saturating_sub(control.area.y))
+                                    + control.list_offset;
+                                if !control.row_enabled.get(row).copied().unwrap_or(true)
+                                    || (!control.row_map.is_empty()
+                                        && control.row_map.get(row).copied().flatten().is_none())
+                                {
+                                    return Some(EventResult::handled());
+                                }
+                            }
+                            self.focus(id);
+                            if kind.is_field() || editor {
+                                return Some(EventResult::changed(Some(Interaction::Edit(
+                                    id,
+                                    FieldEdit::Cursor(cursor),
+                                ))));
+                            }
+                            if kind.is_button()
+                                || kind.is_checkbox()
+                                || kind.is_choice_list()
+                                || kind.is_tab_strip()
+                            {
+                                self.pointer_owner = Some(PointerOwner::Control(id));
+                                return Some(EventResult::changed(None));
+                            }
+                        }
                     }
                 }
                 None
             }
             _ => None,
+        }
+    }
+
+    fn pointer_owner_contains(&self, owner: PointerOwner<K>, x: u16, y: u16) -> bool {
+        match owner {
+            PointerOwner::Control(id) => self.control(id).is_some_and(|control| {
+                control.active && control.enabled && control.area.contains((x, y).into())
+            }),
+            PointerOwner::Dismiss => {
+                self.dismiss_is_eligible() && self.dismiss_area.contains((x, y).into())
+            }
         }
     }
 
@@ -1079,6 +1166,9 @@ impl<K: Copy + Eq> Clone for Form<K> {
         clone.order.clone_from(&self.order);
         clone.last_order.clone_from(&self.last_order);
         clone.pending_focus = focused.or(self.pending_focus);
+        clone.dismiss_area = self.dismiss_area;
+        clone.dismiss_enabled = self.dismiss_enabled;
+        clone.dismiss_active = self.dismiss_active;
         // A physical pointer gesture belongs to the original view, never a draft copy.
         clone.pointer_owner = None;
         clone.controls = self
@@ -1651,5 +1741,79 @@ mod tests {
             form.handle(&mouse(MouseEventKind::ScrollDown, 1, 1)).action,
             Some(Interaction::Select(1, 2))
         );
+    }
+
+    #[test]
+    fn dismiss_target_is_not_a_focus_stop_and_cancel_coexists_with_footer_button() {
+        let mut form = Form::new();
+        form.register(1, ControlKind::Button, Rect::new(10, 0, 8, 1), true);
+        form.register_dismiss(Rect::new(1, 0, 3, 1), true);
+        form.end_frame(1);
+        assert_eq!(form.focused(), Some(1));
+        form.handle(&key(KeyCode::Tab));
+        assert_eq!(form.focused(), Some(1));
+
+        assert!(
+            form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 2, 0))
+                .action
+                .is_none()
+        );
+        assert!(form.dismiss_is_armed());
+        assert_eq!(
+            form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 2, 0))
+                .action,
+            Some(Interaction::Cancel)
+        );
+        assert!(!form.dismiss_is_armed());
+    }
+
+    #[test]
+    fn dismiss_drag_or_move_outside_disarms_without_cancel() {
+        let mut form = Form::<u8>::new();
+        form.register_dismiss(Rect::new(1, 0, 3, 1), true);
+        form.end_frame(1);
+        form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 2, 0));
+        assert!(form.dismiss_is_armed());
+        assert_eq!(
+            form.handle(&mouse(MouseEventKind::Moved, 20, 20)).action,
+            None
+        );
+        assert!(!form.dismiss_is_armed());
+        assert!(!form.captures_pointer());
+        assert_eq!(
+            form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 2, 0))
+                .action,
+            None
+        );
+    }
+
+    #[test]
+    fn disabled_dismiss_target_is_visible_to_hit_testing_but_inert() {
+        let mut form = Form::<u8>::new();
+        form.register_dismiss(Rect::new(1, 0, 3, 1), false);
+        form.end_frame(1);
+        assert!(form.contains(2, 0));
+        let result = form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 2, 0));
+        assert_eq!(result.action, None);
+        assert!(!form.captures_pointer());
+    }
+
+    #[test]
+    fn dismiss_geometry_does_not_leave_a_stale_capture_across_frames() {
+        let mut form = Form::<u8>::new();
+        form.register_dismiss(Rect::new(1, 0, 3, 1), true);
+        form.end_frame(1);
+        form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 2, 0));
+        form.reset_geometry();
+        assert!(!form.contains(2, 0));
+        assert_eq!(
+            form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 2, 0))
+                .action,
+            None
+        );
+        form.begin_frame();
+        form.end_frame(1);
+        assert!(!form.contains(2, 0));
+        assert!(!form.captures_pointer());
     }
 }

@@ -7,7 +7,7 @@ use crate::{
         ReviewSettingsDialog, ReviewSettingsOutcome, ReviewSettingsValidation,
         render_review_settings,
     },
-    widgets::centered_modal,
+    widgets::{centered_modal, dismissible_modal_title},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use hel::hel_config::HelConfig;
@@ -410,6 +410,19 @@ impl SetupDialog {
         }
     }
 
+    /// Compares only values that can be persisted to the config file. The
+    /// expanded schema and all navigation/discovery fields are transient UI
+    /// state and must not make a freshly opened Setup dialog dirty.
+    pub(crate) fn is_dirty(&self) -> bool {
+        let original = serde_json::from_str::<HelConfig>(&self.original);
+        let current = serde_json::from_value::<HelConfig>(self.draft.clone());
+        match (original, current) {
+            (Ok(original), Ok(current)) => original != current,
+            (Err(_), _) => true,
+            (_, Err(_)) => true,
+        }
+    }
+
     fn selected_is_review(&self) -> bool {
         self.selected_path().is_some_and(|path| path == ["review"])
     }
@@ -496,6 +509,25 @@ impl DashboardState {
         self.mark_render_changed();
     }
 
+    fn dismiss_setup(&mut self, dialog: SetupDialog) -> DashboardAction {
+        if dialog.saving {
+            self.mode = Mode::Setup(dialog);
+            return DashboardAction::None;
+        }
+        if dialog.is_dirty() {
+            self.mode = Mode::Confirm(crate::dialogs::ConfirmDialog::new(
+                crate::dialogs::Confirmation::Dismiss {
+                    mode: Box::new(Mode::Setup(dialog)),
+                    intent: crate::dialogs::DismissalIntent::DiscardSetup,
+                },
+            ));
+            self.mark_render_changed();
+        } else {
+            self.cancel_modal();
+        }
+        DashboardAction::None
+    }
+
     #[cfg(test)]
     pub(crate) fn begin_setup_review(&mut self) -> DashboardAction {
         let Mode::Setup(mut dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
@@ -512,6 +544,10 @@ impl DashboardState {
         mut dialog: SetupDialog,
     ) -> DashboardAction {
         use SetupControl::*;
+        if dialog.saving {
+            self.mode = Mode::Setup(dialog);
+            return DashboardAction::None;
+        }
         if let Some(mut review) = dialog.review_editor.take() {
             let save_shortcut = matches!(
                 &event,
@@ -544,7 +580,11 @@ impl DashboardState {
                     dialog.form = RefCell::new(Form::default());
                 }
                 ReviewSettingsOutcome::CancelSetup => {
-                    self.cancel_modal();
+                    review.cancel_discovery(self);
+                    dialog.sync_review_validation(&review);
+                    dialog.review_editor = Some(review);
+                    dialog.prepare();
+                    self.dismiss_setup(dialog);
                     return action;
                 }
                 ReviewSettingsOutcome::Save => {
@@ -564,10 +604,6 @@ impl DashboardState {
             }
             self.mode = Mode::Setup(dialog);
             return action;
-        }
-        if dialog.saving {
-            self.mode = Mode::Setup(dialog);
-            return DashboardAction::None;
         }
         let shortcut = match &event {
             Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
@@ -595,15 +631,14 @@ impl DashboardState {
         let interaction = shortcut.or_else(|| form_result.and_then(|result| result.action));
         let mut action = DashboardAction::None;
         match interaction {
-            Some(Interaction::Cancel | Interaction::Activate(Back)) => {
+            Some(Interaction::Cancel) | Some(Interaction::Activate(Cancel)) => {
+                return self.dismiss_setup(dialog);
+            }
+            Some(Interaction::Activate(Back)) => {
                 if dialog.back() {
                     self.cancel_modal();
                     return DashboardAction::None;
                 }
-            }
-            Some(Interaction::Activate(Cancel)) => {
-                self.cancel_modal();
-                return DashboardAction::None;
             }
             Some(Interaction::Select(List, index)) => {
                 if dialog.selected != index {
@@ -769,7 +804,7 @@ pub(crate) fn render_setup(
     surfaces: &mut FrameSurfaces,
 ) {
     if let Some(review) = &dialog.review_editor {
-        render_review_settings(frame, area, review, surfaces);
+        render_review_settings(frame, area, review, surfaces, dialog.saving);
         return;
     }
     use SetupControl::*;
@@ -780,7 +815,6 @@ pub(crate) fn render_setup(
         area.height.saturating_sub(2).min(32),
         area,
     );
-    frame.render_widget(theme::modal().title(" Setup "), popup);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 2,
         vertical: 1,
@@ -821,6 +855,14 @@ pub(crate) fn render_setup(
     );
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Setup",
+        theme::title(true),
+        !dialog.saving,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
     let initial;
     if let Some(editor) = &dialog.editor {
         if editor.choices.is_empty() {
@@ -1022,6 +1064,12 @@ mod tests {
         let original = dashboard.config.clone();
         choose_light_theme(&mut dashboard);
         dashboard.handle_key(key(KeyCode::Esc));
+        assert!(dashboard.modal_open());
+        dashboard.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
         assert!(!dashboard.modal_open());
         assert_eq!(dashboard.config, original);
         assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
@@ -1238,8 +1286,16 @@ mod tests {
             for label in ["Focus prompt", "Save (Ctrl-S)", "Cancel"] {
                 assert!(text.contains(label), "{text}");
             }
+            dashboard.handle_key(key(KeyCode::Backspace));
+            dashboard.handle_key(key(KeyCode::Backspace));
             dashboard.handle_key(key(KeyCode::Esc));
-            dashboard.handle_key(key(KeyCode::Esc));
+            if dashboard.modal_open() {
+                dashboard.handle_key(key(KeyCode::Right));
+                assert_eq!(
+                    dashboard.handle_key(key(KeyCode::Enter)),
+                    DashboardAction::None
+                );
+            }
             assert!(!dashboard.modal_open());
             assert_eq!(dashboard.config, original);
         }
@@ -1251,7 +1307,15 @@ mod tests {
         dashboard.begin_setup();
         choose(&mut dashboard, "review");
         dashboard.handle_key(key(KeyCode::Char(' ')));
-        dashboard.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::CancelReviewSettingsDiscovery
+        );
+        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::None
+        );
         assert!(matches!(dashboard.mode, Mode::Setup(_)));
         assert!(!dashboard.config.review.enabled);
         let Mode::Setup(dialog) = &dashboard.mode else {
@@ -1259,6 +1323,9 @@ mod tests {
         };
         assert!(dialog.draft["review"]["enabled"].as_bool().unwrap());
         dashboard.handle_key(key(KeyCode::Esc));
+        assert!(dashboard.modal_open());
+        dashboard.handle_key(key(KeyCode::Right));
+        dashboard.handle_key(key(KeyCode::Enter));
         assert!(!dashboard.modal_open());
         assert!(!dashboard.config.review.enabled);
 
@@ -1304,8 +1371,8 @@ mod tests {
         choose(&mut dashboard, "home");
         dashboard.handle_paste("-changed");
         dashboard.handle_key(key(KeyCode::Enter));
-        dashboard.handle_key(key(KeyCode::Esc));
-        dashboard.handle_key(key(KeyCode::Esc));
+        dashboard.handle_key(key(KeyCode::Backspace));
+        dashboard.handle_key(key(KeyCode::Backspace));
         choose(&mut dashboard, "review");
         let setup = setup_dialog_mut(&mut dashboard.mode).unwrap();
         let review = setup.review_editor.as_mut().unwrap();
@@ -1375,7 +1442,18 @@ mod tests {
                 cleanup_warning: None,
             }),
         );
-        dashboard.handle_key(key(KeyCode::Esc));
+        if let Mode::Setup(setup) = &mut dashboard.mode {
+            setup
+                .review_editor
+                .as_mut()
+                .expect("review editor")
+                .form
+                .get_mut()
+                .focus(crate::review_settings::ReviewSettingsFocus::Back);
+        } else {
+            panic!("setup remains open after discovery");
+        }
+        dashboard.handle_key(key(KeyCode::Enter));
         choose(&mut dashboard, "profiles");
         choose(&mut dashboard, "codex-2");
         choose(&mut dashboard, "home");
@@ -1385,7 +1463,7 @@ mod tests {
         assert_eq!(action, DashboardAction::None);
         let setup = setup_dialog_mut(&mut dashboard.mode).unwrap();
         assert!(setup.notice.as_deref().unwrap().contains("unavailable"));
-        dashboard.handle_key(key(KeyCode::Esc));
+        dashboard.handle_key(key(KeyCode::Backspace));
         choose(&mut dashboard, "codex-1");
         choose(&mut dashboard, "home");
         dashboard.handle_key(key(KeyCode::Enter));
