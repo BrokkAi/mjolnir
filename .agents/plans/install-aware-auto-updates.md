@@ -48,18 +48,23 @@ or having no update, changes nothing about startup.
       `MJOLNIR_NO_UPDATE_CHECK`, which nothing reads anymore.
 - [x] (2026-09-09) Design agreed with the user: delegate to package managers
       for npm/brew, keep the curl mechanism, cargo stays notice-only.
-- [ ] Milestone 1: update-check module in `mj-controller` (detection, version
-      sources, throttle stamp) with unit and loopback-server tests.
-- [ ] Milestone 2: prompt-and-apply flows (curl self-replace, npm delegate,
-      brew delegate, cargo notice) in the same module, with tests.
-- [ ] Milestone 3: startup wiring in `mj-cli/src/main.rs` for the interactive
-      dashboard invocations.
-- [ ] Milestone 4: npm launcher env markers (`MJOLNIR_MANAGED_BY_NPM/_NPX`)
-      plus launcher test updates.
-- [ ] Milestone 5: documentation (install.md, storage-network.md,
-      RELEASING.md Homebrew tap section).
-- [ ] Full validation: `cargo fmt --check`, `cargo clippy --all-targets --
-      -D warnings`, `cargo test` (outside the sandbox), `npm test`.
+- [x] (2026-09-09) Milestones 1+2 (commit `0c902697`): update-check module in
+      `mj-controller/src/hel_controller/update.rs` — detection, per-channel
+      version lookups, 24-hour stamp, prompt-and-apply flows for all four
+      channels, curl self-replace port, restart retargeting. 23 tests,
+      clippy clean. Committed as one checkpoint because an M1-only commit
+      fails the `-D warnings` gate on intentionally-not-yet-wired code.
+- [x] (2026-09-09) Milestone 3 (commit `9f9eee60`): startup wiring in
+      `mj-cli/src/main.rs` for `None`/`Workspaces` invocations.
+- [x] (2026-09-09) Milestone 4 (commit `362dd902`): npm launcher sets
+      `MJOLNIR_MANAGED_BY_NPM`/`_NPX`; 12 npm tests pass.
+- [x] (2026-09-09) Milestone 5 (commit `206d29dd`): install.md "Keeping
+      Mjolnir current" section; RELEASING.md Homebrew tap section. The
+      storage-network.md part is dropped — see Surprises.
+- [x] (2026-09-09) Full validation: `cargo fmt --check` clean; `cargo
+      clippy --all-targets -- -D warnings` clean workspace-wide; `cargo
+      test` passes with zero failures across every suite (run outside the
+      sandbox as the suite requires); `npm test` 12/12.
 
 ## Surprises & Discoveries
 
@@ -82,6 +87,11 @@ or having no update, changes nothing about startup.
   style for long work near the TUI — but it is not needed here, because the
   entire update flow completes *before* the TUI event loop starts.
   Evidence: `mj-cli/src/dashboard/io.rs:44`; `mj-cli/src/pollers.rs:1031`.
+- Observation: the 1.x `docs/src/content/docs/storage-network.md` service
+  table no longer exists in the 2.0 docs tree, so the planned network-contact
+  disclosure was folded into install.md's "Keeping Mjolnir current" section
+  instead.
+  Evidence: `ls docs/src/content/docs/` has no storage-network.md.
 
 ## Decision Log
 
@@ -146,12 +156,51 @@ or having no update, changes nothing about startup.
   Rationale: closes the 1.x hole where an env-less npm install would have
   been misclassified as "direct" and self-replaced under `node_modules`.
   Date/Author: 2026-09-09, plan author (see Surprises).
+- Decision: milestones 1 and 2 landed as a single commit.
+  Rationale: the repository gate is `cargo clippy --all-targets -- -D
+  warnings`; an M1-only commit carries dead-code warnings for code M2 was
+  always going to wire, so the first green checkpoint is the full module.
+  Date/Author: 2026-09-09, plan author.
+- Decision: Homebrew restarts through the `mj` wrapper on `PATH`, not
+  through the running binary's own path.
+  Rationale: `brew upgrade` installs the new release into a fresh Cellar
+  directory and repoints the wrapper; re-execing this process's own Cellar
+  path would relaunch the old version. npm bundles replace files in place,
+  so npm keeps the same-exe restart. Encoded in
+  `managed_restart_target` and pinned by
+  `managed_restart_retargets_homebrew_to_its_wrapper`.
+  Date/Author: 2026-09-09, plan author.
+- Decision: the prompt names the semver version uniformly (the 1.x prompt
+  showed the raw tag for curl installs).
+  Rationale: one consistent line across channels; the tag still appears in
+  the download banner, where it selects the release.
+  Date/Author: 2026-09-09, plan author.
 
 ## Outcomes & Retrospective
 
-Not yet written; filled in at completion with what shipped, what remains
-(out-of-repo tap formula change; `mj app` desktop binary excluded), and
-lessons learned.
+Shipped: interactive `mj` startups check their own install channel at most
+once a day, ask `Upgrade now? [Y/n]` before changing anything, and on
+consent upgrade through the package manager (npm: `npm install -g
+@brokkai/mjolnir@latest`; Homebrew: `brew update && brew upgrade mjolnir`)
+or, for curl installs, through the unchanged 1.x download-verify-replace
+flow; npx and cargo installs get the notice line only. The npm launcher
+declares `MJOLNIR_MANAGED_BY_NPM`/`_NPX` instead of disabling the check, and
+RELEASING.md pins the tap wrapper's `MJOLNIR_MANAGED_BY_HOMEBREW` contract
+for the out-of-repo formula bump. Validated by 23 module tests (including
+loopback-server end-to-end channel checks), the launcher suite, and the full
+workspace gate.
+
+What remains: the tap formula change itself (separate repository, rides the
+next release's bump); `mj app`/desktop binaries never check (out of scope);
+a real end-to-end prompt against a published newer release is only
+observable after the next version ships — until then the loopback tests
+stand in for the network half.
+
+Lesson learned: the 1.x code's biggest risk was never the happy path — it
+was misclassifying an install (env-less npm would have self-replaced inside
+`node_modules`). The path-forensics backstop and the restart-retarget test
+exist because classification, not downloading, is where the old design was
+one env var away from corrupting a package database.
 
 ## Context and Orientation
 
@@ -511,3 +560,13 @@ contract is: the child environment contains exactly one of
 `MJOLNIR_MANAGED_BY_NPM` / `MJOLNIR_MANAGED_BY_NPX`, and the Homebrew
 wrapper contract (documented in RELEASING.md, applied in the tap repo) is
 `MJOLNIR_MANAGED_BY_HOMEBREW=1`.
+
+## Revision Notes
+
+- 2026-09-09, post-implementation: Progress, Surprises, Decision Log, and
+  Outcomes updated to record the implementation. Milestones 1+2 landed as
+  one commit for the `-D warnings` gate; storage-network.md turned out not
+  to exist in the 2.0 docs, so its disclosure moved into install.md; the
+  Homebrew restart targets the wrapper on `PATH` (not the running Cellar
+  binary), and the prompt names the semver version uniformly across
+  channels.
