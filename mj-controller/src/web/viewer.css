@@ -575,6 +575,29 @@ pre.entry-body {
   overflow-wrap: anywhere;
 }
 
+.background-task {
+  flex-wrap: wrap;
+}
+
+.background-task-details {
+  display: flex;
+  flex: 1 1 12rem;
+  min-width: 0;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.background-task-command {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.background-task-error {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--failed);
+}
+
 .elicitation {
   border-color: var(--plan);
 }

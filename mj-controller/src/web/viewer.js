@@ -68,6 +68,8 @@ const login = document.querySelector('#login'),
   conversationSummary = conversationSide?.querySelector('summary'),
   queueHeading = queue?.previousElementSibling,
   shellsHeading = shells?.previousElementSibling,
+  backgroundTasks = document.querySelector('#conversation-background-tasks'),
+  backgroundTasksHeading = backgroundTasks?.previousElementSibling,
   elicitations = document.querySelector('#elicitations'),
   reviewHost = document.querySelector('#turn-review'),
   promptText = document.querySelector('#prompt-text'),
@@ -109,6 +111,9 @@ let snapshot,
 /// disabled it: state decides, so a re-render cannot lose the fact and a
 /// failure cannot leave a button dead.
 const pendingActions = new Set();
+/// Stop failures are tied to a task identity, so a fresh snapshot can redraw
+/// the row without losing the inline error that tells the person what failed.
+const backgroundTaskErrors = new Map();
 
 async function request(url, options = {}) {
   const response = await fetch(url, {
@@ -2321,6 +2326,7 @@ function showLogin() {
   }
   // Nothing from the previous viewer may survive a sign-out in this tab.
   pendingActions.clear();
+  backgroundTaskErrors.clear();
   resumeRows.clear();
   resumeCards.clear();
   resumeDrafts.clear();
@@ -2381,6 +2387,11 @@ async function restoreRoute() {
 }
 
 function renderQueue(session) {
+  const backgroundTaskContainer =
+    typeof backgroundTasks === 'undefined' ? null : backgroundTasks;
+  const pending = typeof pendingActions === 'undefined' ? new Set() : pendingActions;
+  const taskErrors =
+    typeof backgroundTaskErrors === 'undefined' ? new Map() : backgroundTaskErrors;
   const prompts = session.queued_prompts || [];
   queue.replaceChildren(
     ...prompts.map((prompt, index) => {
@@ -2412,15 +2423,103 @@ function renderQueue(session) {
   );
   shells.hidden = running.length === 0;
   if (shellsHeading) shellsHeading.hidden = running.length === 0;
-  if (conversationSummary) {
-    conversationSummary.textContent =
-      prompts.length && running.length
-        ? 'Queue and shells'
-        : prompts.length
-          ? 'Queued prompts'
-          : 'Shell commands';
+  const tasks = session.background_tasks || [];
+  const taskIds = new Set(tasks.map(task => task.id));
+  const taskPrefix = `stop-background:${session.id}:`;
+  for (const key of [...pending]) {
+    if (key.startsWith(taskPrefix) && !taskIds.has(key.slice(taskPrefix.length))) {
+      pending.delete(key);
+    }
   }
-  conversationSide.hidden = prompts.length === 0 && running.length === 0;
+  for (const key of [...taskErrors.keys()]) {
+    if (key.startsWith(taskPrefix) && !taskIds.has(key.slice(taskPrefix.length))) {
+      taskErrors.delete(key);
+    }
+  }
+  const now = tasks.length ? serverClockMs() : 0;
+  const taskRows = tasks.map(task => {
+      const key = backgroundTaskKey(session.id, task.id);
+      const row = el('div', 'queue-item background-task');
+      const details = el('div', 'background-task-details');
+      details.append(el('span', 'background-task-command', `$ ${task.command}`));
+      const started = epochMs(task.started_at_ms);
+      details.append(
+        el('span', 'dim', started == null ? 'Running' : formatClock(now - started)),
+      );
+      row.append(details);
+      if (task.can_stop) {
+        const stop = button(
+          pending.has(key) ? 'Stopping…' : 'Stop',
+          'danger',
+          { backgroundTaskId: task.id },
+        );
+        stop.disabled = pending.has(key);
+        row.append(stop);
+      } else {
+        row.append(el('span', 'dim', 'Stop unavailable'));
+      }
+      const error = taskErrors.get(key);
+      if (error) {
+        const message = el('p', 'background-task-error', error);
+        message.setAttribute('role', 'alert');
+        row.append(message);
+      }
+      return row;
+    });
+  if (backgroundTaskContainer) {
+    backgroundTaskContainer.replaceChildren(...taskRows);
+    backgroundTaskContainer.hidden = tasks.length === 0;
+  }
+  if (typeof backgroundTasksHeading !== 'undefined' && backgroundTasksHeading) {
+    backgroundTasksHeading.hidden = tasks.length === 0;
+  }
+  if (conversationSummary) {
+    const labels = [];
+    if (prompts.length) labels.push('queued prompts');
+    if (running.length) labels.push('shell commands');
+    if (tasks.length) labels.push('background tasks');
+    conversationSummary.textContent = labels.length
+      ? labels.map(label => label[0].toUpperCase() + label.slice(1)).join(', ')
+      : 'Shell commands';
+  }
+  conversationSide.hidden = prompts.length === 0 && running.length === 0 && tasks.length === 0;
+}
+
+function backgroundTaskKey(sessionId, taskId) {
+  return `stop-background:${sessionId}:${taskId}`;
+}
+
+/// Stop one projected task. Acceptance is not completion: the button remains
+/// pending until a later snapshot removes the task, so a slow provider cannot
+/// be stopped twice by a rerender or a fast double tap.
+async function stopBackgroundTask(taskId) {
+  const session = activeSession();
+  const task = session?.background_tasks?.find(item => item.id === taskId);
+  if (!session || !task?.can_stop) return false;
+  const key = backgroundTaskKey(session.id, task.id);
+  if (pendingActions.has(key)) return false;
+  pendingActions.add(key);
+  backgroundTaskErrors.delete(key);
+  renderQueue(session);
+  try {
+    await request(
+      `/api/sessions/${encodeURIComponent(session.id)}/background-tasks/stop`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ background_task_id: task.id }),
+      },
+    );
+    await refresh();
+    return true;
+  } catch (error) {
+    pendingActions.delete(key);
+    const latest = snapshot?.sessions.find(item => item.id === session.id);
+    if (latest?.background_tasks?.some(item => item.id === task.id)) {
+      backgroundTaskErrors.set(key, error.message);
+      if (currentSession === session.id) renderQueue(latest);
+    }
+    return false;
+  }
 }
 // Every snapshot revision re-renders the conversation. Rebuilding a card the
 // user is answering would wipe the half-filled form and steal focus, so each
@@ -4183,8 +4282,11 @@ function renderConversationTransition(session) {
   jumpToLatest.hidden = unavailable;
   elicitations.hidden = unavailable;
   reviewHost.hidden = unavailable;
-  if (unavailable) conversationSide.hidden = true;
-  else conversationSide.hidden = (queue.children.length === 0 && shells.children.length === 0);
+  conversationSide.hidden = (
+    queue.children.length === 0
+    && shells.children.length === 0
+    && backgroundTasks.children.length === 0
+  );
   document.querySelector('#prompt-form').hidden = unavailable;
   cancelTurnButton.classList.toggle('hidden', unavailable || !session?.capabilities?.cancel_turn);
   if (!unavailable) return;
@@ -4514,6 +4616,13 @@ moveBackButton.onclick = () => {
 moveForm.onsubmit = async event => {
   event.preventDefault();
   await advanceMove();
+};
+
+conversationSide.onclick = async event => {
+  const target = event.target.closest('button[data-background-task-id]');
+  if (!target) return;
+  event.preventDefault();
+  await stopBackgroundTask(target.dataset.backgroundTaskId);
 };
 
 /// One session action, from the row that carries it.

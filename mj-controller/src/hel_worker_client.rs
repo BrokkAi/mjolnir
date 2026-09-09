@@ -1066,6 +1066,31 @@ impl RelayClient {
         }
     }
 
+    /// Ask the live worker to stop one process-local background task.
+    pub async fn stop_background_task(&mut self, background_task_id: String) -> Result<()> {
+        let request = RelayRequest::StopBackgroundTask {
+            background_task_id: background_task_id.clone(),
+        };
+        if !request.supported_at(self.protocol_version) {
+            bail!(
+                "background task controls require relay protocol {}; this session negotiated {}",
+                request.minimum_protocol(),
+                self.protocol_version
+            );
+        }
+        match self.call(request).await? {
+            RelayResponsePayload::BackgroundTaskStopRequested {
+                background_task_id: stopped,
+            } if stopped == background_task_id => Ok(()),
+            RelayResponsePayload::BackgroundTaskStopRequested {
+                background_task_id: stopped,
+            } => {
+                bail!("relay stopped background task {stopped:?}, expected {background_task_id:?}")
+            }
+            _ => bail!("relay returned an unexpected background task stop response"),
+        }
+    }
+
     pub async fn detach(mut self) -> Result<()> {
         self.input
             .take()

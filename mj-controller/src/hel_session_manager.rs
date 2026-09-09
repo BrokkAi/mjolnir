@@ -369,6 +369,11 @@ pub enum RemoteSessionRequest {
         response: ElicitationResponse,
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
+    StopBackgroundTask {
+        session_id: String,
+        background_task_id: String,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
     Reviewer {
         session_id: String,
         /// Which reviewing role the action drives; `None` is the default one.
@@ -386,6 +391,7 @@ impl RemoteSessionRequest {
             Self::Submit { session_id, .. }
             | Self::Sync { session_id, .. }
             | Self::RespondElicitation { session_id, .. }
+            | Self::StopBackgroundTask { session_id, .. }
             | Self::Reviewer { session_id, .. } => session_id,
         }
     }
@@ -775,6 +781,21 @@ impl ManagedSessionHandle {
             .map_err(anyhow::Error::msg)
     }
 
+    pub async fn stop_background_task(&self, background_task_id: String) -> Result<()> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::StopBackgroundTask {
+                background_task_id,
+                reply,
+            })
+            .await
+            .context("session manager stopped")?;
+        result
+            .await
+            .context("session manager stopped")?
+            .map_err(anyhow::Error::msg)
+    }
+
     /// Drive the session's second-opinion reviewer.
     ///
     /// The reviewer shares this session's relay connection, so its actions
@@ -918,6 +939,13 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
         Box::pin(self.0.respond_elicitation(elicitation_id, response))
     }
 
+    fn stop_background_task(
+        &self,
+        background_task_id: String,
+    ) -> mj_client::session::BoxFuture<'_, Result<()>> {
+        Box::pin(self.0.stop_background_task(background_task_id))
+    }
+
     fn reviewer(
         &self,
         role: Option<String>,
@@ -1009,6 +1037,10 @@ enum ActorCommand {
         response: ElicitationResponse,
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
+    StopBackgroundTask {
+        background_task_id: String,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
     Reviewer {
         role: Option<String>,
         action: ReviewerAction,
@@ -1028,6 +1060,7 @@ impl ActorCommand {
             Self::Submit { .. } => "submit",
             Self::Sync { .. } => "sync",
             Self::RespondElicitation { .. } => "respond_elicitation",
+            Self::StopBackgroundTask { .. } => "stop_background_task",
             Self::Reviewer { action, .. } => action.operation_name(),
             Self::Lease { .. } => "lease",
         }
@@ -1059,6 +1092,15 @@ impl ActorCommand {
                         %session_id,
                         operation = "respond_elicitation",
                         "elicitation rejection receiver was already closed"
+                    );
+                }
+            }
+            Self::StopBackgroundTask { reply, .. } => {
+                if reply.send(Err(message.to_owned())).is_err() {
+                    tracing::debug!(
+                        %session_id,
+                        operation = "stop_background_task",
+                        "background task stop rejection receiver was already closed"
                     );
                 }
             }
@@ -1304,6 +1346,14 @@ async fn run_remote_session_actor(
                 response,
                 reply,
             },
+            ActorCommand::StopBackgroundTask {
+                background_task_id,
+                reply,
+            } => RemoteSessionRequest::StopBackgroundTask {
+                session_id: session_id.clone(),
+                background_task_id,
+                reply,
+            },
             ActorCommand::Reviewer {
                 role,
                 action,
@@ -1327,7 +1377,8 @@ async fn run_remote_session_actor(
                     let _ = reply.send(Err("controller daemon request bridge stopped".into()));
                 }
                 RemoteSessionRequest::Sync { reply, .. }
-                | RemoteSessionRequest::RespondElicitation { reply, .. } => {
+                | RemoteSessionRequest::RespondElicitation { reply, .. }
+                | RemoteSessionRequest::StopBackgroundTask { reply, .. } => {
                     let _ = reply.send(Err("controller daemon request bridge stopped".into()));
                 }
                 RemoteSessionRequest::Reviewer { reply, .. } => {
@@ -2073,6 +2124,58 @@ async fn run_session_actor(
                                 session_id = %target.session_id,
                                 operation = "respond_elicitation",
                                 "elicitation result receiver was already closed"
+                            );
+                        }
+                    }
+                    ActorCommand::StopBackgroundTask {
+                        background_task_id,
+                        reply,
+                    } => {
+                        if lifecycle.is_leased() {
+                            let _ = reply.send(Err(
+                                "session is reserved for a lifecycle operation".into(),
+                            ));
+                            continue;
+                        }
+                        let result = async {
+                            sync_actor_connection(&target, &mut connection).await?;
+                            let connection = connection
+                                .as_mut()
+                                .context("relay is disconnected")?;
+                            connection.stop_background_task(background_task_id).await?;
+                            Ok::<_, anyhow::Error>(connection.snapshot())
+                        }
+                        .await;
+                        match result {
+                            Ok(ref snapshot) => publish_view(
+                                &target.session_id,
+                                ManagedSessionView {
+                                    snapshot: Some(snapshot.clone()),
+                                    connected: true,
+                                    error: None,
+                                },
+                                &view_tx,
+                                &updates,
+                            ),
+                            Err(ref error) if !is_final_rejection(error) => connection = None,
+                            Err(_) => {}
+                        }
+                        if let Err(error) = &result {
+                            tracing::warn!(
+                                session_id = %target.session_id,
+                                operation = "stop_background_task",
+                                error = %error,
+                                "relay background task stop failed"
+                            );
+                        }
+                        if reply
+                            .send(result.map(|_| ()).map_err(|error| format!("{error:#}")))
+                            .is_err()
+                        {
+                            tracing::debug!(
+                                session_id = %target.session_id,
+                                operation = "stop_background_task",
+                                "background task stop result receiver was already closed"
                             );
                         }
                     }
@@ -2839,6 +2942,12 @@ impl StandaloneSession {
         self.client
             .respond_elicitation(elicitation_id, response)
             .await?;
+        self.sync_in_place().await?;
+        Ok(())
+    }
+
+    pub async fn stop_background_task(&mut self, background_task_id: String) -> Result<()> {
+        self.client.stop_background_task(background_task_id).await?;
         self.sync_in_place().await?;
         Ok(())
     }

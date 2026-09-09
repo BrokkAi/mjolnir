@@ -40,6 +40,9 @@ pub(super) enum ChatRemoteOperation {
         text: String,
         kind: QueuedCommandKind,
     },
+    StopBackgroundTask {
+        id: String,
+    },
     SetConfig {
         command_id: String,
         key: String,
@@ -83,6 +86,10 @@ pub(super) enum ChatRemoteResult {
         kind: QueuedCommandKind,
         result: std::result::Result<(), String>,
     },
+    StopBackgroundTask {
+        id: String,
+        result: std::result::Result<(), String>,
+    },
     SetConfig {
         key: String,
         value: String,
@@ -118,6 +125,9 @@ impl ChatRemoteResult {
                 result: Err(error), ..
             }
             | Self::RemoveQueuedPrompt {
+                result: Err(error), ..
+            }
+            | Self::StopBackgroundTask {
                 result: Err(error), ..
             }
             | Self::SetConfig {
@@ -526,6 +536,22 @@ async fn enqueue_chat_remote_operation(
                 }
             }
         }
+        ChatRemoteOperation::StopBackgroundTask { id } => {
+            let session = session.clone();
+            let results = results.clone();
+            let attached = attached.clone();
+            pending.spawn(async move {
+                let result = session
+                    .stop_background_task(id.clone())
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                publish_chat_remote_result(
+                    &results,
+                    &attached,
+                    ChatRemoteResult::StopBackgroundTask { id, result },
+                );
+            });
+        }
         ChatRemoteOperation::SetConfig {
             command_id,
             key,
@@ -850,6 +876,18 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
             chat.fail_queued_prompt_removal(id, text, kind);
             chat.set_notice(format!("Queued prompt was not removed: {error}"));
         }
+        ChatRemoteResult::StopBackgroundTask { id, result: Ok(()) } => {
+            // The provider's acknowledgement only means it accepted the stop
+            // request. The next activity snapshot remains authoritative for
+            // removing the row and its pending label.
+            if chat.background_stop_pending(&id) {
+                chat.set_notice("Background task stop requested");
+            }
+        }
+        ChatRemoteResult::StopBackgroundTask {
+            id,
+            result: Err(error),
+        } => chat.fail_background_stop(&id, &error),
         ChatRemoteResult::SetConfig { result: Ok(()), .. } => {
             chat.set_notice("Configuration update accepted")
         }
@@ -910,7 +948,13 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
             }
             chat.set_notice(format!("Answer was not sent: {error}"));
         }
-        ChatRemoteResult::WorkerFailed(error) => chat.set_notice(error),
+        ChatRemoteResult::WorkerFailed(error) => {
+            if chat.fail_all_background_stops() {
+                chat.set_notice(format!("Background task could not be stopped: {error}"));
+            } else {
+                chat.set_notice(error);
+            }
+        }
     }
 }
 
@@ -936,6 +980,9 @@ pub(super) fn queue_chat_remote_operation(
             }
             ChatRemoteOperation::RemoveQueuedPrompt { id, text, kind, .. } => {
                 chat.fail_queued_prompt_removal(id, text, kind);
+            }
+            ChatRemoteOperation::StopBackgroundTask { id } => {
+                chat.fail_background_stop(&id, "session command queue is full");
             }
             ChatRemoteOperation::SetConfig { key, value, .. } => {
                 restore_unsent_input(chat, &config_command_text(&key, &value));

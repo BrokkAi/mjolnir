@@ -55,7 +55,7 @@ use crate::pollers::{
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
 };
 
-pub(crate) const PROTOCOL_VERSION: u32 = 16;
+pub(crate) const PROTOCOL_VERSION: u32 = 17;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a daemon is given to exit after it accepts a stop.
@@ -431,6 +431,10 @@ enum DaemonAction {
         session_id: String,
         elicitation_id: String,
         response: ElicitationResponse,
+    },
+    StopBackgroundTask {
+        session_id: String,
+        background_task_id: String,
     },
     /// Drive a session's second-opinion reviewer. The reviewer is a sidecar of
     /// the session's worker, so it travels the session's own relay rather than
@@ -3255,6 +3259,23 @@ impl DaemonClient {
         }
     }
 
+    pub(crate) async fn stop_background_task(
+        &mut self,
+        session_id: String,
+        background_task_id: String,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::StopBackgroundTask {
+                session_id,
+                background_task_id,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected background task stop reply {reply:?}"),
+        }
+    }
+
     pub(crate) async fn close_session(&mut self, session_id: String) -> Result<()> {
         match self
             .request(DaemonAction::CloseSession { session_id })
@@ -4296,6 +4317,22 @@ async fn forward_in_process_session_request(
             .map_err(|error| format!("{error:#}"));
             let _ = reply.send(result);
         }
+        RemoteSessionRequest::StopBackgroundTask {
+            session_id,
+            background_task_id,
+            reply,
+        } => {
+            let result = async {
+                manager
+                    .session(session_id)
+                    .await?
+                    .stop_background_task(background_task_id)
+                    .await
+            }
+            .await
+            .map_err(|error| format!("{error:#}"));
+            let _ = reply.send(result);
+        }
         RemoteSessionRequest::Reviewer {
             session_id,
             role,
@@ -4848,6 +4885,18 @@ async fn handle_action(
                 .session(session_id)
                 .await?
                 .respond_elicitation(elicitation_id, response)
+                .await?;
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::StopBackgroundTask {
+            session_id,
+            background_task_id,
+        } => {
+            state
+                .session_manager
+                .session(session_id)
+                .await?
+                .stop_background_task(background_task_id)
                 .await?;
             Ok(DaemonReply::Done)
         }

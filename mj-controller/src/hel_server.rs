@@ -166,6 +166,10 @@ pub struct ServerOptions {
     pub move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     pub client_state_tx: mpsc::Sender<ClientStateRequest>,
     pub dictation_tx: mpsc::Sender<DictationRequest>,
+    /// Dedicated bounded path for stopping one live background task. This is
+    /// deliberately separate from [`ControllerAction`]: stopping a provider
+    /// task does not occupy the controller's action admission slot.
+    background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
     pub shutdown: CancellationToken,
     pub session_ttl: Duration,
     /// Keep this enabled for direct HTTPS or an HTTPS reverse proxy. It may be
@@ -206,6 +210,7 @@ impl ServerOptions {
             move_preparation_tx: requests.move_preparation_tx,
             client_state_tx: requests.client_state_tx,
             dictation_tx: requests.dictation_tx,
+            background_task_stop_tx: mpsc::channel(1).0,
             shutdown: CancellationToken::new(),
             session_ttl: DEFAULT_SESSION_TTL,
             secure_cookie: true,
@@ -241,6 +246,11 @@ impl ServerOptions {
         );
         self.cookie_key = key;
         Ok(())
+    }
+
+    /// Install the controller's bounded background-task stop path.
+    pub fn set_background_task_stop_tx(&mut self, tx: mpsc::Sender<BackgroundTaskStopRequest>) {
+        self.background_task_stop_tx = tx;
     }
 
     #[cfg(test)]
@@ -374,6 +384,7 @@ impl ViewerSnapshot {
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
                     active_user_shells: Vec::new(),
+                    background_tasks: Vec::new(),
                     pending_elicitations: Vec::new(),
                     conversation_available: false,
                     prompt_images_supported: false,
@@ -523,6 +534,8 @@ pub struct ViewerSession {
     pub queued_prompts: Vec<ViewerQueuedPrompt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_user_shells: Vec<ViewerUserShell>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<ViewerBackgroundTask>,
     /// Form questions the session is blocked on, published so a phone can
     /// answer them. These are the agent's own questions, already visible in
     /// the transcript, so they travel whole rather than redacted.
@@ -879,6 +892,16 @@ pub struct ViewerUserShell {
     pub id: String,
     pub command: String,
     pub started_at_ms: Option<i64>,
+}
+
+/// One command the active agent left running in the background.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerBackgroundTask {
+    pub id: String,
+    pub command: String,
+    pub started_at_ms: i64,
+    pub can_stop: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1509,6 +1532,29 @@ pub struct ReadReceiptRequest {
     pub reply: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
+/// A phone request to stop one currently projected background task.
+///
+/// This is intentionally not a [`ControllerAction`]. The request is already
+/// validated against the current operational snapshot by the HTTP handler,
+/// then the controller resolves the live session handle and waits for the
+/// provider acknowledgement in a supervised task.
+#[derive(Debug)]
+pub struct BackgroundTaskStopRequest {
+    pub session_id: String,
+    pub background_task_id: String,
+    pub reply: tokio::sync::oneshot::Sender<Result<(), BackgroundTaskStopFailure>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundTaskStopFailure {
+    /// The session manager could not resolve the live session handle.
+    SessionUnavailable,
+    /// The provider or relay rejected the stop request.
+    Provider,
+    /// The stop task itself failed before reaching the provider.
+    Internal,
+}
+
 #[derive(Clone)]
 struct ServerState {
     snapshot_rx: watch::Receiver<ViewerSnapshot>,
@@ -1520,6 +1566,7 @@ struct ServerState {
     move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     client_state_tx: mpsc::Sender<ClientStateRequest>,
     dictation_tx: mpsc::Sender<DictationRequest>,
+    background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
     dictation_permits: Arc<Semaphore>,
     dictation_probe_permits: Arc<Semaphore>,
     shutdown: CancellationToken,
@@ -1593,6 +1640,7 @@ fn router(options: ServerOptions) -> Router {
         move_preparation_tx: options.move_preparation_tx,
         client_state_tx: options.client_state_tx,
         dictation_tx: options.dictation_tx,
+        background_task_stop_tx: options.background_task_stop_tx,
         dictation_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DICTATIONS)),
         dictation_probe_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DICTATIONS)),
         shutdown: options.shutdown,
@@ -1618,6 +1666,10 @@ fn router(options: ServerOptions) -> Router {
         .route(
             "/api/sessions/{session_id}/dictation",
             get(dictation_availability).post(upload_dictation),
+        )
+        .route(
+            "/api/sessions/{session_id}/background-tasks/stop",
+            post(stop_background_task),
         )
         .route(
             "/api/sessions/{session_id}/attachments",
@@ -2006,6 +2058,74 @@ async fn mark_conversation_read(
         .map_err(|_| ApiError::controller_unavailable())?
         .map_err(|_| ApiError::new(StatusCode::CONFLICT, "read receipt failed"))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopBackgroundTaskRequest {
+    background_task_id: String,
+}
+
+/// Ask the live session actor to stop one task the current projection still
+/// shows. The snapshot check is intentionally repeated at admission time:
+/// a task may have completed, or lost its provider stop capability, between
+/// the browser rendering its button and the POST arriving.
+async fn stop_background_task(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<StopBackgroundTaskRequest>,
+) -> Result<StatusCode, ApiError> {
+    validate_public_id(&session_id)?;
+    // Task ids are opaque provider ids (the worker currently uses values such
+    // as `terminal:<id>`), so they do not use the config id alphabet. The
+    // request is still bounded and must name a task in the current snapshot.
+    if request.background_task_id.is_empty() || request.background_task_id.len() > 256 {
+        return Err(ApiError::bad_request("invalid background task id"));
+    }
+    {
+        let snapshot = state.snapshot_rx.borrow();
+        let session = require_session_record(&snapshot, &session_id)?;
+        let task = session
+            .background_tasks
+            .iter()
+            .find(|task| task.id == request.background_task_id)
+            .ok_or_else(|| {
+                ApiError::new(StatusCode::CONFLICT, "background task is no longer running")
+            })?;
+        if !task.can_stop {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "background task cannot be stopped",
+            ));
+        }
+    }
+
+    let (reply, result) = tokio::sync::oneshot::channel();
+    state
+        .background_task_stop_tx
+        .send(BackgroundTaskStopRequest {
+            session_id,
+            background_task_id: request.background_task_id,
+            reply,
+        })
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    match result
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+    {
+        Ok(()) => Ok(StatusCode::ACCEPTED),
+        Err(BackgroundTaskStopFailure::SessionUnavailable) => Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the live session is unavailable",
+        )),
+        Err(BackgroundTaskStopFailure::Provider | BackgroundTaskStopFailure::Internal) => {
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the provider could not stop this background task",
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -4057,6 +4177,120 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert!(requests.try_recv().is_err());
+    }
+
+    fn app_with_background_stop_receiver(
+        can_stop: bool,
+    ) -> (Router, mpsc::Receiver<BackgroundTaskStopRequest>) {
+        let (config, state) = sample_config_state();
+        let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        snapshot.sessions[0].background_tasks = vec![ViewerBackgroundTask {
+            id: "terminal:background-1".into(),
+            command: "cargo test".into(),
+            started_at_ms: 1_000,
+            can_stop,
+        }];
+        let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
+        let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
+        let (action_tx, _action_rx) = mpsc::channel(8);
+        let (bundle_tx, _bundle_rx) = mpsc::channel(8);
+        let (receipt_tx, _receipt_rx) = mpsc::channel(8);
+        let (preflight_tx, _preflight_rx) = mpsc::channel(8);
+        let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
+        let (client_state_tx, _client_state_rx) = mpsc::channel(8);
+        let (stop_tx, stop_rx) = mpsc::channel(8);
+        let mut options = test_options(
+            snapshot_rx,
+            conversation_rx,
+            action_tx,
+            bundle_tx,
+            receipt_tx,
+            preflight_tx,
+            move_preparation_tx,
+            client_state_tx,
+        )
+        .with_test_credentials("123456", b"01234567890123456789012345678901");
+        options.set_background_task_stop_tx(stop_tx);
+        (router(options), stop_rx)
+    }
+
+    #[tokio::test]
+    async fn background_task_stop_validates_the_snapshot_and_waits_for_acknowledgement() {
+        let (app, mut requests) = app_with_background_stop_receiver(true);
+        let cookie = login_cookie(&app).await;
+        let response = tokio::spawn({
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                app.oneshot(
+                    Request::post("/api/sessions/session-1/background-tasks/stop")
+                        .header(COOKIE, cookie)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            r#"{"background_task_id":"terminal:background-1"}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        });
+        let request = requests.recv().await.unwrap();
+        assert_eq!(request.session_id, "session-1");
+        assert_eq!(request.background_task_id, "terminal:background-1");
+        request.reply.send(Ok(())).unwrap();
+        assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+
+        let (app, mut requests) = app_with_background_stop_receiver(false);
+        let cookie = login_cookie(&app).await;
+        let response = app
+            .oneshot(
+                Request::post("/api/sessions/session-1/background-tasks/stop")
+                    .header(COOKIE, cookie)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"background_task_id":"terminal:background-1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn background_task_stop_reports_provider_failure_without_leaking_details() {
+        let (app, mut requests) = app_with_background_stop_receiver(true);
+        let cookie = login_cookie(&app).await;
+        let response = tokio::spawn({
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::post("/api/sessions/session-1/background-tasks/stop")
+                        .header(COOKIE, cookie)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            r#"{"background_task_id":"terminal:background-1"}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        });
+        let request = requests.recv().await.unwrap();
+        request
+            .reply
+            .send(Err(BackgroundTaskStopFailure::Provider))
+            .unwrap();
+        let response = response.await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            &body[..],
+            br#"{"error":"the provider could not stop this background task"}"#
+        );
     }
 
     #[tokio::test]

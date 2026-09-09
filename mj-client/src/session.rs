@@ -183,6 +183,7 @@ pub trait SessionHandleBackend: Send + Sync {
         elicitation_id: String,
         response: ElicitationResponse,
     ) -> BoxFuture<'_, Result<()>>;
+    fn stop_background_task(&self, background_task_id: String) -> BoxFuture<'_, Result<()>>;
     fn reviewer(
         &self,
         role: Option<String>,
@@ -249,6 +250,10 @@ impl SessionHandle {
         self.backend
             .respond_elicitation(elicitation_id, response)
             .await
+    }
+
+    pub async fn stop_background_task(&self, background_task_id: String) -> Result<()> {
+        self.backend.stop_background_task(background_task_id).await
     }
 
     pub async fn reviewer(&self, action: ReviewerAction) -> Result<ReviewerOutcome> {
@@ -494,6 +499,10 @@ impl SessionHandleBackend for ReplacementTestSession {
         _elicitation_id: String,
         _response: ElicitationResponse,
     ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { anyhow::bail!("unsupported test operation") })
+    }
+
+    fn stop_background_task(&self, _background_task_id: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { anyhow::bail!("unsupported test operation") })
     }
 

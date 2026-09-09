@@ -824,6 +824,9 @@ pub(super) fn record_runtime_event(
         RuntimeEvent::ClaudeBackgroundTasksChanged { tasks } => {
             relay.claude_background_tasks_changed(tasks)?;
         }
+        RuntimeEvent::ClaudeAsyncTaskControlChanged { task_id, can_stop } => {
+            relay.claude_async_task_control_changed(task_id, can_stop)?;
+        }
         RuntimeEvent::ElicitationRequested { request } => {
             relay.record_observation(RelayObservation::ElicitationRequested { request })?;
         }
@@ -1465,8 +1468,8 @@ pub(super) async fn serve_client_with_memory(
                 let request_id = envelope.request_id.clone();
                 let protocol_version = envelope.protocol_version;
                 let store = hel::hel_attachment::AttachmentStore::worker(&relay_root);
-                let body = if protocol_version < 8
-                    || protocol_version > hel::hel_worker::RELAY_PROTOCOL_VERSION
+                let body = if !(8..=hel::hel_worker::RELAY_PROTOCOL_VERSION)
+                    .contains(&protocol_version)
                 {
                     compaction_error(
                         RelayErrorCode::InvalidRequest,
@@ -1567,6 +1570,13 @@ pub(super) async fn serve_client_with_memory(
                 // directly to the ACP runtime and never touch relay state.
                 let response = elicitation_response(envelope, commands.as_ref()).await;
                 write_logged_response(&mut writer, &response, &session_id, "respond_elicitation")
+                    .await?;
+                continue;
+            }
+            if let RelayRequest::StopBackgroundTask { .. } = &envelope.request {
+                let response =
+                    background_task_stop_response(envelope, commands.as_ref(), &relay).await;
+                write_logged_response(&mut writer, &response, &session_id, "stop_background_task")
                     .await?;
                 continue;
             }
@@ -1836,6 +1846,64 @@ async fn elicitation_response(
                 Err(_) => compaction_error(
                     RelayErrorCode::Internal,
                     "ACP runtime stopped before accepting the elicitation answer",
+                ),
+            }
+        }
+    };
+    RelayResponseEnvelope {
+        request_id,
+        protocol_version,
+        body,
+    }
+}
+
+async fn background_task_stop_response(
+    envelope: RelayRequestEnvelope,
+    commands: Option<&mpsc::Sender<CommandRequest>>,
+    relay: &Arc<Mutex<DurableRelay>>,
+) -> RelayResponseEnvelope {
+    if !envelope.request.supported_at(envelope.protocol_version) {
+        return incompatible_request_protocol_response(
+            envelope.request_id,
+            envelope.protocol_version,
+        );
+    }
+    let protocol_version = envelope.protocol_version;
+    let request_id = envelope.request_id;
+    let RelayRequest::StopBackgroundTask { background_task_id } = envelope.request else {
+        unreachable!("background_task_stop_response only serves task stops")
+    };
+    let target = relay
+        .lock()
+        .expect("relay state lock poisoned")
+        .background_task_stop_target(&background_task_id);
+    let body = match (commands, target) {
+        (None, _) => compaction_error(
+            RelayErrorCode::InvalidState,
+            "session is closed; no ACP runtime can stop the background task",
+        ),
+        (_, Err(error)) => compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
+        (Some(commands), Ok(target)) => {
+            let (resolved, resolution) = tokio::sync::oneshot::channel();
+            match commands
+                .send(CommandRequest::StopBackgroundTask { target, resolved })
+                .await
+            {
+                Ok(()) => match resolution.await {
+                    Ok(Ok(())) => RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::BackgroundTaskStopRequested {
+                            background_task_id,
+                        },
+                    },
+                    Ok(Err(message)) => compaction_error(RelayErrorCode::InvalidState, &message),
+                    Err(_) => compaction_error(
+                        RelayErrorCode::Internal,
+                        "ACP runtime stopped before resolving the background task stop",
+                    ),
+                },
+                Err(_) => compaction_error(
+                    RelayErrorCode::Internal,
+                    "ACP runtime stopped before accepting the background task stop",
                 ),
             }
         }
