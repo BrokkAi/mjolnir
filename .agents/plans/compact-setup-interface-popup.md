@@ -13,8 +13,8 @@ The terminal Setup screen currently occupies the full available width and replac
 - [x] (2026-09-09 12:02Z) Added the virtual Interface page, stable Setup sizing, choice glyphs, and inline popup state transitions.
 - [x] (2026-09-09 12:02Z) Added focused behavior and rendering tests, including real rendered-surface geometry and pointer activation.
 - [x] (2026-09-09 12:02Z) Ran formatting, the full Rust test suite, and clippy; reviewed and tightened the integrated diff.
-- [x] (2026-09-09 13:10Z) Integrated the first upstream batch, preserved its second Advanced setting, and regenerated the Setup documentation capture.
-- [ ] Commit, merge current upstream changes if necessary, rerun affected validation after a merge, and push.
+- [x] (2026-09-09 12:20Z) Integrated the first upstream batch, preserved its second Advanced setting, and regenerated the Setup documentation capture.
+- [x] (2026-09-09 12:51Z) Committed the implementation, integrated all subsequent upstream modal and prompt-surface changes, reran the complete validation, and prepared the branch for the requested push.
 
 ## Surprises & Discoveries
 
@@ -30,6 +30,8 @@ The terminal Setup screen currently occupies the full available width and replac
   Evidence: `git status --short --branch` reports `hel3...origin/master [behind 3]`, and `git diff --name-only HEAD..origin/master` includes `mj-tui/src/setup.rs`, `mj-tui/src/setup/schema.rs`, and workspace manifests.
 - Observation: A second upstream batch landed while the post-merge suite was running and replaces the terminal-wide modal dismissal/layout machinery.
   Evidence: `origin/master` advanced through `6ff448d0` and `2b6e4617` after merge commit `49b6b8eb`; the new commits overlap Setup's surrounding modal APIs and require a second integration pass.
+- Observation: The first two post-merge workspace runs reached the PTY binary only after prolonged stress-test load and timed out while several fixtures waited for terminal capability replies; every PTY case passed in serial or isolation, and the later upstream harness update made the final full run pass all six together.
+  Evidence: the final `cargo test` run after `0f730c9f` reports `termination_pty` with 6 passed and 0 failed.
 
 ## Decision Log
 
@@ -51,7 +53,7 @@ The terminal Setup screen currently occupies the full available width and replac
 
 ## Outcomes & Retrospective
 
-The feature is implemented and locally validated. Setup now renders compactly at one stable size, exposes Interface without changing the serialized configuration, and uses an anchored autocomplete-style popup for fixed choices. Focused Setup tests passed 17 of 17, the full workspace `cargo test` run passed with only its documented ignored tests, and `cargo clippy --all-targets -- -D warnings` completed successfully. Upstream synchronization, post-merge validation, commit bookkeeping, and push remain.
+The feature is implemented, documented, synchronized with upstream, and fully validated. Setup now renders compactly at one stable size, exposes Interface without changing the serialized configuration, marks choice-backed rows with `▾`, and uses an anchored autocomplete-style popup for fixed choices. It also composes with the upstream shared modal title and dismissal behavior: Escape cancels an open choice popup, while the title-bar dismissal remains inert behind that popup. Implementation commit `48e04c3b`, documentation commit `d2d93846`, and the subsequent merge commits contain the completed result. The final focused Setup run passed 17 of 17, the final workspace `cargo test` run passed including all six PTY tests, and `cargo clippy --all-targets -- -D warnings` completed successfully.
 
 ## Context and Orientation
 
@@ -118,6 +120,20 @@ Validation before upstream integration:
     Finished successfully with warnings denied
 
 The final commit set must include this updated ExecPlan alongside the implementation and tests. Record the implementation commit identifier and post-merge validation in Outcomes & Retrospective.
+
+Final validation after all upstream integrations:
+
+    cargo test -p brokk-mj-tui setup::tests
+    test result: ok. 17 passed; 0 failed
+
+    cargo test
+    all workspace test binaries and doctests passed; only documented live, benchmark, screenshot, and container tests were ignored
+
+    cargo clippy --all-targets -- -D warnings
+    Finished successfully with warnings denied
+
+    cargo test -p brokk-mj-tui generate_documentation_screenshots -- --ignored --nocapture
+    test result: ok. 1 passed; the committed Setup capture was current
 
 ## Interfaces and Dependencies
 
