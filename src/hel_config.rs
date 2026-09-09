@@ -1125,17 +1125,25 @@ pub enum UiTheme {
     #[default]
     Midnight,
     Light,
-    Dracula,
+    #[serde(rename = "darcula", alias = "dracula")]
+    Darcula,
+    HighContrast,
 }
 
 impl UiTheme {
-    pub const ALL: [Self; 3] = [Self::Midnight, Self::Light, Self::Dracula];
+    pub const ALL: [Self; 4] = [
+        Self::Midnight,
+        Self::Light,
+        Self::Darcula,
+        Self::HighContrast,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Midnight => "Midnight",
             Self::Light => "Light",
-            Self::Dracula => "Dracula",
+            Self::Darcula => "Darcula",
+            Self::HighContrast => "High Contrast",
         }
     }
 
@@ -2622,6 +2630,25 @@ mod tests {
             expected.theme = theme;
             assert_eq!(HelConfig::load_from(&path).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn legacy_dracula_theme_loads_and_saves_as_darcula() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            format!("version = {CONFIG_VERSION}\ntheme = \"dracula\"\n"),
+        )
+        .unwrap();
+
+        let config = HelConfig::load_from(&path).unwrap();
+        assert_eq!(config.theme, UiTheme::Darcula);
+        assert_eq!(UiTheme::ALL.len(), 4);
+        config.save_to(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("theme = \"darcula\""), "{saved}");
+        assert!(!saved.contains("dracula"), "{saved}");
     }
 
     #[test]

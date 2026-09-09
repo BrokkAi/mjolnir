@@ -42,7 +42,7 @@ The only accepted top-level keys are:
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is not shown in Setup. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
-| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, or `dracula`. |
+| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, or `high-contrast`. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Detailed activity-clock display options. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |

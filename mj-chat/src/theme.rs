@@ -70,24 +70,46 @@ const LIGHT: Palette = Palette {
     activity_dim: rgb(220, 178, 186),
 };
 
-const DRACULA: Palette = Palette {
-    background: rgb(30, 31, 41),
-    surface_raised: rgb(52, 55, 70),
-    surface: rgb(40, 42, 54),
-    selection: rgb(68, 71, 90),
-    text: rgb(248, 248, 242),
-    muted: rgb(157, 168, 204),
-    border: rgb(88, 96, 128),
-    accent: rgb(139, 233, 253),
-    secondary: rgb(189, 147, 249),
-    success: rgb(80, 250, 123),
-    warning: rgb(241, 250, 140),
-    error: rgb(255, 128, 128),
-    session_error: rgb(255, 128, 128),
-    session_activity: rgb(255, 184, 108),
+const DARCULA: Palette = Palette {
+    // IntelliJ Darcula's charcoal editor and panel anchors.
+    background: rgb(43, 43, 43),
+    surface_raised: rgb(60, 63, 65),
+    surface: rgb(49, 51, 53),
+    selection: rgb(33, 66, 131),
+    text: rgb(169, 183, 198),
+    muted: rgb(159, 170, 183),
+    border: rgb(126, 135, 143),
+    // Brighter variants preserve contrast over the blue selection surface.
+    accent: rgb(112, 183, 255),
+    secondary: rgb(205, 169, 255),
+    success: rgb(136, 231, 155),
+    warning: rgb(255, 198, 109),
+    error: rgb(255, 155, 155),
+    session_error: rgb(255, 155, 155),
+    session_activity: rgb(255, 198, 109),
     session_attention: rgb(255, 220, 96),
-    session_idle: rgb(111, 177, 255),
-    activity_dim: rgb(86, 44, 53),
+    session_idle: rgb(145, 220, 255),
+    activity_dim: rgb(104, 56, 76),
+};
+
+const HIGH_CONTRAST: Palette = Palette {
+    background: rgb(0, 0, 0),
+    surface_raised: rgb(32, 32, 32),
+    surface: rgb(0, 0, 0),
+    selection: rgb(51, 51, 255),
+    text: rgb(255, 255, 255),
+    muted: rgb(190, 190, 190),
+    border: rgb(230, 230, 230),
+    accent: rgb(26, 235, 255),
+    secondary: rgb(255, 150, 255),
+    success: rgb(80, 166, 97),
+    warning: rgb(255, 191, 102),
+    error: rgb(255, 80, 80),
+    session_error: rgb(255, 80, 80),
+    session_activity: rgb(255, 191, 102),
+    session_attention: rgb(255, 220, 96),
+    session_idle: rgb(140, 220, 255),
+    activity_dim: rgb(64, 0, 32),
 };
 
 thread_local! {
@@ -102,7 +124,8 @@ pub fn palette_for(theme: UiTheme) -> &'static Palette {
     match theme {
         UiTheme::Midnight => &MIDNIGHT,
         UiTheme::Light => &LIGHT,
-        UiTheme::Dracula => &DRACULA,
+        UiTheme::Darcula => &DARCULA,
+        UiTheme::HighContrast => &HIGH_CONTRAST,
     }
 }
 
@@ -284,8 +307,8 @@ mod tests {
         with_theme(UiTheme::Light, || {
             assert_eq!(base().bg, Some(LIGHT.background));
             let result = std::panic::catch_unwind(|| {
-                with_theme(UiTheme::Dracula, || {
-                    assert_eq!(base().fg, Some(DRACULA.text));
+                with_theme(UiTheme::Darcula, || {
+                    assert_eq!(base().fg, Some(DARCULA.text));
                     panic!("interrupted render");
                 });
             });
@@ -348,5 +371,15 @@ mod tests {
                 assert!(contrast(foreground, colors.selection) >= 4.5);
             }
         }
+    }
+
+    #[test]
+    fn high_contrast_uses_black_canvas_and_distinct_raised_controls() {
+        let colors = palette_for(UiTheme::HighContrast);
+        assert_eq!(colors.background, rgb(0, 0, 0));
+        assert_eq!(colors.surface, rgb(0, 0, 0));
+        assert_eq!(colors.surface_raised, rgb(32, 32, 32));
+        assert!(contrast(colors.text, colors.surface_raised) >= 7.0);
+        assert!(contrast(colors.accent, colors.selection) >= 4.5);
     }
 }

@@ -753,25 +753,30 @@ pub(crate) fn render_setup(
         .as_ref()
         .map(|editor| &editor.path)
         .unwrap_or(&dialog.path);
-    let breadcrumb = std::iter::once("Setup".to_owned())
-        .chain(path.iter().map(|key| schema::label(key)))
-        .collect::<Vec<_>>()
-        .join(" › ");
-    frame.render_widget(
-        Paragraph::new(breadcrumb).style(theme::title(true)),
-        Rect::new(inner.x, inner.y, inner.width, 1),
-    );
+    let nested = !path.is_empty();
+    if nested {
+        let breadcrumb = std::iter::once("Setup".to_owned())
+            .chain(path.iter().map(|key| schema::label(key)))
+            .collect::<Vec<_>>()
+            .join(" › ");
+        frame.render_widget(
+            Paragraph::new(breadcrumb).style(theme::title(true)),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+    }
+    let help_y = inner.y + u16::from(nested);
     frame.render_widget(
         Paragraph::new(schema::help(path))
             .wrap(Wrap { trim: false })
             .style(theme::muted()),
-        Rect::new(inner.x, inner.y + 1, inner.width, 2),
+        Rect::new(inner.x, help_y, inner.width, 2),
     );
+    let body_y = help_y + 3;
     let body = Rect::new(
         inner.x,
-        inner.y + 4,
+        body_y,
         inner.width,
-        inner.height.saturating_sub(9).max(1),
+        inner.height.saturating_sub(8 + u16::from(nested)).max(1),
     );
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
@@ -1009,6 +1014,25 @@ mod tests {
         let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
         assert_eq!(dialog.draft["theme"], "light");
         assert!(dialog.notice.as_ref().unwrap().contains("disk full"));
+    }
+
+    #[test]
+    fn setup_root_uses_modal_title_once_and_nested_pages_keep_breadcrumb() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let root = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert_eq!(root.matches("Setup").count(), 1, "{root}");
+
+        choose(&mut dashboard, "startup");
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let nested = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(nested.contains("Setup › New session defaults"), "{nested}");
     }
 
     #[test]
