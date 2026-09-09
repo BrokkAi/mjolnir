@@ -70,6 +70,7 @@ const login = document.querySelector('#login'),
   shellsHeading = shells?.previousElementSibling,
   elicitations = document.querySelector('#elicitations'),
   reviewHost = document.querySelector('#turn-review'),
+  promptSettings = document.querySelector('#prompt-settings'),
   promptText = document.querySelector('#prompt-text'),
   attachments = document.querySelector('#attachments'),
   attachImage = document.querySelector('#attach-image'),
@@ -4312,9 +4313,37 @@ function renderSessionTitle(node, session) {
   node.classList.toggle('idle-title', session.is_idle === true);
 }
 
+/// Show only the settings the live session currently has, using the harness's
+/// human-readable choice name when one matches the raw current value. This is
+/// deliberately a readout rather than a control: changing settings remains a
+/// separate, explicit action and a snapshot refresh can remove it entirely.
+function renderPromptSettings(session) {
+  const settings = ['model', 'effort'].flatMap(key => {
+    const option = session?.config_options?.find(item => item.key === key);
+    const current = option?.current;
+    if (current === null || current === undefined || current === '') return [];
+    const rawValue = String(current);
+    const choice = option.choices?.find(item => String(item.value) === rawValue);
+    return [{ label: key === 'model' ? 'Model' : 'Effort', value: choice?.name || rawValue }];
+  });
+
+  promptSettings.replaceChildren(
+    ...settings.map(setting => {
+      const item = el('span', 'prompt-setting');
+      item.append(
+        el('span', 'prompt-setting-label', `${setting.label}:`),
+        el('span', 'prompt-setting-value', setting.value),
+      );
+      return item;
+    }),
+  );
+  promptSettings.classList.toggle('hidden', settings.length === 0);
+}
+
 function renderConversationHeader(session) {
   syncConversationMode(session);
   renderSessionTitle(document.querySelector('#conversation-title'), session);
+  renderPromptSettings(session);
   const state = document.querySelector('#conversation-state');
   state.textContent = sessionLifecycleLabel(session);
   state.className = `pill state-${session.lifecycle}`;

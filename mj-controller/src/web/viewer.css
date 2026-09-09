@@ -1310,6 +1310,29 @@ article > h3 {
   border-top: 1px solid var(--border);
 }
 
+.prompt-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  align-items: baseline;
+  margin: 0 0 6px;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.prompt-setting {
+  display: inline-flex;
+  gap: 4px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.prompt-setting-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .entry-time {
   margin-left: auto;
   color: var(--dim);
