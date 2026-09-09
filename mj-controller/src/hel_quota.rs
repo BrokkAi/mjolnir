@@ -130,7 +130,7 @@ fn quota_error_label(error: &str) -> String {
     if error == claude_usage::LOGIN_EXPIRED {
         claude_usage::LOGIN_EXPIRED.to_string()
     } else {
-        format!("unavailable: {error}")
+        "unavailable".to_string()
     }
 }
 
@@ -1515,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_still_prefixes_other_errors_with_unavailable() {
+    fn compact_shows_other_errors_as_unavailable() {
         let report = ProfileQuota {
             profile_id: "claude2".into(),
             harness: HarnessKind::Claude,
@@ -1524,10 +1524,8 @@ mod tests {
             error: Some("query Claude usage: HTTP 429".into()),
             refreshed_at_epoch_seconds: 0,
         };
-        assert_eq!(
-            report.compact(),
-            "unavailable: query Claude usage: HTTP 429"
-        );
+        assert_eq!(report.compact(), "unavailable");
+        assert_eq!(report.error_label().as_deref(), Some("unavailable"));
     }
 
     #[test]

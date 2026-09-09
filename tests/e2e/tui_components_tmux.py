@@ -475,16 +475,16 @@ def dashboard_dimensions(tmux: TmuxController, evidence: Evidence) -> None:
 
 def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
     """Changing only the sidebar size moves both support panes together."""
-    tmux.resize(100, 40)
+    tmux.resize(80, 40)
     tmux.wait_until(
-        lambda: len(tmux.capture().splitlines()[0]) == 100
+        lambda: len(tmux.capture().splitlines()[0]) == 80
         and tmux.capture().splitlines()[0].endswith("╮"),
-        "dashboard rendered at 100 columns",
+        "dashboard rendered at 80 columns",
     )
     for glyph, sidebar_width, support_x, label in [
-        ("□", 50, 0, "wide"),
+        ("▪", 40, 0, "wide"),
         ("▁", 20, 20, "narrow"),
-        ("□", 50, 0, "wide-again"),
+        ("▪", 40, 0, "wide-again"),
     ]:
         screen = tmux.capture().splitlines()
         y = next(i for i, line in enumerate(screen) if "▁" in line)
@@ -505,7 +505,7 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
         screen = tmux.capture()
         evidence.event(
             f"sidebar-relayout-{label}",
-            f"click Sessions {glyph} at fixed 100x40",
+            f"click Sessions {glyph} at fixed 80x40",
             f"Targets and Quota begin at column {support_x}",
             f"Targets and Quota begin at column {support_x}",
             evidence.capture(f"sidebar-relayout-{label}", screen),
