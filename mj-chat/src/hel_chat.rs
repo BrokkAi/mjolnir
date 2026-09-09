@@ -35,7 +35,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use rat_event::ConsumedEvent;
+use rat_event::{ConsumedEvent, Outcome};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 use ratatui::text::Line;
@@ -576,6 +576,7 @@ pub struct ChatState {
     task_dialog_open: bool,
     task_dialog_scroll: usize,
     task_dialog_max_scroll: usize,
+    task_dialog_form: Form<()>,
     task_control_area: Option<Rect>,
     task_dialog_area: Option<Rect>,
     prompt_content_width: usize,
@@ -704,6 +705,7 @@ impl ChatState {
             task_dialog_open: false,
             task_dialog_scroll: 0,
             task_dialog_max_scroll: 0,
+            task_dialog_form: Form::new(),
             task_control_area: None,
             task_dialog_area: None,
             prompt_content_width: 1,
@@ -1399,6 +1401,7 @@ impl ChatState {
             self.task_dialog_scroll = 0;
             self.task_dialog_max_scroll = 0;
             self.task_dialog_area = None;
+            self.task_dialog_form.clear();
             self.mark_visible_changed();
         }
     }
@@ -2437,8 +2440,19 @@ impl ChatState {
         }
 
         if self.task_dialog_open {
+            let result =
+                self.task_dialog_form
+                    .handle(&Event::Key(KeyEvent::new_with_kind_and_state(
+                        code, modifiers, key.kind, key.state,
+                    )));
+            if matches!(result.action, Some(Interaction::Cancel)) {
+                self.close_task_dialog();
+                return ChatAction::None;
+            }
+            if result.outcome.is_consumed() {
+                return ChatAction::None;
+            }
             match code {
-                KeyCode::Esc => self.close_task_dialog(),
                 KeyCode::Up => {
                     let next = self.task_dialog_scroll.saturating_sub(1);
                     self.set_task_dialog_scroll(next);
@@ -2848,6 +2862,11 @@ impl ChatState {
 
     /// Cancels any pointer gesture owned by a chat component.
     pub fn cancel_component_pointer(&mut self) {
+        let task_captured = self.task_dialog_form.captures_pointer();
+        self.task_dialog_form.cancel_pointer();
+        if task_captured {
+            self.mark_visible_changed();
+        }
         let voice_captured = self.voice_form.captures_pointer();
         self.voice_form.cancel_pointer();
         if voice_captured {
@@ -2868,6 +2887,7 @@ impl ChatState {
     /// focus and pointer ownership survive a normal resize; only hitboxes are
     /// invalidated until the next registration pass.
     pub fn reset_component_geometry(&mut self) {
+        self.task_dialog_form.reset_geometry();
         self.voice_form.reset_geometry();
         self.voice_button_area = None;
         self.task_control_area = None;
@@ -2932,6 +2952,17 @@ impl ChatState {
             return ChatAction::None;
         }
         if self.task_dialog_open {
+            let result = self.task_dialog_form.handle(&Event::Mouse(mouse));
+            if result.outcome == Outcome::Changed {
+                self.mark_visible_changed();
+            }
+            if matches!(result.action, Some(Interaction::Cancel)) {
+                self.close_task_dialog();
+                return ChatAction::None;
+            }
+            if result.outcome.is_consumed() {
+                return ChatAction::None;
+            }
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     let next = self.task_dialog_scroll.saturating_sub(3);
@@ -4116,7 +4147,23 @@ mod tests {
         assert_eq!(chat.handle_mouse(click), ChatAction::None);
         assert!(chat.task_dialog_open());
         assert_eq!(chat.input_cursor, cursor_before);
-        assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
+        drawn_transcript(&mut chat, 100, 24);
+        let dialog_inner = chat.task_dialog_area.expect("task dialog geometry");
+        let dismiss = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: dialog_inner.x.saturating_add(1),
+            row: dialog_inner.y.saturating_sub(1),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(chat.component_handles_mouse(dismiss));
+        assert_eq!(chat.handle_mouse(dismiss), ChatAction::None);
+        assert_eq!(
+            chat.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                ..dismiss
+            }),
+            ChatAction::None
+        );
         assert!(!chat.task_dialog_open());
 
         assert_eq!(chat.handle_key(key(KeyCode::Down)), ChatAction::None);
@@ -4143,8 +4190,9 @@ mod tests {
         for height in [1, 4, 8] {
             let screen = drawn_transcript(&mut chat, 24, height).join("\n");
             if height >= 4 {
+                assert!(screen.contains("×"), "height={height}: {screen}");
                 assert!(
-                    screen.contains("Background tasks"),
+                    screen.contains("Background task"),
                     "height={height}: {screen}"
                 );
             }

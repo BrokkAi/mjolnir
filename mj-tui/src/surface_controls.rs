@@ -564,16 +564,16 @@ mod tests {
         let lines = draw(&mut dashboard, (120, 40));
         click(&mut dashboard, create);
         assert!(matches!(dashboard.mode, Mode::Help(_)));
-        let close = point(&lines, "Close");
-        dashboard.handle_mouse(mouse(MouseEventKind::ScrollDown, close));
+        let dismiss = point(&lines, "×");
+        dashboard.handle_mouse(mouse(MouseEventKind::ScrollDown, dismiss));
         assert!(matches!(&dashboard.mode, Mode::Help(overlay) if overlay.scroll > 0));
-        click(&mut dashboard, close);
+        click(&mut dashboard, dismiss);
         assert!(matches!(dashboard.mode, Mode::Dashboard));
         dashboard.handle_key(key(KeyCode::F(7)));
         let previous = dashboard.mode.clone();
         dashboard.dispatch_command(CommandId::Help);
         let lines = draw(&mut dashboard, (120, 40));
-        click(&mut dashboard, point(&lines, "Close"));
+        click(&mut dashboard, point(&lines, "×"));
         assert_eq!(dashboard.mode, previous);
     }
 }

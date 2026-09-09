@@ -294,7 +294,15 @@ pub(super) fn render_config_picker(
     let picker = chat.config_picker.as_mut()?;
     let visible = picker.filtered.len().clamp(1, 8);
     let rect = crate::hel_modal::centered_modal_rect_fixed(frame, 72, visible as u16 + 7, area);
-    let block = theme::modal().title(format!(" Choose a {} ", picker.key));
+    picker.form.begin_frame();
+    let title = crate::hel_modal::dismissible_modal_title(
+        &mut picker.form,
+        rect,
+        format!("Choose a {}", picker.key),
+        theme::title(true),
+        true,
+    );
+    let block = theme::modal().title(title);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -314,7 +322,6 @@ pub(super) fn render_config_picker(
     )));
     frame.render_widget(label, chunks[0]);
     let filter_area = chunks[1];
-    picker.form.begin_frame();
     TextField::render(
         frame,
         filter_area,
@@ -372,7 +379,7 @@ mod tests {
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
         SessionConfigSelectOptions,
     };
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
     fn model_option(current: &str, values: &[(&str, &str)]) -> SessionConfigOption {
         SessionConfigOption::select(
@@ -422,6 +429,42 @@ mod tests {
             effort_option("high", &["low", "medium", "high", "max"]),
         ]);
         chat
+    }
+
+    #[test]
+    fn dismiss_glyph_closes_the_selector_just_like_escape() {
+        let mut clicked = chat_with_models();
+        assert!(clicked.open_config_picker("model"));
+        let rows = drawn_transcript(&mut clicked, 100, 24);
+        let (row, column) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                line.chars()
+                    .position(|character| character == '×')
+                    .map(|column| (row as u16, column as u16))
+            })
+            .expect("selector dismiss glyph");
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(clicked.handle_mouse(press), ChatAction::None);
+        assert_eq!(
+            clicked.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                ..press
+            }),
+            ChatAction::None
+        );
+        assert!(!clicked.config_picker_active());
+
+        let mut escaped = chat_with_models();
+        assert!(escaped.open_config_picker("model"));
+        assert_eq!(escaped.handle_key(key(KeyCode::Esc)), ChatAction::None);
+        assert!(!escaped.config_picker_active());
     }
 
     #[test]
