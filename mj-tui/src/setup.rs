@@ -503,6 +503,7 @@ impl DashboardState {
         self.mark_render_changed();
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_setup_review(&mut self) -> DashboardAction {
         let Mode::Setup(mut dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
             return DashboardAction::None;

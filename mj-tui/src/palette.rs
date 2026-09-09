@@ -630,7 +630,8 @@ mod tests {
         let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
         let rename = row_of(&lines, "Rename session").expect("Rename session");
         let settings = row_of(&lines, "Settings").expect("the settings heading");
-        let review = row_of(&lines, "Review settings").expect("Review settings");
+        let setup = row_of(&lines, "Open setup").expect("Open setup");
+        assert!(row_of(&lines, "Review settings").is_none(), "{lines:#?}");
         let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");
         let workspaces = lines
             .iter()
@@ -641,7 +642,7 @@ mod tests {
             .expect("Workspaces command");
         assert!(heading < rename, "{lines:#?}");
         assert!(rename < settings, "{lines:#?}");
-        assert!(settings < review && review < anywhere, "{lines:#?}");
+        assert!(settings < setup && setup < anywhere, "{lines:#?}");
         assert!(anywhere < workspaces, "{lines:#?}");
         // The palette never lists itself.
         assert!(row_of(&lines, "Command palette").is_none(), "{lines:#?}");
@@ -683,14 +684,14 @@ mod tests {
     }
 
     #[test]
-    fn palette_searches_and_activates_review_settings() {
+    fn palette_searches_and_activates_setup() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         dashboard.handle_key(key(KeyCode::F(2)));
-        type_query(&mut dashboard, "review settings");
+        type_query(&mut dashboard, "open setup");
 
         let lines = drawn(&mut dashboard, 120, 30);
-        assert!(row_of(&lines, "Review settings").is_some(), "{lines:#?}");
+        assert!(row_of(&lines, "Open setup").is_some(), "{lines:#?}");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::None

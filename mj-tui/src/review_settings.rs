@@ -750,6 +750,7 @@ impl DashboardState {
         self.review_settings_generation
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_review_settings(&mut self) -> DashboardAction {
         self.begin_setup();
         self.begin_setup_review()
@@ -1045,7 +1046,7 @@ mod tests {
     use crossterm::event::KeyCode;
 
     fn open(dashboard: &mut DashboardState) -> DashboardAction {
-        dashboard.dispatch_command(CommandId::ReviewSettings)
+        dashboard.begin_review_settings()
     }
 
     fn dialog(dashboard: &DashboardState) -> &ReviewSettingsDialog {
@@ -1118,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn review_settings_is_global_even_without_a_selected_session() {
+    fn review_settings_is_available_through_setup_without_a_selected_session() {
         let mut dashboard = DashboardState::new(
             config(),
             hel::hel_state::HelState::default(),
@@ -1142,7 +1143,7 @@ mod tests {
             palette
                 .entries
                 .iter()
-                .any(|entry| entry.id == CommandId::ReviewSettings)
+                .any(|entry| entry.id == CommandId::OpenConfig)
         );
     }
 

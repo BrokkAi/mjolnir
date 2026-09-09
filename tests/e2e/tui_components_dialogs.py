@@ -236,7 +236,8 @@ def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
     import time
     from tui_components_tmux import locate_text
     before = lab.snapshot()["review_config"]
-    _open_palette_command(tmux, "review settings", "Review settings…")
+    from tui_components_actions import open_review_settings
+    open_review_settings(tmux)
     _wait(tmux, "Automatic review")
     _record(evidence, tmux, "review-settings-open", "open review settings", "review form visible")
     tmux.send_key("Space")

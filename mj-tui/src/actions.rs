@@ -44,7 +44,6 @@ pub enum CommandId {
     WebViewer,
     QuitDetach,
     Palette,
-    ReviewSettings,
     CycleSpinner,
     Help,
 }
@@ -656,17 +655,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
-        id: CommandId::ReviewSettings,
-        label: "Review settings…",
-        description: "Open Setup at Code review.",
-        scope: Scope::Settings,
-        keys: &[],
-        footer: no_footer,
-        footer_group: FooterGroup::Function,
-        footer_rank: 0,
-        available: always_ready,
-    },
-    CommandSpec {
         id: CommandId::CycleSpinner,
         label: "Next spinner style",
         description: "Cycle activity animations: scan, pulse, wave, bars, shimmer, globe.",
@@ -866,7 +854,6 @@ impl DashboardState {
                 self.begin_palette();
                 DashboardAction::None
             }
-            CommandId::ReviewSettings => self.begin_review_settings(),
             CommandId::CycleSpinner => {
                 if self.spinner_save_pending {
                     return DashboardAction::None;
