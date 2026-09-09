@@ -13,9 +13,12 @@ Publish the completed work that entered master after v2.4.0. The release gives u
 - [x] Synchronize the workspace version, five internal dependency constraints, all eight `Cargo.lock` workspace entries, and generated third-party license report. Supplemental notices remain byte-for-byte current.
 - [x] Pass pre-commit formatting, default-member Clippy with warnings denied, host release build, x86-64 musl worker release build, the full default-member Cargo test suite, dependency-license policy, fresh notice-report comparisons, and whole-workspace source packaging.
 - [x] Verify all eight crates.io trusted publishers name repository `BrokkAi/mjolnir`, workflow `publish.yml`, and environment `crates-io`.
-- [ ] Commit the release files on master, validate the exact clean commit, push it upstream, and require green CI on that commit.
-- [ ] Confirm npm publishing authorization for the unchanged existing pipeline, create and push annotated tag `v2.5.0`, and monitor all publication workflows.
-- [ ] Verify the GitHub release assets and checksums, Linux binary versions, all eight Rust crate versions, and all four npm package versions; record completion.
+- [x] (2026-09-09) Commit clean release candidate `ccfbe0b461ea690128428aea29ffa0e28c5e47be`, validate it locally, and push it to `origin/master`.
+- [x] (2026-09-09) Confirm exact-commit CI run `34324527404` passed all seven jobs, including Linux, macOS, Windows, licenses, desktop, reliability, and voice checks.
+- [x] (2026-09-09) Create and push annotated tag `v2.5.0`; tag object `55c9d95ca322ed8312bd8018b8c6d6695322fb94` resolves to candidate `ccfbe0b461ea690128428aea29ffa0e28c5e47be`.
+- [x] (2026-09-09) Confirm GitHub Release workflow `34326858337`, crates.io workflow `34329773630`, and npm workflow `34329784335` all completed successfully.
+- [x] (2026-09-09) Verify all three release archives and checksum sidecars, run the released Linux controller and portable worker, confirm all eight Rust crates are 2.5.0 and not yanked, and confirm all four npm packages are 2.5.0 and `latest`.
+- [x] (2026-09-09) Publish concise user-facing release notes and record completion.
 
 ## Surprises & Discoveries
 
@@ -25,6 +28,10 @@ Publish the completed work that entered master after v2.4.0. The release gives u
   Evidence: Regeneration succeeded outside the sandbox and produced no diff in `licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt`.
 - Observation: The only `cargo deny` diagnostic is the known unmatched `libbz2-rs-sys@0.2.5` exception warning also present in the validated v2.4.0 release pipeline.
   Evidence: `cargo deny --workspace --config licenses/deny.toml --locked check licenses` exits successfully and reports `licenses ok`.
+- Observation: Exact-commit CI and the macOS release build were correct but slow.
+  Evidence: Windows CI completed after cache housekeeping in 26m15s, and the universal macOS release build completed in 28m25s; every job ultimately passed.
+- Observation: crates.io needed time to propagate same-release sibling versions while publishing the dependency chain.
+  Evidence: Six crates were visible before `brokk-mj-desktop`; the publisher retried as designed and all eight were published when workflow `34329773630` completed successfully.
 
 ## Decision Log
 
@@ -43,7 +50,7 @@ Publish the completed work that entered master after v2.4.0. The release gives u
 
 ## Outcomes & Retrospective
 
-Local pre-commit validation passed and the release metadata is synchronized. The candidate still needs a clean commit, exact-commit local and CI validation, a tag, and publication verification. No product-code changes are part of this release commit.
+Mjolnir v2.5.0 is published at https://github.com/BrokkAi/mjolnir/releases/tag/v2.5.0. The immutable tag identifies validated commit `ccfbe0b461ea690128428aea29ffa0e28c5e47be`; this completion record is committed afterward and does not alter the tagged release. All local checks, exact-commit CI, release builds, registry workflows, asset checksums, binary versions, and public package checks passed.
 
 ## Context and Orientation
 
@@ -94,10 +101,20 @@ Version synchronization, notice generation, builds, tests, and packaging are saf
 
 ## Artifacts and Notes
 
-The release changes only `Cargo.toml`, `Cargo.lock`, `licenses/THIRD_PARTY_LICENSES.html`, and this plan. Pre-commit packaging produced all eight `target/package/brokk-*-2.5.0.crate` files. The known cargo-deny unmatched libbz2 exception warning is not a failure.
+The tagged release changes only `Cargo.toml`, `Cargo.lock`, `licenses/THIRD_PARTY_LICENSES.html`, and the initial revision of this plan. Pre-commit packaging produced all eight `target/package/brokk-*-2.5.0.crate` files. The known cargo-deny unmatched libbz2 exception warning is not a failure.
+
+Published asset SHA-256 values are:
+
+    brokk-mjolnir-v2.5.0-aarch64-unknown-linux-gnu.tar.gz  f3086954cc8a26d32b9a4570d94d70dcb5c71b374bd05bc523bbb20fa26c652e
+    brokk-mjolnir-v2.5.0-universal-apple-darwin.tar.gz     5555f2e573bae11db35ca713be29dbdc4cd28a7ad138725bf30329f296d5f8f0
+    brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz   3888aac3b0419c74ae08316485f9e3a86f578fea1f1101e1a07316fcb4a177f9
+
+The checksum-verified Linux controller reports `mj 2.5.0`, and its bundled x86-64 musl worker reports `mj-worker 2.5.0`. Downloaded archives and verification outputs remain under `target/release-v2.5.0-assets/`; local notice comparisons remain under `target/release-v2.5.0-checks/`.
 
 ## Interfaces and Dependencies
 
 Use Rust 1.96.0, cargo-about 0.9.1, cargo-deny 0.20.2, and Node 24. Do not add dependencies, crates, workflows, package identities, publisher settings, or registry triggers in this release commit.
 
 Revision 2026-09-09: created the self-contained release plan after synchronizing 2.5.0 metadata and recording initial validation and publisher status.
+
+Revision 2026-09-09: recorded the clean candidate, successful exact-commit CI and publication workflows, immutable tag identity, verified assets and registry versions, and public release notes.
