@@ -3,7 +3,7 @@ import json
 import time
 
 from reliability_lab import ScenarioFailure
-from tui_components_actions import absent, click, command, record
+from tui_components_actions import absent, click, open_review_settings, record
 
 
 def requests(lab):
@@ -77,12 +77,12 @@ def exercise_choices(lab, tmux, evidence):
 def exercise_cached_reopen(lab, tmux, evidence):
     # First open primes the persisted profile even if an earlier draft selected
     # another one; the second must reuse those successfully discovered choices.
-    command(tmux, "review settings", "Automatic review")
+    open_review_settings(tmux)
     tmux.wait_for("Choices loaded")
     click(tmux, "  Cancel  ")
     absent(tmux, "╭ Setup")
     offset = len(requests(lab))
-    command(tmux, "review settings", "Automatic review")
+    open_review_settings(tmux)
     tmux.wait_for("Choices loaded")
     time.sleep(0.8)
     expect_discoveries(lab, offset, 0)
@@ -91,7 +91,7 @@ def exercise_cached_reopen(lab, tmux, evidence):
     click(tmux, "  Save Setup  ")
     absent(tmux, "╭ Setup")
     record(tmux, evidence, "review-save-during-refresh", "Refresh choices then immediately Save", "Save closes the form while the background request is cancelled")
-    command(tmux, "review settings", "Automatic review")
+    open_review_settings(tmux)
     tmux.wait_for("Choices loaded")
     click(tmux, "  Cancel  ")
     absent(tmux, "╭ Setup")
@@ -100,7 +100,7 @@ def exercise_cached_reopen(lab, tmux, evidence):
 def exercise_offline_save(lab, tmux, evidence):
     original = lab.snapshot()["review_config"]
     offset = len(requests(lab))
-    command(tmux, "review settings", "Automatic review")
+    open_review_settings(tmux)
     click(tmux, "  Refresh choices  ")
     tmux.wait_for("connected session")
     # Existing choices remain useful even when no worker can refresh them.

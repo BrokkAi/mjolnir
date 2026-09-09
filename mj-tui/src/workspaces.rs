@@ -581,6 +581,7 @@ pub(crate) fn workspace_tab_click(
     {
         dashboard.focus = crate::Focus::Workspaces;
         dashboard.mark_render_changed();
+        dashboard.set_session_action_focus(None);
     }
     let workspace_id = workspace_id?;
     if dashboard.focus != crate::Focus::Workspaces {

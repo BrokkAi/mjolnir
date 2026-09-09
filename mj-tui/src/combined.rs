@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::render::{
-    MINIMUM_TERMINAL_WIDTH, TerminalSizeRequirement, capacity_table_width,
+    MINIMUM_TERMINAL_WIDTH, SESSION_ACTIONS_HEIGHT, TerminalSizeRequirement, capacity_table_width,
     minimized_pane_size_controls, minimized_quota_line, minimized_sessions_content_height,
     minimized_targets_line, pane_size_control_areas, pane_title_content_width, quota_table_width,
     render_capacity, render_footer, render_modal, render_onboarding_surface, render_quotas,
@@ -32,8 +32,6 @@ const FOOTER_HEIGHT: u16 = 1;
 /// The bordered workspace list above Sessions. Its inner row is intentionally
 /// short; the border gives it a stable click and focus target.
 const WORKSPACE_PANE_HEIGHT: u16 = 3;
-/// Create and Resume share one row immediately below the workspace list.
-const SIDEBAR_ACTIONS_HEIGHT: u16 = 1;
 /// The fewest rows the transcript is worth drawing in.
 const TRANSCRIPT_MINIMUM: u16 = 3;
 /// A bordered composer with one row of text.
@@ -385,16 +383,7 @@ fn render_combined_themed(
         sidebar_area.width,
         WORKSPACE_PANE_HEIGHT.min(sidebar_area.height),
     );
-    let actions_area = Rect::new(
-        sidebar_area.x,
-        workspace_area.bottom(),
-        sidebar_area.width,
-        sidebar_area
-            .height
-            .saturating_sub(workspace_area.height)
-            .min(SIDEBAR_ACTIONS_HEIGHT),
-    );
-    let sidebar_top = workspace_area.height.saturating_add(actions_area.height);
+    let sidebar_top = workspace_area.height;
     let sessions_area = Rect::new(
         sidebar_area.x,
         sidebar_area.y.saturating_add(sidebar_top),
@@ -442,6 +431,7 @@ fn render_combined_themed(
                     minimized_sessions_content_height(dashboard, sidebar_width.saturating_sub(2))
                         .into(),
                 )
+                .saturating_add(SESSION_ACTIONS_HEIGHT)
                 .saturating_add(2),
                 full: sessions_content_height(dashboard, sidebar_width.saturating_sub(2))
                     .saturating_add(2),
@@ -556,7 +546,6 @@ fn render_combined_themed(
         .split(support_area);
     let (targets_area, quota_area) = (support_bands[0], support_bands[1]);
     render_workspace_tabs(frame, workspace_area, dashboard);
-    crate::surface_controls::render_sidebar_actions(frame, actions_area, dashboard);
     let footer_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     dashboard.pane_areas = Some([sessions_area, targets_area, quota_area]);
     for (pane, pane_area) in [
@@ -573,7 +562,7 @@ fn render_combined_themed(
     let rendered = render_sessions(frame, sessions_area, dashboard);
     dashboard.session_row_areas = rendered.session_row_areas;
     dashboard.project_heading_areas = rendered.project_heading_areas;
-    crate::surface_controls::render_session_actions(frame, dashboard);
+    crate::surface_controls::render_session_row_actions(frame, dashboard);
     let sessions_content = bordered_content(sessions_area);
     dashboard.frame_surfaces.push(SurfaceFrame::fixed(
         SurfaceId::DashboardPane(0),
@@ -1091,7 +1080,7 @@ mod tests {
                     assert_eq!(targets.x, quota.x);
                     assert_eq!(targets.width, quota.width);
                     assert_eq!(targets.bottom(), quota.y);
-                    assert_eq!(sessions.y, 4, "workspace pane and actions occupy four rows");
+                    assert_eq!(sessions.y, 3, "workspace pane occupies three rows");
                     if width < threshold {
                         assert_eq!(targets.width, width);
                         assert_eq!(targets.y, sessions.bottom());
