@@ -4087,8 +4087,8 @@ mod tests {
         dashboard.focus_sessions();
         assert_eq!(
             combined_footer_text(&dashboard, 200),
-            "Enter open · s stop · Del delete · Tab pane │ Alt-N create · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
-             · Alt-Q detach │ F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help"
+            "Enter open · s stop · Del delete · Tab pane · r restart │ Alt-N create · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
+             · Alt-Q detach │ F2 palette · F4 web · F5 refresh · F7 setup · F1 help"
         );
 
         // The cancel chord takes its fixed place before detach, and only while
@@ -4115,8 +4115,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
         dashboard.focus_sessions();
-        const FUNCTION_KEYS: &str =
-            "F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help";
+        const FUNCTION_KEYS: &str = "F2 palette · F4 web · F5 refresh · F7 setup · F1 help";
 
         let full = combined_footer_text(&dashboard, 200);
         assert!(
@@ -4130,7 +4129,10 @@ mod tests {
         assert!(squeezed.contains("Alt-N create"), "{squeezed}");
         assert!(squeezed.ends_with(FUNCTION_KEYS), "{squeezed}");
 
-        assert_eq!(combined_footer_text(&dashboard, 32), "F2 palette · F1 help");
+        assert_eq!(
+            combined_footer_text(&dashboard, 32),
+            "F2 palette · F4 web · F1 help"
+        );
         assert_eq!(combined_footer_text(&dashboard, 20), "F2 palette · F1 help");
         assert_eq!(combined_footer_text(&dashboard, 7), "F1 help");
         assert!(combined_footer_text(&dashboard, 5).is_empty());

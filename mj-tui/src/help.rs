@@ -81,7 +81,6 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ("Alt-G", "pane layout"),
     ("Alt-Q", "detach"),
     ("F2", "command palette"),
-    ("F3", "workspaces"),
     ("F4", "web viewer"),
     ("Alt-W", "new session with options"),
     ("F5", "refresh targets and quotas"),

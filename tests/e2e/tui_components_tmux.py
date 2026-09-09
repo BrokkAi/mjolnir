@@ -384,22 +384,21 @@ def create_session(
     if status != 204:
         raise ScenarioFailure(f"fixture viewer login returned {status}")
 
-    # F3 is an integrated manager over the combined dashboard. Closing it
-    # returns to the same surface, and the workspace tab is the first keyboard
-    # stop before Sessions. With one deterministic fixture workspace, the
-    # horizontal keys must be harmless at either edge while focus is retained.
-    tmux.send_key("F3")
-    tmux.wait_for("Workspaces · F3", "integrated workspace manager")
-    tmux.wait_for("active sessions", "workspace manager snapshot")
+    # Shift-Tab from Sessions reaches the workspace hamburger. Activating it
+    # opens the manager inside the combined dashboard; closing it returns to
+    # the same surface and leaves the workspace pane's keyboard stops usable.
+    tmux.send_key("BTab")
+    tmux.send_key("Enter")
+    tmux.wait_for("New workspace", "integrated workspace manager")
     tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Workspaces · F3" not in tmux.capture(), "workspace manager closed")
     tmux.send_key("BTab")
     tmux.send_key("Left")
     tmux.send_key("Right")
     tmux.send_key("Tab")
+    tmux.send_key("Tab")
     evidence.event(
         "workspace-keyboard-focus",
-        "F3; Escape; Shift-Tab; Left; Right; Tab",
+        "Shift-Tab; Enter; Escape; Shift-Tab; Left; Right; Tab; Tab",
         "integrated manager closes and workspace focus returns to Sessions",
         "workspace focus remained responsive",
         evidence.capture("workspace-keyboard-focus", tmux.capture()),

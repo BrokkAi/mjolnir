@@ -27,13 +27,14 @@ mj workspaces
 mj --workspace "Release work"
 ```
 
-`--workspace` matches names case-insensitively. In the terminal surface, `F3`
-opens the workspace manager from anywhere. A bordered three-row Workspaces pane
-sits above Sessions; selecting a tab, or pressing an arrow while Workspaces has
-focus, changes the live-session filter immediately. Tabs are local views, so
-sessions in other workspaces continue running independently. The web viewer
-shows each workspace as a separate tab. The terminal surface requires at least
-80 columns.
+`--workspace` matches names case-insensitively. In the terminal surface, a
+bordered three-row Workspaces pane sits above Sessions. Its right-hand `☰`
+button opens the workspace manager; the command palette also exposes the
+Workspaces command. Selecting a tab, or pressing an arrow while the workspace
+tabs have focus, changes the live-session filter immediately. Tabs are local
+views, so sessions in other workspaces continue running independently. The web
+viewer shows each workspace as a separate tab. The terminal surface requires at
+least 80 columns.
 
 The manager can create, rename, and delete workspaces and recover drafts. Names
 are trimmed, must be 1–64 Unicode characters, cannot contain control characters,

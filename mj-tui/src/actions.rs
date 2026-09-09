@@ -582,10 +582,12 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Workspaces",
         description: "Switch to another workspace.",
         scope: Scope::Global,
-        keys: &[KeyHint::plain(KeyCode::F(3), "F3")],
-        footer: footer_word!("workspaces"),
+        // Workspace management is opened by the pinned hamburger or the
+        // command palette. It intentionally has no global key or footer hint.
+        keys: &[],
+        footer: no_footer,
         footer_group: FooterGroup::Function,
-        footer_rank: 1,
+        footer_rank: 0,
         available: always_ready,
     },
     CommandSpec {
@@ -688,12 +690,9 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
 /// accepts — a function key or an Alt letter. Plain-letter aliases remain
 /// local to their pane because the composer reads bare letters as text.
 ///
-/// `F2` opens the command palette; its old workspace-picker binding moved to
-/// `F3`.
 const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::Help,
     CommandId::Palette,
-    CommandId::Workspaces,
     CommandId::SelectWorkspacePrevious,
     CommandId::SelectWorkspaceNext,
     CommandId::WebViewer,
@@ -984,6 +983,14 @@ mod tests {
     use super::*;
     use crate::SessionOperationKind;
     use crate::test_support::{dashboard_with_session, key, operation, running_session};
+
+    #[test]
+    fn workspace_manager_stays_in_palette_without_a_function_key() {
+        let dashboard = dashboard_with_session(running_session());
+        assert!(global_chord(&key(KeyCode::F(3))).is_none());
+        assert!(available(&dashboard, None).contains(&CommandId::Workspaces));
+        assert!(spec(CommandId::Workspaces).keys.is_empty());
+    }
 
     #[test]
     fn spinner_selection_waits_for_the_current_save_before_accepting_another() {

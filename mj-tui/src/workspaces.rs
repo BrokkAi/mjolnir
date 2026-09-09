@@ -1,8 +1,8 @@
-//! Workspace tabs and the non-blocking F3 workspace manager.
+//! Workspace tabs and the non-blocking workspace manager.
 
 use std::cell::RefCell;
 
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use hel::hel_workspace::WorkspaceRecord;
 use mj_chat::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
 use mj_chat::hel_selection::FrameSurfaces;
@@ -36,15 +36,46 @@ pub struct WorkspaceManagementEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceControlFocus {
+    Tabs,
+    Menu,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspaceManagerView {
+    List,
+    Create,
+    Rename {
+        workspace_id: String,
+    },
+    Delete {
+        workspace_id: String,
+        workspace_name: String,
+        session_count: u64,
+        draft_count: usize,
+    },
+    Drafts {
+        workspace_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceControl {
     List,
+    DraftList,
+    New,
+    Open,
+    Rename,
+    Save,
+    Delete,
+    ConfirmDelete,
     Drafts,
     Name,
     Create,
-    Rename,
-    Delete,
     ForceDelete,
     Recover,
+    Cancel,
+    Back,
     Close,
 }
 
@@ -57,20 +88,22 @@ pub(crate) enum WorkspaceMutation {
     Recover,
 }
 
-/// State for the F3 manager. It only stores a snapshot and drafts; all
+/// State for the workspace manager. It only stores a snapshot and drafts; all
 /// filesystem/database work is requested through [`DashboardAction`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceManager {
     pub(crate) generation: u64,
+    pub(crate) active_workspace_id: Option<String>,
     pub(crate) entries: Vec<WorkspaceManagementEntry>,
     pub(crate) selected: usize,
     pub(crate) selected_draft: usize,
-    pub(crate) confirming_delete: bool,
+    pub(crate) view: WorkspaceManagerView,
     pub(crate) name: TextInput,
     pub(crate) form: RefCell<Form<WorkspaceControl>>,
     pub(crate) loading: bool,
     pub(crate) busy: Option<WorkspaceMutation>,
     pub(crate) error: Option<String>,
+    pub(crate) success: Option<String>,
 }
 
 fn manager_form() -> RefCell<Form<WorkspaceControl>> {
@@ -83,36 +116,45 @@ fn manager_form() -> RefCell<Form<WorkspaceControl>> {
         },
     );
     form.declare(
-        WorkspaceControl::Drafts,
+        WorkspaceControl::DraftList,
         ControlKind::ChoiceList {
             len: 0,
             selected: 0,
         },
     );
+    form.declare(WorkspaceControl::New, ControlKind::Button);
+    form.declare(WorkspaceControl::Open, ControlKind::Button);
+    form.declare(WorkspaceControl::Rename, ControlKind::Button);
+    form.declare(WorkspaceControl::Save, ControlKind::Button);
+    form.declare(WorkspaceControl::Delete, ControlKind::Button);
+    form.declare(WorkspaceControl::ConfirmDelete, ControlKind::Button);
+    form.declare(WorkspaceControl::Drafts, ControlKind::Button);
     form.declare(WorkspaceControl::Name, ControlKind::TextField);
     form.declare(WorkspaceControl::Create, ControlKind::Button);
-    form.declare(WorkspaceControl::Rename, ControlKind::Button);
-    form.declare(WorkspaceControl::Delete, ControlKind::Button);
     form.declare(WorkspaceControl::ForceDelete, ControlKind::Button);
     form.declare(WorkspaceControl::Recover, ControlKind::Button);
+    form.declare(WorkspaceControl::Cancel, ControlKind::Button);
+    form.declare(WorkspaceControl::Back, ControlKind::Button);
     form.declare(WorkspaceControl::Close, ControlKind::Button);
     form.end_frame(WorkspaceControl::List);
     RefCell::new(form)
 }
 
 impl WorkspaceManager {
-    pub(crate) fn loading(generation: u64) -> Self {
+    pub(crate) fn loading(generation: u64, active_workspace_id: Option<String>) -> Self {
         Self {
             generation,
+            active_workspace_id,
             entries: Vec::new(),
             selected: 0,
             selected_draft: 0,
-            confirming_delete: false,
+            view: WorkspaceManagerView::List,
             name: TextInput::default(),
             form: manager_form(),
             loading: true,
             busy: Some(WorkspaceMutation::Load),
             error: None,
+            success: None,
         }
     }
 
@@ -120,46 +162,81 @@ impl WorkspaceManager {
         self.entries.get(self.selected)
     }
 
-    pub(crate) fn selected_draft(&self) -> Option<&WorkspaceDraftEntry> {
-        self.selected_entry()?.drafts.get(self.selected_draft)
-    }
-
     fn select(&mut self, index: usize) {
         self.selected = index.min(self.entries.len().saturating_sub(1));
         self.selected_draft = 0;
-        self.confirming_delete = false;
-        if let Some(entry) = self.selected_entry() {
+        if matches!(self.view, WorkspaceManagerView::List)
+            && let Some(entry) = self.selected_entry()
+        {
             self.name = TextInput::from_value(entry.workspace.name.clone()).with_max_chars(64);
         }
     }
 
+    fn view_workspace_id(&self) -> Option<&str> {
+        match &self.view {
+            WorkspaceManagerView::List | WorkspaceManagerView::Create => None,
+            WorkspaceManagerView::Rename { workspace_id }
+            | WorkspaceManagerView::Delete { workspace_id, .. }
+            | WorkspaceManagerView::Drafts { workspace_id } => Some(workspace_id),
+        }
+    }
+
+    fn viewed_entry(&self) -> Option<&WorkspaceManagementEntry> {
+        let workspace_id = self.view_workspace_id()?;
+        self.entries
+            .iter()
+            .find(|entry| entry.workspace.id == workspace_id)
+    }
+
     fn force_delete_ready(&self) -> bool {
-        let Some(entry) = self.selected_entry() else {
+        let WorkspaceManagerView::Delete {
+            workspace_name,
+            session_count,
+            draft_count,
+            ..
+        } = &self.view
+        else {
             return false;
         };
         let typed = self.name.value().trim();
-        self.confirming_delete
-            && typed == entry.workspace.name
-            && (!entry.drafts.is_empty() || entry.workspace.session_count > 0)
+        typed == workspace_name && (*draft_count > 0 || *session_count > 0)
     }
 
-    fn active_sessions_or_drafts(&self) -> bool {
-        self.selected_entry()
-            .is_some_and(|entry| entry.workspace.session_count > 0 || !entry.drafts.is_empty())
+    fn delete_is_destructive(&self) -> bool {
+        matches!(
+            self.view,
+            WorkspaceManagerView::Delete {
+                session_count,
+                draft_count,
+                ..
+            } if session_count > 0 || draft_count > 0
+        )
     }
 
     fn set_error(&mut self, error: String) {
         self.loading = false;
         self.busy = None;
         self.error = Some(error);
+        self.success = None;
     }
 
     fn can_mutate(&self) -> bool {
         !self.loading && self.busy.is_none()
     }
 
+    fn reset_to_list(&mut self) {
+        self.view = WorkspaceManagerView::List;
+        self.selected_draft = 0;
+        self.error = None;
+        self.success = None;
+        if let Some(entry) = self.selected_entry() {
+            self.name = TextInput::from_value(entry.workspace.name.clone()).with_max_chars(64);
+        }
+        self.form.get_mut().focus(WorkspaceControl::List);
+    }
+
     fn sync_form(&mut self) {
-        let draft_len = self.selected_entry().map_or(0, |entry| entry.drafts.len());
+        let draft_len = self.viewed_entry().map_or(0, |entry| entry.drafts.len());
         let form = self.form.get_mut();
         form.begin_update();
         form.declare(
@@ -170,18 +247,25 @@ impl WorkspaceManager {
             },
         );
         form.declare(
-            WorkspaceControl::Drafts,
+            WorkspaceControl::DraftList,
             ControlKind::ChoiceList {
                 len: draft_len,
                 selected: self.selected_draft,
             },
         );
+        form.declare(WorkspaceControl::New, ControlKind::Button);
+        form.declare(WorkspaceControl::Open, ControlKind::Button);
+        form.declare(WorkspaceControl::Rename, ControlKind::Button);
+        form.declare(WorkspaceControl::Save, ControlKind::Button);
+        form.declare(WorkspaceControl::Delete, ControlKind::Button);
+        form.declare(WorkspaceControl::ConfirmDelete, ControlKind::Button);
+        form.declare(WorkspaceControl::Drafts, ControlKind::Button);
         form.declare(WorkspaceControl::Name, ControlKind::TextField);
         form.declare(WorkspaceControl::Create, ControlKind::Button);
-        form.declare(WorkspaceControl::Rename, ControlKind::Button);
-        form.declare(WorkspaceControl::Delete, ControlKind::Button);
         form.declare(WorkspaceControl::ForceDelete, ControlKind::Button);
         form.declare(WorkspaceControl::Recover, ControlKind::Button);
+        form.declare(WorkspaceControl::Cancel, ControlKind::Button);
+        form.declare(WorkspaceControl::Back, ControlKind::Button);
         form.declare(WorkspaceControl::Close, ControlKind::Button);
         form.end_frame(WorkspaceControl::List);
     }
@@ -204,6 +288,82 @@ fn workspace_manager_in_mode(mode: &mut Mode) -> Option<&mut WorkspaceManager> {
 }
 
 impl DashboardState {
+    /// Handles the two keyboard stops inside the workspace pane. Tabs own
+    /// left/right selection; the pinned menu is a second local stop before
+    /// the ordinary dashboard Tab ring continues to Sessions.
+    pub(crate) fn handle_workspace_pane_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
+        if self.focus != crate::Focus::Workspaces
+            || key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            return None;
+        }
+        let back_tab = key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
+        match (self.workspace_control_focus, key.code, back_tab) {
+            (WorkspaceControlFocus::Tabs, KeyCode::Tab, false) => {
+                self.workspace_control_focus = WorkspaceControlFocus::Menu;
+                self.surface_form
+                    .borrow_mut()
+                    .focus(crate::surface_controls::SurfaceControl::WorkspaceMenu);
+                self.mark_render_changed();
+                self.record_event_handled();
+                Some(DashboardAction::None)
+            }
+            (WorkspaceControlFocus::Menu, KeyCode::Tab, false) => {
+                self.cycle_focus(false);
+                self.record_event_handled();
+                Some(DashboardAction::None)
+            }
+            (WorkspaceControlFocus::Menu, _, true) => {
+                self.workspace_control_focus = WorkspaceControlFocus::Tabs;
+                self.mark_render_changed();
+                self.record_event_handled();
+                Some(DashboardAction::None)
+            }
+            (WorkspaceControlFocus::Tabs, _, true) => {
+                self.cycle_focus(true);
+                self.record_event_handled();
+                Some(DashboardAction::None)
+            }
+            (WorkspaceControlFocus::Menu, KeyCode::Left, false) => {
+                self.workspace_control_focus = WorkspaceControlFocus::Tabs;
+                self.mark_render_changed();
+                self.record_event_handled();
+                Some(DashboardAction::None)
+            }
+            (WorkspaceControlFocus::Menu, KeyCode::Enter | KeyCode::Char(' '), false) => {
+                self.record_event_handled();
+                Some(self.dispatch_command(crate::CommandId::Workspaces))
+            }
+            (WorkspaceControlFocus::Tabs, KeyCode::Right, false) => {
+                let ids = self.workspace_ids();
+                let at_end = self
+                    .active_workspace_id()
+                    .and_then(|active| ids.iter().position(|id| id == active))
+                    .is_some_and(|index| index + 1 >= ids.len());
+                if at_end {
+                    self.workspace_control_focus = WorkspaceControlFocus::Menu;
+                    self.surface_form
+                        .borrow_mut()
+                        .focus(crate::surface_controls::SurfaceControl::WorkspaceMenu);
+                    self.mark_render_changed();
+                    self.record_event_handled();
+                    Some(DashboardAction::None)
+                } else {
+                    self.record_event_handled();
+                    Some(self.select_adjacent_workspace(1))
+                }
+            }
+            (WorkspaceControlFocus::Tabs, KeyCode::Left, false) => {
+                self.record_event_handled();
+                Some(self.select_adjacent_workspace(-1))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn select_adjacent_workspace(&self, delta: isize) -> DashboardAction {
         let ids = self.workspace_ids();
         let Some(active) = self.active_workspace_id() else {
@@ -229,7 +389,10 @@ impl DashboardState {
     pub fn begin_workspace_manager(&mut self) -> DashboardAction {
         self.workspace_management_generation = self.workspace_management_generation.wrapping_add(1);
         let generation = self.workspace_management_generation;
-        self.mode = Mode::WorkspaceManager(WorkspaceManager::loading(generation));
+        self.mode = Mode::WorkspaceManager(WorkspaceManager::loading(
+            generation,
+            self.active_workspace_id.clone(),
+        ));
         self.mark_render_changed();
         DashboardAction::LoadWorkspaceManagement { generation }
     }
@@ -259,36 +422,84 @@ impl DashboardState {
         };
         match result {
             Ok(entries) => {
-                let selected_id = manager
+                let previous_busy = manager.busy;
+                let was_loading = manager.loading;
+                let previous_error = manager.error.clone();
+                let previous_selected = manager.selected;
+                let previous_view_id = manager.view_workspace_id().map(str::to_owned);
+                let previous_selected_id = manager
                     .selected_entry()
-                    .map(|entry| entry.workspace.id.clone())
+                    .map(|entry| entry.workspace.id.clone());
+                let previous_entries = std::mem::replace(&mut manager.entries, entries);
+                let workspace_id = previous_view_id
+                    .or(previous_selected_id)
                     .or(active_workspace_id);
-                let selected = selected_id
-                    .and_then(|id| entries.iter().position(|entry| entry.workspace.id == id))
-                    .unwrap_or_else(|| manager.selected.min(entries.len().saturating_sub(1)));
-                let name = entries
-                    .get(selected)
-                    .map(|entry| {
-                        TextInput::from_value(entry.workspace.name.clone()).with_max_chars(64)
+                let selected = workspace_id
+                    .as_deref()
+                    .and_then(|id| {
+                        manager
+                            .entries
+                            .iter()
+                            .position(|entry| entry.workspace.id == id)
                     })
-                    .unwrap_or_else(|| TextInput::default().with_max_chars(64));
-                let changed = manager.entries != entries
-                    || manager.selected != selected
-                    || manager.selected_draft != 0
-                    || manager.confirming_delete
-                    || manager.loading
-                    || manager.busy.is_some()
-                    || manager.error.is_some()
-                    || manager.name != name;
-                manager.entries = entries;
+                    .unwrap_or_else(|| {
+                        manager
+                            .selected
+                            .min(manager.entries.len().saturating_sub(1))
+                    });
+                let previous_draft_id = previous_entries
+                    .get(manager.selected)
+                    .and_then(|entry| entry.drafts.get(manager.selected_draft))
+                    .map(|draft| draft.id.clone());
+                let old_view = manager.view.clone();
                 manager.selected = selected;
-                manager.selected_draft = 0;
-                manager.confirming_delete = false;
+                manager.selected_draft = previous_draft_id
+                    .as_deref()
+                    .and_then(|id| {
+                        manager
+                            .selected_entry()
+                            .and_then(|entry| entry.drafts.iter().position(|draft| draft.id == id))
+                    })
+                    .unwrap_or(0);
+                if manager
+                    .view_workspace_id()
+                    .is_some_and(|id| !manager.entries.iter().any(|entry| entry.workspace.id == id))
+                {
+                    manager.view = WorkspaceManagerView::List;
+                }
+                if matches!(
+                    previous_busy,
+                    Some(
+                        WorkspaceMutation::Create
+                            | WorkspaceMutation::Rename
+                            | WorkspaceMutation::Delete
+                    )
+                ) {
+                    manager.view = WorkspaceManagerView::List;
+                }
+                if matches!(previous_busy, Some(WorkspaceMutation::Recover)) {
+                    manager.success = Some("Draft recovered.".into());
+                } else {
+                    manager.success = None;
+                }
                 manager.loading = false;
                 manager.busy = None;
                 manager.error = None;
-                manager.name = name;
+                if matches!(manager.view, WorkspaceManagerView::List) {
+                    manager.name = manager
+                        .selected_entry()
+                        .map(|entry| {
+                            TextInput::from_value(entry.workspace.name.clone()).with_max_chars(64)
+                        })
+                        .unwrap_or_else(|| TextInput::default().with_max_chars(64));
+                }
                 manager.sync_form();
+                let changed = manager.entries != previous_entries
+                    || manager.selected != previous_selected
+                    || was_loading
+                    || previous_busy.is_some()
+                    || manager.view != old_view
+                    || previous_error.is_some();
                 if changed {
                     self.mark_render_changed();
                 }
@@ -311,98 +522,6 @@ impl DashboardState {
         let Mode::WorkspaceManager(manager) = &mut self.mode else {
             return DashboardAction::None;
         };
-
-        if let Event::Key(key) = &event
-            && key.kind == KeyEventKind::Press
-            && key.modifiers.is_empty()
-        {
-            let focused = manager.form.borrow().focused();
-            if focused == Some(WorkspaceControl::List) {
-                match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        let previous = manager.selected;
-                        manager.select(manager.selected.saturating_add(1));
-                        if manager.selected != previous {
-                            crate::mark_render_changed_cells(
-                                &self.render_changed,
-                                &self.render_change_revision,
-                            );
-                        } else {
-                            self.record_event_handled();
-                        }
-                        return DashboardAction::None;
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        let previous = manager.selected;
-                        manager.select(manager.selected.saturating_sub(1));
-                        if manager.selected != previous {
-                            crate::mark_render_changed_cells(
-                                &self.render_changed,
-                                &self.render_change_revision,
-                            );
-                        } else {
-                            self.record_event_handled();
-                        }
-                        return DashboardAction::None;
-                    }
-                    KeyCode::Char('r') if manager.can_mutate() => {
-                        return self.workspace_manager_mutation(WorkspaceMutation::Rename);
-                    }
-                    KeyCode::Char('d') if manager.can_mutate() => {
-                        return self.workspace_manager_mutation(WorkspaceMutation::Delete);
-                    }
-                    KeyCode::Char('c') if manager.can_mutate() => {
-                        manager.form.get_mut().focus(WorkspaceControl::Name);
-                        crate::mark_render_changed_cells(
-                            &self.render_changed,
-                            &self.render_change_revision,
-                        );
-                        return DashboardAction::None;
-                    }
-                    _ => {}
-                }
-            } else if focused == Some(WorkspaceControl::Drafts) {
-                match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        let previous = manager.selected_draft;
-                        let len = manager
-                            .selected_entry()
-                            .map_or(0, |entry| entry.drafts.len());
-                        manager.selected_draft = manager
-                            .selected_draft
-                            .saturating_add(1)
-                            .min(len.saturating_sub(1));
-                        if manager.selected_draft != previous {
-                            crate::mark_render_changed_cells(
-                                &self.render_changed,
-                                &self.render_change_revision,
-                            );
-                        } else {
-                            self.record_event_handled();
-                        }
-                        return DashboardAction::None;
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        let previous = manager.selected_draft;
-                        manager.selected_draft = manager.selected_draft.saturating_sub(1);
-                        if manager.selected_draft != previous {
-                            crate::mark_render_changed_cells(
-                                &self.render_changed,
-                                &self.render_change_revision,
-                            );
-                        } else {
-                            self.record_event_handled();
-                        }
-                        return DashboardAction::None;
-                    }
-                    KeyCode::Char('r') if manager.can_mutate() => {
-                        return self.workspace_manager_mutation(WorkspaceMutation::Recover);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
         let result = manager.form.get_mut().handle(&event);
         crate::record_form_outcome_cells(
             &self.last_event_outcome,
@@ -410,15 +529,21 @@ impl DashboardState {
             &self.render_change_revision,
             &result,
         );
-        let interaction = result.action;
-        match interaction {
-            Some(Interaction::Cancel | Interaction::Activate(WorkspaceControl::Close)) => {
-                self.cancel_modal();
+        match result.action {
+            Some(Interaction::Cancel) => {
+                if matches!(manager.view, WorkspaceManagerView::List) {
+                    self.cancel_modal();
+                } else {
+                    manager.reset_to_list();
+                    self.mark_render_changed();
+                }
             }
             Some(Interaction::Edit(WorkspaceControl::Name, edit)) => {
                 if TextField::apply(&mut manager.name, edit)
                     == mj_chat::components::Outcome::Changed
                 {
+                    manager.error = None;
+                    manager.success = None;
                     crate::mark_render_changed_cells(
                         &self.render_changed,
                         &self.render_change_revision,
@@ -429,13 +554,15 @@ impl DashboardState {
                 let previous = manager.selected;
                 manager.select(index);
                 if manager.selected != previous {
+                    manager.error = None;
+                    manager.success = None;
                     crate::mark_render_changed_cells(
                         &self.render_changed,
                         &self.render_change_revision,
                     );
                 }
             }
-            Some(Interaction::Select(WorkspaceControl::Drafts, index)) => {
+            Some(Interaction::Select(WorkspaceControl::DraftList, index)) => {
                 if manager.selected_draft != index {
                     manager.selected_draft = index;
                     crate::mark_render_changed_cells(
@@ -444,37 +571,107 @@ impl DashboardState {
                     );
                 }
             }
-            Some(Interaction::Activate(WorkspaceControl::List)) if manager.busy.is_none() => {
-                let Some(workspace_id) = manager
-                    .selected_entry()
-                    .map(|entry| entry.workspace.id.clone())
-                else {
-                    return DashboardAction::None;
-                };
-                self.cancel_modal();
-                return DashboardAction::SelectWorkspace { workspace_id };
-            }
-            Some(Interaction::Activate(WorkspaceControl::Drafts)) => {
-                return self.workspace_manager_mutation(WorkspaceMutation::Recover);
-            }
-            Some(Interaction::Activate(WorkspaceControl::Name)) => {
-                manager.form.get_mut().focus(WorkspaceControl::Create);
-            }
-            Some(Interaction::Activate(WorkspaceControl::Create)) => {
-                return self.workspace_manager_mutation(WorkspaceMutation::Create);
-            }
-            Some(Interaction::Activate(WorkspaceControl::Rename)) => {
-                return self.workspace_manager_mutation(WorkspaceMutation::Rename);
-            }
-            Some(Interaction::Activate(WorkspaceControl::Delete)) => {
-                return self.workspace_manager_mutation(WorkspaceMutation::Delete);
-            }
-            Some(Interaction::Activate(WorkspaceControl::ForceDelete)) => {
-                return self.workspace_manager_mutation(WorkspaceMutation::Delete);
-            }
-            Some(Interaction::Activate(WorkspaceControl::Recover)) => {
-                return self.workspace_manager_mutation(WorkspaceMutation::Recover);
-            }
+            Some(Interaction::Activate(control)) => match control {
+                WorkspaceControl::List | WorkspaceControl::Open => {
+                    if manager.busy.is_none()
+                        && let Some(workspace_id) = manager
+                            .selected_entry()
+                            .map(|entry| entry.workspace.id.clone())
+                    {
+                        self.cancel_modal();
+                        return DashboardAction::SelectWorkspace { workspace_id };
+                    }
+                }
+                WorkspaceControl::New if manager.can_mutate() => {
+                    manager.view = WorkspaceManagerView::Create;
+                    manager.name = TextInput::default().with_max_chars(64);
+                    manager.error = None;
+                    manager.success = None;
+                    manager.form.get_mut().focus(WorkspaceControl::Name);
+                    self.mark_render_changed();
+                }
+                WorkspaceControl::Rename if manager.can_mutate() => {
+                    if let Some((workspace_id, workspace_name)) = manager
+                        .selected_entry()
+                        .map(|entry| (entry.workspace.id.clone(), entry.workspace.name.clone()))
+                    {
+                        manager.view = WorkspaceManagerView::Rename { workspace_id };
+                        manager.name = TextInput::from_value(workspace_name).with_max_chars(64);
+                        manager.error = None;
+                        manager.success = None;
+                        manager.form.get_mut().focus(WorkspaceControl::Name);
+                        self.mark_render_changed();
+                    }
+                }
+                WorkspaceControl::Delete if manager.can_mutate() => {
+                    if let Some(entry) = manager.selected_entry() {
+                        manager.view = WorkspaceManagerView::Delete {
+                            workspace_id: entry.workspace.id.clone(),
+                            workspace_name: entry.workspace.name.clone(),
+                            session_count: entry.workspace.session_count,
+                            draft_count: entry.drafts.len(),
+                        };
+                        manager.name = TextInput::default().with_max_chars(64);
+                        manager.error = None;
+                        manager.success = None;
+                        if manager.delete_is_destructive() {
+                            manager.form.get_mut().focus(WorkspaceControl::Name);
+                        } else {
+                            manager.form.get_mut().focus(WorkspaceControl::Cancel);
+                        }
+                        self.mark_render_changed();
+                    }
+                }
+                WorkspaceControl::Drafts if manager.can_mutate() => {
+                    if let Some(entry) = manager.selected_entry() {
+                        manager.view = WorkspaceManagerView::Drafts {
+                            workspace_id: entry.workspace.id.clone(),
+                        };
+                        manager.selected_draft = 0;
+                        manager.error = None;
+                        manager.success = None;
+                        manager.form.get_mut().focus(WorkspaceControl::DraftList);
+                        self.mark_render_changed();
+                    }
+                }
+                WorkspaceControl::Close | WorkspaceControl::Back => {
+                    if matches!(manager.view, WorkspaceManagerView::List) {
+                        self.cancel_modal();
+                    } else {
+                        manager.reset_to_list();
+                        self.mark_render_changed();
+                    }
+                }
+                WorkspaceControl::Name => {
+                    let next = match manager.view {
+                        WorkspaceManagerView::Create => WorkspaceControl::Create,
+                        WorkspaceManagerView::Rename { .. } => WorkspaceControl::Save,
+                        WorkspaceManagerView::Delete { .. } if manager.delete_is_destructive() => {
+                            WorkspaceControl::ForceDelete
+                        }
+                        WorkspaceManagerView::Delete { .. } => WorkspaceControl::ConfirmDelete,
+                        _ => WorkspaceControl::Cancel,
+                    };
+                    manager.form.get_mut().focus(next);
+                }
+                WorkspaceControl::Create => {
+                    return self.workspace_manager_mutation(WorkspaceMutation::Create);
+                }
+                WorkspaceControl::Save => {
+                    return self.workspace_manager_mutation(WorkspaceMutation::Rename);
+                }
+                WorkspaceControl::ConfirmDelete | WorkspaceControl::ForceDelete => {
+                    return self.workspace_manager_mutation(WorkspaceMutation::Delete);
+                }
+                WorkspaceControl::DraftList | WorkspaceControl::Recover => {
+                    return self.workspace_manager_mutation(WorkspaceMutation::Recover);
+                }
+                WorkspaceControl::Cancel => {
+                    manager.reset_to_list();
+                    self.mark_render_changed();
+                }
+                _ => {}
+            },
             _ => {}
         }
         DashboardAction::None
@@ -499,7 +696,7 @@ impl DashboardState {
                 DashboardAction::CreateWorkspace { generation, name }
             }
             WorkspaceMutation::Rename => {
-                let Some(entry) = manager.selected_entry() else {
+                let WorkspaceManagerView::Rename { workspace_id } = &manager.view else {
                     return DashboardAction::None;
                 };
                 let name = manager.name.trim().to_owned();
@@ -510,37 +707,39 @@ impl DashboardState {
                 }
                 DashboardAction::RenameWorkspace {
                     generation,
-                    workspace_id: entry.workspace.id.clone(),
+                    workspace_id: workspace_id.clone(),
                     name,
                 }
             }
             WorkspaceMutation::Delete => {
-                let Some((workspace_id, workspace_name)) = manager
-                    .selected_entry()
-                    .map(|entry| (entry.workspace.id.clone(), entry.workspace.name.clone()))
+                let WorkspaceManagerView::Delete {
+                    workspace_id,
+                    session_count,
+                    draft_count,
+                    ..
+                } = &manager.view
                 else {
                     return DashboardAction::None;
                 };
-                let force = manager.active_sessions_or_drafts();
-                if force && !manager.force_delete_ready() {
-                    manager.confirming_delete = true;
-                    manager.name = TextInput::default().with_max_chars(64);
-                    manager.error = Some(format!(
-                        "Type {:?} exactly to force delete this workspace.",
-                        workspace_name
-                    ));
+                let destructive = *session_count > 0 || *draft_count > 0;
+                if destructive && !manager.force_delete_ready() {
+                    manager.error =
+                        Some("Type the workspace name exactly to enable Force delete.".into());
                     manager.form.get_mut().focus(WorkspaceControl::Name);
                     self.mark_render_changed();
                     return DashboardAction::None;
                 }
                 DashboardAction::DeleteWorkspace {
                     generation,
-                    workspace_id,
-                    force,
+                    workspace_id: workspace_id.clone(),
+                    force: destructive,
                 }
             }
             WorkspaceMutation::Recover => {
-                let Some(draft) = manager.selected_draft() else {
+                let Some(draft) = manager
+                    .viewed_entry()
+                    .and_then(|entry| entry.drafts.get(manager.selected_draft))
+                else {
                     manager.error = Some("This workspace has no detached drafts.".into());
                     self.mark_render_changed();
                     return DashboardAction::None;
@@ -554,6 +753,7 @@ impl DashboardState {
         };
         manager.busy = Some(mutation);
         manager.error = None;
+        manager.success = None;
         self.mark_render_changed();
         action
     }
@@ -588,6 +788,10 @@ pub(crate) fn workspace_tab_click(
         dashboard.focus = crate::Focus::Workspaces;
         dashboard.mark_render_changed();
     }
+    if dashboard.workspace_control_focus != WorkspaceControlFocus::Tabs {
+        dashboard.workspace_control_focus = WorkspaceControlFocus::Tabs;
+        dashboard.mark_render_changed();
+    }
     (dashboard.active_workspace_id() != Some(workspace_id.as_str()))
         .then_some(DashboardAction::SelectWorkspace { workspace_id })
 }
@@ -609,6 +813,19 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    let menu_width = 3u16.min(inner.width);
+    let menu_area = Rect::new(
+        inner.right().saturating_sub(menu_width),
+        inner.y,
+        menu_width,
+        1,
+    );
+    if menu_width == 3 {
+        dashboard.workspace_hamburger_area = Some(menu_area);
+        crate::surface_controls::render_workspace_menu(frame, menu_area, dashboard);
+    }
+    let tabs_width = inner.width.saturating_sub(menu_width);
+    let tabs_area = Rect::new(inner.x, inner.y, tabs_width, 1);
     let ids = dashboard.workspace_ids();
     let labels = ids
         .iter()
@@ -624,13 +841,13 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         .unwrap_or(0);
     let mut first = 0;
     let mut selected_width = widths.iter().take(selected + 1).sum::<usize>();
-    while first < selected && selected_width > usize::from(inner.width) {
+    while first < selected && selected_width > usize::from(tabs_area.width) {
         selected_width = selected_width.saturating_sub(widths[first]);
         first += 1;
     }
-    let mut x = inner.x;
+    let mut x = tabs_area.x;
     for (index, id) in ids.iter().enumerate().skip(first) {
-        let width = widths[index].min(usize::from(inner.right().saturating_sub(x))) as u16;
+        let width = widths[index].min(usize::from(tabs_area.right().saturating_sub(x))) as u16;
         if width == 0 {
             break;
         }
@@ -681,8 +898,15 @@ pub(crate) fn render_workspace_manager(
     dialog: &WorkspaceManager,
     surfaces: &mut FrameSurfaces,
 ) {
-    let popup = centered_modal(frame, surfaces, 86, area.height.min(24), area);
-    frame.render_widget(theme::modal().title(" Workspaces · F3 "), popup);
+    let popup = centered_modal(frame, surfaces, 72, area.height.min(24), area);
+    let title = match &dialog.view {
+        WorkspaceManagerView::List => " Workspaces ",
+        WorkspaceManagerView::Create => " Workspaces · New ",
+        WorkspaceManagerView::Rename { .. } => " Workspaces · Rename ",
+        WorkspaceManagerView::Delete { .. } => " Workspaces · Delete ",
+        WorkspaceManagerView::Drafts { .. } => " Workspaces · Drafts ",
+    };
+    frame.render_widget(theme::modal().title(title), popup);
     let inner = popup.inner(Margin {
         horizontal: 1,
         vertical: 1,
@@ -697,9 +921,6 @@ pub(crate) fn render_workspace_manager(
             Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Min(2),
-            Constraint::Length(1),
-            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(inner);
@@ -707,12 +928,32 @@ pub(crate) fn render_workspace_manager(
         "Loading workspaces…".to_owned()
     } else if let Some(error) = &dialog.error {
         error.clone()
+    } else if let Some(success) = &dialog.success {
+        success.clone()
     } else {
-        "Enter selects a workspace · type a name for create, rename, or force delete".to_owned()
+        match &dialog.view {
+            WorkspaceManagerView::List => {
+                "Enter opens the selected workspace · Tab moves between controls".into()
+            }
+            WorkspaceManagerView::Create => {
+                "Enter creates the workspace · Esc returns to the list".into()
+            }
+            WorkspaceManagerView::Rename { .. } => {
+                "Enter saves the new name · Esc returns to the list".into()
+            }
+            WorkspaceManagerView::Delete { .. } => {
+                "Every deletion requires confirmation · Esc returns to the list".into()
+            }
+            WorkspaceManagerView::Drafts { .. } => {
+                "Enter recovers the selected draft · Esc returns to the list".into()
+            }
+        }
     };
     frame.render_widget(
         Paragraph::new(message).style(Style::default().fg(if dialog.error.is_some() {
             theme::palette().error
+        } else if dialog.success.is_some() {
+            theme::palette().success
         } else {
             theme::palette().muted
         })),
@@ -720,152 +961,326 @@ pub(crate) fn render_workspace_manager(
     );
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    match &dialog.view {
+        WorkspaceManagerView::List => render_manager_list(frame, &rows, dialog, &mut form),
+        WorkspaceManagerView::Create => render_manager_name_view(
+            frame,
+            &rows,
+            dialog,
+            &mut form,
+            "New workspace name:",
+            WorkspaceControl::Create,
+            "Create",
+        ),
+        WorkspaceManagerView::Rename { .. } => render_manager_name_view(
+            frame,
+            &rows,
+            dialog,
+            &mut form,
+            "Workspace name:",
+            WorkspaceControl::Save,
+            "Save",
+        ),
+        WorkspaceManagerView::Delete {
+            workspace_name,
+            session_count,
+            draft_count,
+            ..
+        } => render_manager_delete(
+            frame,
+            &rows,
+            dialog,
+            &mut form,
+            workspace_name,
+            *session_count,
+            *draft_count,
+        ),
+        WorkspaceManagerView::Drafts { .. } => {
+            render_manager_drafts(frame, &rows, dialog, &mut form)
+        }
+    }
+    let busy = dialog.busy.map(|mutation| format!("Working: {mutation:?}"));
+    frame.render_widget(
+        Paragraph::new(busy.unwrap_or_default()).style(Style::default().fg(theme::palette().muted)),
+        rows[3],
+    );
+    let initial = match &dialog.view {
+        WorkspaceManagerView::List if dialog.entries.is_empty() => WorkspaceControl::New,
+        WorkspaceManagerView::List => WorkspaceControl::List,
+        WorkspaceManagerView::Create | WorkspaceManagerView::Rename { .. } => {
+            WorkspaceControl::Name
+        }
+        WorkspaceManagerView::Delete { .. } if dialog.delete_is_destructive() => {
+            WorkspaceControl::Name
+        }
+        WorkspaceManagerView::Delete { .. } => WorkspaceControl::Cancel,
+        WorkspaceManagerView::Drafts { .. } => WorkspaceControl::DraftList,
+    };
+    form.end_frame(initial);
+}
+
+fn render_manager_list(
+    frame: &mut Frame,
+    rows: &[Rect],
+    dialog: &WorkspaceManager,
+    form: &mut Form<WorkspaceControl>,
+) {
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(rows[1]);
+    ButtonRow::render(
+        frame,
+        body[0],
+        &[(WorkspaceControl::New, "New workspace", dialog.can_mutate())],
+        form,
+    );
     let list_items = dialog
         .entries
         .iter()
         .map(|entry| {
-            let drafts = if entry.drafts.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " · {} draft{}",
-                    entry.drafts.len(),
-                    if entry.drafts.len() == 1 { "" } else { "s" }
-                )
-            };
-            Line::from(format!(
-                "{}  ({} active session{}){}",
-                entry.workspace.name,
+            let current =
+                if dialog.active_workspace_id.as_deref() == Some(entry.workspace.id.as_str()) {
+                    "  Current"
+                } else {
+                    ""
+                };
+            let sessions = format!(
+                "{} session{}",
                 entry.workspace.session_count,
                 if entry.workspace.session_count == 1 {
                     ""
                 } else {
                     "s"
-                },
-                drafts
+                }
+            );
+            let drafts = if entry.drafts.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "  {} draft{}",
+                    entry.drafts.len(),
+                    if entry.drafts.len() == 1 { "" } else { "s" }
+                )
+            };
+            Line::from(format!(
+                "{}{}  {}{}",
+                entry.workspace.name, current, sessions, drafts
             ))
         })
         .collect::<Vec<_>>();
     if list_items.is_empty() {
-        frame.render_widget(Paragraph::new("No workspaces."), rows[1]);
+        frame.render_widget(Paragraph::new("No workspaces."), body[1]);
         form.register(
             WorkspaceControl::List,
             ControlKind::ChoiceList {
                 len: 0,
                 selected: 0,
             },
-            rows[1],
+            body[1],
             false,
         );
     } else {
         ChoiceList::render(
             frame,
-            rows[1],
+            body[1],
             &list_items,
             dialog.selected,
-            &mut form,
+            form,
             WorkspaceControl::List,
         );
     }
-    let drafts = dialog.selected_entry().map(|entry| {
-        entry
-            .drafts
-            .iter()
-            .map(|draft| {
-                Line::from(format!(
-                    "{}  · {}{}",
-                    draft.source,
-                    draft.saved_at,
-                    draft
-                        .session_id
-                        .as_deref()
-                        .map_or(String::new(), |session_id| format!("  · {session_id}"))
-                ))
-            })
-            .collect::<Vec<_>>()
-    });
-    frame.render_widget(Paragraph::new("Detached drafts"), rows[2]);
-    if let Some(drafts) = drafts.filter(|drafts| !drafts.is_empty()) {
-        ChoiceList::render(
-            frame,
-            rows[3],
-            &drafts,
-            dialog.selected_draft,
-            &mut form,
-            WorkspaceControl::Drafts,
-        );
-    } else {
-        frame.render_widget(Paragraph::new("No detached drafts."), rows[3]);
-        form.register(
-            WorkspaceControl::Drafts,
-            ControlKind::ChoiceList {
-                len: 0,
-                selected: 0,
-            },
-            rows[3],
-            false,
-        );
+    let selected = dialog.selected_entry();
+    let mut actions = vec![
+        (
+            WorkspaceControl::Open,
+            "Open",
+            dialog.can_mutate() && selected.is_some(),
+        ),
+        (
+            WorkspaceControl::Rename,
+            "Rename",
+            dialog.can_mutate() && selected.is_some(),
+        ),
+        (
+            WorkspaceControl::Delete,
+            "Delete",
+            dialog.can_mutate() && selected.is_some(),
+        ),
+    ];
+    if selected.is_some_and(|entry| !entry.drafts.is_empty()) {
+        actions.push((WorkspaceControl::Drafts, "Drafts", dialog.can_mutate()));
     }
-    let name_label = Line::from(vec![Span::styled(
-        if dialog.confirming_delete {
-            "Type name: "
-        } else {
-            "Name: "
-        },
-        Style::default().add_modifier(Modifier::BOLD),
-    )]);
-    frame.render_widget(name_label, Rect::new(rows[4].x, rows[4].y, 11, 1));
+    actions.push((WorkspaceControl::Close, "Close", dialog.busy.is_none()));
+    ButtonRow::render(frame, rows[2], &actions, form);
+}
+
+fn render_manager_name_view(
+    frame: &mut Frame,
+    rows: &[Rect],
+    dialog: &WorkspaceManager,
+    form: &mut Form<WorkspaceControl>,
+    label: &str,
+    submit: WorkspaceControl,
+    submit_label: &str,
+) {
+    let field = Rect::new(rows[1].x, rows[1].y, rows[1].width, 1);
+    let label_width = Line::raw(label).width() as u16 + 1;
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            label,
+            Style::default().add_modifier(Modifier::BOLD),
+        )])),
+        Rect::new(field.x, field.y, label_width.min(field.width), 1),
+    );
     TextField::render(
         frame,
         Rect::new(
-            rows[4].x.saturating_add(11),
-            rows[4].y,
-            rows[4].width.saturating_sub(11),
+            field.x.saturating_add(label_width),
+            field.y,
+            field.width.saturating_sub(label_width),
             1,
         ),
         &dialog.name,
-        &mut form,
+        form,
         WorkspaceControl::Name,
     );
-    let force_enabled = dialog.force_delete_ready();
     ButtonRow::render(
         frame,
-        rows[5],
+        rows[2],
         &[
-            (WorkspaceControl::Create, "Create", dialog.can_mutate()),
-            (
-                WorkspaceControl::Rename,
-                "Rename",
-                dialog.can_mutate() && dialog.selected_entry().is_some(),
-            ),
-            (WorkspaceControl::Delete, "Delete", dialog.can_mutate()),
+            (submit, submit_label, dialog.can_mutate()),
+            (WorkspaceControl::Cancel, "Cancel", dialog.busy.is_none()),
+        ],
+        form,
+    );
+}
+
+fn render_manager_delete(
+    frame: &mut Frame,
+    rows: &[Rect],
+    dialog: &WorkspaceManager,
+    form: &mut Form<WorkspaceControl>,
+    workspace_name: &str,
+    session_count: u64,
+    draft_count: usize,
+) {
+    let destructive = session_count > 0 || draft_count > 0;
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(if destructive { 2 } else { 1 }),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(rows[1]);
+    let explanation = if destructive {
+        format!(
+            "Deleting {workspace_name:?} destroys {session_count} session{} and discards {draft_count} draft{}.",
+            if session_count == 1 { "" } else { "s" },
+            if draft_count == 1 { "" } else { "s" },
+        )
+    } else {
+        format!("Delete empty workspace {workspace_name:?}?")
+    };
+    frame.render_widget(Paragraph::new(explanation), body[0]);
+    if destructive {
+        frame.render_widget(
+            Paragraph::new("Type the exact workspace name to confirm:"),
+            body[1],
+        );
+        TextField::render(frame, body[2], &dialog.name, form, WorkspaceControl::Name);
+    }
+    let buttons = if destructive {
+        vec![
             (
                 WorkspaceControl::ForceDelete,
                 "Force delete",
-                dialog.can_mutate() && force_enabled,
+                dialog.can_mutate() && dialog.force_delete_ready(),
             ),
+            (WorkspaceControl::Cancel, "Cancel", dialog.busy.is_none()),
+        ]
+    } else {
+        vec![
+            (
+                WorkspaceControl::ConfirmDelete,
+                "Delete",
+                dialog.can_mutate(),
+            ),
+            (WorkspaceControl::Cancel, "Cancel", dialog.busy.is_none()),
+        ]
+    };
+    ButtonRow::render(frame, body[3], &buttons, form);
+}
+
+fn render_manager_drafts(
+    frame: &mut Frame,
+    rows: &[Rect],
+    dialog: &WorkspaceManager,
+    form: &mut Form<WorkspaceControl>,
+) {
+    let drafts = dialog
+        .viewed_entry()
+        .map(|entry| {
+            entry
+                .drafts
+                .iter()
+                .map(|draft| {
+                    Line::from(format!(
+                        "{}  · {}{}",
+                        draft.source,
+                        draft.saved_at,
+                        draft
+                            .session_id
+                            .as_deref()
+                            .map_or(String::new(), |id| format!("  · {id}")),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if drafts.is_empty() {
+        frame.render_widget(Paragraph::new("No detached drafts."), rows[1]);
+        form.register(
+            WorkspaceControl::DraftList,
+            ControlKind::ChoiceList {
+                len: 0,
+                selected: 0,
+            },
+            rows[1],
+            false,
+        );
+    } else {
+        ChoiceList::render(
+            frame,
+            rows[1],
+            &drafts,
+            dialog.selected_draft,
+            form,
+            WorkspaceControl::DraftList,
+        );
+    }
+    ButtonRow::render(
+        frame,
+        rows[2],
+        &[
             (
                 WorkspaceControl::Recover,
-                "Recover draft",
-                dialog.can_mutate() && dialog.selected_draft().is_some(),
+                "Recover",
+                dialog.can_mutate() && !drafts.is_empty(),
             ),
-            (WorkspaceControl::Close, "Close", dialog.busy.is_none()),
+            (WorkspaceControl::Back, "Back", dialog.busy.is_none()),
         ],
-        &mut form,
+        form,
     );
-    let busy = dialog.busy.map(|mutation| format!("Working: {mutation:?}"));
-    frame.render_widget(
-        Paragraph::new(busy.unwrap_or_default()).style(Style::default().fg(theme::palette().muted)),
-        rows[6],
-    );
-    form.end_frame(WorkspaceControl::List);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dashboard_with_session, running_session};
-    use crossterm::event::{KeyEvent, KeyModifiers};
+    use crate::test_support::{buffer_lines, cell_column, dashboard_with_session, running_session};
+    use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use hel::hel_workspace::WorkspaceRecord;
 
     fn entry(id: &str, name: &str) -> WorkspaceManagementEntry {
@@ -879,6 +1294,43 @@ mod tests {
             },
             drafts: Vec::new(),
         }
+    }
+
+    fn draw_manager(dashboard: &DashboardState) -> Vec<String> {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        let mut surfaces = FrameSurfaces::new();
+        terminal
+            .draw(|frame| {
+                if let Mode::WorkspaceManager(manager) = &dashboard.mode {
+                    render_workspace_manager(frame, frame.area(), manager, &mut surfaces);
+                }
+            })
+            .unwrap();
+        buffer_lines(terminal.backend().buffer())
+    }
+
+    fn manager_click(dashboard: &mut DashboardState, lines: &[String], label: &str) {
+        let (row, line) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.contains(label))
+            .unwrap_or_else(|| panic!("missing {label:?}: {lines:#?}"));
+        let column = cell_column(line, label) + 1;
+        let mouse = |kind| MouseEvent {
+            kind,
+            column,
+            row: row as u16,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            dashboard.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left))),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left))),
+            DashboardAction::None
+        );
     }
 
     #[test]
@@ -968,6 +1420,233 @@ mod tests {
         assert!(
             matches!(dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), DashboardAction::SelectWorkspace { workspace_id } if workspace_id == "b")
         );
+    }
+
+    #[test]
+    fn hamburger_is_pinned_and_opens_manager_on_mouse_release() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.workspace_names.insert(
+            hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+            "A very long workspace name".into(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(24, 3)).unwrap();
+        terminal
+            .draw(|frame| render_workspace_tabs(frame, frame.area(), &mut dashboard))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(20, 1)].symbol(), " ");
+        assert_eq!(buffer[(21, 1)].symbol(), "☰");
+        assert_eq!(buffer[(22, 1)].symbol(), " ");
+        assert!(dashboard.surface_form.borrow().contains(21, 1));
+
+        let mouse = |kind| MouseEvent {
+            kind,
+            column: 21,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            dashboard.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left))),
+            DashboardAction::None
+        );
+        assert!(matches!(
+            dashboard.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left))),
+            DashboardAction::LoadWorkspaceManagement { generation: 1 }
+        ));
+        assert!(matches!(dashboard.mode, Mode::WorkspaceManager(_)));
+    }
+
+    #[test]
+    fn workspace_menu_has_a_keyboard_stop_before_sessions() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus = crate::Focus::Workspaces;
+        assert_eq!(
+            dashboard.workspace_control_focus,
+            WorkspaceControlFocus::Tabs
+        );
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.workspace_control_focus,
+            WorkspaceControlFocus::Menu
+        );
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            DashboardAction::None
+        );
+        assert_eq!(dashboard.focus, crate::Focus::Sessions);
+
+        dashboard.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(dashboard.focus, crate::Focus::Workspaces);
+        assert_eq!(
+            dashboard.workspace_control_focus,
+            WorkspaceControlFocus::Menu
+        );
+        dashboard.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(dashboard.focus, crate::Focus::Workspaces);
+        assert_eq!(
+            dashboard.workspace_control_focus,
+            WorkspaceControlFocus::Tabs
+        );
+
+        dashboard.focus = crate::Focus::Workspaces;
+        dashboard.workspace_control_focus = WorkspaceControlFocus::Menu;
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            DashboardAction::LoadWorkspaceManagement { generation: 1 }
+        );
+    }
+
+    #[test]
+    fn manager_views_keep_rename_identity_across_reordered_refresh() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let DashboardAction::LoadWorkspaceManagement { generation } =
+            dashboard.begin_workspace_manager()
+        else {
+            panic!("load");
+        };
+        dashboard
+            .finish_workspace_management(generation, Ok(vec![entry("a", "A"), entry("b", "B")]));
+        if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+            manager.form.get_mut().focus(WorkspaceControl::Rename);
+        }
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            DashboardAction::None
+        );
+        assert!(matches!(
+            &dashboard.mode,
+            Mode::WorkspaceManager(manager)
+                if matches!(&manager.view, WorkspaceManagerView::Rename { workspace_id } if workspace_id == "a")
+        ));
+        dashboard.finish_workspace_management(
+            generation,
+            Ok(vec![entry("b", "B"), entry("a", "A renamed")]),
+        );
+        assert!(matches!(
+            &dashboard.mode,
+            Mode::WorkspaceManager(manager)
+                if matches!(&manager.view, WorkspaceManagerView::Rename { workspace_id } if workspace_id == "a")
+        ));
+    }
+
+    #[test]
+    fn manager_actions_activate_on_mouse_release() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let DashboardAction::LoadWorkspaceManagement { generation } =
+            dashboard.begin_workspace_manager()
+        else {
+            panic!("load");
+        };
+        dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "A")]));
+        let lines = draw_manager(&dashboard);
+
+        manager_click(&mut dashboard, &lines, "Rename");
+
+        assert!(matches!(
+            &dashboard.mode,
+            Mode::WorkspaceManager(manager)
+                if matches!(&manager.view, WorkspaceManagerView::Rename { workspace_id } if workspace_id == "a")
+        ));
+    }
+
+    #[test]
+    fn destructive_delete_requires_exact_name_and_uses_force_action() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let DashboardAction::LoadWorkspaceManagement { generation } =
+            dashboard.begin_workspace_manager()
+        else {
+            panic!("load");
+        };
+        let mut busy_entry = entry("a", "Project alpha");
+        busy_entry.workspace.session_count = 2;
+        busy_entry.drafts.push(WorkspaceDraftEntry {
+            id: "draft-a".into(),
+            session_id: Some("session-a".into()),
+            source: "composer".into(),
+            saved_at: "now".into(),
+            owner_pid: None,
+        });
+        dashboard.finish_workspace_management(generation, Ok(vec![busy_entry]));
+        if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+            manager.form.get_mut().focus(WorkspaceControl::Delete);
+        }
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            &dashboard.mode,
+            Mode::WorkspaceManager(manager) if matches!(&manager.view, WorkspaceManagerView::Delete { .. })
+        ));
+        if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+            manager.form.get_mut().focus(WorkspaceControl::ForceDelete);
+        }
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            DashboardAction::None
+        );
+        if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+            manager.name = TextInput::from_value("Project alpha").with_max_chars(64);
+            manager.form.get_mut().focus(WorkspaceControl::ForceDelete);
+        }
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            DashboardAction::DeleteWorkspace {
+                generation,
+                workspace_id: "a".into(),
+                force: true,
+            }
+        );
+    }
+
+    #[test]
+    fn manager_renders_distinct_create_and_drafts_views() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let DashboardAction::LoadWorkspaceManagement { generation } =
+            dashboard.begin_workspace_manager()
+        else {
+            panic!("load");
+        };
+        let mut workspace = entry("workspace-a", "Project alpha");
+        workspace.drafts.push(WorkspaceDraftEntry {
+            id: "draft-a".into(),
+            session_id: Some("session-a".into()),
+            source: "composer".into(),
+            saved_at: "today".into(),
+            owner_pid: None,
+        });
+        dashboard.finish_workspace_management(generation, Ok(vec![workspace]));
+        let list = draw_manager(&dashboard).join("\n");
+        assert!(list.contains("New workspace"), "{list}");
+        assert!(list.contains("Open"), "{list}");
+        assert!(list.contains("Drafts"), "{list}");
+
+        if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+            manager.form.get_mut().focus(WorkspaceControl::New);
+        }
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let create = draw_manager(&dashboard).join("\n");
+        assert!(create.contains("Workspaces · New"), "{create}");
+        assert!(create.contains("Create"), "{create}");
+        assert!(create.contains("Cancel"), "{create}");
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            DashboardAction::None
+        );
+        let _ = draw_manager(&dashboard);
+
+        if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+            manager.form.get_mut().focus(WorkspaceControl::Drafts);
+        }
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let drafts = draw_manager(&dashboard).join("\n");
+        assert!(drafts.contains("Workspaces · Drafts"), "{drafts}");
+        assert!(drafts.contains("composer"), "{drafts}");
+        assert!(drafts.contains("Recover"), "{drafts}");
+        assert!(drafts.contains("Back"), "{drafts}");
     }
 
     #[test]

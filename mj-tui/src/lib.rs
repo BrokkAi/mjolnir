@@ -38,7 +38,7 @@ use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
 use crate::wizards::{NewWizard, ResumeWizard};
-use crate::workspaces::WorkspaceManager;
+use crate::workspaces::{WorkspaceControlFocus, WorkspaceManager};
 
 mod actions;
 mod combined;
@@ -288,7 +288,7 @@ pub enum DashboardAction {
     SelectWorkspace {
         workspace_id: String,
     },
-    /// Load the workspace list and detached drafts for the F3 manager.
+    /// Load the workspace list and detached drafts for the workspace manager.
     LoadWorkspaceManagement {
         generation: u64,
     },
@@ -606,6 +606,14 @@ pub struct DashboardState {
     workspace_pane_sizes_modified: BTreeSet<String>,
     workspace_tab_areas: Vec<(String, Rect)>,
     pub(crate) workspace_pane_area: Option<Rect>,
+    /// The hamburger's exact three-cell rectangle from the last frame.
+    /// Rebuilt with the tabs so stale geometry cannot activate an invisible
+    /// manager control after the pane disappears.
+    pub(crate) workspace_hamburger_area: Option<Rect>,
+    /// Transient focus inside the workspace pane. The pane remains the
+    /// persisted top-level focus; this only distinguishes its tabs from the
+    /// pinned manager button.
+    pub(crate) workspace_control_focus: WorkspaceControlFocus,
     workspace_management_generation: u64,
     pub(crate) render_change_snapshot: render_changes::RenderChangeSnapshot,
     /// Set by visible mutations and consumed by the controller before its
@@ -706,6 +714,8 @@ impl DashboardState {
             workspace_pane_sizes_modified: BTreeSet::new(),
             workspace_tab_areas: Vec::new(),
             workspace_pane_area: None,
+            workspace_hamburger_area: None,
+            workspace_control_focus: WorkspaceControlFocus::Tabs,
             workspace_management_generation: 0,
             render_change_snapshot: render_changes::RenderChangeSnapshot::default(),
             render_changed: Cell::new(false),
@@ -776,8 +786,18 @@ impl DashboardState {
     /// Select a tab locally. The caller should save any open chat draft before
     /// invoking this setter; the setter itself performs no external work.
     pub fn set_active_workspace(&mut self, workspace_id: Option<String>) {
+        let manager_marker_changed = if let Mode::WorkspaceManager(manager) = &mut self.mode {
+            let changed = manager.active_workspace_id != workspace_id;
+            manager.active_workspace_id = workspace_id.clone();
+            changed
+        } else {
+            false
+        };
         if self.active_workspace_id == workspace_id {
             self.clamp_selections();
+            if manager_marker_changed {
+                self.mark_render_changed();
+            }
             return;
         }
         let workspace_focused = self.focus == Focus::Workspaces;
@@ -874,6 +894,7 @@ impl DashboardState {
 
     pub(crate) fn clear_workspace_tab_areas(&mut self) {
         self.workspace_tab_areas.clear();
+        self.workspace_hamburger_area = None;
     }
 
     /// Moves the Sessions selection onto `session_id` without changing focus.
@@ -931,6 +952,7 @@ impl DashboardState {
             return false;
         }
         self.focus = Focus::Prompt;
+        self.workspace_control_focus = WorkspaceControlFocus::Tabs;
         self.set_session_action_focus(None);
         self.mark_render_changed();
         true
@@ -940,6 +962,7 @@ impl DashboardState {
     pub fn focus_sessions(&mut self) -> bool {
         let before = self.focus;
         self.focus = Focus::Sessions;
+        self.workspace_control_focus = WorkspaceControlFocus::Tabs;
         self.set_session_action_focus(None);
         self.clamp_selections();
         let changed = before != self.focus;
@@ -955,6 +978,12 @@ impl DashboardState {
     pub fn cycle_focus(&mut self, reverse: bool) -> bool {
         let previous = self.focus;
         self.focus = cycle_control(self.focus, &FOCUS_ORDER, reverse);
+        self.workspace_control_focus =
+            if reverse && previous == Focus::Sessions && self.focus == Focus::Workspaces {
+                WorkspaceControlFocus::Menu
+            } else {
+                WorkspaceControlFocus::Tabs
+            };
         if self.focus != Focus::Sessions {
             self.set_session_action_focus(None);
         }
@@ -1391,6 +1420,7 @@ impl DashboardState {
                     self.focus = Focus::Workspaces;
                     self.mark_render_changed();
                 }
+                self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Tabs;
                 self.set_session_action_focus(None);
                 return DashboardAction::None;
             }
@@ -1523,6 +1553,9 @@ impl DashboardState {
         let plain = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        if let Some(action) = self.handle_workspace_pane_key(key) {
+            return action;
+        }
         match (key.code, command) {
             // Shift-Tab is the reverse of the registry's Tab.
             (KeyCode::BackTab, _) => {
@@ -1538,21 +1571,6 @@ impl DashboardState {
                 return DashboardAction::None;
             }
             _ => {}
-        }
-        if self.focus == Focus::Workspaces && plain {
-            match key.code {
-                KeyCode::Left => {
-                    let action = self.select_adjacent_workspace(-1);
-                    self.record_event_handled();
-                    return action;
-                }
-                KeyCode::Right => {
-                    let action = self.select_adjacent_workspace(1);
-                    self.record_event_handled();
-                    return action;
-                }
-                _ => {}
-            }
         }
         if plain
             && self.focus == Focus::Sessions
@@ -2371,6 +2389,11 @@ mod tests {
 
         assert_eq!(
             dashboard.handle_key(key(KeyCode::F(3))),
+            DashboardAction::None
+        );
+        assert_eq!(dashboard.mode, Mode::Dashboard);
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::Workspaces),
             DashboardAction::LoadWorkspaceManagement { generation: 1 }
         );
         dashboard.cancel_modal();
@@ -2475,6 +2498,7 @@ mod tests {
             Focus::Targets,
             Focus::Quota,
             Focus::Workspaces,
+            Focus::Workspaces,
             Focus::Sessions,
         ] {
             assert_eq!(
@@ -2492,6 +2516,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(session);
 
         for expected in [
+            Focus::Workspaces,
             Focus::Workspaces,
             Focus::Quota,
             Focus::Targets,
@@ -2751,6 +2776,7 @@ mod tests {
             Focus::Targets,
             Focus::Quota,
             Focus::Workspaces,
+            Focus::Workspaces,
             Focus::Sessions,
         ] {
             dashboard.handle_key(key(KeyCode::Tab));
@@ -2758,6 +2784,7 @@ mod tests {
             assert_eq!(dashboard.pane_sizes, sizes);
         }
         for expected in [
+            Focus::Workspaces,
             Focus::Workspaces,
             Focus::Quota,
             Focus::Targets,
@@ -2823,6 +2850,8 @@ mod tests {
         dashboard.handle_key(ctrl_key('p'));
         assert_eq!(dashboard.selected_visible_index(), Some(1));
 
+        dashboard.handle_key(key(KeyCode::BackTab));
+        assert_eq!(dashboard.focus, Focus::Workspaces);
         dashboard.handle_key(key(KeyCode::BackTab));
         assert_eq!(dashboard.focus, Focus::Workspaces);
         dashboard.handle_key(key(KeyCode::BackTab));
@@ -3129,6 +3158,8 @@ mod tests {
         dashboard.set_active_workspace(Some(first.clone()));
         dashboard.handle_key(key(KeyCode::BackTab));
         assert_eq!(dashboard.focus, Focus::Workspaces);
+        dashboard.handle_key(key(KeyCode::BackTab));
+        assert_eq!(dashboard.focus, Focus::Workspaces);
         for expected in ["second", "third"] {
             let DashboardAction::SelectWorkspace { workspace_id } =
                 dashboard.handle_key(key(KeyCode::Right))
@@ -3143,6 +3174,14 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Right)),
             DashboardAction::None
         );
+        assert_eq!(
+            dashboard.workspace_control_focus,
+            crate::workspaces::WorkspaceControlFocus::Menu
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Left)),
+            DashboardAction::None
+        );
         let DashboardAction::SelectWorkspace { workspace_id } =
             dashboard.handle_key(key(KeyCode::Left))
         else {
@@ -3151,6 +3190,11 @@ mod tests {
         assert_eq!(workspace_id, "second");
         dashboard.set_active_workspace(Some(workspace_id));
         assert_eq!(dashboard.focus, Focus::Workspaces);
+        dashboard.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            dashboard.workspace_control_focus,
+            crate::workspaces::WorkspaceControlFocus::Menu
+        );
         dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(dashboard.focus, Focus::Sessions);
     }
@@ -3513,6 +3557,7 @@ mod tests {
             Focus::Targets,
             Focus::Quota,
             Focus::Workspaces,
+            Focus::Workspaces,
             Focus::Sessions,
         ] {
             dashboard.handle_key(key(KeyCode::Tab));
@@ -3521,6 +3566,7 @@ mod tests {
         }
 
         for expected in [
+            Focus::Workspaces,
             Focus::Workspaces,
             Focus::Quota,
             Focus::Targets,
@@ -3886,6 +3932,7 @@ mod tests {
             Focus::Prompt,
             Focus::Targets,
             Focus::Quota,
+            Focus::Workspaces,
             Focus::Workspaces,
             Focus::Sessions,
         ] {

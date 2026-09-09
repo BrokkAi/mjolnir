@@ -3676,17 +3676,17 @@ mod tests {
             dashboard_event_action(&mut dashboard, Event::Resize(80, 24)),
             DashboardAction::None
         ));
-        // Escape no longer quits the combined surface, so a key that does
-        // ask for work stands in for it here.
+        // Escape no longer quits the combined surface, so refresh stands in
+        // for an event that asks the controller to do work.
         assert!(matches!(
             dashboard_event_action(
                 &mut dashboard,
                 Event::Key(crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::F(3),
+                    crossterm::event::KeyCode::F(5),
                     crossterm::event::KeyModifiers::NONE,
                 )),
             ),
-            DashboardAction::LoadWorkspaceManagement { .. }
+            DashboardAction::RefreshAll
         ));
     }
 
@@ -3909,7 +3909,7 @@ mod tests {
     }
 
     #[test]
-    fn f3_opens_workspace_management_from_any_pane() {
+    fn f3_is_no_longer_a_workspace_shortcut() {
         for focus in [
             hel_tui::Focus::Sessions,
             hel_tui::Focus::Prompt,
@@ -3918,12 +3918,7 @@ mod tests {
         ] {
             let mut dashboard = populated_dashboard();
             focus_on(&mut dashboard, focus);
-            let command = chord(&dashboard, function_key(3)).expect("F3 is a global chord");
-            assert_eq!(command, CommandId::Workspaces, "{focus:?}");
-            assert!(matches!(
-                dashboard.dispatch_command(command),
-                DashboardAction::LoadWorkspaceManagement { .. }
-            ));
+            assert_eq!(chord(&dashboard, function_key(3)), None, "{focus:?}");
         }
     }
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Exercise workspace/session commands by mouse in an isolated real terminal.
 
-Build mj and mj-worker, then run this script with tmux on PATH. Navigation and submission primarily use SGR clicks; function keys open
-management panes and text fields use ordinary keyboard editing.
+Build mj and mj-worker, then run this script with tmux on PATH. Navigation and
+submission primarily use SGR clicks; text fields use ordinary keyboard editing.
 Evidence and captures are retained under target/reliability-artifacts.
 """
 
@@ -40,15 +40,11 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         tmux.send_raw("\x1b[200~" + value + "\x1b[201~")
 
     def workspace_manager() -> None:
-        tmux.send_key("F3")
-        tmux.wait_for("Workspaces · F3")
-        tmux.wait_for("active sessions")
+        click("☰")
+        tmux.wait_for("New workspace")
+        tmux.wait_for("Current", "workspace manager finishes loading")
 
     def workspace_name(value: str) -> None:
-        screen = tmux.wait_for_any(("Name:", "Type name:"), "workspace name field")
-        marker = "Type name:" if "Type name:" in screen else "Name:"
-        x, y = locate_text(screen, marker, last=True)
-        tmux.mouse_click(x + 15, y)
         name(value)
 
     tmux.run("new-session", "-d", "-s", "mouse-commands", "-x", "140", "-y", "40",
@@ -64,28 +60,31 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
     if status != 204:
         raise ScenarioFailure(f"fixture viewer login returned {status}")
 
-    # Workspace management is integrated behind F3. Rename the fixture
-    # workspace, verify the no-draft Recover guard, then create a second tab.
+    # Workspace management opens from the pinned hamburger. Rename the fixture,
+    # verify that draft actions stay hidden without drafts, then create a tab.
     workspace_manager()
-    workspace_name("Mouse renamed")
     click("Rename")
+    tmux.wait_for("Workspaces · Rename")
+    workspace_name("Mouse renamed")
+    click("Save")
     lab.wait_snapshot(
         lambda value: any(row["name"] == "Mouse renamed" for row in value["workspaces"]),
         "workspace rename persisted",
     )
     tmux.wait_until(lambda: "Working:" not in tmux.capture(), "workspace rename completes in manager")
     click("Close")
-    absent("Workspaces · F3")
+    absent("New workspace")
 
     workspace_manager()
-    click("Recover draft")
-    tmux.wait_for("No detached drafts.")
-    tmux.wait_for("Workspaces · F3")
-    record("workspace-recover-guard", "click disabled Recover draft", "an empty draft list remains unchanged and the manager stays open")
+    if "Drafts" in tmux.capture():
+        raise ScenarioFailure("workspace with no drafts exposed a Drafts action")
+    record("workspace-recover-guard", "open workspace menu", "draft actions stay hidden when no detached drafts exist")
     click("Close")
-    absent("Workspaces · F3")
+    absent("New workspace")
 
     workspace_manager()
+    click("New workspace")
+    tmux.wait_for("Workspaces · New")
     workspace_name("Mouse secondary")
     click("Create")
     created_workspaces = lab.wait_snapshot(
@@ -96,17 +95,17 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         row["id"] for row in created_workspaces["workspaces"] if row["name"] == "Mouse secondary"
     )
     tmux.wait_for("Mouse secondary")
-    absent("Workspaces · F3")
-    record("workspace-created", "F3; name; Create", "Create adds a durable workspace tab and selects it")
+    absent("New workspace")
+    record("workspace-created", "☰; New workspace; name; Create", "Create adds a durable workspace tab and selects it")
 
     # Confirm the selected tab through the manager's initial selection, rather
     # than waiting for a name that was already visible on an inactive tab.
     for label in ("Mouse renamed", "Mouse secondary"):
         click(label, last=False)
         workspace_manager()
-        tmux.wait_for(f"Name:      {label}", "workspace manager follows the clicked tab")
+        tmux.wait_for(f"{label}  Current", "workspace manager follows the clicked tab")
         click("Close")
-        absent("Workspaces · F3")
+        absent("New workspace")
     record("workspace-tab-selection", "click both workspace tabs", "the workspace manager confirms each selected tab")
 
     # Resume remains a top sidebar control even when there are no stopped rows.
@@ -208,7 +207,7 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
     # surviving tab.
     workspace_manager()
     click("Delete")
-    tmux.wait_for('Type "Mouse secondary" exactly to force delete this workspace.')
+    tmux.wait_for("Type the exact workspace name to confirm:")
     workspace_name("Mouse secondary")
     click("Force delete")
     lab.wait_snapshot(
@@ -224,8 +223,8 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         "workspace delete completes in manager",
     )
     click("Close")
-    absent("Workspaces · F3")
-    record("workspace-force-delete", "F3; Delete; type exact name; Force delete; Close", "the active workspace and its session are removed and the remaining tab stays open")
+    absent("New workspace")
+    record("workspace-force-delete", "☰; Delete; type exact name; Force delete; Close", "the active workspace and its session are removed and the remaining tab stays open")
 
 
 

@@ -682,8 +682,18 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
         Instant::now() + TIMEOUT,
     );
     output.clear();
-    // F3 opens management inside the existing dashboard and terminal.
-    master.write_all(b"\x1bOR").expect("open workspace manager");
+    // The command palette remains a keyboard entry point for the visible
+    // workspace menu and opens management inside the existing terminal.
+    master.write_all(b"\x1bOQ").expect("open command palette");
+    wait_for_output(
+        &mut master,
+        &mut output,
+        b"Commands",
+        Instant::now() + TIMEOUT,
+    );
+    master
+        .write_all(b"workspaces\r")
+        .expect("run the Workspaces command");
     wait_for_output(
         &mut master,
         &mut output,
@@ -693,7 +703,7 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
     wait_for_output(
         &mut master,
         &mut output,
-        b"active sessions",
+        b"New workspace",
         Instant::now() + TIMEOUT,
     );
     assert!(
