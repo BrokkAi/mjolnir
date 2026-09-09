@@ -27,7 +27,7 @@ use mj_chat::hel_text_input::TextInput;
 
 use crate::actions::{Availability, COMMANDS, CommandId, Scope, spec};
 use crate::render::render_session_scrollbar;
-use crate::widgets::centered_modal;
+use crate::widgets::{centered_modal, dismissible_modal_title};
 use crate::{DashboardAction, DashboardState, Focus, Mode};
 
 /// One row of the palette: a command and whether it can be run.
@@ -61,7 +61,6 @@ pub(crate) enum PaletteControl {
     Query,
     Commands,
     Run,
-    Close,
 }
 
 impl CommandPalette {
@@ -84,7 +83,6 @@ impl CommandPalette {
                 .get(self.selected)
                 .is_some_and(|entry| entry.availability == Availability::Ready),
         );
-        form.declare_with_enabled(PaletteControl::Close, ControlKind::Button, true);
         form.end_frame(PaletteControl::Query);
     }
 }
@@ -281,9 +279,7 @@ impl DashboardState {
             result.action
         };
         match interaction {
-            Some(Interaction::Cancel | Interaction::Activate(PaletteControl::Close)) => {
-                self.cancel_modal()
-            }
+            Some(Interaction::Cancel) => self.cancel_modal(),
             Some(Interaction::Edit(PaletteControl::Query, edit)) => {
                 if TextField::apply(&mut palette.query, edit)
                     == mj_chat::components::Outcome::Changed
@@ -387,21 +383,7 @@ pub(crate) fn render_palette(
     // it to the usable terminal bounds when the list cannot fit.
     let popup_height = u16::try_from(lines.len().saturating_add(5).max(6)).unwrap_or(u16::MAX);
     let popup = centered_modal(frame, surfaces, 72, popup_height, area);
-    let outer = theme::modal()
-        .title(" ✦ Commands ")
-        .title(
-            Line::styled(
-                format!(" {} commands ", palette.entries.len()),
-                theme::muted(),
-            )
-            .right_aligned(),
-        )
-        .title_bottom(Line::styled(
-            " ↑↓ browse · Tab moves · Enter runs · Esc closes ",
-            theme::muted(),
-        ));
-    let inner = outer.inner(popup);
-    frame.render_widget(outer, popup);
+    let inner = theme::modal().inner(popup);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -414,6 +396,21 @@ pub(crate) fn render_palette(
 
     let mut form = palette.form.borrow_mut();
     form.begin_frame();
+    let title = dismissible_modal_title(&mut form, popup, "✦ Commands", theme::title(true), true);
+    let outer = theme::modal()
+        .title(title)
+        .title(
+            Line::styled(
+                format!(" {} commands ", palette.entries.len()),
+                theme::muted(),
+            )
+            .right_aligned(),
+        )
+        .title_bottom(Line::styled(
+            " ↑↓ browse · Tab moves · Enter runs · Esc closes ",
+            theme::muted(),
+        ));
+    frame.render_widget(outer, popup);
     TextField::render(
         frame,
         rows[0],
@@ -544,17 +541,14 @@ pub(crate) fn render_palette(
     ButtonRow::render(
         frame,
         rows[3],
-        &[
-            (
-                PaletteControl::Run,
-                "Run",
-                palette
-                    .entries
-                    .get(palette.selected)
-                    .is_some_and(|entry| entry.availability == Availability::Ready),
-            ),
-            (PaletteControl::Close, "Close", true),
-        ],
+        &[(
+            PaletteControl::Run,
+            "Run",
+            palette
+                .entries
+                .get(palette.selected)
+                .is_some_and(|entry| entry.availability == Availability::Ready),
+        )],
         &mut form,
     );
     form.end_frame(PaletteControl::Query);

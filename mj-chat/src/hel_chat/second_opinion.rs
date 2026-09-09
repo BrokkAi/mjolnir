@@ -442,6 +442,15 @@ fn setup_form(setup: &ReviewerSetup) -> Form<SetupControl> {
 
 fn prepare_setup_form(setup: &ReviewerSetup, form: &mut Form<SetupControl>) {
     let options_were_available = form.is_enabled(SetupControl::Options);
+    update_setup_form(setup, form, options_were_available);
+    form.end_frame(SetupControl::Options);
+}
+
+fn update_setup_form(
+    setup: &ReviewerSetup,
+    form: &mut Form<SetupControl>,
+    options_were_available: bool,
+) {
     form.begin_update();
     if setup.failure().is_some() {
         form.declare(SetupControl::Retry, ControlKind::Button);
@@ -463,7 +472,6 @@ fn prepare_setup_form(setup: &ReviewerSetup, form: &mut Form<SetupControl>) {
     {
         form.focus(SetupControl::Options);
     }
-    form.end_frame(SetupControl::Options);
 }
 
 fn setup_control_kind(setup: &ReviewerSetup) -> ControlKind {
@@ -1000,8 +1008,17 @@ pub(super) fn render_setup(
     setup: &ReviewerSetup,
     form: &mut Form<SetupControl>,
 ) -> Rect {
-    prepare_setup_form(setup, form);
-    let block = theme::modal().title(" Choose a reviewer ");
+    let options_were_available = form.is_enabled(SetupControl::Options);
+    form.begin_frame();
+    update_setup_form(setup, form, options_were_available);
+    let title = crate::hel_modal::dismissible_modal_title(
+        form,
+        area,
+        "Choose a reviewer",
+        theme::title(true),
+        true,
+    );
+    let block = theme::modal().title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1052,7 +1069,6 @@ pub(super) fn render_setup(
         Paragraph::new(heading).style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[1],
     );
-    form.begin_frame();
     if let Some(failure) = setup.failure() {
         frame.render_widget(
             Paragraph::new(failure).style(Style::default().fg(theme::palette().error)),
@@ -1293,13 +1309,13 @@ pub(super) fn pane_from_entries(entries: Vec<ChatEntry>) -> ReviewerPane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hel_chat::test_support::{key, snapshot};
+    use crate::hel_chat::test_support::{drawn_transcript, key, snapshot};
     use crate::hel_chat::{ChatAction, ChatState};
     use agent_client_protocol::schema::v1::{
         SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
         SessionConfigSelectOptions,
     };
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use hel::hel_second_opinion::{HARNESS_DEFAULT_VALUE, ReviewerDefaults, ReviewerProfileChoice};
     use hel::hel_transcript::ChatRole;
 
@@ -1565,6 +1581,46 @@ mod tests {
             action,
             ChatAction::SecondOpinion(SecondOpinionIntent::Closed)
         ));
+    }
+
+    #[test]
+    fn reviewer_setup_dismiss_glyph_survives_a_redraw_and_matches_escape() {
+        let mut clicked = chat_in_setup();
+        let rows = drawn_transcript(&mut clicked, 100, 24);
+        let (row, column) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                line.chars()
+                    .position(|character| character == '×')
+                    .map(|column| (row as u16, column as u16))
+            })
+            .expect("reviewer setup dismiss glyph");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(clicked.handle_mouse(click), ChatAction::None);
+        // The visual armed state causes a redraw before the release arrives.
+        // The same form gesture must survive that frame boundary.
+        drawn_transcript(&mut clicked, 100, 24);
+        assert_eq!(
+            clicked.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                ..click
+            }),
+            ChatAction::SecondOpinion(SecondOpinionIntent::Closed)
+        );
+        assert!(!clicked.second_opinion_active());
+
+        let mut escaped = chat_in_setup();
+        assert_eq!(
+            press(&mut escaped, KeyCode::Esc),
+            ChatAction::SecondOpinion(SecondOpinionIntent::Closed)
+        );
+        assert!(!escaped.second_opinion_active());
     }
 
     /// The split's actions are the whole keyboard: there is no composer,

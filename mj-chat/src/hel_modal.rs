@@ -7,9 +7,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear};
 
+use crate::components::Form;
 use crate::hel_selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
+use crate::theme;
 
 /// Blank cells kept outside every modal border, on every side.
 pub const MODAL_SCREEN_MARGIN: u16 = 2;
@@ -38,6 +42,38 @@ pub fn bordered_content(area: Rect) -> Rect {
         vertical: 1,
         horizontal: 1,
     })
+}
+
+/// Builds the shared upper-left modal title and registers its mouse target.
+///
+/// The leading ` × ` occupies the three title cells immediately inside the
+/// popup's left border. It is deliberately not a form control, so it never
+/// enters keyboard focus traversal; Escape remains the keyboard equivalent.
+pub fn dismissible_modal_title<K: Copy + Eq>(
+    form: &mut Form<K>,
+    popup: Rect,
+    title: impl Into<String>,
+    title_style: Style,
+    enabled: bool,
+) -> Line<'static> {
+    let hitbox = Rect::new(
+        popup.x.saturating_add(1),
+        popup.y,
+        popup.width.saturating_sub(2).min(3),
+        popup.height.min(1),
+    );
+    form.register_dismiss(hitbox, enabled);
+    let dismiss_style = if !enabled {
+        theme::muted().bg(theme::palette().surface_raised)
+    } else if form.dismiss_is_armed() {
+        theme::selection(true)
+    } else {
+        theme::selection(false)
+    };
+    Line::from(vec![
+        Span::styled(" × ", dismiss_style),
+        Span::styled(title.into(), title_style),
+    ])
 }
 
 /// Clears a modal and the empty cells it keeps around its border.
@@ -172,9 +208,12 @@ pub fn centered_modal_fixed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::Form;
+    use crossterm::event::Event;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
+    use ratatui::style::Modifier;
     use ratatui::style::{Color, Style};
     use ratatui::text::Line;
     use ratatui::widgets::Paragraph;
@@ -279,5 +318,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dismissible_title_registers_the_three_cell_border_target_and_preserves_title_style() {
+        let popup = Rect::new(10, 6, 30, 12);
+        let title_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::ITALIC);
+        let mut form = Form::<u8>::new();
+        let title = dismissible_modal_title(&mut form, popup, "Settings", title_style, true);
+
+        assert_eq!(title.spans.len(), 2);
+        assert_eq!(title.spans[0].content, " × ");
+        assert_eq!(title.spans[1].content, "Settings");
+        assert_eq!(title.spans[1].style, title_style);
+        assert!(form.contains(popup.x + 1, popup.y));
+        assert!(form.contains(popup.x + 3, popup.y));
+        assert!(!form.contains(popup.x, popup.y));
+        assert!(!form.contains(popup.x + 4, popup.y));
+    }
+
+    #[test]
+    fn dismissible_title_reports_available_armed_and_disabled_glyph_styles() {
+        let popup = Rect::new(10, 6, 30, 12);
+        let mut form = Form::<u8>::new();
+        let available = dismissible_modal_title(&mut form, popup, "Title", Style::default(), true);
+        assert_eq!(available.spans[0].style, theme::selection(false));
+
+        let mouse = |kind, column, row| {
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        };
+        form.handle(&mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            popup.x + 2,
+            popup.y,
+        ));
+        let armed = dismissible_modal_title(&mut form, popup, "Title", Style::default(), true);
+        assert_eq!(armed.spans[0].style, theme::selection(true));
+
+        let disabled = dismissible_modal_title(&mut form, popup, "Title", Style::default(), false);
+        assert_eq!(
+            disabled.spans[0].style,
+            theme::muted().bg(theme::palette().surface_raised)
+        );
     }
 }

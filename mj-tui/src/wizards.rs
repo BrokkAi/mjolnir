@@ -27,7 +27,7 @@ use mj_chat::components::{
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 
-use crate::widgets::{centered_modal, format_resource_bytes};
+use crate::widgets::{centered_modal, dismissible_modal_title, format_resource_bytes};
 use crate::{
     DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, cycle_control, move_index,
     nth_key,
@@ -763,7 +763,8 @@ pub(crate) fn render_picker(
     let help_area = Rect::new(content.x, help_y, content.width, help_height);
     let button_y = content.bottom().saturating_sub(1);
     let button_area = Rect::new(content.x, button_y, content.width, 1.min(content.height));
-    frame.render_widget(theme::modal().title(title), popup);
+    let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
+    frame.render_widget(theme::modal().title(title_line), popup);
     ChoiceList::render_with_rows(
         frame,
         list_area,
@@ -999,14 +1000,18 @@ pub(crate) fn render_new_wizard(
             horizontal: 1,
             vertical: 1,
         });
-        frame.render_widget(
-            theme::modal().title(if local {
-                " New session · 3/4 local project "
-            } else {
-                " New session · 3/4 remote project "
-            }),
+        let title_line = dismissible_modal_title(
+            &mut form,
             popup,
+            if local {
+                "New session · 3/4 local project"
+            } else {
+                "New session · 3/4 remote project"
+            },
+            theme::title(true),
+            true,
         );
+        frame.render_widget(theme::modal().title(title_line), popup);
         let intro = lines.iter().take(2).cloned().collect::<Vec<_>>();
         let details = lines.iter().skip(2).cloned().collect::<Vec<_>>();
         frame.render_widget(
@@ -1068,7 +1073,14 @@ pub(crate) fn render_new_wizard(
             horizontal: 1,
             vertical: 1,
         });
-        frame.render_widget(theme::modal().title(" New bundle "), popup);
+        let title_line = dismissible_modal_title(
+            &mut form,
+            popup,
+            "New bundle",
+            theme::title(true),
+            !wizard.bundle_creation_in_flight,
+        );
+        frame.render_widget(theme::modal().title(title_line), popup);
         frame.render_widget(
             Paragraph::new("Repositories (first is primary):"),
             Rect::new(content.x, content.y, content.width, 1.min(content.height)),
@@ -1514,7 +1526,8 @@ fn render_review_wizard(
         horizontal: 1,
         vertical: 1,
     });
-    frame.render_widget(theme::modal().title(title), popup);
+    let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
+    frame.render_widget(theme::modal().title(title_line), popup);
     let body = Rect::new(
         inner.x,
         inner.y,
@@ -1786,7 +1799,8 @@ fn render_mount_wizard(
         horizontal: 1,
         vertical: 1,
     });
-    frame.render_widget(theme::modal().title(title), popup);
+    let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
+    frame.render_widget(theme::modal().title(title_line), popup);
     let body = Rect::new(
         inner.x,
         inner.y,

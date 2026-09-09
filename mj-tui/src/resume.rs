@@ -33,7 +33,9 @@ use mj_chat::hel_text_input::TextInput;
 
 use crate::dialogs::{ConfirmDialog, Confirmation, ImportProfileOption};
 use crate::render::render_session_scrollbar;
-use crate::widgets::{centered_modal, centered_rect, format_resource_bytes, truncate_text};
+use crate::widgets::{
+    centered_modal, centered_rect, dismissible_modal_title, format_resource_bytes, truncate_text,
+};
 use crate::{DashboardAction, DashboardState, Mode};
 
 /// Origin shown for a native session that has never run under Hel.
@@ -848,9 +850,7 @@ pub(crate) fn render_resume_dialog(
     } else {
         " Resume a session ".to_owned()
     };
-    let outer = theme::modal().title(title);
-    let inner = outer.inner(popup);
-    frame.render_widget(outer, popup);
+    let inner = theme::modal().inner(popup);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -863,6 +863,9 @@ pub(crate) fn render_resume_dialog(
 
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    let title_line =
+        dismissible_modal_title(&mut form, popup, title.trim(), theme::title(true), true);
+    frame.render_widget(theme::modal().title(title_line), popup);
     TabStrip::render(
         frame,
         rows[0],

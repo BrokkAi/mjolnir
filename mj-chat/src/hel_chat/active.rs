@@ -3326,8 +3326,16 @@ fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat: &mut ChatS
         lines = lines.into_iter().skip(chat.task_dialog_scroll).collect();
     }
     lines.truncate(visible);
+    chat.task_dialog_form.begin_frame();
+    let title = crate::hel_modal::dismissible_modal_title(
+        &mut chat.task_dialog_form,
+        popup,
+        "Background tasks",
+        theme::title(true),
+        true,
+    );
     let block = theme::panel(true)
-        .title(" Background tasks ")
+        .title(title)
         .title_bottom(Line::from(Span::styled(" Esc close ", theme::muted())).right_aligned());
     frame.render_widget(
         Paragraph::new(lines)
@@ -3349,6 +3357,7 @@ fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat: &mut ChatS
     chat.frame_surfaces.clear();
     chat.frame_surfaces
         .push(SurfaceFrame::fixed(SurfaceId::ModalBody, inner));
+    chat.task_dialog_form.end_frame(());
 }
 
 /// The composer keeps one cell of space between its text and each border.
