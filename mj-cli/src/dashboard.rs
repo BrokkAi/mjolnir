@@ -1820,6 +1820,7 @@ impl DashboardContext {
         let context = mj_chat::hel_chat::ChatSessionContext {
             config: self.controller.config.clone(),
             session: session_record,
+            reviewer_stager: mj_controller::hel_controller::reviewer_stager(),
         };
         let (persistence_tx, mut persistence_rx) =
             tokio::sync::mpsc::unbounded_channel::<mj_chat::hel_chat::ChatDaemonRequest>();
@@ -1897,10 +1898,10 @@ impl DashboardContext {
                     .map_err(|error| format!("{error:#}"))?;
                 tokio_util::task::AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
                     mj_chat::hel_chat::ActiveChat::prepare_with_persistence(
-                        managed,
+                        managed.client(),
                         &bundle_id,
                         Some(context),
-                        sessions,
+                        sessions.client(),
                         header,
                         draft,
                         notices,
@@ -3078,8 +3079,7 @@ mod tests {
     }
 
     fn open_test_chat(session_id: &str) -> ActiveChat {
-        let fixture =
-            mj_controller::hel_session_manager::replacement_session_test_fixture(session_id, 1);
+        let fixture = mj_client::session::replacement_session_test_fixture(session_id, 1);
         ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -3479,8 +3479,7 @@ mod tests {
     async fn prompt_press_focuses_before_release_and_preserves_drag_selection() {
         let mut dashboard = populated_dashboard();
         dashboard.focus_sessions();
-        let fixture =
-            mj_controller::hel_session_manager::replacement_session_test_fixture("session-1", 1);
+        let fixture = mj_client::session::replacement_session_test_fixture("session-1", 1);
         let notices = Notices::default();
         let mut chat = ActiveChat::open(
             fixture.stopped,
@@ -3826,10 +3825,7 @@ mod tests {
         ] {
             let mut dashboard = populated_dashboard();
             focus_on(&mut dashboard, focus);
-            let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-                "session-1",
-                1,
-            );
+            let fixture = mj_client::session::replacement_session_test_fixture("session-1", 1);
             let notices = Notices::default();
             let mut chat = ActiveChat::open(
                 fixture.stopped,

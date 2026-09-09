@@ -8,10 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::hel_worker_client::{
-    RelayAttachment, RelayClient, RelayEventPage, RelayRejected, RelayTransportDead,
-    StartedReviewer,
-};
+use crate::hel_worker_client::{RelayClient, RelayEventPage, RelayRejected, RelayTransportDead};
 use hel::hel_archive::verify_archive_streaming;
 use hel::hel_credentials::{CredentialSyncSignal, relay_event_credential_sync_reason};
 use hel::hel_database::{
@@ -29,7 +26,11 @@ use hel::hel_targets::{
     TargetRecoveryOutcome, TargetRecoveryPlan, ensure_recovery_target_running,
 };
 use hel::hel_worker::{RelayCommand, RelayCursor, RelayOperationalState};
+#[cfg(test)]
 use hel::hel_worker_launch::ReviewerLaunchConfig;
+pub use mj_client::session::{
+    ManagedSessionView, ReviewerAction, ReviewerOutcome, ViewError, new_command_id,
+};
 
 const SESSION_SYNC_INTERVAL: Duration = Duration::from_millis(150);
 /// Release SQLite's single writer between bounded pieces of a large relay
@@ -294,34 +295,6 @@ async fn recover_worker(
     .context("worker recovery task failed")?
 }
 
-/// Why a managed session stopped producing fresh views. The kind matters to
-/// callers: an unreachable relay is worth retrying and diagnosing, while a
-/// projection integrity failure is deterministic and needs a different report.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
-pub enum ViewError {
-    Unreachable(String),
-    TargetMissing(String),
-    ProjectionIntegrity(String),
-}
-
-impl ViewError {
-    pub fn detail(&self) -> &str {
-        match self {
-            Self::Unreachable(detail)
-            | Self::TargetMissing(detail)
-            | Self::ProjectionIntegrity(detail) => detail,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct ManagedSessionView {
-    pub snapshot: Option<ManagedSessionSnapshot>,
-    pub connected: bool,
-    pub error: Option<ViewError>,
-}
-
 #[derive(Debug, Clone)]
 pub struct SessionManagerUpdate {
     pub session_id: String,
@@ -376,98 +349,6 @@ impl RemoteSessionRequests {
     pub async fn recv(&mut self) -> Option<RemoteSessionRequest> {
         self.requests.recv().await
     }
-}
-
-/// What a caller asks of a session's second-opinion reviewer.
-///
-/// The reviewer is a sidecar of the session's worker, so every action travels
-/// the session's own relay connection rather than opening a second one.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewerAction {
-    Start {
-        config: Box<ReviewerLaunchConfig>,
-    },
-    Submit {
-        command_id: String,
-        command: RelayCommand,
-    },
-    Attach {
-        after_ordinal: u64,
-        after_digest: String,
-    },
-    Acknowledge {
-        through_ordinal: u64,
-        through_digest: String,
-    },
-    Status,
-    /// Answer a form the reviewer's harness is waiting on. A reviewer left
-    /// waiting on one stalls the whole review.
-    RespondElicitation {
-        elicitation_id: String,
-        response: ElicitationResponse,
-    },
-    Pause,
-    /// Report what the workspace repositories changed since these baselines.
-    CaptureDelta {
-        baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
-    },
-    /// Record the trees a completed review reviewed through.
-    AdvanceBaseline {
-        trees: std::collections::BTreeMap<std::path::PathBuf, String>,
-    },
-    /// Run Bifrost's semantic diff analysis over the captured trees.
-    AnalyzeDelta {
-        repositories: Vec<hel::hel_worker::AnalyzeDeltaRepository>,
-    },
-    /// Collect the specialist lanes the review supervisor asked for.
-    TakeLaneDispatches,
-}
-
-impl ReviewerAction {
-    pub const fn operation_name(&self) -> &'static str {
-        match self {
-            Self::Start { .. } => "reviewer_start",
-            Self::Submit { .. } => "reviewer_submit",
-            Self::Attach { .. } => "reviewer_attach",
-            Self::Acknowledge { .. } => "reviewer_acknowledge",
-            Self::Status => "reviewer_status",
-            Self::RespondElicitation { .. } => "reviewer_respond_elicitation",
-            Self::Pause => "reviewer_pause",
-            Self::CaptureDelta { .. } => "reviewer_capture_delta",
-            Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
-            Self::AnalyzeDelta { .. } => "reviewer_analyze_delta",
-            Self::TakeLaneDispatches => "reviewer_take_lane_dispatches",
-        }
-    }
-}
-
-/// What a [`ReviewerAction`] produced.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewerOutcome {
-    Started(Box<StartedReviewer>),
-    Accepted {
-        ordinal: u64,
-    },
-    Attached(Box<RelayAttachment>),
-    Acknowledged(RelayCursor),
-    Status(Box<RelayOperationalState>),
-    ElicitationResolved,
-    Paused,
-    /// What every workspace repository changed since the stored baselines.
-    Delta {
-        repositories: Vec<hel::hel_worker::RepoDelta>,
-    },
-    BaselineAdvanced,
-    /// Bifrost's changed-callable packet for the captured trees.
-    ChangedFunctions {
-        packet: String,
-    },
-    /// Specialist lanes the review supervisor asked for.
-    LaneDispatches {
-        requests: Vec<hel::hel_review::lanes::ReviewSubagentRequest>,
-    },
 }
 
 pub enum RemoteSessionRequest {
@@ -791,6 +672,11 @@ impl Drop for ManagedSessionLease {
 }
 
 impl ManagedSessionHandle {
+    /// Narrow this controller-owned handle to the operations a control surface uses.
+    pub fn client(&self) -> mj_client::session::SessionHandle {
+        mj_client::session::SessionHandle::new(ClientSessionHandle(self.clone()))
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -972,7 +858,93 @@ impl PendingRelaySync {
     }
 }
 
+#[derive(Clone)]
+struct ClientSessionHandle(ManagedSessionHandle);
+
+impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
+    fn clone_box(&self) -> Box<dyn mj_client::session::SessionHandleBackend> {
+        Box::new(self.clone())
+    }
+
+    fn session_id(&self) -> &str {
+        self.0.session_id()
+    }
+
+    fn view(&self) -> ManagedSessionView {
+        self.0.view()
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.0.is_stopped()
+    }
+
+    fn has_changed(&self) -> Result<bool> {
+        self.0.has_changed()
+    }
+
+    fn changed(&mut self) -> mj_client::session::BoxFuture<'_, Result<ManagedSessionView>> {
+        Box::pin(self.0.changed())
+    }
+
+    fn enqueue_submit(
+        &self,
+        command_id: String,
+        command: RelayCommand,
+    ) -> mj_client::session::BoxFuture<'_, Result<mj_client::session::PendingRelaySubmit>> {
+        Box::pin(async move {
+            let pending = self.0.enqueue_submit(command_id, command).await?;
+            Ok(mj_client::session::PendingRelaySubmit::new(Box::pin(
+                pending.wait(),
+            )))
+        })
+    }
+
+    fn enqueue_sync(
+        &self,
+    ) -> mj_client::session::BoxFuture<'_, Result<mj_client::session::PendingRelaySync>> {
+        Box::pin(async move {
+            let pending = self.0.enqueue_sync().await?;
+            Ok(mj_client::session::PendingRelaySync::new(Box::pin(
+                pending.wait(),
+            )))
+        })
+    }
+
+    fn respond_elicitation(
+        &self,
+        elicitation_id: String,
+        response: ElicitationResponse,
+    ) -> mj_client::session::BoxFuture<'_, Result<()>> {
+        Box::pin(self.0.respond_elicitation(elicitation_id, response))
+    }
+
+    fn reviewer(
+        &self,
+        role: Option<String>,
+        action: ReviewerAction,
+    ) -> mj_client::session::BoxFuture<'_, Result<ReviewerOutcome>> {
+        Box::pin(self.0.reviewer_as(role, action))
+    }
+}
+
+#[derive(Clone)]
+struct ClientSessionControl(SessionManagerControl);
+
+impl mj_client::session::SessionControlBackend for ClientSessionControl {
+    fn session(
+        &self,
+        session_id: String,
+    ) -> mj_client::session::BoxFuture<'_, Result<mj_client::session::SessionHandle>> {
+        Box::pin(async move { Ok(self.0.session(session_id).await?.client()) })
+    }
+}
+
 impl SessionManagerControl {
+    /// Narrow this controller-owned manager to session lookup for a control surface.
+    pub fn client(&self) -> mj_client::session::SessionControl {
+        mj_client::session::SessionControl::new(ClientSessionControl(self.clone()))
+    }
+
     pub async fn session(&self, session_id: impl Into<String>) -> Result<ManagedSessionHandle> {
         let session_id = session_id.into();
         let (reply, response) = oneshot::channel();
@@ -3074,41 +3046,23 @@ fn projection_integrity_failure(error: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<ProjectionIntegrityError>().is_some())
 }
 
-pub fn new_command_id(prefix: &str) -> Result<String> {
-    ensure!(!prefix.trim().is_empty(), "command ID prefix is required");
-    let mut random = [0_u8; 16];
-    getrandom::fill(&mut random)
-        .map_err(|error| anyhow::anyhow!("generate command ID: {error}"))?;
-    Ok(format!("{prefix}-{}", hex(&random)))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    output
-}
-
 /// A stopped actor and the manager that resolves its live replacement.
 ///
 /// This fixture and its constructor are compiled unconditionally and hidden
 /// from the documentation because the chat crate's tests need them, and a
 /// `#[cfg(test)]` item is invisible to another crate.
-#[doc(hidden)]
-pub struct ReplacementSessionTestFixture {
-    pub stopped: ManagedSessionHandle,
-    pub control: SessionManagerControl,
-    pub submitted: mpsc::UnboundedReceiver<RelayCommand>,
+#[cfg(test)]
+struct ReplacementSessionTestFixture {
+    stopped: ManagedSessionHandle,
+    control: SessionManagerControl,
+    submitted: mpsc::UnboundedReceiver<RelayCommand>,
 }
 
 /// A stopped actor and a manager that resolves its live replacement. Chat
 /// tests use this hand-written actor instead of mocking the session manager
 /// protocol.
-#[doc(hidden)]
-pub fn replacement_session_test_fixture(
+#[cfg(test)]
+fn replacement_session_test_fixture(
     session_id: &str,
     accepted_ordinal: u64,
 ) -> ReplacementSessionTestFixture {
@@ -3179,6 +3133,29 @@ pub fn replacement_session_test_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn client_adapter_preserves_actor_replacement_and_submit_completion() {
+        let mut fixture = replacement_session_test_fixture("client-session", 73);
+        let stopped = fixture.stopped.client();
+        assert!(stopped.is_stopped());
+
+        let control = fixture.control.client();
+        let replacement = control
+            .wait_for_session("client-session", Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(!replacement.is_stopped());
+        let pending = replacement
+            .enqueue_submit("client-command".into(), RelayCommand::Cancel)
+            .await
+            .unwrap();
+        assert!(matches!(
+            fixture.submitted.recv().await,
+            Some(RelayCommand::Cancel)
+        ));
+        assert_eq!(pending.wait().await.unwrap(), 73);
+    }
 
     #[tokio::test]
     async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {

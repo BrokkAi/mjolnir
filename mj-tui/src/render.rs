@@ -16,8 +16,8 @@ use hel::hel_targets::DeploymentCapacityKind;
 use mj_chat::components::{render_scrollbar, scrollbar_geometry};
 use mj_chat::hel_chat::render_agent_message_head;
 use mj_chat::theme;
-use mj_controller::hel_quota::{ProfileQuota, QuotaWindow};
-use mj_controller::hel_review_host::RuntimeReviewView;
+use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow};
+use mj_client::review::RuntimeReviewView;
 
 use crate::dialogs::{
     render_config_id_editor, render_confirmation, render_container_editor,
@@ -2102,7 +2102,7 @@ fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
 
 /// Renders the API label in the same black, bordered field as capacity charts.
 fn api_quota_bar() -> Line<'static> {
-    let label = mj_controller::hel_quota::API_LABEL;
+    let label = API_LABEL;
     let label_cells = label.chars().count().min(QUOTA_BAR_CELLS);
     let left = (QUOTA_BAR_CELLS - label_cells) / 2;
     let right = QUOTA_BAR_CELLS - label_cells - left;
@@ -2603,7 +2603,7 @@ mod tests {
     };
     use hel::hel_targets::{DeploymentCapacityUsage, ProvisionStage};
     use mj_chat::hel_selection::SurfaceId;
-    use mj_controller::hel_quota::{ProfileQuota, QuotaWindow};
+    use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow};
 
     use super::*;
     use crate::test_support::*;
@@ -4435,7 +4435,7 @@ mod tests {
             profile_id: profile_id.into(),
             harness: HarnessKind::Deepseek,
             windows: Vec::new(),
-            extra: Some(mj_controller::hel_quota::API_LABEL.into()),
+            extra: Some(API_LABEL.into()),
             error: None,
             refreshed_at_epoch_seconds: now_seconds(),
         }

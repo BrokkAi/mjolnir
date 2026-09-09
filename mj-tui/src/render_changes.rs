@@ -10,7 +10,7 @@ pub(crate) use hel::clock::epoch_seconds;
 
 use hel::hel_state::SessionState;
 use hel::hel_targets::{DeploymentCapacityKind, DeploymentCapacityUsage};
-use mj_controller::hel_review_host::RuntimeReviewView;
+use mj_client::review::RuntimeReviewView;
 
 use crate::ingest::{CapacityDetail, SessionDetail};
 use crate::render::{

@@ -47,7 +47,7 @@ fn target_defaults(kind: &str) -> Value {
         "local-podman" | "local-docker" | "apple-container" | "ssh-podman" | "ssh-docker"
     ) {
         fields.as_object_mut().unwrap().extend(json!({
-            "image":mj_controller::hel_setup::DEFAULT_IMAGE,"pull_policy":"auto","platform":null,
+            "image":mj_client::target::DEFAULT_IMAGE,"pull_policy":"auto","platform":null,
             "cpus":null,"memory":null,"environment":{},"workspace_storage":{"kind":"podman-volume"}
         }).as_object().unwrap().clone());
     }

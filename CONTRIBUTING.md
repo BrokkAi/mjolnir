@@ -55,8 +55,9 @@ dictation, put `mj-voice-worker` beside `mj` in the target directory or set
 
 ## Crate Layout
 
-The control plane is split into four crates that stack in one direction. A
-crate may use the crates below it. It must never use a crate above it.
+The control plane starts with a foundation and then splits into independent
+branches. A crate may use the crates below it. It must never use a crate above
+it or introduce a dependency between sibling branches.
 
 - `brokk-mj-core` (repository root, library `hel`) is the foundation. It holds
   configuration, persisted state, the database, the relay protocol, and the
@@ -64,20 +65,26 @@ crate may use the crates below it. It must never use a crate above it.
 - `brokk-mj-worker` (`mj-worker/`, library `mj_worker`) is the target side. It
   runs inside a container or on an SSH host and supervises the agent process
   there.
+- `brokk-mj-client` (`mj-client/`, library `mj_client`) holds client-facing
+  contracts and shared presentation helpers. It uses the foundation.
 - `brokk-mj-controller` (`mj-controller/`, library `mj_controller`) is the
   daemon side. It provisions targets, manages sessions, and serves the web
-  surface.
+  surface. It uses the foundation and client branches.
 - `brokk-mj-chat` (`mj-chat/`, library `mj_chat`) holds the conversation view
-  state that the terminal and web surfaces render. It uses the controller.
+  state that the terminal and web surfaces render. It uses the foundation and
+  client branches, in parallel with the controller.
 
 The controller must not depend on the worker, and the worker must not depend on
-the controller. Anything both need lives in the foundation, and the two sides
-talk over the relay protocol. Keeping them apart lets Cargo compile them at the
-same time, and it stops an edit in one from rebuilding the other.
+the controller. The controller and chat branches must not depend on each other;
+anything they both need belongs in the foundation or client crate. The worker
+and controller still talk over the relay protocol. Keeping these branches
+apart lets Cargo compile them at the same time, and it stops an edit in one
+from rebuilding the other.
 
-`brokk-mj-tui` (`mj-tui/`), `brokk-mjolnir` (`mj-cli/`, which builds the `mj`
-binary), and `brokk-mj-desktop` (`mj-desktop/`) sit on top of all four. Put new
-code in the lowest crate that can hold it.
+`brokk-mj-tui` (`mj-tui/`) builds on the client and chat branches;
+`brokk-mjolnir` (`mj-cli/`, which builds the `mj` binary) joins the controller,
+chat, and TUI branches; and `brokk-mj-desktop` (`mj-desktop/`) uses the
+controller branch. Put new code in the lowest crate that can hold it.
 
 ## Understand the Runtime Boundaries
 

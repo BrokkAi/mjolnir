@@ -26,8 +26,8 @@ use hel::hel_targets::AdditionalMount;
 use mj_chat::components::{EventResult, Outcome};
 use mj_chat::hel_chat::Notices;
 use mj_chat::hel_selection::FrameSurfaces;
-use mj_controller::hel_quota::ProfileQuota;
-use mj_controller::hel_review_host::RuntimeReviewView;
+use mj_client::quota::ProfileQuota;
+use mj_client::review::RuntimeReviewView;
 
 use crate::dialogs::{
     ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, ImportBundleConfirmation,
@@ -324,7 +324,7 @@ pub struct RemoteRepositoryPreview {
     pub push_urls: Vec<String>,
 }
 
-pub use mj_controller::hel_server::{WebListenerProcess, WebViewerAccess, WebViewerRecovery};
+pub use mj_client::web::{WebListenerProcess, WebViewerAccess, WebViewerRecovery};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionOperationKind {

@@ -1850,7 +1850,7 @@ impl DashboardState {
         target_id: &str,
     ) -> Option<String> {
         let session = self.state.sessions.get(session_id)?;
-        mj_controller::hel_controller::resume_compatibility(session, &self.config, target_id).err()
+        mj_client::target::resume_compatibility(session, &self.config, target_id).err()
     }
 
     fn prepare_resume_target(&self, wizard: &mut ResumeWizard) -> DashboardAction {

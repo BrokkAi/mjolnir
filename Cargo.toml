@@ -37,11 +37,11 @@ test-hooks = []
 # mj-desktop stays out of the default set: plain builds produce the headless
 # controller/worker, while its own GNU/Linux CI job and the macOS/Windows
 # matrix build the separate native application explicitly.
-members = [".", "mj-worker", "mj-controller", "mj-chat", "mj-tui", "mj-cli", "mj-desktop", "voice-worker"]
-default-members = [".", "mj-worker", "mj-controller", "mj-chat", "mj-tui", "mj-cli"]
+members = [".", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli", "mj-desktop", "voice-worker"]
+default-members = [".", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
-# inherits it with `version.workspace = true`, so the eight package versions
+# inherits it with `version.workspace = true`, so the nine package versions
 # cannot drift apart (RELEASING.md requires them to match).
 [workspace.package]
 version = "2.5.0"
@@ -67,6 +67,7 @@ rust-version = "1.96"
 anvil-client = { package = "brokk-anvil-client", version = "0.28.2" }
 hel = { path = ".", package = "brokk-mj-core", version = "2.5.0", default-features = false }
 mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.5.0" }
+mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.5.0" }
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.5.0" }
 mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.5.0" }
 hel-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.5.0" }

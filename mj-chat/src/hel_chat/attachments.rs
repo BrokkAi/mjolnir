@@ -309,8 +309,7 @@ pub(super) fn install_path(session_id: &str, path: &Path) -> Result<ClipboardIma
 }
 
 fn install_image_bytes(session_id: &str, bytes: &[u8]) -> Result<ClipboardImage> {
-    let optimized =
-        mj_controller::hel_image::optimize_image(bytes).context("optimize image attachment")?;
+    let optimized = mj_client::image::optimize_image(bytes).context("optimize image attachment")?;
     let reference = AttachmentRef::new(
         &optimized.bytes,
         optimized.mime_type,

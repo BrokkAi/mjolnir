@@ -43,6 +43,7 @@ exceptions = [
     # third-party dependencies.
     { crate = "brokk-mjolnir", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-chat", allow = ["GPL-3.0-only"] },
+    { crate = "brokk-mj-client", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-controller", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-core", allow = ["GPL-3.0-only"] },
     { crate = "brokk-mj-desktop", allow = ["GPL-3.0-only"] },
