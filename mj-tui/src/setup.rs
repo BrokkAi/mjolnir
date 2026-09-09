@@ -474,11 +474,17 @@ impl SetupDialog {
         form.captures_pointer() || form.contains(column, row)
     }
 
-    pub(crate) fn cancel_pointer(&mut self) {
+    pub(crate) fn cancel_pointer(&mut self) -> bool {
         if let Some(review) = &mut self.review_editor {
-            review.form.get_mut().cancel_pointer();
+            let form = review.form.get_mut();
+            let changed = form.captures_pointer();
+            form.cancel_pointer();
+            changed
         } else {
-            self.form.get_mut().cancel_pointer();
+            let form = self.form.get_mut();
+            let changed = form.captures_pointer();
+            form.cancel_pointer();
+            changed
         }
     }
 
@@ -494,8 +500,10 @@ impl SetupDialog {
 impl DashboardState {
     pub fn begin_setup(&mut self) {
         self.mode = Mode::Setup(SetupDialog::new(&self.config));
+        self.mark_render_changed();
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_setup_review(&mut self) -> DashboardAction {
         let Mode::Setup(mut dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
             return DashboardAction::None;
@@ -580,7 +588,18 @@ impl DashboardState {
             },
             _ => None,
         };
-        let interaction = shortcut.or_else(|| dialog.form.get_mut().handle(&event).action);
+        let form_result = shortcut
+            .is_none()
+            .then(|| dialog.form.get_mut().handle(&event));
+        if let Some(result) = &form_result {
+            crate::record_form_outcome_cells(
+                &self.last_event_outcome,
+                &self.render_changed,
+                &self.render_change_revision,
+                result,
+            );
+        }
+        let interaction = shortcut.or_else(|| form_result.and_then(|result| result.action));
         let mut action = DashboardAction::None;
         match interaction {
             Some(Interaction::Cancel | Interaction::Activate(Back)) => {
@@ -593,30 +612,52 @@ impl DashboardState {
                 self.cancel_modal();
                 return DashboardAction::None;
             }
-            Some(Interaction::Select(List, index)) => dialog.selected = index,
-            Some(Interaction::Toggle(List)) => dialog.open_selected(),
+            Some(Interaction::Select(List, index)) => {
+                if dialog.selected != index {
+                    dialog.selected = index;
+                    self.mark_render_changed();
+                }
+            }
+            Some(Interaction::Toggle(List)) => {
+                dialog.open_selected();
+                self.mark_render_changed();
+            }
             Some(Interaction::Activate(List)) => {
                 if dialog.selected_is_review() {
                     action = dialog.open_review(self);
                 } else {
                     dialog.open_selected();
                 }
+                self.mark_render_changed();
             }
             Some(Interaction::Edit(Field, edit)) => {
-                if let Some(editor) = &mut dialog.editor {
-                    TextField::apply(&mut editor.input, edit);
+                if let Some(editor) = &mut dialog.editor
+                    && TextField::apply(&mut editor.input, edit)
+                        == mj_chat::components::Outcome::Changed
+                {
+                    self.record_visible_event_change();
                 }
             }
             Some(Interaction::Select(Choices, index)) => {
-                if let Some(editor) = &mut dialog.editor {
+                if let Some(editor) = &mut dialog.editor
+                    && editor.selected != index
+                {
                     editor.selected = index;
+                    self.record_visible_event_change();
                 }
             }
             Some(Interaction::Activate(Field | Choices | Apply)) => {
                 dialog.notice = dialog.apply_editor(false).err();
+                self.mark_render_changed();
             }
-            Some(Interaction::Activate(Clear)) => dialog.notice = dialog.apply_editor(true).err(),
-            Some(Interaction::Activate(Add)) => dialog.add(),
+            Some(Interaction::Activate(Clear)) => {
+                dialog.notice = dialog.apply_editor(true).err();
+                self.mark_render_changed();
+            }
+            Some(Interaction::Activate(Add)) => {
+                dialog.add();
+                self.mark_render_changed();
+            }
             Some(Interaction::Activate(Remove)) if dialog.collection() => {
                 if let Some(key) = dialog.keys().get(dialog.selected).cloned() {
                     match dialog.draft.pointer_mut(&pointer(&dialog.path)).unwrap() {
@@ -632,12 +673,17 @@ impl DashboardState {
                         let profile_id = dialog.path.get(1).unwrap_or(&key).clone();
                         dialog.invalidate_review_validation_for(Some(&profile_id));
                     }
+                    self.mark_render_changed();
                 }
             }
-            Some(Interaction::Activate(Save)) if dialog.editor.is_none() => action = dialog.save(),
+            Some(Interaction::Activate(Save)) if dialog.editor.is_none() => {
+                action = dialog.save();
+                self.mark_render_changed();
+            }
             Some(Interaction::Activate(Detect)) if !dialog.discovering => {
                 dialog.discovering = true;
                 dialog.notice = Some("Detecting agent accounts and usable local runtimes…".into());
+                self.mark_render_changed();
                 action = DashboardAction::DiscoverSetup {
                     generation: dialog.generation,
                 };
@@ -670,6 +716,7 @@ impl DashboardState {
                     dialog.saving = false;
                     dialog.notice = Some(format!("Could not save: {error}"));
                     dialog.prepare();
+                    self.mark_render_changed();
                 } else {
                     self.set_failure_notice(error);
                 }
@@ -710,6 +757,7 @@ impl DashboardState {
             Err(error) => dialog.notice = Some(format!("Detection failed: {error}")),
         }
         dialog.prepare();
+        self.mark_render_changed();
     }
 }
 

@@ -384,22 +384,21 @@ def create_session(
     if status != 204:
         raise ScenarioFailure(f"fixture viewer login returned {status}")
 
-    # F3 is an integrated manager over the combined dashboard. Closing it
-    # returns to the same surface, and the workspace tab is the first keyboard
-    # stop before Sessions. With one deterministic fixture workspace, the
-    # horizontal keys must be harmless at either edge while focus is retained.
-    tmux.send_key("F3")
-    tmux.wait_for("Workspaces · F3", "integrated workspace manager")
-    tmux.wait_for("active sessions", "workspace manager snapshot")
+    # Shift-Tab from Sessions reaches the workspace hamburger. Activating it
+    # opens the manager inside the combined dashboard; closing it returns to
+    # the same surface and leaves the workspace pane's keyboard stops usable.
+    tmux.send_key("BTab")
+    tmux.send_key("Enter")
+    tmux.wait_for("New workspace", "integrated workspace manager")
     tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Workspaces · F3" not in tmux.capture(), "workspace manager closed")
     tmux.send_key("BTab")
     tmux.send_key("Left")
     tmux.send_key("Right")
     tmux.send_key("Tab")
+    tmux.send_key("Tab")
     evidence.event(
         "workspace-keyboard-focus",
-        "F3; Escape; Shift-Tab; Left; Right; Tab",
+        "Shift-Tab; Enter; Escape; Shift-Tab; Left; Right; Tab; Tab",
         "integrated manager closes and workspace focus returns to Sessions",
         "workspace focus remained responsive",
         evidence.capture("workspace-keyboard-focus", tmux.capture()),
@@ -473,6 +472,45 @@ def dashboard_dimensions(tmux: TmuxController, evidence: Evidence) -> None:
         )
 
 
+def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
+    """Changing only the sidebar size moves both support panes together."""
+    tmux.resize(80, 40)
+    tmux.wait_until(
+        lambda: len(tmux.capture().splitlines()[0]) == 80
+        and tmux.capture().splitlines()[0].endswith("╮"),
+        "dashboard rendered at 80 columns",
+    )
+    for glyph, sidebar_width, support_x, label in [
+        ("▪", 40, 0, "wide"),
+        ("▁", 20, 20, "narrow"),
+        ("▪", 40, 0, "wide-again"),
+    ]:
+        screen = tmux.capture().splitlines()
+        y = next(i for i, line in enumerate(screen) if "▁" in line)
+        tmux.mouse_click(screen[y].index(glyph), y)
+
+        def positioned():
+            lines = tmux.capture().splitlines()
+            sessions = next((line for line in lines if "▁" in line), "")
+            targets = next((line for line in lines if " Targets " in line), "")
+            quota = next((line for line in lines if " Quota " in line), "")
+            return (
+                sessions.find("╮") == sidebar_width - 1
+                and targets.find("╭ Targets ") == support_x
+                and quota.find("╭ Quota ") == support_x
+            )
+
+        tmux.wait_until(positioned, f"support panes relayout with {label} sidebar")
+        screen = tmux.capture()
+        evidence.event(
+            f"sidebar-relayout-{label}",
+            f"click Sessions {glyph} at fixed 80x40",
+            f"Targets and Quota begin at column {support_x}",
+            f"Targets and Quota begin at column {support_x}",
+            evidence.capture(f"sidebar-relayout-{label}", screen),
+        )
+
+
 def run_workflow(
     lab: Lab, tmux: TmuxController, evidence: Evidence, seed: int, port: int
 ) -> None:
@@ -489,6 +527,7 @@ def run_workflow(
     tmux.wait_for_any(("Sessions", "live-components"), "dashboard after direct reattach")
 
     dashboard_dimensions(tmux, evidence)
+    sidebar_relayout(tmux, evidence)
     tmux.resize(140, 40)
     tmux.wait_for("Sessions", "dashboard restored to 140x40")
 

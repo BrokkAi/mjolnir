@@ -356,6 +356,12 @@ impl DashboardState {
             _ => event.clone(),
         };
         let result = wizard.form.borrow_mut().handle(&form_event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
         if let Some(interaction) = result.action {
             sync_new_legacy_focus(&mut wizard);
             return self.apply_new_interaction(wizard, interaction);
@@ -440,6 +446,12 @@ impl DashboardState {
             _ => event.clone(),
         };
         let result = wizard.form.borrow_mut().handle(&form_event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
         if let Some(interaction) = result.action {
             sync_resume_legacy_focus(&mut wizard);
             return self.apply_resume_interaction(wizard, interaction);
@@ -471,6 +483,7 @@ impl DashboardState {
     ) -> DashboardAction {
         match interaction {
             Interaction::Cancel => {
+                self.mark_render_changed();
                 self.cancel_modal();
                 DashboardAction::None
             }
@@ -481,21 +494,34 @@ impl DashboardState {
             }
             Interaction::Select(id, selected) => {
                 match id {
-                    WizardControl::ProfileList => wizard.profile = selected,
+                    WizardControl::ProfileList => {
+                        if wizard.profile != selected {
+                            wizard.profile = selected;
+                            self.mark_render_changed();
+                        }
+                    }
                     WizardControl::BundleList => {
                         if wizard.bundle != selected {
                             self.invalidate_new_remote_preflight(&mut wizard);
+                            self.mark_render_changed();
                         }
                         wizard.bundle = selected;
                     }
                     WizardControl::NewBundleRepositories => {
-                        wizard.new_bundle_selected =
+                        let next =
                             selected.min(wizard.new_bundle_repositories.len().saturating_sub(1));
-                        wizard.new_bundle_focus = NewBundleFocus::Repositories;
+                        if wizard.new_bundle_selected != next
+                            || wizard.new_bundle_focus != NewBundleFocus::Repositories
+                        {
+                            wizard.new_bundle_selected = next;
+                            wizard.new_bundle_focus = NewBundleFocus::Repositories;
+                            self.mark_render_changed();
+                        }
                     }
                     WizardControl::TargetList => {
                         if wizard.target != selected {
                             self.invalidate_new_remote_preflight(&mut wizard);
+                            self.mark_render_changed();
                         }
                         wizard.target = selected;
                         let action = self.prepare_new_target(&mut wizard);
@@ -503,9 +529,14 @@ impl DashboardState {
                         return action;
                     }
                     WizardControl::ReviewAttachments => {
-                        wizard.mounts.history_index =
-                            selected.min(wizard.mounts.mounts.len().saturating_sub(1));
-                        wizard.review_focus = ReviewFocus::Attachments;
+                        let next = selected.min(wizard.mounts.mounts.len().saturating_sub(1));
+                        if wizard.mounts.history_index != next
+                            || wizard.review_focus != ReviewFocus::Attachments
+                        {
+                            wizard.mounts.history_index = next;
+                            wizard.review_focus = ReviewFocus::Attachments;
+                            self.mark_render_changed();
+                        }
                     }
                     _ => {}
                 }
@@ -515,10 +546,12 @@ impl DashboardState {
             Interaction::Toggle(WizardControl::MountReadOnly) => {
                 wizard.mounts.toggle_read_only();
                 wizard.mounts.focus = MountFocus::ReadOnly;
+                self.mark_render_changed();
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
             Interaction::Toggle(WizardControl::ReviewAttachments) => {
+                self.mark_render_changed();
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
@@ -537,6 +570,7 @@ impl DashboardState {
     ) -> DashboardAction {
         match interaction {
             Interaction::Cancel => {
+                self.mark_render_changed();
                 self.cancel_modal();
                 DashboardAction::None
             }
@@ -550,10 +584,16 @@ impl DashboardState {
                 match id {
                     WizardControl::ProfileList => {
                         invalidate_move_preparation(&mut wizard);
-                        wizard.profile = selected;
+                        if wizard.profile != selected {
+                            wizard.profile = selected;
+                            self.mark_render_changed();
+                        }
                     }
                     WizardControl::TargetList => {
-                        invalidate_move_preparation(&mut wizard);
+                        if wizard.target != selected {
+                            invalidate_move_preparation(&mut wizard);
+                            self.mark_render_changed();
+                        }
                         let target_id = nth_key(&self.config.targets, selected);
                         wizard.target = selected;
                         if self
@@ -566,9 +606,14 @@ impl DashboardState {
                         }
                     }
                     WizardControl::ReviewAttachments => {
-                        wizard.mounts.history_index =
-                            selected.min(wizard.mounts.mounts.len().saturating_sub(1));
-                        wizard.review_focus = ReviewFocus::Attachments;
+                        let next = selected.min(wizard.mounts.mounts.len().saturating_sub(1));
+                        if wizard.mounts.history_index != next
+                            || wizard.review_focus != ReviewFocus::Attachments
+                        {
+                            wizard.mounts.history_index = next;
+                            wizard.review_focus = ReviewFocus::Attachments;
+                            self.mark_render_changed();
+                        }
                     }
                     _ => {}
                 }
@@ -579,11 +624,13 @@ impl DashboardState {
                 invalidate_move_preparation(&mut wizard);
                 wizard.mounts.toggle_read_only();
                 wizard.mounts.focus = MountFocus::ReadOnly;
+                self.mark_render_changed();
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
             Interaction::Toggle(WizardControl::DiscardQueue) => {
                 wizard.discard_queue = !wizard.discard_queue;
+                self.mark_render_changed();
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
@@ -634,6 +681,7 @@ impl DashboardState {
                     == Outcome::Changed;
                 if changed {
                     wizard.project_directory_error = None;
+                    self.record_visible_event_change();
                 }
                 return changed;
             }
@@ -647,8 +695,12 @@ impl DashboardState {
                     wizard.focus = WizardFocus::Content;
                     return true;
                 }
-                return TextField::apply(&mut wizard.new_bundle_source, FieldEdit::Key(key))
+                let changed = TextField::apply(&mut wizard.new_bundle_source, FieldEdit::Key(key))
                     == Outcome::Changed;
+                if changed {
+                    self.record_visible_event_change();
+                }
+                return changed;
             }
             if id == WizardControl::MountSource {
                 if key.code == KeyCode::Up && !wizard.mounts.completion_candidates.is_empty() {
@@ -702,6 +754,7 @@ impl DashboardState {
                 if changed {
                     wizard.mounts.completion_candidates.clear();
                     wizard.mounts.error = None;
+                    self.record_visible_event_change();
                 }
                 return changed;
             }
@@ -710,6 +763,7 @@ impl DashboardState {
                     == Outcome::Changed;
                 if changed {
                     wizard.mounts.error = None;
+                    self.record_visible_event_change();
                 }
                 return changed;
             }
@@ -725,6 +779,7 @@ impl DashboardState {
         if changed {
             wizard.project_directory_error = None;
             wizard.mounts.error = None;
+            self.record_visible_event_change();
         }
         changed
     }
@@ -792,6 +847,7 @@ impl DashboardState {
             if TextField::apply(input, FieldEdit::Key(key)) == Outcome::Changed {
                 wizard.mounts.completion_candidates.clear();
                 wizard.mounts.error = None;
+                self.record_visible_event_change();
             }
             return;
         }
@@ -803,6 +859,7 @@ impl DashboardState {
         if TextField::apply(input, edit) == Outcome::Changed {
             wizard.mounts.completion_candidates.clear();
             wizard.mounts.error = None;
+            self.record_visible_event_change();
         }
     }
 
@@ -814,6 +871,7 @@ impl DashboardState {
         if wizard.step == WizardStep::NewBundle {
             return self.activate_new_bundle_control(wizard, id);
         }
+        self.mark_render_changed();
         match id {
             WizardControl::Cancel => {
                 self.cancel_modal();
@@ -892,6 +950,7 @@ impl DashboardState {
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         }
+        self.mark_render_changed();
         match id {
             WizardControl::Cancel => {
                 self.cancel_modal();
@@ -970,6 +1029,7 @@ impl DashboardState {
         mut wizard: ResumeWizard,
         id: WizardControl,
     ) -> DashboardAction {
+        self.mark_render_changed();
         if matches!(id, WizardControl::ReviewAttachments | WizardControl::Add) {
             invalidate_move_preparation(&mut wizard);
         }
@@ -1485,6 +1545,7 @@ impl DashboardState {
                 };
                 if changed {
                     wizard.mounts.error = None;
+                    self.record_visible_event_change();
                 }
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
@@ -1685,6 +1746,7 @@ impl DashboardState {
         wizard.step = WizardStep::Review;
         self.notices.set(format!("Created bundle {bundle_id}."));
         self.mode = Mode::New(wizard);
+        self.mark_render_changed();
         DashboardAction::None
     }
 
@@ -1696,6 +1758,7 @@ impl DashboardState {
         {
             wizard.bundle_creation_in_flight = false;
             self.mode = Mode::New(wizard);
+            self.mark_render_changed();
         }
         self.notices
             .set(format!("Could not create bundle: {error}"));
@@ -1715,6 +1778,9 @@ impl DashboardState {
                     }
                     return;
                 }
+                let old_allocation = wizard.resource_allocation.clone();
+                let old_error = wizard.sizing_error.clone();
+                let old_options = wizard.aws_options.get(target_id).cloned();
                 apply_aws_options(
                     target_id,
                     result,
@@ -1723,7 +1789,13 @@ impl DashboardState {
                     &mut wizard.sizing_error,
                     None,
                 );
+                let changed = old_allocation != wizard.resource_allocation
+                    || old_error != wizard.sizing_error
+                    || old_options != wizard.aws_options.get(target_id).cloned();
                 self.mode = Mode::New(wizard);
+                if changed {
+                    self.mark_render_changed();
+                }
             }
             Mode::Resume(mut wizard) => {
                 if nth_key(&self.config.targets, wizard.target) != target_id {
@@ -1733,6 +1805,9 @@ impl DashboardState {
                     }
                     return;
                 }
+                let old_allocation = wizard.resource_allocation.clone();
+                let old_error = wizard.sizing_error.clone();
+                let old_options = wizard.aws_options.get(target_id).cloned();
                 let previous = self
                     .state
                     .sessions
@@ -1746,7 +1821,13 @@ impl DashboardState {
                     &mut wizard.sizing_error,
                     previous,
                 );
+                let changed = old_allocation != wizard.resource_allocation
+                    || old_error != wizard.sizing_error
+                    || old_options != wizard.aws_options.get(target_id).cloned();
                 self.mode = Mode::Resume(wizard);
+                if changed {
+                    self.mark_render_changed();
+                }
             }
             _ => {}
         }
@@ -1882,16 +1963,34 @@ impl DashboardState {
                     && wizard.mounts.focus == MountFocus::Source
                     && wizard.mounts.source == prefix =>
             {
+                let old_source = wizard.mounts.source.to_string();
+                let old_candidates = wizard.mounts.completion_candidates.clone();
+                let old_index = wizard.mounts.completion_index;
                 apply_mount_completions(&mut wizard.mounts, prefix, candidates);
+                let changed = old_source != wizard.mounts.source.to_string()
+                    || old_candidates != wizard.mounts.completion_candidates
+                    || old_index != wizard.mounts.completion_index;
                 self.mode = Mode::New(wizard);
+                if changed {
+                    self.mark_render_changed();
+                }
             }
             Mode::Resume(mut wizard)
                 if wizard.step == WizardStep::Mounts
                     && wizard.mounts.focus == MountFocus::Source
                     && wizard.mounts.source == prefix =>
             {
+                let old_source = wizard.mounts.source.to_string();
+                let old_candidates = wizard.mounts.completion_candidates.clone();
+                let old_index = wizard.mounts.completion_index;
                 apply_mount_completions(&mut wizard.mounts, prefix, candidates);
+                let changed = old_source != wizard.mounts.source.to_string()
+                    || old_candidates != wizard.mounts.completion_candidates
+                    || old_index != wizard.mounts.completion_index;
                 self.mode = Mode::Resume(wizard);
+                if changed {
+                    self.mark_render_changed();
+                }
             }
             _ => {}
         }
@@ -1906,6 +2005,7 @@ impl DashboardState {
         result: Result<Option<String>, String>,
     ) -> DashboardAction {
         let mut entered_move_review = false;
+        let visible_changed;
         let (mounts, review_focus, step, moving) = match &mut self.mode {
             Mode::New(wizard)
                 if wizard.step == WizardStep::Mounts && wizard.mounts.source == source =>
@@ -1942,11 +2042,17 @@ impl DashboardState {
                 *review_focus = ReviewFocus::Attachments;
                 *step = WizardStep::Review;
                 entered_move_review = moving;
+                visible_changed = true;
             }
             Err(error) => {
+                visible_changed = mounts.error.as_deref() != Some(error.as_str())
+                    || mounts.focus != MountFocus::Source;
                 mounts.error = Some(error);
                 mounts.focus = MountFocus::Source;
             }
+        }
+        if visible_changed {
+            self.mark_render_changed();
         }
         if entered_move_review {
             let Mode::Resume(wizard) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
@@ -1977,11 +2083,22 @@ impl DashboardState {
         }
         match result {
             Ok(()) => {
+                let changed = wizard.project_directory_error.is_some()
+                    || wizard.step != WizardStep::Review
+                    || wizard.review_focus != ReviewFocus::Submit;
                 wizard.project_directory_error = None;
                 wizard.step = WizardStep::Review;
                 wizard.review_focus = ReviewFocus::Submit;
+                if changed {
+                    self.mark_render_changed();
+                }
             }
-            Err(error) => wizard.project_directory_error = Some(error),
+            Err(error) => {
+                if wizard.project_directory_error.as_deref() != Some(error.as_str()) {
+                    wizard.project_directory_error = Some(error);
+                    self.mark_render_changed();
+                }
+            }
         }
     }
 
@@ -2409,6 +2526,7 @@ impl DashboardState {
                 if changed {
                     invalidate_move_preparation(&mut wizard);
                     wizard.mounts.error = None;
+                    self.record_visible_event_change();
                 }
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
@@ -2590,6 +2708,7 @@ impl DashboardState {
         wizard.preparation = Some(preparation);
         wizard.preparing = false;
         wizard.preparation_error = None;
+        self.mark_render_changed();
         true
     }
 
@@ -2614,6 +2733,7 @@ impl DashboardState {
         wizard.preparation = None;
         wizard.preparation_request_id = None;
         wizard.preparation_error = Some(error);
+        self.mark_render_changed();
         true
     }
 
@@ -2634,6 +2754,7 @@ impl DashboardState {
     }
 
     pub fn apply_session_mount_preflight_failure(&mut self, source: &str, error: String) {
+        let mut changed = false;
         match &mut self.mode {
             Mode::New(wizard) => {
                 if let Some(index) = wizard
@@ -2642,9 +2763,11 @@ impl DashboardState {
                     .iter()
                     .position(|mount| mount.source == std::path::Path::new(source))
                 {
+                    changed |= wizard.mounts.history_index != index;
                     wizard.mounts.history_index = index;
                     prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
                 }
+                changed |= wizard.mounts.error.as_deref() != Some(error.as_str());
                 wizard.mounts.error = Some(error);
             }
             Mode::Resume(wizard) => {
@@ -2654,12 +2777,17 @@ impl DashboardState {
                     .iter()
                     .position(|mount| mount.source == std::path::Path::new(source))
                 {
+                    changed |= wizard.mounts.history_index != index;
                     wizard.mounts.history_index = index;
                     prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
                 }
+                changed |= wizard.mounts.error.as_deref() != Some(error.as_str());
                 wizard.mounts.error = Some(error);
             }
             _ => {}
+        }
+        if changed {
+            self.mark_render_changed();
         }
     }
 
@@ -2674,9 +2802,15 @@ impl DashboardState {
             return;
         }
         if let Mode::New(wizard) = &mut self.mode {
+            let changed = !wizard.remote_preflight_in_flight
+                || wizard.remote_preflight_error.is_some()
+                || wizard.remote_repositories.is_some();
             wizard.remote_preflight_in_flight = true;
             wizard.remote_preflight_error = None;
             wizard.remote_repositories = None;
+            if changed {
+                self.mark_render_changed();
+            }
         }
     }
 
@@ -2693,17 +2827,33 @@ impl DashboardState {
         let Mode::New(wizard) = &mut self.mode else {
             return;
         };
+        let old_in_flight = wizard.remote_preflight_in_flight;
+        let old_error = wizard.remote_preflight_error.clone();
         wizard.remote_preflight_in_flight = false;
         match result {
             Ok(repositories) => {
+                let changed = !old_in_flight
+                    || wizard.remote_repositories.as_ref() != Some(&repositories)
+                    || old_error.is_some()
+                    || wizard.review_focus != ReviewFocus::Submit;
                 wizard.remote_repositories = Some(repositories);
                 wizard.remote_preflight_error = None;
                 wizard.review_focus = ReviewFocus::Submit;
+                if changed {
+                    self.mark_render_changed();
+                }
             }
             Err(error) => {
+                let changed = !old_in_flight
+                    || wizard.remote_repositories.is_some()
+                    || old_error.as_deref() != Some(error.as_str())
+                    || wizard.review_focus != ReviewFocus::Submit;
                 wizard.remote_repositories = None;
                 wizard.remote_preflight_error = Some(error);
                 wizard.review_focus = ReviewFocus::Submit;
+                if changed {
+                    self.mark_render_changed();
+                }
             }
         }
     }
@@ -2810,6 +2960,7 @@ impl DashboardState {
             remote_preflight_error: None,
             form: std::cell::RefCell::new(mj_chat::components::Form::default()),
         });
+        self.mark_render_changed();
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -2867,6 +3018,7 @@ impl DashboardState {
             discard_queue: false,
             form: std::cell::RefCell::new(mj_chat::components::Form::default()),
         });
+        self.mark_render_changed();
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -2925,6 +3077,7 @@ impl DashboardState {
             discard_queue: true,
             form: std::cell::RefCell::new(mj_chat::components::Form::default()),
         });
+        self.mark_render_changed();
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -3000,6 +3153,7 @@ impl DashboardState {
             discard_queue: operation.queue == ResumeQueueDisposition::Discard,
             form: std::cell::RefCell::new(mj_chat::components::Form::default()),
         });
+        self.mark_render_changed();
     }
 
     fn resolve_all_aws_resource_options_action(&self) -> DashboardAction {

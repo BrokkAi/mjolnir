@@ -675,9 +675,9 @@ fn expanded_session_lines(
     let mut output = message
         .map(|message| {
             let text = if label.is_empty() {
-                std::borrow::Cow::Borrowed(message)
+                message.replace('\n', " ")
             } else {
-                std::borrow::Cow::Owned(format!("{label}{message}"))
+                format!("{label}{message}")
             };
             render_agent_message_head(&text, output_width, 2)
         })
@@ -762,10 +762,10 @@ fn session_activity_line(
     }
     let available = usize::from(width);
     // A minimized cell's second line is reserved for activity and its queue.
-    // Identity is already on the first line; indentation must not consume the
-    // cells needed by a running clock and an actionable queue count.
+    // Keep it two cells in from the pane edge so the summary reads as a
+    // continuation of the title line while retaining enough room for status.
     let compact = width <= 24;
-    let prefix = if compact { "" } else { prefix };
+    let prefix = if compact { "  " } else { prefix };
     let queue_width = queue
         .as_ref()
         .map_or(0, |queue| Line::raw(queue.as_str()).width() + 1);
@@ -1013,6 +1013,80 @@ impl SessionRowFacts<'_> {
         self.detail
             .is_some_and(|detail| !detail.pending_elicitations.is_empty())
     }
+}
+
+/// Return the moving value currently used in a session's activity line.
+/// Keeping this decision beside the renderer prevents invalidation from
+/// inventing a second precedence order for operation, lifecycle, and activity
+/// clocks.
+pub(crate) fn session_display_clock(
+    dashboard: &DashboardState,
+    session: &SessionRecord,
+    detail: Option<&SessionDetail>,
+    review: Option<&RuntimeReviewView>,
+    unreachable: bool,
+    operation: Option<&SessionOperationDisplay>,
+    now_epoch_seconds: u64,
+) -> Option<String> {
+    let started_at = if let Some(operation) = operation {
+        Some(operation_status(operation).1)
+    } else if dashboard.transition_kind(&session.id).is_some()
+        || dashboard.transition_failure_kind(&session.id).is_some()
+        || session.state == SessionState::Provisioning
+    {
+        session_updated_at_epoch_seconds(session)
+    } else {
+        None
+    };
+    if let Some(started_at) = started_at {
+        return Some(mj_chat::usage_format::format_clock(
+            now_epoch_seconds.saturating_sub(started_at),
+        ));
+    }
+
+    if session.last_error.is_some()
+        || unreachable
+        || detail.is_some_and(|detail| !detail.pending_elicitations.is_empty())
+        || review.is_some_and(|review| review.activity_label().is_some())
+        || !session.state.is_active()
+    {
+        return None;
+    }
+    let detail = detail?;
+    if detail.activity.is_idle(detail.current_turn_started_at)
+        || matches!(
+            detail.activity.execution,
+            Some(hel::hel_worker::RelayExecutionState::Closing)
+                | Some(hel::hel_worker::RelayExecutionState::Closed)
+        )
+    {
+        return None;
+    }
+    let detailed = dashboard.pane_size(SupportPane::Sessions) != PaneSize::Minimized
+        && dashboard.project_is_expanded(session)
+        && dashboard.config.advanced.detailed_activity_clocks;
+    Some(
+        SessionRowFacts {
+            detail: Some(detail),
+            unreachable,
+            state: session.state,
+            now_epoch_seconds,
+        }
+        .clock(detailed),
+    )
+}
+
+/// The review fields that can alter a session row: its compact activity label
+/// and whether the row owns an animation frame. Controller progress text and
+/// role details are intentionally omitted because the dashboard does not draw
+/// them.
+pub(crate) fn session_review_display_signature(
+    review: Option<&RuntimeReviewView>,
+) -> (Option<&'static str>, bool) {
+    (
+        review.and_then(RuntimeReviewView::activity_label),
+        review.is_some_and(RuntimeReviewView::is_working),
+    )
 }
 
 /// Select only content authored by the agent for the expanded output rows.
@@ -1452,7 +1526,7 @@ pub(crate) fn render_session_scrollbar(
     }
 }
 
-fn operation_status(operation: &SessionOperationDisplay) -> (String, u64) {
+pub(crate) fn operation_status(operation: &SessionOperationDisplay) -> (String, u64) {
     if matches!(
         operation.kind,
         SessionOperationKind::Launching
@@ -1481,7 +1555,7 @@ fn operation_status(operation: &SessionOperationDisplay) -> (String, u64) {
     }
 }
 
-fn session_updated_at_epoch_seconds(session: &SessionRecord) -> Option<u64> {
+pub(crate) fn session_updated_at_epoch_seconds(session: &SessionRecord) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(&session.updated_at)
         .ok()?
         .timestamp()
@@ -1529,7 +1603,7 @@ fn session_band_color(
     theme::palette().session_activity
 }
 
-fn checkpoint_age(now_epoch_seconds: u64, checkpointed_at: &str) -> String {
+pub(crate) fn checkpoint_age(now_epoch_seconds: u64, checkpointed_at: &str) -> String {
     let Ok(checkpointed_at) = chrono::DateTime::parse_from_rfc3339(checkpointed_at) else {
         return "unknown".into();
     };
@@ -1573,11 +1647,14 @@ fn fleet_vm_label(detail: &CapacityDetail) -> String {
 /// A reading older than this stopped tracking the host: the poller samples
 /// every 30 seconds, so three missed rounds mean the number on screen is no
 /// longer what the host is doing.
-const CAPACITY_SAMPLE_STALE_AFTER_SECONDS: u64 = 90;
+pub(crate) const CAPACITY_SAMPLE_STALE_AFTER_SECONDS: u64 = 90;
 
 /// Why the row's reading cannot be trusted, if it cannot: a probe that failed,
 /// or a sample that stopped refreshing. `None` means the reading is current.
-fn capacity_staleness(detail: &CapacityDetail, now_epoch_seconds: u64) -> Option<String> {
+pub(crate) fn capacity_staleness(
+    detail: &CapacityDetail,
+    now_epoch_seconds: u64,
+) -> Option<String> {
     if let Some(error) = &detail.probe_error {
         return Some(format!("stale: {error}"));
     }
@@ -1685,7 +1762,7 @@ pub(crate) fn capacity_table_width(dashboard: &DashboardState) -> u16 {
     widths
         .into_iter()
         .fold(0_u16, u16::saturating_add)
-        .saturating_add(2) // two inter-column spacing cells
+        .saturating_add(4) // two spaces between each of the three columns
         .saturating_add(4) // two borders and two highlight cells
 }
 
@@ -1719,7 +1796,7 @@ pub(crate) fn render_capacity(
         }),
         column_widths.map(Constraint::Length),
     )
-    .column_spacing(1)
+    .column_spacing(2)
     .header(
         Row::new(["Host / fleet", "Targets", "In Use"])
             .style(theme::muted().add_modifier(Modifier::BOLD)),
@@ -2014,11 +2091,10 @@ fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
             EMPTY_QUOTA_CELL.repeat(empty_cells),
             Style::default().bg(theme::palette().background),
         ),
-        // This replaces the separator before the percentage, keeping the
-        // line's width unchanged while closing the chart on its right edge.
+        // The percentage follows the chart rail without an extra separator.
         Span::styled(QUOTA_CHART_RIGHT_BORDER, quota_chart_border_style()),
         Span::styled(
-            format!("{remaining:>3}%"),
+            format!("{remaining}%"),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
     ])
@@ -2108,7 +2184,7 @@ fn five_hour_quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> Str
     }
 }
 
-fn quota_reset_cell(window: Option<&QuotaWindow>, now: u64) -> String {
+pub(crate) fn quota_reset_cell(window: Option<&QuotaWindow>, now: u64) -> String {
     let Some(window) = window else {
         return String::new();
     };
@@ -2119,7 +2195,7 @@ fn quota_reset_cell(window: Option<&QuotaWindow>, now: u64) -> String {
         .unwrap_or_default()
 }
 
-fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, String) {
+pub(crate) fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, String) {
     let mut weekly = quota_reset_cell(quota.weekly_window(), now);
     if let Some(extra) = quota.extra.as_deref() {
         if !weekly.is_empty() {
@@ -2148,50 +2224,40 @@ struct QuotaTableRow {
     profile: String,
     harness: String,
     weekly: Line<'static>,
-    weekly_chart: bool,
-    weekly_width_overhang: usize,
-    weekly_reset: String,
     five_hour: Line<'static>,
-    five_hour_chart: bool,
-    five_hour_reset: String,
 }
 
 impl QuotaTableRow {
-    fn into_row(self, widths: [u16; 6]) -> Row<'static> {
+    fn into_row(self) -> Row<'static> {
         Row::new([
             Cell::from(self.profile),
-            Cell::from(cell_before_quota_chart(
-                self.harness,
-                widths[1],
-                self.weekly_chart,
-            )),
+            Cell::from(self.harness),
             Cell::from(self.weekly),
-            Cell::from(cell_before_quota_chart(
-                self.weekly_reset,
-                widths[3],
-                self.five_hour_chart,
-            )),
             Cell::from(self.five_hour),
-            Cell::from(self.five_hour_reset),
         ])
     }
 }
 
-/// Uses the last of a table separator's two cells as the left chart rail.
-/// The following chart therefore starts in exactly the same column as before.
-fn cell_before_quota_chart(text: String, width: u16, chart_follows: bool) -> Line<'static> {
-    if !chart_follows {
-        return Line::raw(text);
+/// A quota window is one logical group: the chart's left rail, its bar and
+/// percentage, and the reset countdown. Keeping those pieces in one cell
+/// makes the single internal separator independent of the other columns'
+/// widths.
+fn quota_group(mut chart: Line<'static>, chart_present: bool, reset: String) -> Line<'static> {
+    let mut spans = Vec::new();
+    if chart_present {
+        spans.push(Span::styled(
+            QUOTA_CHART_LEFT_BORDER,
+            quota_chart_border_style(),
+        ));
     }
-    let text = crate::widgets::truncate_text(&text, usize::from(width));
-    let padding = usize::from(width)
-        .saturating_sub(Line::raw(text.as_str()).width())
-        .saturating_add(1);
-    Line::from(vec![
-        Span::raw(text),
-        Span::raw(" ".repeat(padding)),
-        Span::styled(QUOTA_CHART_LEFT_BORDER, quota_chart_border_style()),
-    ])
+    spans.append(&mut chart.spans);
+    if !reset.is_empty() {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::raw(reset));
+    }
+    Line::from(spans)
 }
 
 fn quota_column_width(
@@ -2209,88 +2275,71 @@ fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<QuotaTableRow> 
         .profiles
         .iter()
         .map(|(id, profile)| {
-            let (
-                weekly,
-                weekly_reset,
-                five_hour,
-                five_hour_reset,
-                weekly_chart,
-                five_hour_chart,
-                weekly_width_overhang,
-            ) = if profile.kind == HarnessKind::Deepseek {
-                (
-                    api_quota_bar(),
-                    String::new(),
-                    Line::default(),
-                    String::new(),
-                    true,
-                    false,
-                    1,
-                )
-            } else if dashboard.quota_refreshing.contains(id) {
-                (
-                    Line::raw("refreshing…"),
-                    String::new(),
-                    Line::default(),
-                    String::new(),
-                    false,
-                    false,
-                    0,
-                )
-            } else {
-                match dashboard.quotas.get(id) {
-                    Some(quota) if quota.error.is_none() => {
-                        let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
-                        let weekly = quota_bar(quota.weekly_window());
-                        let five_hour = five_hour_quota_bar(quota);
-                        let weekly_chart = !weekly.spans.is_empty();
-                        let five_hour_chart = !five_hour.spans.is_empty();
-                        (
-                            weekly,
-                            weekly_reset,
-                            five_hour,
-                            five_hour_reset,
-                            weekly_chart,
-                            five_hour_chart,
-                            0,
-                        )
-                    }
-                    Some(quota) => (
-                        Line::raw(quota.error_label().unwrap_or_else(|| "unavailable".into())),
+            let (weekly, weekly_reset, five_hour, five_hour_reset, weekly_chart, five_hour_chart) =
+                if profile.kind == HarnessKind::Deepseek {
+                    (
+                        api_quota_bar(),
                         String::new(),
                         Line::default(),
                         String::new(),
+                        true,
                         false,
-                        false,
-                        0,
-                    ),
-                    None => (
+                    )
+                } else if dashboard.quota_refreshing.contains(id) {
+                    (
                         Line::raw("refreshing…"),
                         String::new(),
                         Line::default(),
                         String::new(),
                         false,
                         false,
-                        0,
-                    ),
-                }
-            };
+                    )
+                } else {
+                    match dashboard.quotas.get(id) {
+                        Some(quota) if quota.error.is_none() => {
+                            let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
+                            let weekly = quota_bar(quota.weekly_window());
+                            let five_hour = five_hour_quota_bar(quota);
+                            let weekly_chart = !weekly.spans.is_empty();
+                            let five_hour_chart = !five_hour.spans.is_empty();
+                            (
+                                weekly,
+                                weekly_reset,
+                                five_hour,
+                                five_hour_reset,
+                                weekly_chart,
+                                five_hour_chart,
+                            )
+                        }
+                        Some(quota) => (
+                            Line::raw(quota.error_label().unwrap_or_else(|| "unavailable".into())),
+                            String::new(),
+                            Line::default(),
+                            String::new(),
+                            false,
+                            false,
+                        ),
+                        None => (
+                            Line::raw("refreshing…"),
+                            String::new(),
+                            Line::default(),
+                            String::new(),
+                            false,
+                            false,
+                        ),
+                    }
+                };
             QuotaTableRow {
                 profile: id.clone(),
                 harness: profile.kind.display_name().into(),
-                weekly,
-                weekly_chart,
-                weekly_width_overhang,
-                weekly_reset,
-                five_hour,
-                five_hour_chart,
-                five_hour_reset,
+                weekly: quota_group(weekly, weekly_chart, weekly_reset),
+                five_hour: quota_group(five_hour, five_hour_chart, five_hour_reset),
             }
         })
         .collect()
 }
 
-fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 6] {
+fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 4] {
     [
         quota_column_width(
             "Profile",
@@ -2306,27 +2355,14 @@ fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 6] {
         ),
         quota_column_width(
             "Weekly",
-            rows.iter()
-                .map(|row| row.weekly.width().saturating_sub(row.weekly_width_overhang)),
-            u16::MAX,
-        ),
-        quota_column_width(
-            "Resets",
-            rows.iter()
-                .map(|row| Line::raw(row.weekly_reset.as_str()).width()),
+            rows.iter().map(|row| row.weekly.width()),
             u16::MAX,
         ),
         quota_column_width("5H", rows.iter().map(|row| row.five_hour.width()), u16::MAX),
-        quota_column_width(
-            "Resets",
-            rows.iter()
-                .map(|row| Line::raw(row.five_hour_reset.as_str()).width()),
-            u16::MAX,
-        ),
     ]
 }
 
-/// Width needed to draw the complete Quota table, including its folded
+/// Width needed to draw the complete Quota table, including its
 /// inter-column spacing, border, and always-present selection marker.
 pub(crate) fn quota_table_width(dashboard: &DashboardState) -> u16 {
     let now = SystemTime::now()
@@ -2337,7 +2373,7 @@ pub(crate) fn quota_table_width(dashboard: &DashboardState) -> u16 {
     content_widths
         .into_iter()
         .fold(0_u16, u16::saturating_add)
-        .saturating_add(10) // two folded spacing cells for each of five columns
+        .saturating_add(6) // two spaces at each of the three boundaries
         .saturating_add(4) // two borders and two highlight cells
 }
 
@@ -2381,12 +2417,7 @@ pub(crate) fn render_quotas(
     ]);
     let quotas_focused = dashboard.focus == Focus::Quota;
     let content_widths = quota_table_column_widths(&rows);
-    // Fold the old two-cell inter-column spacing into every non-final column.
-    // Rows can then paint either of those cells as a chart rail without moving
-    // any column or changing the table's total width.
-    let widths: [Constraint; 6] = std::array::from_fn(|index| {
-        Constraint::Length(content_widths[index].saturating_add(if index < 5 { 2 } else { 0 }))
-    });
+    let widths = content_widths.map(Constraint::Length);
     let block = theme::panel(quotas_focused).title(title);
     let block = size.map_or(block.clone(), |size| {
         block.title(pane_size_controls(
@@ -2394,23 +2425,20 @@ pub(crate) fn render_quotas(
             dashboard.pane_maximize_enabled(SupportPane::Quota),
         ))
     });
-    let table = Table::new(
-        rows.into_iter().map(|row| row.into_row(content_widths)),
-        widths,
-    )
-    .column_spacing(0)
-    .header(
-        Row::new(["Profile", "Harness", "Weekly", "Resets", "5H", "Resets"])
-            .style(theme::muted().add_modifier(Modifier::BOLD)),
-    )
-    .row_highlight_style(if quotas_focused {
-        theme::selection(true)
-    } else {
-        Style::default()
-    })
-    .highlight_symbol(if quotas_focused { "› " } else { "  " })
-    .highlight_spacing(HighlightSpacing::Always)
-    .block(block);
+    let table = Table::new(rows.into_iter().map(QuotaTableRow::into_row), widths)
+        .column_spacing(2)
+        .header(
+            Row::new(["Profile", "Harness", "Weekly", "5H"])
+                .style(theme::muted().add_modifier(Modifier::BOLD)),
+        )
+        .row_highlight_style(if quotas_focused {
+            theme::selection(true)
+        } else {
+            Style::default()
+        })
+        .highlight_symbol(if quotas_focused { "› " } else { "  " })
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(block);
     let mut offset = dashboard.quota_scroll.get();
     if let Some(direction) = take_scroll_lookahead(dashboard, Focus::Quota) {
         let row_heights = vec![1; dashboard.config.profiles.len()];
@@ -2545,7 +2573,7 @@ pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &Dashboard
     }
 }
 
-fn refresh_age(now: u64, refreshed: u64) -> String {
+pub(crate) fn refresh_age(now: u64, refreshed: u64) -> String {
     if refreshed == 0 {
         return "unknown".into();
     }
@@ -4059,8 +4087,8 @@ mod tests {
         dashboard.focus_sessions();
         assert_eq!(
             combined_footer_text(&dashboard, 200),
-            "Enter open · s stop · Del delete · Tab pane │ Alt-N create · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
-             · Alt-Q detach │ F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help"
+            "Enter open · s stop · Del delete · Tab pane · r restart │ Alt-N create · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
+             · Alt-Q detach │ F2 palette · F4 web · F5 refresh · F7 setup · F1 help"
         );
 
         // The cancel chord takes its fixed place before detach, and only while
@@ -4087,8 +4115,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
         dashboard.focus_sessions();
-        const FUNCTION_KEYS: &str =
-            "F2 palette · F3 workspaces · F4 web · F5 refresh · F7 setup · F1 help";
+        const FUNCTION_KEYS: &str = "F2 palette · F4 web · F5 refresh · F7 setup · F1 help";
 
         let full = combined_footer_text(&dashboard, 200);
         assert!(
@@ -4102,7 +4129,10 @@ mod tests {
         assert!(squeezed.contains("Alt-N create"), "{squeezed}");
         assert!(squeezed.ends_with(FUNCTION_KEYS), "{squeezed}");
 
-        assert_eq!(combined_footer_text(&dashboard, 32), "F2 palette · F1 help");
+        assert_eq!(
+            combined_footer_text(&dashboard, 32),
+            "F2 palette · F4 web · F1 help"
+        );
         assert_eq!(combined_footer_text(&dashboard, 20), "F2 palette · F1 help");
         assert_eq!(combined_footer_text(&dashboard, 7), "F1 help");
         assert!(combined_footer_text(&dashboard, 5).is_empty());
@@ -4187,7 +4217,7 @@ mod tests {
     /// Expanded output keeps the transcript's rich formatting without adding
     /// a second role rail.
     #[test]
-    fn an_expanded_agent_excerpt_carries_no_transcript_gutter() {
+    fn an_expanded_agent_excerpt_flattens_newlines_without_a_transcript_gutter() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         apply_materialized_transcript(
@@ -4202,7 +4232,7 @@ mod tests {
                         })],
                     },
                 ),
-                agent_message(2, "reliability reply: summarize the README"),
+                agent_message(2, "reliability\nreply: summarize the README"),
             ],
         );
 
@@ -4681,6 +4711,9 @@ mod tests {
         let rendered = drawn(&mut dashboard, 120, 44).join("\n");
         assert!(rendered.contains("ACP pretty"), "{rendered}");
         assert!(rendered.contains("Idle"), "{rendered}");
+        let rows = minimized_content_rows(&mut dashboard, 120, 44);
+        let status = rows.iter().find(|line| line.contains("Idle")).unwrap();
+        assert!(status.starts_with("  Idle"), "{status:?}");
     }
 
     /// A session row is coloured by the same state rule the expanded rows
@@ -4835,7 +4868,9 @@ mod tests {
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized selection surface");
         assert_eq!(selection.rect, pane.inner(Margin::new(1, 1)));
-        assert_eq!(selection.rect.height, 12);
+        // Targets and Quota fit beside the minimized sidebar at this width.
+        assert_eq!(dashboard.pane_areas.unwrap()[1].x, pane.right());
+        assert_eq!(selection.rect.height, 14);
     }
 
     #[test]
@@ -4926,8 +4961,9 @@ mod tests {
             "the portrait list keeps its bordered Sessions title: {lines:?}"
         );
         let panes = dashboard.pane_areas.expect("pane geometry");
-        assert_eq!(panes[0].bottom(), panes[1].y);
-        assert_eq!(panes[1].width, 80);
+        assert_eq!(panes[0].bottom(), panes[2].bottom());
+        assert_eq!(panes[1].x, panes[0].right());
+        assert_eq!(panes[1].width, 60);
         for visible in ["Tar", "Quo"] {
             assert!(
                 lines.iter().any(|line| line.contains(visible)),
@@ -5420,7 +5456,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(rendered.contains("podman, mac-container"));
+        assert!(
+            rendered.contains("podman, mac-container  37% CPU"),
+            "{rendered}"
+        );
         assert!(rendered.contains("37% CPU · 75% RAM"));
         assert!(!rendered.contains("Sample"));
         assert!(!rendered.contains("stale"));
@@ -6174,7 +6213,7 @@ mod tests {
                 .iter()
                 .map(|span| span.content.as_ref())
                 .collect::<String>(),
-            "███████▎  ▏ 73%"
+            "███████▎  ▏73%"
         );
         assert_eq!(bar.spans[0].style.fg, Some(theme::palette().success));
         assert_eq!(bar.spans[2].style.fg, None);
@@ -6184,9 +6223,9 @@ mod tests {
                 .all(|span| span.style.bg == Some(theme::palette().background))
         );
         assert_eq!(bar.spans[3].style.fg, Some(theme::palette().muted));
-        let before = cell_before_quota_chart("Codex".into(), 7, true);
-        assert_eq!(before.to_string(), "Codex   ▕");
-        assert_eq!(before.spans[2].style, quota_chart_border_style());
+        let group = quota_group(bar, true, "2d".into());
+        assert_eq!(group.to_string(), "▕███████▎  ▏73% 2d");
+        assert_eq!(group.spans[0].style, quota_chart_border_style());
         assert!(quota_bar(None).spans.is_empty());
     }
 
@@ -6380,7 +6419,6 @@ mod tests {
 
         assert!(rendered.contains("Weekly"));
         assert!(rendered.contains("5H"));
-        assert_eq!(rendered.matches("Resets").count(), 2);
         assert!(rendered.contains("73%"));
         assert!(rendered.contains("70%"));
         assert!(rendered.contains("2d"));
@@ -6391,15 +6429,15 @@ mod tests {
             .iter()
             .find(|line| line.contains("codex-1"))
             .expect("quota row");
-        assert!(row.contains("▕███████▎  ▏ 73%"), "{row:?}");
-        assert!(row.contains("▕███████   ▏ 70%"), "{row:?}");
+        assert!(row.contains("▕███████▎  ▏73%"), "{row:?}");
+        assert!(row.contains("▕███████   ▏70%"), "{row:?}");
         let weekly_percent = cell_column(row, "73%");
         let weekly_reset = cell_column(row, "2d");
         let five_hour_percent = cell_column(row, "70%");
         let five_hour_reset = cell_column(row, "1h5m");
-        assert_eq!(weekly_reset, weekly_percent + 3 + 2);
-        assert_eq!(five_hour_percent - 12, weekly_reset + 6 + 2);
-        assert_eq!(five_hour_reset, five_hour_percent + 3 + 2);
+        assert_eq!(weekly_reset, weekly_percent + 3 + 1);
+        assert_eq!(five_hour_percent - 12, weekly_reset + 2 + 2);
+        assert_eq!(five_hour_reset, five_hour_percent + 3 + 1);
     }
 
     #[test]

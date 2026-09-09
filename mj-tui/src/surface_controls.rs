@@ -16,6 +16,7 @@ pub(crate) enum SurfaceControl {
     Command(CommandId),
     Footer(CommandId),
     Session(usize),
+    WorkspaceMenu,
 }
 
 pub(crate) const SESSION_ACTIONS: [(CommandId, &str); 2] = [
@@ -98,7 +99,29 @@ impl DashboardState {
     }
 
     pub(crate) fn handle_surface_mouse(&mut self, mouse: MouseEvent) -> Option<DashboardAction> {
+        let workspace_menu_hit = mouse.kind
+            == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+            && self
+                .workspace_hamburger_area
+                .is_some_and(|area| area.contains((mouse.column, mouse.row).into()));
         let result = self.surface_form.get_mut().handle(&Event::Mouse(mouse));
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        if workspace_menu_hit
+            && self
+                .surface_form
+                .borrow()
+                .is_focused(SurfaceControl::WorkspaceMenu)
+        {
+            self.focus = Focus::Workspaces;
+            self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Menu;
+            self.set_session_action_focus(None);
+            self.mark_render_changed();
+        }
         if let Some(Interaction::Activate(control)) = result.action {
             self.last_row_click = None;
             return Some(match control {
@@ -115,6 +138,13 @@ impl DashboardState {
                     }
                     DashboardAction::None
                 }
+                SurfaceControl::WorkspaceMenu => {
+                    self.focus = Focus::Workspaces;
+                    self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Menu;
+                    self.set_session_action_focus(None);
+                    self.mark_render_changed();
+                    self.run_available_command(CommandId::Workspaces)
+                }
             });
         }
         result
@@ -122,6 +152,26 @@ impl DashboardState {
             .is_consumed()
             .then_some(DashboardAction::None)
     }
+}
+
+/// Draws the pinned three-cell workspace manager control. It is registered in
+/// the shared surface form so mouse presses are armed and released safely even
+/// when the pointer leaves the button between events.
+pub(crate) fn render_workspace_menu(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let control = SurfaceControl::WorkspaceMenu;
+    let mut form = dashboard.surface_form.borrow_mut();
+    form.register(control, ControlKind::Button, area, true);
+    let focused = dashboard.focus() == Focus::Workspaces
+        && dashboard.workspace_control_focus == crate::workspaces::WorkspaceControlFocus::Menu;
+    let style = if focused || form.is_armed(control) {
+        theme::selection(true)
+    } else {
+        theme::muted()
+    };
+    frame.render_widget(Paragraph::new(" ☰ ").style(style), area);
 }
 
 pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
@@ -330,29 +380,60 @@ mod tests {
         second.id = "another-session".into();
         dashboard.state.sessions.insert(second.id.clone(), second);
         dashboard.focus_sessions();
+        dashboard.set_selection_for(Focus::Sessions, 0);
         draw(&mut dashboard, (120, 40));
 
-        dashboard.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            dashboard
+                .handle_event_result(Event::Key(key(KeyCode::Down)))
+                .outcome,
+            mj_chat::components::Outcome::Changed,
+        );
         assert_eq!(dashboard.selected_visible_index(), Some(1));
-        dashboard.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            dashboard
+                .handle_event_result(Event::Key(key(KeyCode::Up)))
+                .outcome,
+            mj_chat::components::Outcome::Changed,
+        );
         assert_eq!(dashboard.selected_visible_index(), Some(0));
-        dashboard.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            dashboard
+                .handle_event_result(Event::Key(key(KeyCode::Up)))
+                .outcome,
+            mj_chat::components::Outcome::Changed,
+        );
         assert_eq!(
             dashboard.session_action_focus,
             Some(CommandId::NewSessionWizard)
         );
-        dashboard.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            dashboard
+                .handle_event_result(Event::Key(key(KeyCode::Right)))
+                .outcome,
+            mj_chat::components::Outcome::Changed,
+        );
         assert_eq!(
             dashboard.session_action_focus,
             Some(CommandId::ResumeDialog)
         );
-        dashboard.handle_key(key(KeyCode::Left));
+        assert_eq!(
+            dashboard
+                .handle_event_result(Event::Key(key(KeyCode::Left)))
+                .outcome,
+            mj_chat::components::Outcome::Changed,
+        );
         assert_eq!(
             dashboard.session_action_focus,
             Some(CommandId::NewSessionWizard),
             "Left returns from Resume to Create"
         );
-        dashboard.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            dashboard
+                .handle_event_result(Event::Key(key(KeyCode::Down)))
+                .outcome,
+            mj_chat::components::Outcome::Changed,
+        );
         assert_eq!(dashboard.session_action_focus, None);
         assert_eq!(dashboard.selected_visible_index(), Some(0));
         assert!(matches!(

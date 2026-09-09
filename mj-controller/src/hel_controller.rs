@@ -13,6 +13,7 @@ mod resume;
 mod reviewer;
 #[cfg(test)]
 mod test_support;
+pub mod update;
 mod worker_binary;
 mod worker_restart;
 mod worktree;

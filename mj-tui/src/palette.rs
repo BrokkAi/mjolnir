@@ -196,6 +196,7 @@ impl DashboardState {
         };
         palette.prepare();
         self.mode = Mode::Palette(palette);
+        self.mark_render_changed();
     }
 
     pub(crate) fn begin_session_palette(&mut self) {
@@ -231,6 +232,7 @@ impl DashboardState {
         palette.form.get_mut().cancel_pointer();
         palette.entries = entries;
         palette.prepare();
+        self.mark_render_changed();
     }
 
     pub(crate) fn handle_palette_event(&mut self, event: Event) -> DashboardAction {
@@ -261,19 +263,47 @@ impl DashboardState {
             form.focus(PaletteControl::Commands);
             let result = form.handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
             form.focus(PaletteControl::Query);
+            crate::record_form_outcome_cells(
+                &self.last_event_outcome,
+                &self.render_changed,
+                &self.render_change_revision,
+                &result,
+            );
             result.action
         } else {
-            palette.form.get_mut().handle(&event).action
+            let result = palette.form.get_mut().handle(&event);
+            crate::record_form_outcome_cells(
+                &self.last_event_outcome,
+                &self.render_changed,
+                &self.render_change_revision,
+                &result,
+            );
+            result.action
         };
         match interaction {
             Some(Interaction::Cancel | Interaction::Activate(PaletteControl::Close)) => {
                 self.cancel_modal()
             }
             Some(Interaction::Edit(PaletteControl::Query, edit)) => {
-                TextField::apply(&mut palette.query, edit);
+                if TextField::apply(&mut palette.query, edit)
+                    == mj_chat::components::Outcome::Changed
+                {
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
+                }
                 self.rebuild_palette_entries();
             }
-            Some(Interaction::Select(PaletteControl::Commands, index)) => palette.selected = index,
+            Some(Interaction::Select(PaletteControl::Commands, index)) => {
+                if palette.selected != index {
+                    palette.selected = index;
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
+                }
+            }
             Some(Interaction::Activate(
                 PaletteControl::Query | PaletteControl::Commands | PaletteControl::Run,
             )) => {
@@ -296,9 +326,13 @@ impl DashboardState {
                         self.set_notice("This session is no longer available.");
                         return DashboardAction::None;
                     };
-                    self.selected_session_id = Some(id);
+                    if self.selected_session_id.as_deref() != Some(id.as_str()) {
+                        self.selected_session_id = Some(id);
+                        self.mark_render_changed();
+                    }
                 }
                 self.mode = Mode::Dashboard;
+                self.mark_render_changed();
                 return self.run_available_command(entry.id);
             }
             _ => {}
@@ -596,7 +630,8 @@ mod tests {
         let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
         let rename = row_of(&lines, "Rename session").expect("Rename session");
         let settings = row_of(&lines, "Settings").expect("the settings heading");
-        let review = row_of(&lines, "Review settings").expect("Review settings");
+        let setup = row_of(&lines, "Open setup").expect("Open setup");
+        assert!(row_of(&lines, "Review settings").is_none(), "{lines:#?}");
         let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");
         let workspaces = lines
             .iter()
@@ -607,7 +642,7 @@ mod tests {
             .expect("Workspaces command");
         assert!(heading < rename, "{lines:#?}");
         assert!(rename < settings, "{lines:#?}");
-        assert!(settings < review && review < anywhere, "{lines:#?}");
+        assert!(settings < setup && setup < anywhere, "{lines:#?}");
         assert!(anywhere < workspaces, "{lines:#?}");
         // The palette never lists itself.
         assert!(row_of(&lines, "Command palette").is_none(), "{lines:#?}");
@@ -649,14 +684,14 @@ mod tests {
     }
 
     #[test]
-    fn palette_searches_and_activates_review_settings() {
+    fn palette_searches_and_activates_setup() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         dashboard.handle_key(key(KeyCode::F(2)));
-        type_query(&mut dashboard, "review settings");
+        type_query(&mut dashboard, "open setup");
 
         let lines = drawn(&mut dashboard, 120, 30);
-        assert!(row_of(&lines, "Review settings").is_some(), "{lines:#?}");
+        assert!(row_of(&lines, "Open setup").is_some(), "{lines:#?}");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::None

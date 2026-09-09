@@ -421,17 +421,9 @@ fn primary_button(labels: &[&str]) -> usize {
     labels.len().saturating_sub(1)
 }
 
-pub(crate) fn render_import_progress(
-    frame: &mut Frame,
-    area: Rect,
-    progress: &ImportProgress,
-    surfaces: &mut FrameSurfaces,
-) {
-    let total = progress
-        .total
-        .map_or_else(|| "?".into(), |total| total.to_string());
+pub(crate) fn import_progress_status(progress: &ImportProgress) -> Line<'static> {
     let stalled_for = progress.last_updated.elapsed();
-    let status = if stalled_for >= IMPORT_STALL_WARNING_AFTER {
+    if stalled_for >= IMPORT_STALL_WARNING_AFTER {
         Line::styled(
             format!(
                 "No progress for {}s; the filesystem may be stalled.",
@@ -444,7 +436,19 @@ pub(crate) fn render_import_progress(
             "The dashboard remains responsive while the import runs.",
             Style::default().fg(theme::palette().muted),
         )
-    };
+    }
+}
+
+pub(crate) fn render_import_progress(
+    frame: &mut Frame,
+    area: Rect,
+    progress: &ImportProgress,
+    surfaces: &mut FrameSurfaces,
+) {
+    let total = progress
+        .total
+        .map_or_else(|| "?".into(), |total| total.to_string());
+    let status = import_progress_status(progress);
     let paragraph = Paragraph::new(vec![
         Line::styled(
             truncate_text(&progress.session_title, 60),
@@ -1305,8 +1309,12 @@ impl DashboardState {
             return;
         };
         if matches!(access, WebViewerAccess::Starting) {
+            let changed = !current.loading;
             current.loading = true;
             current.reset_form();
+            if changed {
+                self.mark_render_changed();
+            }
             return;
         }
         let mut dialog = WebDialog::loading();
@@ -1341,13 +1349,33 @@ impl DashboardState {
             WebViewerAccess::Unavailable(message) => dialog.message = Some(message),
         }
         dialog.reset_form();
+        let changed = current.loading != dialog.loading
+            || current.viewer_url != dialog.viewer_url
+            || current.viewer_code != dialog.viewer_code
+            || current.fallback_reason != dialog.fallback_reason
+            || current.message != dialog.message
+            || current.qr != dialog.qr
+            || current.failed_address != dialog.failed_address
+            || current.port_conflict != dialog.port_conflict
+            || current.inspecting != dialog.inspecting
+            || current.listeners != dialog.listeners
+            || current.listener_index != dialog.listener_index
+            || current.inspection_message != dialog.inspection_message
+            || current.confirm_stop != dialog.confirm_stop;
         self.mode = Mode::Web(dialog);
+        if changed {
+            self.mark_render_changed();
+        }
     }
 
     pub fn apply_web_listeners(&mut self, result: Result<Vec<WebListenerProcess>, String>) {
         let Mode::Web(dialog) = &mut self.mode else {
             return;
         };
+        let old_inspecting = dialog.inspecting;
+        let old_listeners = dialog.listeners.clone();
+        let old_listener_index = dialog.listener_index;
+        let old_message = dialog.inspection_message.clone();
         dialog.inspecting = false;
         match result {
             Ok(processes) => {
@@ -1358,12 +1386,25 @@ impl DashboardState {
             Err(error) => dialog.inspection_message = Some(error),
         }
         dialog.reset_form();
+        if old_inspecting != dialog.inspecting
+            || old_listeners != dialog.listeners
+            || old_listener_index != dialog.listener_index
+            || old_message != dialog.inspection_message
+        {
+            self.mark_render_changed();
+        }
     }
 
     pub fn apply_web_error(&mut self, error: String) {
         let Mode::Web(dialog) = &mut self.mode else {
             return;
         };
+        let old = (
+            dialog.loading,
+            dialog.confirm_stop.clone(),
+            dialog.inspection_message.clone(),
+            dialog.message.clone(),
+        );
         dialog.loading = false;
         dialog.confirm_stop = None;
         dialog.inspection_message = Some(error.clone());
@@ -1371,6 +1412,15 @@ impl DashboardState {
             dialog.message = Some(error);
         }
         dialog.reset_form();
+        let new = (
+            dialog.loading,
+            dialog.confirm_stop.clone(),
+            dialog.inspection_message.clone(),
+            dialog.message.clone(),
+        );
+        if old != new {
+            self.mark_render_changed();
+        }
     }
 
     pub(crate) fn handle_web_event(
@@ -1378,7 +1428,14 @@ impl DashboardState {
         event: Event,
         mut dialog: WebDialog,
     ) -> DashboardAction {
-        let interaction = dialog.form.get_mut().handle(&event).action;
+        let result = dialog.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         let mut action = DashboardAction::None;
         match interaction {
             Some(Interaction::Cancel) if dialog.confirm_stop.is_some() => {
@@ -1455,6 +1512,7 @@ impl DashboardState {
             ),
             return_to_targets: false,
         });
+        self.mark_render_changed();
     }
 
     pub(crate) fn begin_target_actions(&mut self) {
@@ -1477,6 +1535,7 @@ impl DashboardState {
             testing: None,
             result: None,
         });
+        self.mark_render_changed();
     }
 
     pub(crate) fn handle_target_actions_event(
@@ -1496,6 +1555,7 @@ impl DashboardState {
             dialog.result = Some(("Target test".into(), Err("cancelled".into())));
             sync_target_actions_form(&mut dialog);
             self.mode = Mode::TargetActions(dialog);
+            self.mark_render_changed();
             return DashboardAction::CancelTargetTest;
         }
         // Preserve the convenient Up/Down target selection from the old
@@ -1507,9 +1567,20 @@ impl DashboardState {
                 KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k')
             )
         {
-            dialog.form.get_mut().focus(DialogControl::TargetList);
+            let form = dialog.form.get_mut();
+            if !form.is_focused(DialogControl::TargetList) {
+                form.focus(DialogControl::TargetList);
+                self.mark_render_changed();
+            }
         }
-        let interaction = dialog.form.get_mut().handle(&event).action;
+        let result = dialog.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) => {
                 self.cancel_modal();
@@ -1539,6 +1610,7 @@ impl DashboardState {
                             ),
                             return_to_targets: true,
                         });
+                        self.mark_render_changed();
                         return DashboardAction::None;
                     }
                     DialogControl::TargetTest if dialog.testing.is_none() => {
@@ -1546,6 +1618,7 @@ impl DashboardState {
                         dialog.result = None;
                         sync_target_actions_form(&mut dialog);
                         self.mode = Mode::TargetActions(dialog);
+                        self.mark_render_changed();
                         return DashboardAction::TestTarget { target_id };
                     }
                     DialogControl::TargetClose => {
@@ -1554,6 +1627,7 @@ impl DashboardState {
                     }
                     _ => {}
                 }
+                self.mode = Mode::TargetActions(dialog);
             }
             _ => self.mode = Mode::TargetActions(dialog),
         }
@@ -1565,7 +1639,14 @@ impl DashboardState {
         event: Event,
         mut editor: ConfigIdEditor,
     ) -> DashboardAction {
-        let interaction = editor.form.get_mut().handle(&event).action;
+        let result = editor.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
                 if editor.return_to_targets {
@@ -1575,12 +1656,21 @@ impl DashboardState {
                 }
             }
             Some(Interaction::Edit(DialogControl::Field, edit)) => {
-                TextField::apply(&mut editor.value, edit);
+                if TextField::apply(&mut editor.value, edit) == Outcome::Changed {
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
+                }
                 self.mode = Mode::ConfigId(editor);
             }
             Some(Interaction::Activate(DialogControl::Field | DialogControl::Save)) => {
                 if editor.value.trim().is_empty() {
                     self.notices.set("Configuration ID cannot be empty.");
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
                     self.mode = Mode::ConfigId(editor);
                 } else {
                     self.cancel_modal();
@@ -1609,9 +1699,13 @@ impl DashboardState {
         if let Mode::TargetActions(dialog) = &mut self.mode
             && dialog.testing.as_deref() == Some(&target_id)
         {
+            let old = (dialog.testing.clone(), dialog.result.clone());
             dialog.testing = None;
             dialog.result = Some((target_id, result));
             sync_target_actions_form(dialog);
+            if old != (dialog.testing.clone(), dialog.result.clone()) {
+                self.mark_render_changed();
+            }
         }
     }
 
@@ -1642,14 +1736,20 @@ impl DashboardState {
             ),
             launch: Box::new(launch),
         });
+        self.mark_render_changed();
     }
 
     pub fn apply_repository_origin_failure(&mut self, repository_id: &str, error: String) {
         if let Mode::RepositoryOrigin(dialog) = &mut self.mode
             && dialog.repository_id == repository_id
         {
+            let old_error = dialog.error.clone();
+            let old_focus = dialog.form.borrow().focused();
             dialog.error = Some(error);
             dialog.form.get_mut().focus(DialogControl::Field);
+            if old_error != dialog.error || old_focus != dialog.form.borrow().focused() {
+                self.mark_render_changed();
+            }
         }
     }
 
@@ -1662,7 +1762,14 @@ impl DashboardState {
         event: Event,
         mut dialog: RepositoryOriginDialog,
     ) -> DashboardAction {
-        let interaction = dialog.form.get_mut().handle(&event).action;
+        let result = dialog.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
                 self.cancel_modal();
@@ -1670,6 +1777,10 @@ impl DashboardState {
             Some(Interaction::Edit(DialogControl::Field, edit)) => {
                 if TextField::apply(&mut dialog.replacement, edit) == Outcome::Changed {
                     dialog.error = None;
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
                 }
                 self.mode = Mode::RepositoryOrigin(dialog);
             }
@@ -1677,6 +1788,10 @@ impl DashboardState {
                 if dialog.replacement.trim().is_empty() {
                     dialog.error = Some("Enter the repository's new origin.".into());
                     dialog.form.get_mut().focus(DialogControl::Field);
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
                     self.mode = Mode::RepositoryOrigin(dialog);
                 } else {
                     let action = DashboardAction::ReplaceResumeRepositoryOrigin {
@@ -1700,6 +1815,7 @@ impl DashboardState {
             session_id,
             error: error.into(),
         }));
+        self.mark_render_changed();
     }
 
     pub fn show_import_progress(&mut self, session_title: String) {
@@ -1711,16 +1827,23 @@ impl DashboardState {
             last_updated: Instant::now(),
             form: dialog_form(&[DialogControl::Cancel], DialogControl::Cancel),
         });
+        self.mark_render_changed();
     }
 
     pub fn update_import_progress(&mut self, step: usize, total: Option<usize>, message: String) {
         let Mode::Importing(progress) = &mut self.mode else {
             return;
         };
+        let previous_status = import_progress_status(progress);
+        let changed =
+            progress.step != step || progress.total != total || progress.message != message;
         progress.step = step;
         progress.total = total;
         progress.message = message;
         progress.last_updated = Instant::now();
+        if changed || previous_status != import_progress_status(progress) {
+            self.mark_render_changed();
+        }
     }
 
     pub fn show_import_bundle_confirmation(
@@ -1753,6 +1876,7 @@ impl DashboardState {
             ignore_untracked: has_untracked_files,
             form,
         });
+        self.mark_render_changed();
     }
 
     pub fn show_dirty_local_confirmation(
@@ -1764,6 +1888,7 @@ impl DashboardState {
             action,
             repositories,
         }));
+        self.mark_render_changed();
     }
 
     pub fn finish_import(&mut self) {
@@ -1775,7 +1900,14 @@ impl DashboardState {
         event: Event,
         mut progress: ImportProgress,
     ) -> DashboardAction {
-        let interaction = progress.form.get_mut().handle(&event).action;
+        let result = progress.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
                 self.mode = Mode::Importing(progress);
@@ -1812,6 +1944,7 @@ impl DashboardState {
                 DialogControl::Field,
             ),
         });
+        self.mark_render_changed();
     }
 
     pub(crate) fn handle_rename_event(
@@ -1819,19 +1952,35 @@ impl DashboardState {
         event: Event,
         mut editor: RenameEditor,
     ) -> DashboardAction {
-        let interaction = editor.form.get_mut().handle(&event).action;
+        let result = editor.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
                 self.cancel_modal();
             }
             Some(Interaction::Edit(DialogControl::Field, edit)) => {
-                TextField::apply(&mut editor.title, edit);
+                if TextField::apply(&mut editor.title, edit) == Outcome::Changed {
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
+                }
                 self.mode = Mode::Rename(editor);
             }
             Some(Interaction::Activate(DialogControl::Field | DialogControl::Save)) => {
                 if editor.title.trim().is_empty() {
                     self.notices.set("Session name cannot be empty.");
                     editor.form.get_mut().focus(DialogControl::Field);
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
                     self.mode = Mode::Rename(editor);
                 } else {
                     self.cancel_modal();
@@ -1851,7 +2000,14 @@ impl DashboardState {
         event: Event,
         mut confirmation: ImportBundleConfirmation,
     ) -> DashboardAction {
-        let interaction = confirmation.form.get_mut().handle(&event).action;
+        let result = confirmation.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel)
             | Some(Interaction::Activate(DialogControl::ImportCancel)) => {
@@ -1899,7 +2055,14 @@ impl DashboardState {
                 _ => {}
             }
         }
-        let interaction = dialog.form.get_mut().handle(&event).action;
+        let result = dialog.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) => {
                 if let Confirmation::DestroyStopped { reopen, .. } = dialog.confirmation {

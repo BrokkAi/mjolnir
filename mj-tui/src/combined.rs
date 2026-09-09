@@ -297,10 +297,8 @@ fn sized_band(size: PaneSize, minimized_height: u16, full: u16, standard_cap: u1
     }
 }
 
-fn support_panes_fit(area_width: u16, dashboard: &DashboardState) -> bool {
-    let hypothetical_content_width =
-        area_width.saturating_sub(sessions_sidebar_width(area_width, PaneSize::Maximized));
-    capacity_table_width(dashboard).max(quota_table_width(dashboard)) <= hypothetical_content_width
+fn support_panes_fit(content_width: u16, dashboard: &DashboardState) -> bool {
+    capacity_table_width(dashboard).max(quota_table_width(dashboard)) <= content_width
 }
 
 /// Draws the whole combined surface: Sessions, the conversation, Prompt,
@@ -473,10 +471,9 @@ fn render_combined_themed(
     };
     let targets = bands[1];
     let quota = bands[2];
-    // The support panes stay stacked together. Their placement is based on
-    // the width left by a hypothetical maximized Sessions pane so that
-    // minimizing Sessions cannot make the arrangement jump between frames.
-    let supports_adjacent = support_panes_fit(area.width, dashboard);
+    // Keep the support panes stacked together, using the space left by the
+    // current sidebar size to decide whether they fit beside Sessions.
+    let supports_adjacent = support_panes_fit(content_area.width, dashboard);
     let mut maximize_enabled =
         maximized_pane_is_effective(area.height, dimensions, desired_prompt, sizes);
     maximize_enabled[0].1 = sessions_sidebar_width(area.width, PaneSize::Maximized)
@@ -1066,8 +1063,15 @@ mod tests {
                 dashboard.config.sessions_side = side;
                 dashboard.set_pane_size(SupportPane::Sessions, size);
                 let required = capacity_table_width(&dashboard).max(quota_table_width(&dashboard));
-                let threshold = required.saturating_mul(2).saturating_sub(1);
-                for width in [threshold - 1, threshold, 80, 480] {
+                let threshold = (MINIMUM_TERMINAL_WIDTH..=480)
+                    .find(|&width| width - sessions_sidebar_width(width, size) >= required)
+                    .expect("support panes fit in a wide terminal");
+                for width in [
+                    threshold.saturating_sub(1).max(MINIMUM_TERMINAL_WIDTH),
+                    threshold,
+                    80,
+                    480,
+                ] {
                     let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
                     terminal
                         .draw(|frame| render_combined(frame, &mut dashboard, None, false))
@@ -1084,6 +1088,55 @@ mod tests {
                         assert_eq!(targets.width, width - sessions.width);
                         assert_eq!(sessions.bottom(), 39);
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resizing_sidebar_relayouts_support_panes_without_resizing_terminal() {
+        use hel::hel_config::SessionsSide;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        for side in [SessionsSide::Left, SessionsSide::Right] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.config.sessions_side = side;
+            let required = capacity_table_width(&dashboard).max(quota_table_width(&dashboard));
+            let width = (MINIMUM_TERMINAL_WIDTH..=480)
+                .find(|&width| {
+                    width - sessions_sidebar_width(width, PaneSize::Minimized) >= required
+                        && width - sessions_sidebar_width(width, PaneSize::Maximized) < required
+                })
+                .expect("sidebar sizes straddle the support layout threshold");
+            let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+            for size in [
+                PaneSize::Maximized,
+                PaneSize::Minimized,
+                PaneSize::Maximized,
+            ] {
+                dashboard.set_pane_size(SupportPane::Sessions, size);
+                assert!(dashboard.take_render_changed());
+                terminal
+                    .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+                    .unwrap();
+                let [sessions, targets, quota] = dashboard.pane_areas.unwrap();
+                assert_eq!(targets.x, quota.x);
+                assert_eq!(targets.width, quota.width);
+                assert_eq!(targets.bottom(), quota.y);
+                if size == PaneSize::Minimized {
+                    assert_eq!(targets.width, width - sessions.width);
+                    assert_eq!(sessions.bottom(), 39);
+                    assert_eq!(
+                        targets.x,
+                        if side == SessionsSide::Left {
+                            sessions.right()
+                        } else {
+                            0
+                        }
+                    );
+                } else {
+                    assert_eq!(targets.width, width);
+                    assert_eq!(targets.y, sessions.bottom());
                 }
             }
         }

@@ -45,10 +45,12 @@ def palette_viewport(tmux, evidence):
     # Palette groups follow the focused pane; use Sessions for this viewport probe.
     click(tmux, "Sessions")
     tmux.send_key("F2")
-    tmux.wait_for("Review settings…")
+    tmux.wait_for("Open setup")
     screen = popup_text()
-    if not screen.index("Settings") < screen.index("Review settings…") < screen.index("Anywhere"):
-        raise ScenarioFailure(f"review settings is not in its own Settings section:\n{screen}")
+    if not screen.index("Settings") < screen.index("Open setup") < screen.index("Anywhere"):
+        raise ScenarioFailure(f"Setup is not in its Settings section:\n{screen}")
+    if "Review settings…" in screen:
+        raise ScenarioFailure("obsolete review settings palette entry remains")
     tmux.wait_for("Detach from this terminal")
     if "▐" in popup_text():
         raise ScenarioFailure("roomy palette unnecessarily shows a scrollbar")
@@ -63,20 +65,28 @@ def palette_viewport(tmux, evidence):
     tmux.wait_until(lambda: "› Help" in popup_text(), "the final Help command selected after End")
     record(tmux, evidence, "palette-scroll-end", "resize 100x18; Tab, End", "the final command rows remain reachable")
     tmux.send_key("BTab")
-    tmux.send_text("review settings")
-    tmux.wait_for("Review settings…")
+    tmux.send_text("open setup")
+    tmux.wait_for("Open setup")
     tmux.wait_until(lambda: "▐" not in popup_text(), "filtered palette fits without scrollbar")
-    record(tmux, evidence, "palette-filter-small", "Shift-Tab; type review settings", "filtered settings entry fits in the short palette")
+    record(tmux, evidence, "palette-filter-small", "Shift-Tab; type open setup", "filtered settings entry fits in the short palette")
     tmux.send_key("Enter")
-    tmux.wait_for("Automatic review")
+    tmux.wait_for("╭ Setup")
     click(tmux, "  Cancel  ")
     absent(tmux, "╭ Setup")
     tmux.resize(140, 40)
 
 
+def open_review_settings(tmux):
+    tmux.send_key("F7")
+    tmux.wait_for("Code review")
+    click(tmux, "Code review")
+    tmux.send_key("Enter")
+    tmux.wait_for("Automatic review")
+
+
 def save_review_settings(lab, tmux, evidence):
     original = lab.snapshot()["review_config"]
-    command(tmux, "review settings", "Automatic review")
+    open_review_settings(tmux)
     # The fixture starts disabled, so changing tier can be saved independently
     # of target discovery. Validate persistence and disappearance separately.
     click(tmux, "Quick")
@@ -85,7 +95,7 @@ def save_review_settings(lab, tmux, evidence):
     absent(tmux, "╭ Setup")
     lab.wait_snapshot(lambda value: value["review_config"]["tier"].lower() == "quick", "review tier persisted")
     record(tmux, evidence, "review-save-dismissed", "choose Quick and click Save", "settings close and persisted tier changes")
-    command(tmux, "review settings", "Automatic review")
+    open_review_settings(tmux)
     click(tmux, "Extended" if original["tier"].lower() == "extended" else "Quick")
     if original["tier"].lower() == "extended":
         tmux.wait_for("A supervisor selects specialist reviewers for deeper coverage.")

@@ -11,6 +11,7 @@
 //! availability is a question about [`DashboardState`].
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use mj_chat::components::{EventResult, Outcome};
 
 use crate::dialogs::{ConfirmDialog, Confirmation};
 use crate::{DashboardAction, DashboardState, Focus};
@@ -43,7 +44,6 @@ pub enum CommandId {
     WebViewer,
     QuitDetach,
     Palette,
-    ReviewSettings,
     CycleSpinner,
     Help,
 }
@@ -582,10 +582,12 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Workspaces",
         description: "Switch to another workspace.",
         scope: Scope::Global,
-        keys: &[KeyHint::plain(KeyCode::F(3), "F3")],
-        footer: footer_word!("workspaces"),
+        // Workspace management is opened by the pinned hamburger or the
+        // command palette. It intentionally has no global key or footer hint.
+        keys: &[],
+        footer: no_footer,
         footer_group: FooterGroup::Function,
-        footer_rank: 1,
+        footer_rank: 0,
         available: always_ready,
     },
     CommandSpec {
@@ -655,17 +657,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
-        id: CommandId::ReviewSettings,
-        label: "Review settings…",
-        description: "Open Setup at Code review.",
-        scope: Scope::Settings,
-        keys: &[],
-        footer: no_footer,
-        footer_group: FooterGroup::Function,
-        footer_rank: 0,
-        available: always_ready,
-    },
-    CommandSpec {
         id: CommandId::CycleSpinner,
         label: "Next spinner style",
         description: "Cycle activity animations: scan, pulse, wave, bars, shimmer, globe.",
@@ -699,12 +690,9 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
 /// accepts — a function key or an Alt letter. Plain-letter aliases remain
 /// local to their pane because the composer reads bare letters as text.
 ///
-/// `F2` opens the command palette; its old workspace-picker binding moved to
-/// `F3`.
 const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::Help,
     CommandId::Palette,
-    CommandId::Workspaces,
     CommandId::SelectWorkspacePrevious,
     CommandId::SelectWorkspaceNext,
     CommandId::WebViewer,
@@ -865,7 +853,6 @@ impl DashboardState {
                 self.begin_palette();
                 DashboardAction::None
             }
-            CommandId::ReviewSettings => self.begin_review_settings(),
             CommandId::CycleSpinner => {
                 if self.spinner_save_pending {
                     return DashboardAction::None;
@@ -903,6 +890,7 @@ impl DashboardState {
                 self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::ForceDestroy {
                     session_id,
                 }));
+                self.mark_render_changed();
                 DashboardAction::None
             }
             CommandId::MarkAllRead => self.mark_all_read(),
@@ -968,6 +956,26 @@ impl DashboardState {
             }
         }
     }
+
+    /// Runs one command while preserving whether dispatch changed the visible
+    /// dashboard. Commands that return an action are still consumed when they
+    /// do not redraw immediately; the caller must execute those actions
+    /// independently of the repaint decision.
+    pub fn dispatch_command_result(&mut self, id: CommandId) -> EventResult<DashboardAction> {
+        let revision = self.render_change_revision();
+        let notice_generation = self.notices.generation();
+        let action = self.dispatch_command(id);
+        let changed = self.render_change_revision() != revision
+            || self.notices.generation() != notice_generation;
+        EventResult {
+            outcome: if changed {
+                Outcome::Changed
+            } else {
+                Outcome::Unchanged
+            },
+            action: (!matches!(&action, DashboardAction::None)).then_some(action),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -975,6 +983,14 @@ mod tests {
     use super::*;
     use crate::SessionOperationKind;
     use crate::test_support::{dashboard_with_session, key, operation, running_session};
+
+    #[test]
+    fn workspace_manager_stays_in_palette_without_a_function_key() {
+        let dashboard = dashboard_with_session(running_session());
+        assert!(global_chord(&key(KeyCode::F(3))).is_none());
+        assert!(available(&dashboard, None).contains(&CommandId::Workspaces));
+        assert!(spec(CommandId::Workspaces).keys.is_empty());
+    }
 
     #[test]
     fn spinner_selection_waits_for_the_current_save_before_accepting_another() {

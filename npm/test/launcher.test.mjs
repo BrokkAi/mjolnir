@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   isMainModule,
+  installMethodEnvironment,
   nativeBinaryPath,
   launch,
   platformPackageName,
@@ -50,7 +51,7 @@ test("names the platform-native executable", () => {
   assert.equal(nativeBinaryPath("C:\\bundle", "win32"), "C:\\bundle/bin/mj.exe");
 });
 
-test("launches the native bundle with its siblings on PATH and updates disabled", () => {
+test("declares npm as the install method for plain npm launches", () => {
   const child = new EventEmitter();
   child.kill = () => true;
   let invocation;
@@ -61,8 +62,51 @@ test("launches the native bundle with its siblings on PATH and updates disabled"
   assert.equal(invocation.binary, "/tmp/bundle/bin/mj");
   assert.deepEqual(invocation.args, ["--version"]);
   assert.equal(invocation.options.stdio, "inherit");
-  assert.equal(invocation.options.env.MJOLNIR_NO_UPDATE_CHECK, "true");
+  assert.equal(invocation.options.env.MJOLNIR_NO_UPDATE_CHECK, process.env.MJOLNIR_NO_UPDATE_CHECK);
+  assert.ok(
+    invocation.options.env.MJOLNIR_MANAGED_BY_NPM === "true" ||
+      invocation.options.env.MJOLNIR_MANAGED_BY_NPX === "true",
+  );
   assert.ok(invocation.options.env.PATH.startsWith(`/tmp/bundle/bin${process.platform === "win32" ? ";" : ":"}`));
+});
+
+test("preserves a user opt-out for npm and npx launches", () => {
+  const previousOptOut = process.env.MJOLNIR_NO_UPDATE_CHECK;
+  const previousCommand = process.env.npm_command;
+  try {
+    process.env.MJOLNIR_NO_UPDATE_CHECK = "1";
+    for (const npmCommand of ["install", "exec"]) {
+      process.env.npm_command = npmCommand;
+      const child = new EventEmitter();
+      child.kill = () => true;
+      let childEnv;
+      launch("/tmp/bundle", [], "linux", (_binary, _args, options) => {
+        childEnv = options.env;
+        return child;
+      });
+      child.emit("exit", 0, null);
+      assert.equal(childEnv.MJOLNIR_NO_UPDATE_CHECK, "1");
+      const marker = npmCommand === "exec" ? "MJOLNIR_MANAGED_BY_NPX" : "MJOLNIR_MANAGED_BY_NPM";
+      assert.equal(childEnv[marker], "true");
+    }
+  } finally {
+    if (previousOptOut === undefined) delete process.env.MJOLNIR_NO_UPDATE_CHECK;
+    else process.env.MJOLNIR_NO_UPDATE_CHECK = previousOptOut;
+    if (previousCommand === undefined) delete process.env.npm_command;
+    else process.env.npm_command = previousCommand;
+  }
+});
+
+test("names npm or npx as the install method by how the launcher was invoked", () => {
+  assert.deepEqual(installMethodEnvironment({ npm_command: "exec" }), {
+    MJOLNIR_MANAGED_BY_NPX: "true",
+  });
+  assert.deepEqual(installMethodEnvironment({ npm_command: "install" }), {
+    MJOLNIR_MANAGED_BY_NPM: "true",
+  });
+  assert.deepEqual(installMethodEnvironment({}), {
+    MJOLNIR_MANAGED_BY_NPM: "true",
+  });
 });
 
 test("returns the conventional exit status when the native process is signalled", () => {

@@ -63,11 +63,15 @@ impl ChatState {
         if len == 0 {
             return;
         }
-        autocomplete.selected = if delta.is_negative() {
+        let selected = if delta.is_negative() {
             autocomplete.selected.checked_sub(1).unwrap_or(len - 1)
         } else {
             (autocomplete.selected + 1) % len
         };
+        if autocomplete.selected != selected {
+            autocomplete.selected = selected;
+            self.mark_visible_changed();
+        }
     }
 
     pub(super) fn accept_autocomplete(&mut self) -> bool {
@@ -96,7 +100,7 @@ impl ChatState {
             return false;
         };
         self.set_input(value);
-        self.autocomplete = None;
+        self.set_autocomplete(None);
         true
     }
 
@@ -109,49 +113,29 @@ impl ChatState {
 
     pub(super) fn update_autocomplete(&mut self) {
         if !self.input_images.is_empty() {
-            self.autocomplete = None;
+            self.set_autocomplete(None);
             return;
         }
         if self.history_search.is_some() || self.input_cursor != self.input.len() {
-            self.autocomplete = None;
+            self.set_autocomplete(None);
             return;
         }
-        for (prefix, key, values) in [
-            ("/model ", "model", &self.model_values),
-            ("/effort ", "effort", &self.effort_values),
-        ] {
-            if let Some(query) = self.input.strip_prefix(prefix) {
-                // A bare command submits into the full value selector; the
-                // inline popup only completes a partially typed value.
-                if query.is_empty() {
-                    self.autocomplete = None;
-                    return;
-                }
-                // An advertised value is already a complete command. Leaving
-                // its popup open makes Enter accept the text without
-                // submitting it, and a concurrent session refresh can reopen
-                // the popup immediately after acceptance.
-                if values.iter().any(|choice| choice.value == query) {
-                    self.autocomplete = None;
-                    return;
-                }
-                let matches = matching_indices(values, query, |choice| {
-                    (&choice.value, Some(choice.name.as_str()))
-                });
-                self.autocomplete = (!matches.is_empty()).then_some(Autocomplete {
-                    kind: AutocompleteKind::ConfigValues { key },
-                    selected: 0,
-                    matches,
-                });
-                return;
-            }
+        if let Some(query) = self.input.strip_prefix("/model ") {
+            let next = value_autocomplete(query, &self.model_values, "model");
+            self.set_autocomplete(next);
+            return;
+        }
+        if let Some(query) = self.input.strip_prefix("/effort ") {
+            let next = value_autocomplete(query, &self.effort_values, "effort");
+            self.set_autocomplete(next);
+            return;
         }
         let Some(query) = self.input.strip_prefix('/') else {
-            self.autocomplete = None;
+            self.set_autocomplete(None);
             return;
         };
         if query.contains(char::is_whitespace) {
-            self.autocomplete = None;
+            self.set_autocomplete(None);
             return;
         }
         // A fully typed command is ready to submit. Leaving its popup open
@@ -162,17 +146,24 @@ impl ChatState {
             .iter()
             .any(|command| command.name == query)
         {
-            self.autocomplete = None;
+            self.set_autocomplete(None);
             return;
         }
         let matches = matching_indices(&self.command_choices, query, |command| {
             (&command.name, Some(command.description.as_str()))
         });
-        self.autocomplete = (!matches.is_empty()).then_some(Autocomplete {
+        self.set_autocomplete((!matches.is_empty()).then_some(Autocomplete {
             kind: AutocompleteKind::Commands,
             selected: 0,
             matches,
-        });
+        }));
+    }
+
+    fn set_autocomplete(&mut self, autocomplete: Option<Autocomplete>) {
+        if self.autocomplete != autocomplete {
+            self.autocomplete = autocomplete;
+            self.mark_visible_changed();
+        }
     }
 
     pub(super) fn rebuild_command_choices(&mut self) {
@@ -224,14 +215,22 @@ impl ChatState {
                 source: CommandSource::Agent,
             });
         }
-        self.command_choices = commands;
+        if self.command_choices != commands {
+            self.command_choices = commands;
+            self.mark_visible_changed();
+        }
         self.update_autocomplete();
     }
 
     pub(super) fn set_config_options(&mut self, options: &[SessionConfigOption]) {
         self.acp_surface.set_config_options(options);
-        self.model_values = session_config_choices(options, "model");
-        self.effort_values = session_config_choices(options, "effort");
+        let model_values = session_config_choices(options, "model");
+        let effort_values = session_config_choices(options, "effort");
+        if self.model_values != model_values || self.effort_values != effort_values {
+            self.model_values = model_values;
+            self.effort_values = effort_values;
+            self.mark_visible_changed();
+        }
         self.rebuild_command_choices();
     }
 
@@ -262,7 +261,28 @@ impl ChatState {
             ChatRole::System,
             format!("Clipboard: Ctrl-V paste text/image (Ctrl-Alt-V if intercepted by your terminal) · Backspace/Delete remove image markers · Ctrl-Alt-R restore a failed submission (empty composer)\n\nAvailable commands:\n!<command> — run a Bash command in this session [mj]\n{commands}"),
         ));
+        self.mark_visible_changed();
     }
+}
+
+fn value_autocomplete(
+    query: &str,
+    values: &[SessionConfigChoice],
+    key: &'static str,
+) -> Option<Autocomplete> {
+    // A bare command submits into the full value selector; the inline popup
+    // only completes a partially typed value.
+    if query.is_empty() || values.iter().any(|choice| choice.value == query) {
+        return None;
+    }
+    let matches = matching_indices(values, query, |choice| {
+        (&choice.value, Some(choice.name.as_str()))
+    });
+    (!matches.is_empty()).then_some(Autocomplete {
+        kind: AutocompleteKind::ConfigValues { key },
+        selected: 0,
+        matches,
+    })
 }
 
 pub(super) fn matching_indices<T>(

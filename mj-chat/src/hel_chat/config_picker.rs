@@ -15,7 +15,9 @@ use hel::hel_worker::WorkerPhase;
 
 use super::autocomplete::{config_value_row, matching_indices};
 use super::{ChatAction, ChatState};
-use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
+use crate::components::{
+    ButtonRow, ChoiceList, ControlKind, Form, Interaction, Outcome, TextField,
+};
 use crate::hel_text_input::TextInput;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +118,7 @@ impl ChatState {
             return false;
         }
         self.config_picker = Some(ConfigPicker::new(key, choices, current));
+        self.mark_visible_changed();
         true
     }
 
@@ -131,7 +134,11 @@ impl ChatState {
 
     pub(super) fn cancel_config_picker_pointer(&mut self) {
         if let Some(picker) = self.config_picker.as_mut() {
+            let captured = picker.form.captures_pointer();
             picker.form.cancel_pointer();
+            if captured {
+                self.mark_visible_changed();
+            }
         }
     }
 
@@ -150,17 +157,33 @@ impl ChatState {
             Some(picker) => picker.form.handle(&event),
             None => return (false, ChatAction::None),
         };
+        if result.outcome == Outcome::Changed {
+            self.mark_visible_changed();
+        }
         match result.action {
             Some(Interaction::Edit(ConfigControl::Filter, edit)) => {
+                let mut changed = false;
                 if let Some(picker) = self.config_picker.as_mut() {
+                    let before_filter = picker.filter.value().to_owned();
+                    let before_selected = picker.selected;
                     TextField::apply(&mut picker.filter, edit);
                     picker.refilter();
+                    changed = before_filter != picker.filter.value()
+                        || before_selected != picker.selected;
+                }
+                if changed {
+                    self.mark_visible_changed();
                 }
                 (true, ChatAction::None)
             }
             Some(Interaction::Select(ConfigControl::Values, selected)) => {
+                let mut changed = false;
                 if let Some(picker) = self.config_picker.as_mut() {
+                    changed = picker.selected != selected;
                     picker.selected = selected;
+                }
+                if changed {
+                    self.mark_visible_changed();
                 }
                 (true, ChatAction::None)
             }
@@ -169,6 +192,7 @@ impl ChatState {
             }
             Some(Interaction::Activate(ConfigControl::Cancel) | Interaction::Cancel) => {
                 self.config_picker = None;
+                self.mark_visible_changed();
                 (true, ChatAction::None)
             }
             _ => (result.outcome.is_consumed(), ChatAction::None),
@@ -176,25 +200,48 @@ impl ChatState {
     }
 
     pub(super) fn handle_config_picker_event(&mut self, key: KeyEvent) -> ChatAction {
-        let Some(picker) = self.config_picker.as_mut() else {
-            return ChatAction::None;
+        let (outcome, action) = {
+            let Some(picker) = self.config_picker.as_mut() else {
+                return ChatAction::None;
+            };
+            if picker.form.is_focused(ConfigControl::Filter)
+                && key.modifiers.is_empty()
+                && matches!(key.code, KeyCode::Up | KeyCode::Down)
+            {
+                picker.form.focus(ConfigControl::Values);
+            }
+            let event = Event::Key(key);
+            let result = picker.form.handle(&event);
+            (result.outcome, result.action)
         };
-        if picker.form.is_focused(ConfigControl::Filter)
-            && key.modifiers.is_empty()
-            && matches!(key.code, KeyCode::Up | KeyCode::Down)
-        {
-            picker.form.focus(ConfigControl::Values);
+        if outcome == Outcome::Changed {
+            self.mark_visible_changed();
         }
-        let event = Event::Key(key);
-        let result = picker.form.handle(&event);
-        if let Some(action) = result.action {
+        if let Some(action) = action {
             match action {
                 Interaction::Edit(ConfigControl::Filter, edit) => {
-                    TextField::apply(&mut picker.filter, edit);
-                    picker.refilter();
+                    let mut changed = false;
+                    if let Some(picker) = self.config_picker.as_mut() {
+                        let before_filter = picker.filter.value().to_owned();
+                        let before_selected = picker.selected;
+                        TextField::apply(&mut picker.filter, edit);
+                        picker.refilter();
+                        changed = before_filter != picker.filter.value()
+                            || before_selected != picker.selected;
+                    }
+                    if changed {
+                        self.mark_visible_changed();
+                    }
                 }
                 Interaction::Select(ConfigControl::Values, selected) => {
-                    picker.selected = selected;
+                    let mut changed = false;
+                    if let Some(picker) = self.config_picker.as_mut() {
+                        changed = picker.selected != selected;
+                        picker.selected = selected;
+                    }
+                    if changed {
+                        self.mark_visible_changed();
+                    }
                 }
                 Interaction::Activate(ConfigControl::Values | ConfigControl::Apply) => {
                     return self.apply_config_picker_selection();
@@ -204,12 +251,13 @@ impl ChatState {
                 }
                 Interaction::Activate(ConfigControl::Cancel) | Interaction::Cancel => {
                     self.config_picker = None;
+                    self.mark_visible_changed();
                 }
                 _ => {}
             }
             return ChatAction::None;
         }
-        if result.outcome.is_consumed() {
+        if outcome.is_consumed() {
             return ChatAction::None;
         }
         ChatAction::None
@@ -225,6 +273,7 @@ impl ChatState {
         let key = picker.key;
         let value = choice.value.clone();
         self.config_picker = None;
+        self.mark_visible_changed();
         if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
             self.set_notice("The worker is closing; this configuration change was not sent");
             return ChatAction::None;

@@ -64,6 +64,18 @@ impl<A> EventResult<A> {
         }
     }
 
+    /// A consumed event which carries an action but does not itself repaint
+    /// the form. The action is deliberately retained even when the outcome is
+    /// unchanged; callers may need to apply a domain operation such as a
+    /// button activation or a no-op cursor request.
+    #[must_use]
+    pub const fn unchanged(action: Option<A>) -> Self {
+        Self {
+            outcome: Outcome::Unchanged,
+            action,
+        }
+    }
+
     /// A consumed event which should cause a repaint.
     #[must_use]
     pub const fn changed(action: Option<A>) -> Self {
@@ -71,6 +83,30 @@ impl<A> EventResult<A> {
             outcome: Outcome::Changed,
             action,
         }
+    }
+
+    /// Replaces the action while preserving this result's repaint outcome.
+    #[must_use]
+    pub fn map_action<B>(self, map: impl FnOnce(A) -> B) -> EventResult<B> {
+        EventResult {
+            outcome: self.outcome,
+            action: self.action.map(map),
+        }
+    }
+
+    /// Replaces the outcome while preserving this result's action.
+    #[must_use]
+    pub const fn with_outcome(mut self, outcome: Outcome) -> Self {
+        self.outcome = outcome;
+        self
+    }
+
+    /// Combines a second repaint outcome with this result, retaining the
+    /// stronger of the two while preserving the action.
+    #[must_use]
+    pub fn merge_outcome(self, outcome: Outcome) -> Self {
+        let merged = self.outcome.max(outcome);
+        self.with_outcome(merged)
     }
 }
 
@@ -149,6 +185,13 @@ struct Control<K> {
     list_offset: usize,
     row_map: Vec<Option<usize>>,
     row_enabled: Vec<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FormVisualState<K> {
+    focused: Option<K>,
+    focused_kind: Option<ControlKind>,
+    armed: Option<K>,
 }
 
 impl<K> Control<K> {
@@ -503,6 +546,12 @@ impl<K: Copy + Eq> Form<K> {
 
     /// Handles keyboard and mouse input for the form.
     pub fn handle(&mut self, event: &Event) -> EventResult<Interaction<K>> {
+        let before = self.visual_state();
+        let result = self.handle_inner(event);
+        self.report_result(before, result)
+    }
+
+    fn handle_inner(&mut self, event: &Event) -> EventResult<Interaction<K>> {
         if let Some(result) = self.handle_pointer(event) {
             return result;
         }
@@ -521,6 +570,36 @@ impl<K: Copy + Eq> Form<K> {
             )));
         }
         EventResult::ignored()
+    }
+
+    fn visual_state(&self) -> FormVisualState<K> {
+        let focused = self.focused();
+        FormVisualState {
+            focused,
+            focused_kind: focused.and_then(|id| self.control(id).map(|control| control.kind)),
+            armed: self.pointer_owner.filter(|id| {
+                self.active_control(*id)
+                    .is_some_and(|control| control.enabled && !control.kind.is_field())
+            }),
+        }
+    }
+
+    fn report_result(
+        &self,
+        before: FormVisualState<K>,
+        mut result: EventResult<Interaction<K>>,
+    ) -> EventResult<Interaction<K>> {
+        let visible_changed = before != self.visual_state();
+        if visible_changed {
+            result.outcome = Outcome::Changed;
+        } else if result.outcome == Outcome::Changed {
+            // Form handlers also emit actions for domain operations whose
+            // result is not visible until the owner applies them (or which is
+            // intentionally a no-op). Keep those actions consumed, but do not
+            // force a repaint for the form itself.
+            result.outcome = Outcome::Unchanged;
+        }
+        result
     }
 
     /// Returns true while a mouse control owns a press/release gesture.
@@ -1163,11 +1242,19 @@ fn cursor_at<K>(control: &Control<K>, x: u16, y: u16) -> usize {
 /// Applies a field edit to the existing readline editor.
 pub fn apply_field_edit(input: &mut TextInput, edit: FieldEdit) -> Outcome {
     match edit {
-        FieldEdit::Key(key) => match input.handle_key(key) {
-            EditOutcome::Unhandled => Outcome::Continue,
-            EditOutcome::Handled => Outcome::Unchanged,
-            EditOutcome::Changed => Outcome::Changed,
-        },
+        FieldEdit::Key(key) => {
+            let cursor = input.cursor();
+            let outcome = input.handle_key(key);
+            if input.cursor() != cursor {
+                Outcome::Changed
+            } else {
+                match outcome {
+                    EditOutcome::Unhandled => Outcome::Continue,
+                    EditOutcome::Handled => Outcome::Unchanged,
+                    EditOutcome::Changed => Outcome::Changed,
+                }
+            }
+        }
         FieldEdit::Paste(text) => input
             .insert_str(&crate::hel_text_input::single_line_paste(&text))
             .into(),
@@ -1442,6 +1529,81 @@ mod tests {
         assert_eq!(
             form.handle(&key(KeyCode::Char(' '))).action,
             Some(Interaction::Activate(2))
+        );
+    }
+
+    #[test]
+    fn activation_keeps_its_action_when_the_form_does_not_repaint() {
+        let mut form = form();
+        form.focus(2);
+
+        let result = form.handle(&key(KeyCode::Enter));
+
+        assert_eq!(result.outcome, Outcome::Unchanged);
+        assert_eq!(result.action, Some(Interaction::Activate(2)));
+    }
+
+    #[test]
+    fn clamped_navigation_and_repeated_focus_are_consumed_without_changed() {
+        let mut form = Form::new();
+        form.register(
+            1,
+            ControlKind::ChoiceList {
+                len: 2,
+                selected: 1,
+            },
+            Rect::new(0, 0, 5, 2),
+            true,
+        );
+        form.end_frame(1);
+
+        let result = form.handle(&key(KeyCode::Down));
+        assert_eq!(result.outcome, Outcome::Unchanged);
+        assert_eq!(result.action, Some(Interaction::Select(1, 1)));
+
+        let result = form.handle(&key(KeyCode::Up));
+        assert_eq!(result.outcome, Outcome::Changed);
+        assert_eq!(result.action, Some(Interaction::Select(1, 0)));
+        assert_eq!(form.selected(1), Some(0));
+
+        let mut only = Form::new();
+        only.register(1, ControlKind::Button, Rect::new(0, 0, 5, 1), true);
+        only.end_frame(1);
+        let result = only.handle(&key(KeyCode::Tab));
+        assert_eq!(result.outcome, Outcome::Unchanged);
+        assert_eq!(only.focused(), Some(1));
+    }
+
+    #[test]
+    fn pointer_press_and_release_report_only_the_visible_armed_change() {
+        let mut form = form();
+        let down = mouse(MouseEventKind::Down(MouseButton::Left), 1, 1);
+        let up = mouse(MouseEventKind::Up(MouseButton::Left), 20, 20);
+
+        assert_eq!(form.handle(&down).outcome, Outcome::Changed);
+        assert!(form.captures_pointer());
+        let result = form.handle(&up);
+        assert_eq!(result.outcome, Outcome::Changed);
+        assert_eq!(result.action, None);
+        assert!(!form.captures_pointer());
+    }
+
+    #[test]
+    fn disabled_click_and_noop_editing_remain_consumed_without_repaint() {
+        let mut form = form();
+        form.declare_with_enabled(2, ControlKind::Button, false);
+        form.end_frame(1);
+        let disabled = form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        assert_eq!(disabled.outcome, Outcome::Unchanged);
+
+        let edit = form.handle(&key(KeyCode::Left));
+        assert_eq!(edit.outcome, Outcome::Unchanged);
+        assert_eq!(
+            edit.action,
+            Some(Interaction::Edit(
+                1,
+                FieldEdit::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            ))
         );
     }
 
