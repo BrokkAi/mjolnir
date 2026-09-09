@@ -9,7 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::text_layout::multiline_rows;
-use super::{ControlKind, Form};
+use super::{AutocompletePopup, ControlKind, Form, Interaction, PopupSide};
 use crate::hel_text_input::TextInput;
 use crate::theme;
 
@@ -320,6 +320,252 @@ impl Checkbox {
             area,
         );
     }
+}
+
+/// State for one screen-local combobox interaction.
+///
+/// The state deliberately keeps only one pending cursor. A screen can render
+/// several comboboxes, but opening a second one replaces the first so popup
+/// interactions cannot leak into another field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComboBoxState<K: Copy + Eq> {
+    open: Option<K>,
+    pending: Option<usize>,
+}
+
+impl<K: Copy + Eq> Default for ComboBoxState<K> {
+    fn default() -> Self {
+        Self {
+            open: None,
+            pending: None,
+        }
+    }
+}
+
+impl<K: Copy + Eq> ComboBoxState<K> {
+    /// Returns the currently expanded field, if any.
+    #[must_use]
+    pub fn open_id(&self) -> Option<K> {
+        self.open
+    }
+
+    /// Returns whether `id` currently owns the popup.
+    #[must_use]
+    pub fn is_open(&self, id: K) -> bool {
+        self.open == Some(id)
+    }
+
+    /// Opens `id`, taking a snapshot of its committed selection.
+    pub fn open(&mut self, id: K, selected: usize) {
+        self.open = Some(id);
+        self.pending = Some(selected);
+    }
+
+    /// Returns the selection to render for a field.
+    #[must_use]
+    pub fn selection(&self, id: K, committed: usize) -> usize {
+        self.is_open(id)
+            .then_some(self.pending)
+            .flatten()
+            .unwrap_or(committed)
+    }
+
+    /// Records an uncommitted popup cursor movement.
+    pub fn preview(&mut self, id: K, selected: usize) -> bool {
+        if self.is_open(id) {
+            let changed = self.pending != Some(selected);
+            self.pending = Some(selected);
+            changed
+        } else {
+            false
+        }
+    }
+
+    /// Accepts and closes the active popup, returning its pending selection.
+    pub fn accept(&mut self, id: K) -> Option<usize> {
+        if self.is_open(id) {
+            let selected = self.pending.take();
+            self.open = None;
+            selected
+        } else {
+            None
+        }
+    }
+
+    /// Closes the active popup without changing its committed value.
+    pub fn dismiss(&mut self, id: K) -> bool {
+        if self.is_open(id) {
+            self.open = None;
+            self.pending = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Routes interactions produced by a combobox form control.
+    ///
+    /// Preview selections are consumed locally. Accepted selections are
+    /// returned to the screen as [`Interaction::ComboBoxCommit`]. Interactions
+    /// for other controls pass through unchanged, so callers can feed a form's
+    /// action stream through this helper without special casing every screen.
+    pub fn route(&mut self, interaction: Option<Interaction<K>>) -> Option<Interaction<K>> {
+        let interaction = interaction?;
+        let Some(open) = self.open else {
+            return Some(interaction);
+        };
+        match interaction {
+            Interaction::Select(id, selected) if id == open => {
+                self.preview(id, selected);
+                None
+            }
+            Interaction::ComboBoxCommit(id, selected) if id == open => {
+                self.open = None;
+                self.pending = None;
+                Some(Interaction::ComboBoxCommit(id, selected))
+            }
+            Interaction::ComboBoxDismiss(id) if id == open => {
+                self.dismiss(id);
+                Some(Interaction::ComboBoxDismiss(id))
+            }
+            other => {
+                self.open = None;
+                self.pending = None;
+                Some(other)
+            }
+        }
+    }
+}
+
+/// A compact scalar field with an anchored list of choices.
+pub struct ComboBox;
+
+impl ComboBox {
+    /// The compact affordance appended to a collapsed choice value.
+    pub const GLYPH: &'static str = "▾";
+
+    /// Returns a collapsed field value with the dropdown affordance.
+    #[must_use]
+    pub fn display_value(value: &str) -> String {
+        format!("{value} {}", Self::GLYPH)
+    }
+
+    /// Draws a combobox and, when expanded, its anchored popup.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render<K: Copy + Eq>(
+        frame: &mut Frame<'_>,
+        bounds: Rect,
+        area: Rect,
+        value: &str,
+        options: &[Line<'_>],
+        selected: usize,
+        expanded: bool,
+        enabled: bool,
+        title: &str,
+        preferred_side: PopupSide,
+        form: &mut Form<K>,
+        id: K,
+    ) -> Option<(Rect, Rect)> {
+        let selected = selected.min(options.len().saturating_sub(1));
+        let kind = ControlKind::ComboBox {
+            len: options.len(),
+            selected,
+            expanded,
+        };
+        form.register_combobox(id, kind, area, enabled, Rect::default(), Vec::new());
+        let display = clipped_display(value, usize::from(area.width));
+        frame.render_widget(
+            Paragraph::new(display).style(control_style(form, id, enabled)),
+            area,
+        );
+
+        let popup = if expanded {
+            let option_width = options.iter().map(Line::width).max().unwrap_or(0);
+            let width = option_width
+                .saturating_add(4)
+                .max(title.width().saturating_add(2));
+            AutocompletePopup::render(
+                frame,
+                bounds,
+                area,
+                u16::try_from(width).unwrap_or(u16::MAX),
+                options.len(),
+                title,
+                preferred_side,
+            )
+        } else {
+            None
+        };
+
+        if let Some((outer, inner)) = popup {
+            let items = options
+                .iter()
+                .map(|row| ListItem::new(row.clone()))
+                .collect::<Vec<_>>();
+            let mut state = ListState::default();
+            state.select((!options.is_empty()).then_some(selected));
+            frame.render_stateful_widget(
+                List::new(items).highlight_style(if form.is_focused(id) {
+                    theme::selection(true)
+                } else {
+                    theme::selection(false)
+                }),
+                inner,
+                &mut state,
+            );
+            let offset = state.offset();
+            let mut popup_row_map = vec![None; usize::from(outer.height)];
+            for (row, option) in popup_row_map
+                .iter_mut()
+                .enumerate()
+                .skip(1)
+                .take(usize::from(inner.height))
+            {
+                *option = offset
+                    .checked_add(row.saturating_sub(1))
+                    .filter(|index| *index < options.len());
+            }
+            form.register_combobox(id, kind, area, enabled, outer, popup_row_map);
+            Some((outer, inner))
+        } else {
+            None
+        }
+    }
+}
+
+fn clipped_display(value: &str, width: usize) -> String {
+    let suffix = format!(" {}", ComboBox::GLYPH);
+    if width == 0 {
+        return String::new();
+    }
+    if width < suffix.width() {
+        return ComboBox::GLYPH.to_owned();
+    }
+    if width == suffix.width() {
+        return suffix
+            .graphemes(true)
+            .scan(0usize, |used, grapheme| {
+                let next = (*used).saturating_add(grapheme.width());
+                (next <= width).then(|| {
+                    *used = next;
+                    grapheme
+                })
+            })
+            .collect();
+    }
+    let available = width.saturating_sub(suffix.width());
+    let mut result = String::new();
+    let mut used = 0usize;
+    for grapheme in value.graphemes(true) {
+        let next = used.saturating_add(grapheme.width());
+        if next > available {
+            break;
+        }
+        result.push_str(grapheme);
+        used = next;
+    }
+    result.push_str(&suffix);
+    result
 }
 
 /// A vertically navigable list.
@@ -927,5 +1173,91 @@ mod tests {
             .unwrap();
         assert_eq!(form.list_offset(1), 17);
         assert_eq!(click(&mut form, 1, 0), Some(Interaction::Select(1, 17)));
+    }
+
+    #[test]
+    fn combobox_state_consumes_preview_and_returns_commit_or_dismissal() {
+        let mut state = ComboBoxState::default();
+        state.open(1, 0);
+        assert_eq!(state.selection(1, 2), 0);
+        assert_eq!(state.route(Some(Interaction::Select(1, 2))), None);
+        assert_eq!(state.selection(1, 0), 2);
+        assert_eq!(
+            state.route(Some(Interaction::ComboBoxCommit(1, 1))),
+            Some(Interaction::ComboBoxCommit(1, 1))
+        );
+        assert_eq!(state.open_id(), None);
+
+        state.open(1, 1);
+        assert_eq!(
+            state.route(Some(Interaction::ComboBoxDismiss(1))),
+            Some(Interaction::ComboBoxDismiss(1))
+        );
+        assert!(!state.is_open(1));
+        assert_eq!(
+            state.route(Some(Interaction::Activate(2))),
+            Some(Interaction::Activate(2))
+        );
+    }
+
+    #[test]
+    fn combobox_collapsed_value_keeps_a_visible_dropdown_glyph() {
+        assert_eq!(clipped_display("long value", 1), ComboBox::GLYPH);
+        let mut terminal = Terminal::new(TestBackend::new(12, 1)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let mut form = Form::new();
+                form.begin_frame();
+                ComboBox::render(
+                    frame,
+                    frame.area(),
+                    Rect::new(0, 0, 6, 1),
+                    "long value",
+                    &[Line::raw("one"), Line::raw("two")],
+                    0,
+                    false,
+                    true,
+                    " choices ",
+                    PopupSide::Below,
+                    &mut form,
+                    1,
+                );
+                form.end_frame(1);
+            })
+            .expect("draw combobox");
+        let rendered = (0..6)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(rendered.contains(ComboBox::GLYPH), "{rendered}");
+    }
+
+    #[test]
+    fn rendered_combobox_popup_rows_commit_with_a_mouse_click() {
+        let mut terminal = Terminal::new(TestBackend::new(20, 10)).expect("terminal");
+        let mut form = Form::new();
+        terminal
+            .draw(|frame| {
+                form.begin_frame();
+                ComboBox::render(
+                    frame,
+                    frame.area(),
+                    Rect::new(0, 1, 10, 1),
+                    "one",
+                    &[Line::raw("one"), Line::raw("two")],
+                    0,
+                    true,
+                    true,
+                    " choices ",
+                    PopupSide::Below,
+                    &mut form,
+                    1,
+                );
+                form.end_frame(1);
+            })
+            .expect("draw popup");
+        assert_eq!(
+            click(&mut form, 1, 4),
+            Some(Interaction::ComboBoxCommit(1, 1))
+        );
     }
 }

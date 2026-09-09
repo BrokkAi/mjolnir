@@ -13,7 +13,8 @@ use hel::hel_acp::SessionConfigChoice;
 use hel::hel_config::{HelConfig, ReviewConfig, SpinnerStyle};
 use hel::hel_review::lanes::ReviewTier;
 use mj_chat::components::{
-    ButtonRow, Checkbox, ControlKind, Form, FormViewport, Interaction, TabStrip,
+    ButtonRow, Checkbox, ComboBox, ComboBoxState, ControlKind, Form, FormViewport, Interaction,
+    PopupSide,
 };
 use mj_chat::theme;
 use ratatui::Frame;
@@ -99,6 +100,7 @@ pub(crate) struct ReviewSettingsDialog {
     pub(crate) review: ReviewConfig,
     pub(crate) profiles: Vec<Option<String>>,
     pub(crate) form: RefCell<Form<ReviewSettingsFocus>>,
+    combo: ComboBoxState<ReviewSettingsFocus>,
     scroll: Cell<u16>,
     pub(crate) model_choices: Vec<SessionConfigChoice>,
     pub(crate) effort_choices: Vec<SessionConfigChoice>,
@@ -145,6 +147,7 @@ impl ReviewSettingsDialog {
             review: config.review.clone(),
             profiles,
             form: RefCell::new(Form::default()),
+            combo: ComboBoxState::default(),
             scroll: Cell::new(0),
             model_choices: Vec::new(),
             effort_choices: Vec::new(),
@@ -275,9 +278,10 @@ impl ReviewSettingsDialog {
         for (id, _, labels, selected) in self.selectors() {
             form.declare_with_enabled(
                 id,
-                ControlKind::Tabs {
+                ControlKind::ComboBox {
                     len: labels.len(),
-                    selected,
+                    selected: self.combo.selection(id, selected),
+                    expanded: self.combo.is_open(id),
                 },
                 !self.saving,
             );
@@ -573,8 +577,8 @@ impl ReviewSettingsDialog {
             &dashboard.render_change_revision,
             &result,
         );
-        let interaction = result.action;
-        let changed = interaction.is_some();
+        let changed = result.action.is_some();
+        let interaction = self.combo.route(result.action);
         let dismiss = matches!(&interaction, Some(Interaction::Cancel));
         let back = matches!(&interaction, Some(Interaction::Activate(Back)));
         let cancel_setup = matches!(&interaction, Some(Interaction::Activate(Cancel)));
@@ -588,7 +592,7 @@ impl ReviewSettingsDialog {
                 dashboard.mark_render_changed();
                 DashboardAction::None
             }
-            Some(Interaction::Select(Tier, index)) => {
+            Some(Interaction::ComboBoxCommit(Tier, index)) => {
                 let tier = if index == 0 {
                     ReviewTier::Quick
                 } else {
@@ -600,7 +604,7 @@ impl ReviewSettingsDialog {
                 }
                 DashboardAction::None
             }
-            Some(Interaction::Select(Profile, index)) => {
+            Some(Interaction::ComboBoxCommit(Profile, index)) => {
                 let profile = self.profiles.get(index).cloned().flatten();
                 if self.review.profile == profile {
                     DashboardAction::None
@@ -610,7 +614,7 @@ impl ReviewSettingsDialog {
                     self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Profile)
                 }
             }
-            Some(Interaction::Select(Model, index)) => {
+            Some(Interaction::ComboBoxCommit(Model, index)) => {
                 let model = Self::choice_values(self.review.model.as_deref(), &self.model_choices)
                     .get(index)
                     .cloned()
@@ -623,7 +627,7 @@ impl ReviewSettingsDialog {
                     self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Model)
                 }
             }
-            Some(Interaction::Select(Effort, index)) => {
+            Some(Interaction::ComboBoxCommit(Effort, index)) => {
                 let effort =
                     Self::choice_values(self.review.effort.as_deref(), &self.effort_choices)
                         .get(index)
@@ -635,10 +639,21 @@ impl ReviewSettingsDialog {
                 }
                 DashboardAction::None
             }
-            // Selector activation only opens the tab list. Discovery is tied
-            // to changing the profile/model or pressing Refresh choices;
-            // repeated activation must not restart a request.
-            Some(Interaction::Activate(Profile | Model | Effort)) => DashboardAction::None,
+            Some(Interaction::Activate(id @ (Tier | Profile | Model | Effort))) => {
+                if let Some((_, _, _, selected)) = self
+                    .selectors()
+                    .into_iter()
+                    .find(|(candidate, _, _, _)| *candidate == id)
+                {
+                    self.combo.open(id, selected);
+                    dashboard.mark_render_changed();
+                }
+                DashboardAction::None
+            }
+            Some(Interaction::ComboBoxDismiss(Tier | Profile | Model | Effort)) => {
+                dashboard.mark_render_changed();
+                DashboardAction::None
+            }
             Some(Interaction::Activate(Refresh)) => {
                 if let Some(profile) = self.review.profile.as_deref() {
                     dashboard.clear_review_settings_choices(profile);
@@ -935,7 +950,7 @@ pub(crate) fn render_review_settings(
         popup,
         "Setup › Code review",
         theme::title(true),
-        !setup_saving && !dialog.saving,
+        !setup_saving && !dialog.saving && dialog.combo.open_id().is_none(),
     );
     frame.render_widget(theme::modal().title(title), popup);
     let inner = theme::modal().inner(popup);
@@ -964,6 +979,7 @@ pub(crate) fn render_review_settings(
         &mut form,
         Enabled,
     );
+    let mut expanded_combo = None;
     for (index, (id, label, values, selected)) in dialog.selectors().iter().enumerate() {
         let area = row(index as u16 + 1 + if index > 0 { description_height } else { 0 });
         let label_width = 10.min(area.width);
@@ -982,15 +998,26 @@ pub(crate) fn render_review_settings(
             area.width - label_width,
             area.height,
         );
-        TabStrip::render_enabled(
+        let selected = dialog.combo.selection(*id, *selected);
+        let value = values.get(selected).cloned().unwrap_or_default();
+        let options = values.iter().cloned().map(Line::raw).collect::<Vec<_>>();
+        ComboBox::render(
             frame,
+            inner,
             field,
-            &values.iter().map(String::as_str).collect::<Vec<_>>(),
-            *selected,
+            &value,
+            &options,
+            selected,
+            false,
             !dialog.saving,
+            " values · ↑/↓ select · Tab/Enter accept ",
+            PopupSide::Below,
             &mut form,
             *id,
         );
+        if dialog.combo.is_open(*id) {
+            expanded_combo = Some((*id, field, value, options, selected));
+        }
     }
     let help_area = viewport.row(2, description_height);
     let indent = 10.min(help_area.width);
@@ -1015,7 +1042,7 @@ pub(crate) fn render_review_settings(
     if inner.height > 1 {
         frame.render_widget(
             Line::styled(
-                "Tab moves · arrows select · Space toggles · Esc closes Setup",
+                "Tab moves · Enter opens choices · Space toggles · Esc closes Setup",
                 Style::default().fg(theme::palette().muted),
             ),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
@@ -1040,6 +1067,22 @@ pub(crate) fn render_review_settings(
         ],
         &mut form,
     );
+    if let Some((id, field, value, options, selected)) = expanded_combo {
+        ComboBox::render(
+            frame,
+            inner,
+            field,
+            &value,
+            &options,
+            selected,
+            true,
+            !dialog.saving,
+            " values · ↑/↓ select · Tab/Enter accept ",
+            PopupSide::Below,
+            &mut form,
+            id,
+        );
+    }
     form.end_frame(Enabled);
 }
 
@@ -1047,8 +1090,9 @@ pub(crate) fn render_review_settings(
 mod tests {
     use super::*;
     use crate::actions::CommandId;
-    use crate::test_support::{config, dashboard_with_session, key, running_session};
+    use crate::test_support::{buffer_lines, config, dashboard_with_session, key, running_session};
     use crossterm::event::KeyCode;
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn open(dashboard: &mut DashboardState) -> DashboardAction {
         dashboard.begin_review_settings()
@@ -1069,6 +1113,30 @@ mod tests {
         }
     }
 
+    fn choose_next(dashboard: &mut DashboardState) -> DashboardAction {
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Down)),
+            DashboardAction::None
+        );
+        dashboard.handle_key(key(KeyCode::Enter))
+    }
+
+    fn choose_first(dashboard: &mut DashboardState) -> DashboardAction {
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Home)),
+            DashboardAction::None
+        );
+        dashboard.handle_key(key(KeyCode::Enter))
+    }
+
     fn available(
         model_choices: &[&str],
         effort_choices: &[&str],
@@ -1082,6 +1150,33 @@ mod tests {
             },
             cleanup_warning: None,
         }
+    }
+
+    #[test]
+    fn review_selectors_render_as_comboboxes_and_escape_closes_only_the_popup() {
+        let mut dashboard = dashboard_with_session(running_session());
+        open(&mut dashboard);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let text = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(text.matches(ComboBox::GLYPH).count() >= 4, "{text}");
+
+        while dialog(&dashboard).focused() != ReviewSettingsFocus::Tier {
+            dashboard.handle_key(key(KeyCode::Tab));
+        }
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(dialog(&dashboard).combo.is_open(ReviewSettingsFocus::Tier));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::Setup(_)));
+        assert!(dialog(&dashboard).combo.open_id().is_none());
     }
 
     #[test]
@@ -1160,11 +1255,11 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Tab));
         dashboard.handle_key(key(KeyCode::Tab));
         assert!(matches!(
-            dashboard.handle_key(key(KeyCode::Right)),
+            choose_next(&mut dashboard),
             DashboardAction::DiscoverReviewSettings { .. }
         ));
         assert!(matches!(
-            dashboard.handle_key(key(KeyCode::Home)),
+            choose_first(&mut dashboard),
             DashboardAction::CancelReviewSettingsDiscovery
         ));
         assert!(dialog(&dashboard).review.profile.is_none());
@@ -1189,7 +1284,7 @@ mod tests {
         // Enabled -> Tier -> Profile, then choose the first configured profile.
         dashboard.handle_key(key(KeyCode::Tab));
         dashboard.handle_key(key(KeyCode::Tab));
-        let probe = dashboard.handle_key(key(KeyCode::Right));
+        let probe = choose_next(&mut dashboard);
         assert!(matches!(
             probe,
             DashboardAction::DiscoverReviewSettings { .. }
@@ -1198,7 +1293,7 @@ mod tests {
         while dialog(&dashboard).focused() != ReviewSettingsFocus::Tier {
             dashboard.handle_key(key(KeyCode::Tab));
         }
-        dashboard.handle_key(key(KeyCode::Right));
+        choose_next(&mut dashboard);
         while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
             dashboard.handle_key(key(KeyCode::Tab));
         }
@@ -1245,7 +1340,17 @@ mod tests {
         while dialog(&dashboard).focused() != ReviewSettingsFocus::Model {
             dashboard.handle_key(key(KeyCode::Tab));
         }
-        let model_action = dashboard.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Down)),
+            DashboardAction::None,
+            "previewing a model must not start discovery"
+        );
+        assert_eq!(dialog(&dashboard).generation, generation);
+        let model_action = dashboard.handle_key(key(KeyCode::Enter));
         let DashboardAction::DiscoverReviewSettings {
             generation: newer,
             profile_id,
@@ -1307,10 +1412,7 @@ mod tests {
         while dialog(&dashboard).focused() != ReviewSettingsFocus::Model {
             dashboard.handle_key(key(KeyCode::Tab));
         }
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Home)),
-            DashboardAction::None
-        );
+        assert_eq!(choose_first(&mut dashboard), DashboardAction::None);
         assert!(dialog(&dashboard).probing);
         assert_eq!(dialog(&dashboard).generation, generation);
     }
@@ -1348,7 +1450,7 @@ mod tests {
         while dialog(&dashboard).focused() != ReviewSettingsFocus::Effort {
             dashboard.handle_key(key(KeyCode::Tab));
         }
-        let action = dashboard.handle_key(key(KeyCode::Right));
+        let action = choose_next(&mut dashboard);
         assert_eq!(action, DashboardAction::None);
         assert!(!dialog(&dashboard).probing);
     }

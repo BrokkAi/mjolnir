@@ -12,7 +12,8 @@ use crate::{
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use hel::hel_config::HelConfig;
 use mj_chat::components::{
-    AutocompletePopup, ButtonRow, ChoiceList, ControlKind, Form, Interaction, PopupSide, TextField,
+    ButtonRow, ChoiceList, ComboBox, ComboBoxState, ControlKind, Form, Interaction, PopupSide,
+    TextField,
 };
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
@@ -47,6 +48,7 @@ struct Editor {
     input: TextInput,
     choices: Vec<Value>,
     selected: usize,
+    combo: ComboBoxState<SetupControl>,
     adding: bool,
 }
 
@@ -147,7 +149,7 @@ fn value_summary(path: &[String], key: &str, value: &Value, draft: &Value) -> St
         && !value.is_boolean()
         && !schema::choices(&storage_path(&child_path), draft).is_empty()
     {
-        format!("{summary} ▾")
+        ComboBox::display_value(&summary)
     } else {
         summary
     }
@@ -326,9 +328,10 @@ impl SetupDialog {
             } else {
                 form.declare(
                     Choices,
-                    ControlKind::ChoiceList {
+                    ControlKind::ComboBox {
                         len: editor.choices.len(),
-                        selected: editor.selected,
+                        selected: editor.combo.selection(Choices, editor.selected),
+                        expanded: editor.combo.is_open(Choices),
                     },
                 );
                 Choices
@@ -379,6 +382,10 @@ impl SetupDialog {
                 .iter()
                 .position(|choice| choice == value)
                 .unwrap_or(0);
+            let mut combo = ComboBoxState::default();
+            if !choices.is_empty() {
+                combo.open(SetupControl::Choices, selected);
+            }
             self.editor = Some(Editor {
                 path,
                 input: TextInput::from(if value.is_null() {
@@ -391,6 +398,7 @@ impl SetupDialog {
                 }),
                 choices,
                 selected,
+                combo,
                 adding: false,
             });
         }
@@ -431,6 +439,7 @@ impl SetupDialog {
                 input: TextInput::new(),
                 choices: Vec::new(),
                 selected: 0,
+                combo: ComboBoxState::default(),
                 adding: true,
             });
             self.form = RefCell::new(Form::default());
@@ -772,40 +781,6 @@ impl DashboardState {
             .editor
             .as_ref()
             .is_some_and(|editor| !editor.choices.is_empty());
-        if choice_editor
-            && let Event::Key(key) = &event
-            && key.kind != KeyEventKind::Release
-            && !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
-        {
-            match key.code {
-                KeyCode::Tab | KeyCode::Enter => {
-                    dialog.notice = dialog.apply_editor(false).err();
-                    self.mark_render_changed();
-                    dialog.prepare();
-                    self.mode = Mode::Setup(dialog);
-                    return DashboardAction::None;
-                }
-                KeyCode::Esc => {
-                    dialog.editor = None;
-                    dialog.form = RefCell::new(Form::default());
-                    self.mark_render_changed();
-                    dialog.prepare();
-                    self.mode = Mode::Setup(dialog);
-                    return DashboardAction::None;
-                }
-                _ => {}
-            }
-        }
-        let choice_mouse_release = choice_editor
-            && matches!(
-                event,
-                Event::Mouse(mouse)
-                    if mouse.kind == crossterm::event::MouseEventKind::Up(
-                        crossterm::event::MouseButton::Left,
-                )
-            );
         let shortcut = match &event {
             Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -830,6 +805,15 @@ impl DashboardState {
             );
         }
         let interaction = shortcut.or_else(|| form_result.and_then(|result| result.action));
+        let interaction = if choice_editor {
+            if let Some(editor) = dialog.editor.as_mut() {
+                editor.combo.route(interaction)
+            } else {
+                interaction
+            }
+        } else {
+            interaction
+        };
         let mut action = DashboardAction::None;
         match interaction {
             Some(Interaction::Cancel) | Some(Interaction::Activate(Cancel)) => {
@@ -867,19 +851,19 @@ impl DashboardState {
                     self.record_visible_event_change();
                 }
             }
-            Some(Interaction::Select(Choices, index)) => {
-                if let Some(editor) = &mut dialog.editor
-                    && editor.selected != index
-                {
+            Some(Interaction::ComboBoxCommit(Choices, index)) => {
+                if let Some(editor) = &mut dialog.editor {
                     editor.selected = index;
-                    self.record_visible_event_change();
                 }
-                if choice_mouse_release {
-                    dialog.notice = dialog.apply_editor(false).err();
-                    self.mark_render_changed();
-                }
+                dialog.notice = dialog.apply_editor(false).err();
+                self.mark_render_changed();
             }
-            Some(Interaction::Activate(Field | Choices | Apply)) => {
+            Some(Interaction::ComboBoxDismiss(Choices)) => {
+                dialog.editor = None;
+                dialog.form = RefCell::new(Form::default());
+                self.mark_render_changed();
+            }
+            Some(Interaction::Activate(Field | Apply)) => {
                 dialog.notice = dialog.apply_editor(false).err();
                 self.mark_render_changed();
             }
@@ -1218,48 +1202,42 @@ pub(crate) fn render_setup(
     if choice_editor {
         let editor = dialog.editor.as_ref().expect("choice editor");
         let selected_row = dialog.selected.saturating_sub(background_offset);
-        let anchor = Rect::new(
+        let field = Rect::new(
             body.x.saturating_add(34.min(body.width.saturating_sub(1))),
             body.y.saturating_add(
                 u16::try_from(selected_row)
                     .unwrap_or(u16::MAX)
                     .min(body.height.saturating_sub(1)),
             ),
-            1,
+            body.width.saturating_sub(34),
             1,
         );
         let title = " values · ↑/↓ select · Tab/Enter accept ";
-        let row_width = editor
+        let rows = editor
             .choices
             .iter()
-            .map(|value| Line::raw(schema::choice_label(value)).width())
-            .max()
-            .unwrap_or(0)
-            .saturating_add(4)
-            .max(Line::raw(title).width().saturating_add(2));
-        if let Some((_, popup_inner)) = AutocompletePopup::render(
+            .map(|value| Line::raw(schema::choice_label(value)))
+            .collect::<Vec<_>>();
+        let selected = editor.combo.selection(Choices, editor.selected);
+        let value = editor
+            .choices
+            .get(selected)
+            .map(schema::choice_label)
+            .unwrap_or_default();
+        ComboBox::render(
             frame,
             inner,
-            anchor,
-            u16::try_from(row_width).unwrap_or(u16::MAX),
-            editor.choices.len(),
+            field,
+            &value,
+            &rows,
+            selected,
+            editor.combo.is_open(Choices),
+            true,
             title,
             PopupSide::Below,
-        ) {
-            let rows = editor
-                .choices
-                .iter()
-                .map(|value| Line::raw(schema::choice_label(value)))
-                .collect::<Vec<_>>();
-            ChoiceList::render(
-                frame,
-                popup_inner,
-                &rows,
-                editor.selected,
-                &mut form,
-                Choices,
-            );
-        }
+            &mut form,
+            Choices,
+        );
         initial = Choices;
     }
     if let Some(notice) = dialog.read_only.as_ref().or(dialog.notice.as_ref()) {
@@ -1540,7 +1518,10 @@ mod tests {
         choose(&mut dashboard, "theme");
         let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
         let editor = dialog.editor.as_ref().unwrap();
-        assert_eq!(editor.choices[editor.selected], "light");
+        let selected = editor
+            .combo
+            .selection(SetupControl::Choices, editor.selected);
+        assert_eq!(editor.choices[selected], "light");
     }
 
     #[test]
@@ -1626,11 +1607,12 @@ mod tests {
             panic!("setup");
         };
         let editor = dialog.editor.as_mut().unwrap();
-        editor.selected = editor
+        let selected = editor
             .choices
             .iter()
             .position(|value| value == "claude-1")
             .unwrap();
+        assert!(editor.combo.preview(SetupControl::Choices, selected));
         dialog.prepare();
         dashboard.handle_key(key(KeyCode::Enter));
         let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
@@ -1712,11 +1694,12 @@ mod tests {
             panic!("setup");
         };
         let editor = dialog.editor.as_mut().unwrap();
-        editor.selected = editor
+        let selected = editor
             .choices
             .iter()
             .position(|value| value == "ssh-docker")
             .unwrap();
+        assert!(editor.combo.preview(SetupControl::Choices, selected));
         dialog.prepare();
         dashboard.handle_key(key(KeyCode::Enter));
         let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
@@ -1819,7 +1802,9 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Char(' ')));
         dashboard.handle_key(key(KeyCode::Tab));
         dashboard.handle_key(key(KeyCode::Tab));
-        dashboard.handle_key(key(KeyCode::Right));
+        dashboard.handle_key(key(KeyCode::Enter));
+        dashboard.handle_key(key(KeyCode::Down));
+        dashboard.handle_key(key(KeyCode::Enter));
         let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
             KeyCode::Char('s'),
             KeyModifiers::CONTROL,
@@ -1881,12 +1866,28 @@ mod tests {
         let setup = setup_dialog_mut(&mut dashboard.mode).unwrap();
         let review = setup.review_editor.as_mut().unwrap();
         review.form.get_mut().focus(ReviewSettingsFocus::Profile);
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Down)),
+            DashboardAction::None
+        );
         assert!(matches!(
-            dashboard.handle_key(key(KeyCode::Right)),
+            dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::DiscoverReviewSettings { profile_id, .. } if profile_id == "codex-2"
         ));
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Left)),
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Up)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::CancelReviewSettingsDiscovery
         );
         let DashboardAction::SaveSetup { updated, .. } =

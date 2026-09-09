@@ -47,7 +47,7 @@ function question(id, message) {
   };
 }
 
-function fixtureSnapshot() {
+function fixtureSnapshot(configOptions = []) {
   return {
     revision: 1,
     generated_at: '2026-09-05T00:00:00Z',
@@ -81,7 +81,7 @@ function fixtureSnapshot() {
         operation: null,
         chat_phase: 'idle',
         is_idle: true,
-        config_options: [],
+        config_options: configOptions,
         plan_mode_active: false,
         turn_review: null,
         available_commands: [
@@ -137,7 +137,7 @@ function conversation() {
  * the same refresh/re-render paths as a live daemon while retaining exact
  * action payloads for inspection.
  */
-async function mockViewerApi(page, initialPending = []) {
+async function mockViewerApi(page, initialPending = [], configOptions = []) {
   const viewerUrl = 'https://viewer.test/';
   const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
   // Serve the shipped assets without a daemon. Any unhandled API request is
@@ -151,7 +151,7 @@ async function mockViewerApi(page, initialPending = []) {
     return route.fulfill({ path: asset });
   });
   const state = {
-    snapshot: fixtureSnapshot(),
+    snapshot: fixtureSnapshot(configOptions),
     actions: [],
     drafts: new Map(),
     snapshotRequests: 0,
@@ -314,6 +314,62 @@ test('plan command discovers, toggles, sends a request, and retries a rejected a
   await waitForActionCount(state, 6);
   expect(state.actions[5]).toEqual({ action: 'set-plan-mode', session_id: SESSION_ID, active: false });
   await expect(page.locator('#conversation-state')).not.toContainText('plan');
+});
+
+test('composer renders current model and effort settings and reconciles refresh changes', async ({ page }) => {
+  const state = await mockViewerApi(page, [], [
+    {
+      key: 'model',
+      label: 'Model',
+      current: 'gpt-5',
+      choices: [{ value: 'gpt-5', name: 'GPT-5' }],
+    },
+    {
+      key: 'effort',
+      label: 'Effort',
+      current: 'xhigh',
+      choices: [{ value: 'high', name: 'High' }],
+    },
+  ]);
+  const settings = page.locator('#prompt-settings');
+
+  await expect(settings).toBeVisible();
+  await expect(settings).toContainText('Model:');
+  await expect(settings).toContainText('GPT-5');
+  await expect(settings).toContainText('Effort:');
+  await expect(settings).toContainText('xhigh');
+
+  state.snapshot.sessions[0].config_options = [
+    {
+      key: 'model',
+      label: 'Model',
+      current: 'gpt-5-mini',
+      choices: [{ value: 'gpt-5-mini', name: 'GPT-5 mini' }],
+    },
+    {
+      key: 'effort',
+      label: 'Effort',
+      current: 'high',
+      choices: [{ value: 'high', name: 'High' }],
+    },
+  ];
+  const beforeUpdate = state.snapshotRequests;
+  state.snapshot.revision += 1;
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(beforeUpdate);
+  await expect(settings.locator('.prompt-setting-value').nth(0)).toHaveText('GPT-5 mini');
+  await expect(settings.locator('.prompt-setting-value').nth(1)).toHaveText('High');
+
+  state.snapshot.sessions[0].config_options = [
+    { key: 'model', label: 'Model', current: null, choices: [] },
+    { key: 'effort', label: 'Effort', current: '', choices: [] },
+  ];
+  const beforeRemoval = state.snapshotRequests;
+  state.snapshot.revision += 1;
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(beforeRemoval);
+  await expect(settings).toBeHidden();
+  await expect(settings).toHaveText('');
 });
 
 test('long question forms scroll without pushing answer controls or the composer off the phone', async ({ page }) => {
