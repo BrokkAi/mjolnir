@@ -13,6 +13,7 @@ The terminal Setup screen currently occupies the full available width and replac
 - [x] (2026-09-09 12:02Z) Added the virtual Interface page, stable Setup sizing, choice glyphs, and inline popup state transitions.
 - [x] (2026-09-09 12:02Z) Added focused behavior and rendering tests, including real rendered-surface geometry and pointer activation.
 - [x] (2026-09-09 12:02Z) Ran formatting, the full Rust test suite, and clippy; reviewed and tightened the integrated diff.
+- [x] (2026-09-09 13:10Z) Integrated the first upstream batch, preserved its second Advanced setting, and regenerated the Setup documentation capture.
 - [ ] Commit, merge current upstream changes if necessary, rerun affected validation after a merge, and push.
 
 ## Surprises & Discoveries
@@ -27,6 +28,8 @@ The terminal Setup screen currently occupies the full available width and replac
   Evidence: `mj-chat/src/components/scope.rs::pointer_interaction` maps a choice-list release to `Select`; Setup distinguishes a left-button release so arrows only move while clicks commit.
 - Observation: `origin/master` advanced by three commits during implementation and includes overlapping Setup and workspace-structure edits.
   Evidence: `git status --short --branch` reports `hel3...origin/master [behind 3]`, and `git diff --name-only HEAD..origin/master` includes `mj-tui/src/setup.rs`, `mj-tui/src/setup/schema.rs`, and workspace manifests.
+- Observation: A second upstream batch landed while the post-merge suite was running and replaces the terminal-wide modal dismissal/layout machinery.
+  Evidence: `origin/master` advanced through `6ff448d0` and `2b6e4617` after merge commit `49b6b8eb`; the new commits overlap Setup's surrounding modal APIs and require a second integration pass.
 
 ## Decision Log
 
