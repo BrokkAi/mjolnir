@@ -1121,30 +1121,33 @@ mod tests {
             std::fs::write(root.path().join(".crates.toml"), body).expect("manifest");
             InstallMethod::detect(|_| None, Some(executable.as_path()))
         };
+        // The record must name the running version, so the fixture derives it
+        // from the crate instead of hardcoding one: CI builds this tree at
+        // whatever version master carries, not the version this branch began
+        // from.
+        let version = env!("CARGO_PKG_VERSION");
+        let registry = "registry+https://github.com/rust-lang/crates.io-index";
+        let record = |package: &str, version: &str, binary: &str| {
+            format!("\"{package} {version} ({registry})\" = [\"{binary}\"]\n")
+        };
 
         assert_eq!(
-            recorded(concat!(
-                "[v1]\n",
-                "\"brokk-mjolnir 2.4.0 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"mj\"]\n",
-                "\"brokk-mj-voice-worker 2.4.0 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"mj-voice-worker\"]\n",
+            recorded(&format!(
+                "[v1]\n{}{}",
+                record("brokk-mjolnir", version, "mj"),
+                record("brokk-mj-voice-worker", version, "mj-voice-worker"),
             )),
             InstallMethod::Cargo { voice_worker: true }
         );
         assert_eq!(
-            recorded(concat!(
-                "[v1]\n",
-                "\"brokk-mjolnir 2.4.0 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"mj\"]\n",
-            )),
+            recorded(&format!("[v1]\n{}", record("brokk-mjolnir", version, "mj"),)),
             InstallMethod::Cargo {
                 voice_worker: false
             }
         );
         // A record for a different installed version is not this install.
         assert_eq!(
-            recorded(concat!(
-                "[v1]\n",
-                "\"brokk-mjolnir 2.3.0 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"mj\"]\n",
-            )),
+            recorded(&format!("[v1]\n{}", record("brokk-mjolnir", "0.0.0", "mj"),)),
             InstallMethod::Direct
         );
     }

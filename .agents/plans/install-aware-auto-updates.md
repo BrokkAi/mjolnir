@@ -87,6 +87,14 @@ or having no update, changes nothing about startup.
   style for long work near the TUI — but it is not needed here, because the
   entire update flow completes *before* the TUI event loop starts.
   Evidence: `mj-cli/src/dashboard/io.rs:44`; `mj-cli/src/pollers.rs:1031`.
+- Observation: CI builds a PR from its merge with master, so
+  `env!("CARGO_PKG_VERSION")` in the test binary is master's version (2.5.0),
+  not the version this branch started from (2.4.0). The cargo-detection test
+  originally hardcoded "2.4.0" in its `.crates.toml` fixture and failed on
+  both CI runners while passing locally.
+  Evidence: CI log shows `Compiling brokk-mj-core v2.5.0` on the same commit
+  whose manifests say 2.4.0; the fixture now derives its version from
+  `env!("CARGO_PKG_VERSION")`.
 - Observation: the 1.x `docs/src/content/docs/storage-network.md` service
   table no longer exists in the 2.0 docs tree, so the planned network-contact
   disclosure was folded into install.md's "Keeping Mjolnir current" section
