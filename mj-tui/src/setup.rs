@@ -11,9 +11,7 @@ use crate::{
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use hel::hel_config::HelConfig;
-use mj_chat::components::{
-    ButtonRow, Checkbox, ChoiceList, ControlKind, Form, Interaction, TextField,
-};
+use mj_chat::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 use mj_chat::theme;
@@ -123,7 +121,6 @@ impl SetupDialog {
                 .keys()
                 .filter(|key| {
                     key.as_str() != "version"
-                        && !(self.path.is_empty() && key.as_str() == "show_stopped_sessions")
                         && !(self.path.len() == 1
                             && self.path[0] == "startup"
                             && key.as_str() == "enabled")
@@ -174,13 +171,9 @@ impl SetupDialog {
                 Choices
             }
         } else {
-            let kind = if self.path.first().is_some_and(|key| key == "advanced") {
-                ControlKind::Checkbox
-            } else {
-                ControlKind::ChoiceList {
-                    len,
-                    selected: self.selected,
-                }
+            let kind = ControlKind::ChoiceList {
+                len,
+                selected: self.selected,
             };
             form.declare(List, kind);
             List
@@ -902,22 +895,7 @@ pub(crate) fn render_setup(
                 Line::raw(format!("{name:<32}  {summary}"))
             })
             .collect::<Vec<_>>();
-        if dialog.path.first().is_some_and(|key| key == "advanced") {
-            let value = dialog.current()["detailed_activity_clocks"]
-                .as_bool()
-                .unwrap_or(false);
-            Checkbox::render(
-                frame,
-                body,
-                &schema::label("detailed_activity_clocks"),
-                value,
-                !dialog.saving && dialog.read_only.is_none(),
-                &mut form,
-                List,
-            );
-        } else {
-            ChoiceList::render(frame, body, &rows, dialog.selected, &mut form, List);
-        }
+        ChoiceList::render(frame, body, &rows, dialog.selected, &mut form, List);
         initial = List;
         ButtonRow::render(
             frame,
@@ -1155,18 +1133,37 @@ mod tests {
     }
 
     #[test]
-    fn deprecated_stopped_session_visibility_is_preserved_but_hidden_from_setup() {
+    fn stopped_session_visibility_is_only_editable_under_advanced() {
         let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.config.show_stopped_sessions = false;
         dashboard.begin_setup();
-        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
         assert!(
-            !dialog
+            !setup_dialog_mut(&mut dashboard.mode)
+                .unwrap()
                 .keys()
                 .iter()
                 .any(|key| key == "show_stopped_sessions")
         );
-        assert_eq!(dialog.draft["show_stopped_sessions"], false);
+
+        choose(&mut dashboard, "advanced");
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(
+            dialog.keys(),
+            ["detailed_activity_clocks", "show_stopped_sessions"]
+        );
+        assert_eq!(dialog.draft["advanced"]["show_stopped_sessions"], false);
+
+        choose(&mut dashboard, "show_stopped_sessions");
+        assert_eq!(
+            setup_dialog_mut(&mut dashboard.mode).unwrap().draft["advanced"]["show_stopped_sessions"],
+            true
+        );
+        let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let DashboardAction::SaveSetup { updated, .. } = action else {
+            panic!("expected Setup save, got {action:?}")
+        };
+        let saved: HelConfig = serde_json::from_str(&updated).unwrap();
+        assert!(saved.advanced.show_stopped_sessions);
+        assert!(!saved.show_stopped_sessions);
     }
 
     #[test]

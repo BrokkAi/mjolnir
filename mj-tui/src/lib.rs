@@ -1855,9 +1855,11 @@ impl DashboardState {
             .position(|index| sessions.get(index).is_some_and(|s| s.id == selected))
     }
 
-    /// Live sessions in the selected workspace, grouped by project
-    /// and ordered by creation. The controller may feed all workspaces into
-    /// one state snapshot; the tab is the local view filter.
+    /// Sessions visible in the selected workspace, grouped by project and
+    /// ordered by creation. Stopped sessions are included only when their
+    /// advanced display setting is enabled; in-flight transitions remain
+    /// visible regardless. The controller may feed all workspaces into one
+    /// state snapshot; the tab is the local view filter.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
         let Some(active_workspace_id) = self.active_workspace_id.as_deref() else {
             return Vec::new();
@@ -1867,7 +1869,10 @@ impl DashboardState {
         let mut groups = BTreeMap::<String, Vec<&SessionRecord>>::new();
         for session in active {
             if session.workspace_id != active_workspace_id
-                || (!session.state.is_active() && self.transition_kind(&session.id).is_none())
+                || (!session.state.is_active()
+                    && self.transition_kind(&session.id).is_none()
+                    && !(self.config.advanced.show_stopped_sessions
+                        && session.state == SessionState::Stopped))
             {
                 continue;
             }
@@ -3253,6 +3258,55 @@ mod tests {
                 .iter()
                 .any(|session| session.id == "history")
         );
+    }
+
+    #[test]
+    fn advanced_setting_reveals_only_stopped_sessions_in_the_selected_workspace() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let mut live = running_session();
+        live.id = "live".into();
+        dashboard.state.sessions.insert(live.id.clone(), live);
+        let mut lost = stopped_session();
+        lost.id = "lost".into();
+        lost.state = SessionState::Lost;
+        dashboard.state.sessions.insert(lost.id.clone(), lost);
+        let mut remote_history = stopped_session();
+        remote_history.id = "remote-history".into();
+        remote_history.workspace_id = "another-workspace".into();
+        dashboard
+            .state
+            .sessions
+            .insert(remote_history.id.clone(), remote_history);
+        dashboard.clamp_selections();
+
+        assert_eq!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["live"]
+        );
+
+        let mut config = dashboard.config.clone();
+        config.advanced.show_stopped_sessions = true;
+        dashboard.set_config(config);
+        let visible = dashboard
+            .ordered_sessions()
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(visible.contains(&"session-1"));
+        assert!(visible.contains(&"live"));
+        assert!(!visible.contains(&"lost"));
+        assert!(!visible.contains(&"remote-history"));
+
+        dashboard.select_active_session("session-1");
+        let mut config = dashboard.config.clone();
+        config.advanced.show_stopped_sessions = false;
+        dashboard.set_config(config);
+        assert_eq!(dashboard.selected_session_id(), Some("live"));
+        assert!(dashboard.state.sessions.contains_key("session-1"));
     }
 
     #[test]
