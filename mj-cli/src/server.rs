@@ -2885,21 +2885,27 @@ fn session_capabilities(
 
 /// The settings this agent advertised, with the values it accepts.
 fn viewer_config_options(
-    operational: &hel::hel_worker::RelayOperationalState,
+    config_options: &[agent_client_protocol::schema::v1::SessionConfigOption],
+    facts: &hel::hel_acp::AcpSessionFacts,
 ) -> Vec<mj_controller::hel_server::ViewerConfigOption> {
     use mj_controller::hel_server::{ViewerConfigChoice, ViewerConfigOption};
 
     ["model", "effort"]
         .into_iter()
         .filter_map(|key| {
-            let choices = hel::hel_acp::session_config_choices(&operational.config_options, key);
+            let choices = hel::hel_acp::session_config_choices(config_options, key);
             if choices.is_empty() {
                 return None;
             }
             Some(ViewerConfigOption {
                 key: key.to_owned(),
                 label: key.to_owned(),
-                current: operational.config.get(key).cloned(),
+                current: match key {
+                    "model" => facts.current_model(),
+                    "effort" => facts.current_effort(),
+                    _ => None,
+                }
+                .map(str::to_owned),
                 choices: choices
                     .into_iter()
                     .map(|choice| ViewerConfigChoice {
@@ -3248,7 +3254,12 @@ fn viewer_snapshot(
                     mj_controller::hel_server::ViewerChatPhase::Closed
                 }
             };
-            session.config_options = viewer_config_options(state);
+            session.config_options = viewer_config_options(
+                &state.config_options,
+                facts
+                    .as_ref()
+                    .expect("live operational state always has ACP session facts"),
+            );
             // Share activity classification with the terminal. The browser
             // retains its detailed turn/step/background clock presentation.
             let turn_started_at_ms = state
@@ -3380,10 +3391,69 @@ async fn load_materialized_activity(
 mod tests {
     use super::*;
     use crate::pollers::QUOTA_REFRESH_INTERVAL;
+    use std::collections::BTreeMap;
+
+    use agent_client_protocol::schema::v1::{
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        SessionConfigSelectOptions,
+    };
     use hel::hel_config::{
         CONFIG_VERSION, HarnessKind, HelConfig, ProjectBundle, ProjectRepository, TargetTemplate,
     };
     use hel::hel_state::SessionState;
+
+    #[test]
+    fn viewer_config_options_publish_current_advertised_values() {
+        let make_options = |model, effort| {
+            vec![
+                SessionConfigOption::select(
+                    "model_selector",
+                    "Model",
+                    model,
+                    SessionConfigSelectOptions::Ungrouped(vec![
+                        SessionConfigSelectOption::new("sonnet", "Claude Sonnet"),
+                        SessionConfigSelectOption::new("opus", "Claude Opus"),
+                    ]),
+                )
+                .category(SessionConfigOptionCategory::Model),
+                SessionConfigOption::select(
+                    "reasoning_effort",
+                    "Effort",
+                    effort,
+                    SessionConfigSelectOptions::Ungrouped(vec![
+                        SessionConfigSelectOption::new("high", "High"),
+                        SessionConfigSelectOption::new("max", "Maximum"),
+                    ]),
+                ),
+            ]
+        };
+        let options = make_options("sonnet", "high");
+        let defaults = hel::hel_acp::AcpSessionFacts::from_operational(
+            HarnessKind::Claude,
+            &BTreeMap::new(),
+            &options,
+            None,
+        );
+        let projected = viewer_config_options(&options, &defaults);
+        assert_eq!(
+            projected
+                .iter()
+                .map(|option| (option.key.as_str(), option.current.as_deref()))
+                .collect::<Vec<_>>(),
+            [("model", Some("sonnet")), ("effort", Some("high"))]
+        );
+
+        let options = make_options("opus", "max");
+        let updated = hel::hel_acp::AcpSessionFacts::from_operational(
+            HarnessKind::Claude,
+            &BTreeMap::new(),
+            &options,
+            None,
+        );
+        let projected = viewer_config_options(&options, &updated);
+        assert_eq!(projected[0].current.as_deref(), Some("opus"));
+        assert_eq!(projected[1].current.as_deref(), Some("max"));
+    }
 
     #[tokio::test]
     async fn explicit_tls_takes_precedence_over_tailscale_detection() {
