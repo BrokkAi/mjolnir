@@ -13,11 +13,11 @@ The behavior is observable by opening representative dashboard dialogs such as H
 - [x] (2026-09-09 11:17Z) Explored the dashboard and chat modal renderers, shared `Form` interaction layer, and existing cancel actions.
 - [x] (2026-09-09 11:17Z) Settled product behavior with the user: exit the whole workflow, protect only dirty F7 Setup, and confirm only import cancellation.
 - [x] (2026-09-09 11:28Z) Added and focused-tested the shared non-focusable dismiss interaction and modal-title renderer.
-- [ ] Adopt the shared control across dashboard dialogs and make Escape and pointer dismissal share one transition.
-- [ ] Adopt the shared control across chat popups without changing autocomplete or full-page panes.
-- [ ] Remove Close-only controls while retaining Cancel, Back, No, and action-specific controls.
-- [ ] Run formatting, focused tests, the full Rust test suite, and strict Clippy; resolve all findings.
-- [ ] Review, commit only the files changed for this feature, and push the commit to the current branch's upstream.
+- [x] (2026-09-09 12:21Z) Adopted the shared control across dashboard dialogs and routed Escape and pointer dismissal through the same transitions.
+- [x] (2026-09-09 12:21Z) Adopted the shared control across chat popups without changing autocomplete or full-page panes.
+- [x] (2026-09-09 12:21Z) Removed Close-only controls while retaining Cancel, Back, No, and action-specific controls.
+- [x] (2026-09-09 12:21Z) Passed formatting, focused crate tests, the full serialized Rust test suite, and strict workspace Clippy.
+- [x] (2026-09-09 12:21Z) Finalized the spacing fix and ExecPlan for the integration commit and configured-upstream push.
 
 ## Surprises & Discoveries
 
@@ -26,6 +26,15 @@ The behavior is observable by opening representative dashboard dialogs such as H
 
 - Observation: the background-task popup is a read-only viewer and exposes no operation-cancellation action.
   Evidence: `render_background_task_dialog` in `mj-chat/src/hel_chat/active.rs` clones and renders `session_activity().background_commands`; closing only clears the popup-open state.
+
+- Observation: import progress must be found through a dismissal confirmation as well as through Help, otherwise progress displayed after rejecting cancellation would be stale.
+  Evidence: `import_progress_mut` in `mj-tui/src/dialogs.rs` recursively follows both wrapper modes to the preserved `ImportProgress`.
+
+- Observation: preserving the old trailing title margin is behaviorally significant in the PTY snapshots; omitting it joined the title to the border as `target─`.
+  Evidence: `disabled_startup_waits_for_explicit_new_before_creating_a_session` failed until `dismissible_modal_title` restored the final styled space.
+
+- Observation: the upstream updater fixture races with itself under parallel workspace testing on this host and can fail with `ETXTBSY`; it passes alone and in the full serialized suite.
+  Evidence: the parallel `cargo test` attempts failed only in `npm_upgrade_restarts_after_the_running_package_is_removed`; the exact test and `cargo test -- --test-threads=1` passed.
 
 ## Decision Log
 
@@ -51,7 +60,9 @@ The behavior is observable by opening representative dashboard dialogs such as H
 
 ## Outcomes & Retrospective
 
-Implementation is in progress. This section will record the final behavior, validation evidence, and any remaining limitations after the full test and lint passes.
+The dashboard and chat modal families now share one upper-left `×` title control backed by `Form`. Glyph clicks and Escape take the same semantic path, Close-only footer buttons are gone, and explicit Back/Cancel/domain actions remain. Dirty Setup and active imports use safe-default confirmation dialogs; committed Setup, workspace, and bundle mutations disable dismissal. The chat configuration picker, reviewer setup, elicitation, and background-task viewer use the same interaction without broadening the scope to autocomplete or full-page panes.
+
+Validation passed after merging the upstream controller/client split: `cargo fmt --check`; `cargo test -p brokk-mj-tui` (408 passed, 2 ignored before the upstream merge); the exact PTY spacing regression test; `cargo test -- --test-threads=1` across the full merged workspace; `cargo clippy --all-targets -- -D warnings`; and `git diff --check`. The parallel full suite exposed only the pre-existing updater-fixture `ETXTBSY` race documented above, so the authoritative full run was serialized. No product limitation remains.
 
 ## Context and Orientation
 
@@ -81,13 +92,13 @@ Work from `/home/jonathan/Projects/hel4`.
 
 After the shared primitive is implemented, run focused component tests:
 
-    cargo test -p mj-chat components::scope
-    cargo test -p mj-chat hel_modal
+    cargo test -p brokk-mj-chat components::scope
+    cargo test -p brokk-mj-chat hel_modal
 
 After dashboard and chat adoption, run focused crate suites as useful while iterating:
 
-    cargo test -p mj-tui
-    cargo test -p mj-chat
+    cargo test -p brokk-mj-tui
+    cargo test -p brokk-mj-chat
 
 Before committing, run the required workspace checks outside the restricted sandbox because the suite exercises local sockets:
 
@@ -130,4 +141,4 @@ In `mj-chat/src/hel_modal.rs`, provide a generic `dismissible_modal_title` helpe
 
 No wire protocol, configuration schema, persistent data model, or third-party dependency changes are needed. New dashboard confirmation state is crate-internal and must preserve its underlying `Mode` with indirection so the recursive type has finite size.
 
-Revision note (2026-09-09): Created the implementation plan after repository exploration and user decisions; implementation and validation evidence remain to be added. Updated it during implementation when the user explicitly requested that the final commit be pushed.
+Revision note (2026-09-09): Created the implementation plan after repository exploration and user decisions; updated it when the user explicitly requested a push; and completed it with the implemented behavior, upstream-integration notes, and final validation evidence.

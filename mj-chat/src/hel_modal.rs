@@ -73,6 +73,7 @@ pub fn dismissible_modal_title<K: Copy + Eq>(
     Line::from(vec![
         Span::styled(" × ", dismiss_style),
         Span::styled(title.into(), title_style),
+        Span::styled(" ", title_style),
     ])
 }
 
@@ -329,10 +330,12 @@ mod tests {
         let mut form = Form::<u8>::new();
         let title = dismissible_modal_title(&mut form, popup, "Settings", title_style, true);
 
-        assert_eq!(title.spans.len(), 2);
+        assert_eq!(title.spans.len(), 3);
         assert_eq!(title.spans[0].content, " × ");
         assert_eq!(title.spans[1].content, "Settings");
         assert_eq!(title.spans[1].style, title_style);
+        assert_eq!(title.spans[2].content, " ");
+        assert_eq!(title.spans[2].style, title_style);
         assert!(form.contains(popup.x + 1, popup.y));
         assert!(form.contains(popup.x + 3, popup.y));
         assert!(!form.contains(popup.x, popup.y));
