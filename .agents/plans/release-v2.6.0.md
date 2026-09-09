@@ -15,7 +15,7 @@ Publish the work merged after v2.5.0 and summarize it for users. Version 2.6.0 a
 - [x] Verify all nine crates.io publishers name `BrokkAi/mjolnir`, `publish.yml`, and `crates-io` after the user obtained access to the new client crate.
 - [x] Pass formatting, default-member Clippy, npm packaging tests, 24 web unit tests, and portable x86-64 musl worker build and Clippy.
 - [x] Pass the full serialized Cargo suite, host release build, documentation check/build and 1,711 internal links, license checks and fresh notice comparisons, and all nine source packages.
-- [ ] Commit the release candidate on master, validate its clean state, and push it for exact-commit CI.
+- [x] Commit candidate `2da5697f3955b6cb74e36e053eafe1879ec881c5`, pass clean-commit formatting, Clippy, the full serialized Cargo suite, host build, packaging, version checks, and the provisioned reliability scenario with zero leaks, then push master for CI run `34405066583`.
 - [ ] Confirm CI passes, create and push the annotated version tag, and monitor all publishing workflows.
 - [ ] Verify release archives, registry versions, and Homebrew availability; publish notes and record completion.
 
@@ -33,6 +33,8 @@ The license check reports the previously known unmatched `libbz2-rs-sys@0.2.5` e
 
 Choose 2.6.0 because the changes add user-facing features beyond patch-level repairs. Keep the existing branch and publication workflows. The release request authorizes the source and tag pushes needed to publish it; never force-push or move a published tag.
 
+Automatic approval review initially rejected the master push under the previous explicit-push wording. The user explicitly authorized pushing, tagging, publication, and Homebrew updates; the candidate was then pushed successfully. The user also directed that "cut a new release" always means remote publication. Record that durable authorization in `AGENTS.md`. This documentation follow-up does not change the validated release candidate: tag `2da5697f3955b6cb74e36e053eafe1879ec881c5` after its CI passes.
+
 Retain the unchanged npm pipeline under the explicit user direction recorded in `.agents/plans/release-v2.3.0.md` and carried forward in `.agents/plans/release-v2.5.0.md`: use the existing publisher configuration without repeating the npm settings-inspection detour. The four npm package identities and `publish-npm.yml` are unchanged since v2.5.0.
 
 Run the full Cargo suite with one test thread because the preceding Kimi validation recorded PTY fixture interference under concurrency. This preserves the full test set while avoiding competing fixture startups.
@@ -40,7 +42,7 @@ Run the full Cargo suite with one test thread because the preceding Kimi validat
 ## Outcomes & Retrospective
 
 
-Local release preparation is validated and ready to commit. No tag has been created and no 2.6.0 package has been published.
+Candidate `2da5697f3955b6cb74e36e053eafe1879ec881c5` is validated and pushed. CI run `34405066583` is pending. No tag has been created and no 2.6.0 package has been published.
 
 ## Context and Orientation
 
