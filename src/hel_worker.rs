@@ -4644,6 +4644,100 @@ mod tests {
         SessionUpdate::ToolCall(call)
     }
 
+    fn kimi_background_agent_card_with_run_in_background_only() -> SessionUpdate {
+        use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+
+        let mut call = ToolCall::new("run-only", "agent");
+        call.status = ToolCallStatus::Completed;
+        call.raw_input = Some(serde_json::json!({
+            "description": "Run-only agent",
+            "run_in_background": true
+        }));
+        SessionUpdate::ToolCall(call)
+    }
+
+    fn kimi_background_agent_card_with_running_task_id_only() -> SessionUpdate {
+        use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+
+        let mut call = ToolCall::new("task-only", "agent");
+        call.status = ToolCallStatus::Completed;
+        call.raw_input = Some(serde_json::json!({
+            "description": "Task-only agent"
+        }));
+        call.raw_output = Some(serde_json::Value::String(
+            "task_id: agent-task-only\nstatus: running".into(),
+        ));
+        SessionUpdate::ToolCall(call)
+    }
+
+    #[test]
+    fn kimi_agent_acp_evidence_tracks_each_background_alternative_independently() {
+        for update in [
+            kimi_background_agent_card_with_run_in_background_only(),
+            kimi_background_agent_card_with_running_task_id_only(),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+            relay.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+            relay.record_session_update(update).unwrap();
+
+            let state = relay.operational_state();
+            assert_eq!(state.background_commands.len(), 1);
+            assert_eq!(state.background_work_known, Some(false));
+            assert!(!state.is_quiet());
+        }
+    }
+
+    #[test]
+    fn unmatched_kimi_provisional_work_survives_empty_native_scan_until_evidence_or_teardown() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+        relay
+            .record_session_update(kimi_background_agent_card())
+            .unwrap();
+
+        relay
+            .kimi_background_tasks_changed(Vec::new(), BTreeSet::new())
+            .unwrap();
+        assert_eq!(relay.operational_state().background_commands.len(), 1);
+
+        relay
+            .kimi_background_tasks_changed(
+                vec![crate::hel_acp::KimiBackgroundTask {
+                    task_id: "agent-deadbeef".into(),
+                    description: "Fix memory use".into(),
+                    started_at_ms: 1_000,
+                    parent_tool_call_id: Some("tool_agent".into()),
+                }],
+                BTreeSet::from(["tool_agent".into()]),
+            )
+            .unwrap();
+        let state = relay.operational_state();
+        assert_eq!(state.background_commands.len(), 1);
+        assert_eq!(state.background_commands[0].id, "kimi:agent-deadbeef");
+
+        for observation in [
+            RelayObservation::SessionRestarted,
+            RelayObservation::Closing,
+            RelayObservation::Closed,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+            relay.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+            relay
+                .record_session_update(kimi_background_agent_card())
+                .unwrap();
+            relay
+                .kimi_background_tasks_changed(Vec::new(), BTreeSet::new())
+                .unwrap();
+            relay.record_observation(observation).unwrap();
+            let state = relay.operational_state();
+            assert!(state.background_commands.is_empty());
+            assert_eq!(state.background_work_known, Some(false));
+        }
+    }
+
     #[test]
     fn kimi_background_agent_survives_its_parent_prompt_until_native_termination() {
         let temp = tempfile::tempdir().unwrap();

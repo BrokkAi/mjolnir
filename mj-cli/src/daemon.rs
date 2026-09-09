@@ -1120,6 +1120,9 @@ impl RuntimeState {
                         });
                 }
                 self.recovery_observer.observe(RecoveryObservation {
+                    checkpoint_safe: snapshot
+                        .operational
+                        .safe_for_checkpoint(session.harness_kind),
                     session,
                     config: controller.config.clone(),
                     latest_completed_turn_ordinal: snapshot.latest_completed_turn_ordinal(),

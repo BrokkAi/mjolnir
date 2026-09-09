@@ -490,9 +490,6 @@ fn parse_append(
         ensure_line_size(&tail, path, line_number)?;
         *partial = tail;
     }
-    if start == partial.len() {
-        partial.clear();
-    }
     *next_line_number = line_number;
     Ok(())
 }
@@ -841,6 +838,21 @@ mod tests {
     }
 
     #[test]
+    fn legacy_termination_alias_removes_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let wire = temp.path().join("wire.jsonl");
+        append_jsonl(
+            &wire,
+            &[
+                lifecycle(LEGACY_TASK_STARTED, "legacy", None, true, "agent"),
+                lifecycle(LEGACY_TASK_TERMINATED, "legacy", None, true, "agent"),
+            ],
+        );
+
+        assert!(full_scan(&wire).unwrap().tasks.is_empty());
+    }
+
+    #[test]
     fn follower_retains_partial_line_until_completion() {
         let temp = tempfile::tempdir().unwrap();
         let wire = temp.path().join("wire.jsonl");
@@ -857,6 +869,30 @@ mod tests {
             KimiWireRefresh::Updated(_)
         ));
         assert_eq!(follower.snapshot().tasks[0].task_id, "partial");
+    }
+
+    #[test]
+    fn follower_retains_partial_tail_when_it_matches_consumed_prefix_length() {
+        let temp = tempfile::tempdir().unwrap();
+        let wire = temp.path().join("wire.jsonl");
+        let complete = b"{\"type\":\"unknown\"}\n";
+        let partial = lifecycle(TASK_STARTED, "equal-tail", None, true, "agent").to_string();
+        assert!(partial.len() >= complete.len());
+        let mut first_append = complete.to_vec();
+        first_append.extend_from_slice(&partial.as_bytes()[..complete.len()]);
+        fs::write(&wire, first_append).unwrap();
+
+        let mut follower = KimiWireFollower::open(&wire).unwrap();
+        assert!(follower.snapshot().tasks.is_empty());
+
+        let mut file = OpenOptions::new().append(true).open(&wire).unwrap();
+        use std::io::Write;
+        file.write_all(&partial.as_bytes()[complete.len()..])
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+        follower.refresh().unwrap();
+
+        assert_eq!(follower.snapshot().tasks[0].task_id, "equal-tail");
     }
 
     #[test]

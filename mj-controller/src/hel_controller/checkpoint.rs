@@ -23,7 +23,7 @@ use hel::hel_checkpoint::{
     capture_stdin_command, checkpoint_sha256, export_command, export_stdin_command,
     pack_stdin_command,
 };
-use hel::hel_config::sessions_dir;
+use hel::hel_config::{HarnessKind, sessions_dir};
 use hel::hel_projection::canonical_session_from_materialized;
 use hel::hel_state::{
     CheckpointMetadata, HelState, ManagedSessionSnapshot, SessionRecord, SessionState,
@@ -814,9 +814,15 @@ impl Controller {
                 session_id,
                 executor,
                 manager,
-                &backend,
-                &worker_root,
-                &reconnect,
+                InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &worker_root,
+                    reconnect: &reconnect,
+                    launch: None,
+                    messages: &RESTART_FOR_CHECKPOINT,
+                },
+                exclusivity == LatchExclusivity::HoldThroughClose
+                    || session.harness_kind != HarnessKind::Kimi,
             )
             .await?;
         let (barrier, barrier_command_id) = loop {
@@ -829,14 +835,25 @@ impl Controller {
                 hel_targets::ProvisionStage::Starting,
             )
             .await?;
-            if exclusivity == LatchExclusivity::ReleaseAfterLatch
-                && relay.connection_mut().sync().await?.operational.execution
-                    == RelayExecutionState::Running
-            {
-                // A routine recovery copy must not open a barrier just to
-                // abandon it as soon as it observes the active turn.
-                relay.release();
-                return Err(CheckpointDeferred::harness_busy().into());
+            if exclusivity == LatchExclusivity::ReleaseAfterLatch {
+                let snapshot = relay.connection_mut().sync().await?;
+                if snapshot.operational.execution == RelayExecutionState::Running {
+                    // A routine recovery copy must not open a barrier just to
+                    // abandon it as soon as it observes the active turn.
+                    relay.release();
+                    return Err(CheckpointDeferred::harness_busy().into());
+                }
+                if !snapshot
+                    .operational
+                    .safe_for_checkpoint(session.harness_kind)
+                {
+                    // Kimi's native task level is process-owned workspace
+                    // work. Unknown or active work must defer before the
+                    // barrier is submitted; close deliberately does not use
+                    // this path and may still interrupt/terminate it.
+                    relay.release();
+                    return Err(CheckpointDeferred::background_work().into());
+                }
             }
             let barrier_command_id = new_command_id("checkpoint")?;
             let timeout = if restarted_worker {
@@ -860,6 +877,7 @@ impl Controller {
                     &barrier_command_id,
                     timeout,
                     BarrierBusyPolicy::of(exclusivity),
+                    session.harness_kind,
                 )
                 .await
             };
@@ -868,6 +886,17 @@ impl Controller {
                 Err(error)
                     if !restarted_worker && checkpoint_barrier_needs_worker_restart(&error) =>
                 {
+                    if exclusivity == LatchExclusivity::ReleaseAfterLatch
+                        && session.harness_kind == HarnessKind::Kimi
+                    {
+                        let safe_to_restart =
+                            relay.connection_mut().sync().await.is_ok_and(|snapshot| {
+                                snapshot.operational.safe_to_replace(HarnessKind::Kimi)
+                            });
+                        if !safe_to_restart {
+                            return Err(error.context(CheckpointDeferred::background_work()));
+                        }
+                    }
                     tracing::warn!(
                         session_id,
                         "checkpoint requires a worker restart; restarting and retrying: {error:#}"
@@ -1022,6 +1051,7 @@ impl Controller {
                     session_id,
                     &barrier_command_id,
                     &cursor,
+                    session.harness_kind,
                 )
                 .await?;
                 let pack_spec = CheckpointPackSpec {
@@ -1143,11 +1173,20 @@ impl Controller {
                 // before releasing; the sha256 chain covers the transfer itself.
                 if completion == CheckpointCompletion::HeldBarrier {
                     let revalidated = relay.sync_snapshot().await.and_then(|snapshot| {
-                        validate_checkpoint_barrier_snapshot(
-                            &snapshot,
-                            &barrier_command_id,
-                            &cursor,
-                        )
+                        if releases_after_capture {
+                            validate_automatic_checkpoint_barrier_snapshot(
+                                &snapshot,
+                                &barrier_command_id,
+                                &cursor,
+                                session.harness_kind,
+                            )
+                        } else {
+                            validate_checkpoint_barrier_snapshot(
+                                &snapshot,
+                                &barrier_command_id,
+                                &cursor,
+                            )
+                        }
                     });
                     if let Err(error) = revalidated {
                         return Err(remove_uninstalled_checkpoint(
@@ -1218,9 +1257,8 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
-        backend: &hel_targets::TargetLocator,
-        worker_root: &str,
-        reconnect: &hel_targets::CommandSpec,
+        target: InstalledWorkerRestart<'_>,
+        restart_if_unreachable: bool,
     ) -> Result<(ControllerRelayLease, bool)> {
         let project_memory = match self.project_memory_sync_target(session_id) {
             Ok(target) => Some(target),
@@ -1233,10 +1271,16 @@ impl Controller {
                 None
             }
         };
-        match connect_checkpoint_relay(session_id, manager, reconnect, project_memory.clone()).await
+        match connect_checkpoint_relay(
+            session_id,
+            manager,
+            target.reconnect,
+            project_memory.clone(),
+        )
+        .await
         {
             Ok(relay) => Ok((relay, false)),
-            Err(error) if worker_connect_needs_restart(&error) => {
+            Err(error) if worker_connect_needs_restart(&error) && restart_if_unreachable => {
                 tracing::warn!(
                     session_id,
                     "checkpoint could not reach the worker; restarting it: {error:#}"
@@ -1245,15 +1289,18 @@ impl Controller {
                     .restart_worker_for_checkpoint(
                         session_id,
                         executor,
-                        backend,
-                        worker_root,
-                        reconnect,
+                        target.backend,
+                        target.worker_root,
+                        target.reconnect,
                     )
                     .await?;
                 connection.set_project_memory_target(project_memory);
                 let relay =
                     adopt_restarted_checkpoint_relay(session_id, manager, connection).await?;
                 Ok((relay, true))
+            }
+            Err(error) if worker_connect_needs_restart(&error) => {
+                Err(error.context(CheckpointDeferred::background_work()))
             }
             Err(error) => Err(error).context("connect to the session worker for checkpoint"),
         }
@@ -1375,6 +1422,7 @@ async fn wait_for_checkpoint_barrier(
     command_id: &str,
     timeout: Duration,
     busy: BarrierBusyPolicy,
+    harness: HarnessKind,
 ) -> Result<ManagedSessionSnapshot> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut cancel_submitted = false;
@@ -1382,6 +1430,15 @@ async fn wait_for_checkpoint_barrier(
     let mut cancel_started_at: Option<Instant> = None;
     loop {
         let snapshot = relay.sync().await?;
+        if busy == BarrierBusyPolicy::DeferWhileRunning
+            && !snapshot.operational.safe_for_checkpoint(harness)
+        {
+            // The native task level can change after the controller's initial
+            // idle sync and before the queued BeginCheckpoint is processed.
+            // Defer from the barrier wait rather than allowing its timeout to
+            // classify the worker as wedged and restart it.
+            return Err(CheckpointDeferred::background_work().into());
+        }
         if checkpoint_barrier_is_ready(&snapshot, command_id) {
             if let Some(started_at) = cancel_started_at {
                 tracing::info!(
@@ -1575,6 +1632,13 @@ impl CheckpointDeferred {
         Self("the agent is working; try again when it is idle".to_owned())
     }
 
+    fn background_work() -> Self {
+        Self(
+            "Kimi background-agent state is unknown or still active; checkpoint deferred until it is synchronized and idle"
+                .to_owned(),
+        )
+    }
+
     fn frontier_moved() -> Self {
         Self(
             "the session moved past the checkpoint-ready cursor before the barrier latched, so this checkpoint was deferred"
@@ -1668,6 +1732,23 @@ fn validate_checkpoint_barrier_snapshot(
     Ok(())
 }
 
+/// Validate the barrier cut and prove that a routine checkpoint still has no
+/// provider-owned Kimi work. Close checkpoints intentionally use the more
+/// permissive validator because close is allowed to interrupt/terminate work.
+fn validate_automatic_checkpoint_barrier_snapshot(
+    snapshot: &ManagedSessionSnapshot,
+    command_id: &str,
+    expected: &RelayCursor,
+    harness: HarnessKind,
+) -> Result<()> {
+    validate_checkpoint_barrier_snapshot(snapshot, command_id, expected)?;
+    ensure!(
+        snapshot.operational.safe_for_checkpoint(harness),
+        CheckpointDeferred::background_work()
+    );
+    Ok(())
+}
+
 fn remove_uninstalled_checkpoint(path: &Path, error: anyhow::Error) -> anyhow::Error {
     match std::fs::remove_file(path) {
         Ok(()) => error,
@@ -1708,12 +1789,18 @@ async fn release_checkpoint_after_capture(
     session_id: &str,
     barrier_command_id: &str,
     cursor: &RelayCursor,
+    harness: HarnessKind,
 ) -> Result<CheckpointCompletion> {
     relay
         .sync_snapshot()
         .await
         .and_then(|snapshot| {
-            validate_checkpoint_barrier_snapshot(&snapshot, barrier_command_id, cursor)
+            validate_automatic_checkpoint_barrier_snapshot(
+                &snapshot,
+                barrier_command_id,
+                cursor,
+                harness,
+            )
         })
         .context("checkpoint barrier changed while capturing target state")?;
     match relay
@@ -2365,6 +2452,60 @@ mod tests {
         snapshot.operational.checkpoint_ready = Some(cursor.clone());
         snapshot.operational.checkpoint_barrier = None;
         assert!(validate_checkpoint_barrier_snapshot(&snapshot, "checkpoint-1", &cursor).is_err());
+    }
+
+    #[test]
+    fn routine_kimi_checkpoint_defers_when_background_liveness_is_not_safe() {
+        let cursor = RelayCursor {
+            ordinal: 7,
+            digest: "a".repeat(64),
+        };
+        let mut snapshot = checkpoint_barrier_snapshot(&cursor);
+        snapshot.operational.checkpoint_ready = Some(cursor.clone());
+
+        for (known, has_task, label) in [
+            (Some(false), false, "tracker reported a failure"),
+            (Some(true), true, "a native task is still active"),
+            (None, false, "an older worker omitted the tracker field"),
+        ] {
+            snapshot.operational.background_work_known = known;
+            snapshot.operational.background_commands = has_task
+                .then(|| hel::hel_worker::BackgroundCommand {
+                    id: "kimi:agent-1".into(),
+                    started_at_ms: 1,
+                    command: "background agent".into(),
+                    can_stop: false,
+                })
+                .into_iter()
+                .collect();
+            let error = validate_automatic_checkpoint_barrier_snapshot(
+                &snapshot,
+                "checkpoint-1",
+                &cursor,
+                HarnessKind::Kimi,
+            )
+            .expect_err(label);
+            assert!(checkpoint_was_deferred(&error), "{label}: {error:#}");
+            assert!(!checkpoint_barrier_needs_worker_restart(&error));
+        }
+
+        // A non-Kimi harness keeps the historical behavior even if the
+        // optional Kimi field happens to be absent or a provider-level list is
+        // present in a compatibility snapshot.
+        snapshot.operational.background_work_known = None;
+        snapshot.operational.background_commands = vec![hel::hel_worker::BackgroundCommand {
+            id: "legacy-task".into(),
+            started_at_ms: 1,
+            command: "legacy background work".into(),
+            can_stop: false,
+        }];
+        validate_automatic_checkpoint_barrier_snapshot(
+            &snapshot,
+            "checkpoint-1",
+            &cursor,
+            HarnessKind::Codex,
+        )
+        .expect("non-Kimi checkpoint compatibility");
     }
     /// Target-side answer of a successful export.
     fn exported_checkpoint_json() -> Vec<u8> {
@@ -3277,6 +3418,7 @@ mod tests {
             &barrier_command_id,
             CHECKPOINT_BARRIER_TIMEOUT,
             BarrierBusyPolicy::InterruptWhileRunning,
+            HarnessKind::Codex,
         )
         .await
         .unwrap();
@@ -3512,6 +3654,7 @@ mod tests {
             LATCH_RELAY_SESSION,
             &barrier_command_id,
             &cursor,
+            HarnessKind::Codex,
         )
         .await
         .unwrap();
@@ -3624,6 +3767,7 @@ mod tests {
             LATCH_RELAY_SESSION,
             &barrier_command_id,
             &cursor,
+            HarnessKind::Codex,
         )
         .await
         .unwrap();

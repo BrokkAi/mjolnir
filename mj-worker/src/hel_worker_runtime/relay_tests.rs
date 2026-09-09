@@ -991,6 +991,163 @@ async fn kimi_native_task_level_blocks_replacement_until_termination() {
 }
 
 #[tokio::test]
+async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("kimi");
+    let old_session = home.join("sessions/old").join(SESSION_ID);
+    let new_session = home.join("sessions/new").join(SESSION_ID);
+    for (session_dir, task_id) in [(&old_session, "old-agent"), (&new_session, "new-agent")] {
+        let wire = session_dir.join("agents/main/wire.jsonl");
+        std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        std::fs::write(
+            session_dir.join("state.json"),
+            serde_json::json!({"id": SESSION_ID}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &wire,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "task.started",
+                    "agentId": "main",
+                    "info": {
+                        "taskId": task_id,
+                        "description": task_id,
+                        "status": "running",
+                        "detached": true,
+                        "startedAt": 1234,
+                        "kind": "agent",
+                        "agentId": "agent"
+                    }
+                })
+            ),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"sessionId": SESSION_ID, "sessionDir": old_session})
+        ),
+    )
+    .unwrap();
+
+    let mut durable = DurableRelay::open(temp.path().join("relay"), SESSION_ID, "1.0.0").unwrap();
+    durable.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+    durable
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let relay = Arc::new(Mutex::new(durable));
+    let mut monitor = unix::KimiTaskMonitor::new(Ok(home.clone()));
+    monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
+    assert_eq!(
+        relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .background_commands[0]
+            .command,
+        "old-agent"
+    );
+
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"sessionId": SESSION_ID, "sessionDir": old_session}),
+            serde_json::json!({"sessionId": SESSION_ID, "sessionDir": new_session}),
+        ),
+    )
+    .unwrap();
+    monitor.refresh(&relay, true).await.unwrap();
+
+    let state = relay.lock().unwrap().operational_state();
+    assert_eq!(state.background_commands.len(), 1);
+    assert_eq!(state.background_commands[0].command, "new-agent");
+}
+
+#[tokio::test]
+async fn kimi_native_task_monitor_retains_tasks_and_deduplicates_failure_warning() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("kimi");
+    let session_dir = home.join("sessions/workspace").join(SESSION_ID);
+    let wire = session_dir.join("agents/main/wire.jsonl");
+    std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+    std::fs::write(
+        session_dir.join("state.json"),
+        serde_json::json!({"id": SESSION_ID}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        &wire,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "task.started",
+                "agentId": "main",
+                "info": {
+                    "taskId": "agent-1",
+                    "description": "still running",
+                    "status": "running",
+                    "detached": true,
+                    "startedAt": 1234,
+                    "kind": "agent",
+                    "agentId": "agent"
+                }
+            })
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"sessionId": SESSION_ID, "sessionDir": session_dir})
+        ),
+    )
+    .unwrap();
+
+    let mut durable = DurableRelay::open(temp.path().join("relay"), SESSION_ID, "1.0.0").unwrap();
+    durable.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+    durable
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let relay = Arc::new(Mutex::new(durable));
+    let mut monitor = unix::KimiTaskMonitor::new(Ok(home.clone()));
+    monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
+    std::fs::remove_file(home.join("session_index.jsonl")).unwrap();
+
+    monitor.refresh(&relay, true).await.unwrap();
+    let after_failure = relay.lock().unwrap().operational_state();
+    assert_eq!(after_failure.background_commands.len(), 1);
+    assert_eq!(after_failure.background_work_known, Some(false));
+    assert!(!after_failure.safe_to_replace(HarnessKind::Kimi));
+
+    monitor.refresh(&relay, true).await.unwrap();
+    let warning_count = relay
+        .lock()
+        .unwrap()
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.observation,
+                RelayObservation::Warning { message }
+                    if message.starts_with("Kimi background task tracking is unavailable;")
+            )
+        })
+        .count();
+    assert_eq!(warning_count, 1);
+}
+
+#[tokio::test]
 async fn offline_prompt_queue_runs_serially_without_a_controller() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();

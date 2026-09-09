@@ -13,8 +13,12 @@ Mjolnir currently mistakes a Kimi session for idle after the parent turn ends ev
 - [x] (2026-09-09 16:05Z) Implemented and tested the native Kimi task follower, including partial appends, journal replacement, legacy events, and path validation.
 - [x] (2026-09-09 16:20Z) Integrated provisional ACP launch evidence and authoritative Kimi task levels into the relay.
 - [x] (2026-09-09 16:30Z) Gated automatic upgrade and both move preparation checks on Kimi tracking certainty.
-- [x] (2026-09-09 16:55Z) Passed `cargo test` and `cargo clippy --all-targets -- -D warnings`; updated this plan for the completed design.
-- [x] (2026-09-09 17:00Z) Reviewed the final diff and prepared the validated change for commit and push.
+- [x] (2026-09-09 16:55Z) Passed `cargo test` and `cargo clippy --all-targets -- -D warnings` for the initial implementation.
+- [x] (2026-09-09 17:00Z) Reviewed and committed the initial implementation.
+- [x] (2026-09-09 19:15Z) Merged the latest `origin/master` without rebasing and integrated its targeted background-task cancellation fields with Kimi task projection.
+- [x] (2026-09-09 19:35Z) Fixed session-index path rollover and the equal-length partial-record tail bug; added native watcher regression coverage.
+- [x] (2026-09-09 19:43Z) Made routine checkpoints and automatic recovery fail closed for unknown or active Kimi tasks while preserving explicit close semantics; focused Kimi, worker, checkpoint, and recovery tests pass.
+- [x] (2026-09-09 20:18Z) Passed the final serialized full `cargo test -- --test-threads=1`, `cargo clippy --all-targets -- -D warnings`, formatting, and diff checks after reviewing the integrated change.
 
 ## Surprises & Discoveries
 
@@ -24,6 +28,10 @@ Mjolnir currently mistakes a Kimi session for idle after the parent turn ends ev
   Evidence: `task.started.info` contains `taskId`, `description`, `startedAt`, `kind`, `detached`, and `parentToolCallId`; `task.terminated.info` repeats the task ID and terminal state.
 - Observation: the native session's top-level `agentId` identifies the emitting main agent, while `info.agentId` identifies the detached child.
   Evidence: the incident journal uses `agentId: "main"` beside an `info.agentId` such as `agent-1`; filtering both as emitters would discard every real child launch.
+- Observation: a Kimi session index can point the same native session ID at a new directory while the old directory remains readable.
+  Evidence: a monitor-level fixture appends a newer matching index row and proves the watcher switches from the old wire to the new wire on its next refresh.
+- Observation: automatic recovery policy uses materialized turn execution, which is already idle after a Kimi parent turn even when provider-owned work remains live.
+  Evidence: recovery observations now carry a separate checkpoint-safety fact derived from live operational state so a deferred copy is not retried on every view.
 
 ## Decision Log
 
@@ -39,12 +47,15 @@ Mjolnir currently mistakes a Kimi session for idle after the parent turn ends ev
 - Decision: Keep the Kimi monitor in the worker relay coordinator instead of adding Kimi-specific variants to the shared ACP runtime protocol.
   Rationale: the native journal and configured Kimi home exist only on the target worker. Reading them through Tokio's blocking pool lets the coordinator publish live state directly without expanding `LaunchSpec` or `RuntimeEvent` with provider-specific file details.
   Date/Author: 2026-09-09 / Codex
+- Decision: Apply the Kimi certainty rule to routine checkpoints at controller synchronization, barrier waiting, capture release, and final revalidation, but not to explicit close.
+  Rationale: an automatic archive must never restart or capture across unknown provider work, while an explicit close is an intentional request to interrupt and terminate session-owned work.
+  Date/Author: 2026-09-09 / Codex
 
 ## Outcomes & Retrospective
 
-Kimi workers now replay and follow the native main-agent journal, retain positive ACP launch evidence until the journal correlates it, and expose whether that provider-owned task level is synchronized. A running detached Agent remains visible as background work after its parent prompt finishes. Automatic upgrades and moves defer while such work exists or while its state is unknown; termination makes an otherwise-idle current worker replaceable again. Older Kimi workers omit the certainty field and therefore fail closed for replacement, while older workers for other harnesses keep their previous behavior.
+Kimi workers now replay and follow the native main-agent journal, including a session directory that changes through a newer index row, retain positive ACP launch evidence until the journal correlates it, and expose whether that provider-owned task level is synchronized. A running detached Agent remains visible as background work after its parent prompt finishes. Automatic upgrades, routine checkpoints, recovery copies, and moves defer while such work exists or while its state is unknown; termination makes an otherwise-idle current worker replaceable and checkpointable again. Older Kimi workers omit the certainty field and therefore fail closed for replacement and routine checkpoints, while older workers for other harnesses keep their previous behavior. Explicit close remains intentionally able to interrupt session work.
 
-The focused tests cover native modern and legacy lifecycle records, path confinement, partial writes, replacement/truncation, ACP-to-native reconciliation, unavailable-state behavior, old-worker compatibility, and the target worker integration boundary. The full default-member test suite and clippy with warnings denied pass.
+The focused tests cover native modern and legacy lifecycle records, path confinement and rollover, partial writes including the equal-length tail boundary, replacement/truncation, independent ACP launch-evidence forms, ACP-to-native reconciliation, unavailable-state behavior and warning deduplication, process teardown, old-worker compatibility, checkpoint deferral and revalidation, recovery scheduling, and the target worker integration boundary. The final serialized full suite and strict all-target clippy validation pass. Two earlier parallel/full attempts exposed unrelated test-fixture races (`Text file busy` in the npm updater fixture and a PTY startup timeout after leaked test daemons); the affected tests passed in isolation, the exact leaked test daemons were stopped normally, and the final complete serialized run passed every test including all six PTY cases.
 
 ## Context and Orientation
 
@@ -62,9 +73,19 @@ Teach the relay a `KimiTasks` background-work policy. Kimi Agent tool calls that
 
 Add an optional live `background_work_known` field to `RelayOperationalState`. New Kimi workers initialize it false and set it true only after watcher synchronization. `is_quiet` rejects an explicit false. Add a harness-aware replacement predicate that also rejects `None` for Kimi, then use it in automatic upgrade and move preparation/revalidation. This makes an older Kimi worker require one explicit stop/resume to acquire the new tracker without changing compatibility for other harnesses.
 
+Routine checkpointing uses the same live certainty without changing explicit close. The controller checks Kimi task safety before opening a barrier, while waiting for it, after capture, and before publishing the archive. A routine checkpoint may restart an unreachable or wedged Kimi worker only after a live snapshot proves replacement safe; when no worker can provide that proof, the attempt is a normal deferral. The automatic recovery coordinator receives this live safety fact separately from materialized turn execution, preventing repeated attempts while a detached task remains active.
+
+## Milestones
+
+The first milestone establishes trustworthy native evidence. `src/hel_acp/kimi_tasks.rs` resolves the newest matching session-index row, confines it to the configured Kimi home, and follows complete records without losing a partial tail. `mj-worker/src/hel_worker_runtime/unix.rs` re-resolves that row on refresh so a readable superseded directory cannot hide work. The `kimi_tasks` core tests and `kimi_native_task` worker tests demonstrate replay, aliases, filtering, path rollover, failure retention, and incremental boundaries.
+
+The second milestone projects provider work and protects replacement. `src/hel_worker.rs` combines provisional ACP launch evidence with the authoritative native level, while `src/hel_worker/snapshot.rs` exposes certainty and harness-aware predicates. Upgrade and move call sites use those predicates. The focused core Kimi tests demonstrate that each ACP evidence form works independently, correlation removes only the provisional duplicate, and task state survives until native termination or process teardown.
+
+The third milestone protects checkpoints without weakening explicit lifecycle commands. `mj-controller/src/hel_controller/checkpoint.rs` defers routine Kimi checkpoints at every boundary where live work can change and refuses blind restart recovery. `src/hel_state.rs`, `mj-cli/src/daemon.rs`, and `mj-controller/src/hel_recovery.rs` carry the live safety fact into automatic recovery scheduling. Controller checkpoint and recovery tests demonstrate typed deferral, non-Kimi compatibility, and resumption after a known-empty observation.
+
 ## Concrete Steps
 
-Work from `/home/jonathan/Projects/hel2`. Implement the watcher and its unit tests, then wire its runtime events into the relay and add controller behavior tests. Format with `cargo fmt`. Run focused tests while iterating, followed by `cargo test` and `cargo clippy --all-targets -- -D warnings` outside the restricted sandbox. Review the final diff, commit only the changed files on the current branch, incorporate the upstream commit without rebasing if necessary, and push the current branch to its configured upstream.
+Work from `/home/jonathan/Projects/hel2`. The implementation and focused validation are complete. The focused commands are `cargo test -p brokk-mj-core kimi`, `cargo test -p brokk-mj-worker kimi_native_task`, `cargo test -p brokk-mj-controller checkpoint`, and `cargo test -p brokk-mj-controller unsafe_background_work_defers_recovery_until_a_safe_observation`; they pass 20, 3, 37, and 1 tests respectively. The final required gates are `cargo test -- --test-threads=1` and `cargo clippy --all-targets -- -D warnings`; both pass outside the restricted sandbox. `cargo fmt --all -- --check` and `git diff --check` also pass. Commit only the changed feature and plan files on the current branch, then push the current branch to its configured upstream.
 
 ## Validation and Acceptance
 
@@ -87,3 +108,5 @@ No matching terminal record existed before Mjolnir replaced the worker.
 ## Interfaces and Dependencies
 
 `hel_acp` exposes the Kimi journal resolver and incremental follower to the target worker. `hel_worker::BackgroundWorkPolicy` gains `KimiTasks`. `hel_worker::RelayOperationalState` gains `background_work_known: Option<bool>` and the harness-aware `safe_to_replace` method. The worker coordinator derives the configured Kimi home from its existing credential endpoint and publishes task levels directly to the relay. No shared ACP event variant, launch-spec field, third-party dependency, database migration, configuration key, or UI command is required.
+
+Revision note (2026-09-09): Updated the completed design after interruption review to record session-path rollover, partial-record correctness, checkpoint and recovery safety, upstream cancellation integration, focused and full validation results, and final delivery. This revision corrects the earlier completion claim because review found those behaviors were not yet fully implemented or tested.

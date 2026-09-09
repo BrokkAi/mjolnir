@@ -428,6 +428,10 @@ pub struct RecoveryObservation {
     pub config: HelConfig,
     pub latest_completed_turn_ordinal: Option<u64>,
     pub execution: MaterializedExecutionState,
+    /// Whether live provider-owned work permits an automatic checkpoint now.
+    /// This is separate from materialized execution because Kimi detached
+    /// agents outlive the parent turn that returned the session to `Idle`.
+    pub checkpoint_safe: bool,
 }
 
 /// The position where the session's most recent finished turn began, or

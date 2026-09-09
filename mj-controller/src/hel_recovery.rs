@@ -87,7 +87,7 @@ impl RecoveryCoordinator {
                         let policy = policies.entry(session_id.clone()).or_default();
                         policy.observe_checkpoint(observation.session.checkpoint.as_ref());
                         policy.observe_completed_turn(observation.latest_completed_turn_ordinal);
-                        if policy.due(observation.execution, Utc::now())
+                        if checkpoint_due(policy, &observation, Utc::now())
                             && let Some(expected_target) = observation.session.target.clone()
                             && let Some(copy_cancelled) = coordinator_gate.try_start(&session_id)
                         {
@@ -358,6 +358,14 @@ impl PolicyState {
     }
 }
 
+fn checkpoint_due(
+    policy: &PolicyState,
+    observation: &RecoveryObservation,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    observation.checkpoint_safe && policy.due(observation.execution, now)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -423,7 +431,22 @@ mod tests {
             config: HelConfig::default(),
             latest_completed_turn_ordinal: latest_completed_turn_ordinal(&completed(position)),
             execution: MaterializedExecutionState::Idle,
+            checkpoint_safe: true,
         }
+    }
+
+    #[test]
+    fn unsafe_background_work_defers_recovery_until_a_safe_observation() {
+        let mut policy = PolicyState::default();
+        policy.observe_completed_turn(Some(1));
+        let mut observed = observation(1);
+        observed.checkpoint_safe = false;
+
+        assert!(!checkpoint_due(&policy, &observed, Utc::now()));
+        assert_eq!(policy.last_attempted_turn, None);
+
+        observed.checkpoint_safe = true;
+        assert!(checkpoint_due(&policy, &observed, Utc::now()));
     }
 
     /// The dashboard reports activity from its event loop, so observing must

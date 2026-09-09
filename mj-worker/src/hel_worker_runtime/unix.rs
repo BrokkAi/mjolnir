@@ -646,12 +646,11 @@ impl KimiTaskMonitor {
             .expect("Kimi refresh is guarded by a native session id");
         let follower = self.follower.take();
         let scanned = tokio::task::spawn_blocking(move || -> Result<_> {
+            let session_dir = hel_acp::resolve_kimi_session_dir(&home, &native_session_id)?;
+            let wire_path = session_dir.join("agents/main/wire.jsonl");
             let mut follower = match follower {
-                Some(follower) => follower,
-                None => {
-                    let session_dir = hel_acp::resolve_kimi_session_dir(&home, &native_session_id)?;
-                    hel_acp::KimiWireFollower::open(session_dir.join("agents/main/wire.jsonl"))?
-                }
+                Some(follower) if follower.wire_path() == wire_path => follower,
+                _ => hel_acp::KimiWireFollower::open(wire_path)?,
             };
             let snapshot = match follower.refresh()? {
                 hel_acp::KimiWireRefresh::Updated(snapshot) => snapshot,

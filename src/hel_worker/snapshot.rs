@@ -493,6 +493,16 @@ impl RelayOperationalState {
         self.is_quiet()
             && (harness != HarnessKind::Kimi || self.background_work_known == Some(true))
     }
+
+    /// Whether a routine checkpoint may admit a barrier without risking work
+    /// owned by a Kimi provider process. Older Kimi workers omit the
+    /// synchronization field, so they must fail closed just like replacement
+    /// does. Other harnesses retain their historical checkpoint behavior.
+    #[must_use]
+    pub fn safe_for_checkpoint(&self, harness: HarnessKind) -> bool {
+        harness != HarnessKind::Kimi
+            || (self.background_work_known == Some(true) && self.background_commands.is_empty())
+    }
 }
 
 /// On-disk record format for a relay event.
@@ -2106,6 +2116,29 @@ mod tests {
         state.background_work_known = Some(true);
         assert!(state.is_quiet());
         assert!(state.safe_to_replace(HarnessKind::Kimi));
+    }
+
+    #[test]
+    fn kimi_checkpoint_requires_known_empty_background_work() {
+        let mut state = RelaySnapshot::new(SESSION.into()).operational_state();
+        assert!(state.safe_for_checkpoint(HarnessKind::Codex));
+        assert!(
+            !state.safe_for_checkpoint(HarnessKind::Kimi),
+            "an older Kimi worker cannot prove provider tasks are absent"
+        );
+
+        state.background_work_known = Some(false);
+        assert!(!state.safe_for_checkpoint(HarnessKind::Kimi));
+
+        state.background_work_known = Some(true);
+        assert!(state.safe_for_checkpoint(HarnessKind::Kimi));
+        state.background_commands.push(BackgroundCommand {
+            id: "kimi:agent-1".into(),
+            started_at_ms: 1,
+            command: "background agent".into(),
+            can_stop: false,
+        });
+        assert!(!state.safe_for_checkpoint(HarnessKind::Kimi));
     }
 
     #[test]
