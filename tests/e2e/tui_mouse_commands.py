@@ -51,7 +51,7 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
              "-c", str(lab.project), "--", str(tmux.binary))
     tmux.session = "mouse-commands"
     screen = tmux.wait_for_any(
-        ("Sessions", "Prompt (no live session)"),
+        ("Sessions", "No live session"),
         "combined dashboard after direct startup",
     )
     code, _ = lab.wait_daemon_status(port)
