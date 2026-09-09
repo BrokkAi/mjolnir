@@ -3056,7 +3056,6 @@ pub(super) fn render_in(
         chat.frame_surfaces.clear();
         chat.frame_surfaces
             .push(SurfaceFrame::fixed(SurfaceId::ModalBody, body));
-        return;
     }
 }
 
