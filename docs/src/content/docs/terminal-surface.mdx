@@ -175,8 +175,9 @@ Detailed activity clocks are off by default. Turn them on in **Setup → Advance
 conversation header to show separate turn, step, and background clocks. The
 ordinary **Running** status covers the originating turn and its follow-on
 background work continuously, so it does not reset or go idle between phases.
-The configured spinner appears above the Prompt composer only while the
-selected session is actually busy; an idle or stopped session does not animate.
+The configured spinner appears in the Prompt composer's upper-right corner only
+while the selected session is actually busy; an idle or stopped session does
+not animate.
 
 Stopped sessions are hidden from the Sessions pane by default and remain
 available through **Resume**. Enable **Setup → Advanced → Show stopped sessions**
@@ -190,10 +191,10 @@ to include them in the Sessions pane for their workspace.
 ## Prompt editor
 
 The Prompt pane is a multiline editor with completion, history, and transcript
-controls. Above the composer, the controls appear in this order: **Model**,
-**Effort**, then the microphone button. The selected session's busy spinner is
-shown above the composer while work is active. It disappears when the session is
-idle, stopped, or waiting without active work.
+controls. A `>` marks the editable input. Above the composer, the controls
+appear in this order: **Model**, **Effort**, then the microphone button. The
+selected session's busy spinner appears at the upper right while work is active.
+It disappears when the session is idle, stopped, or waiting without active work.
 
 The bottom border contains **View tasks (N)**. With the cursor on the last input
 line, press `↓` to focus that control; press `Enter` to open the tasks dialog and

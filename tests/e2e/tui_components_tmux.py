@@ -367,7 +367,7 @@ def create_session(
 
     tmux.start("dashboard-create", 140, 40)
     screen = tmux.wait_for_any(
-        ("Sessions", "Prompt (no live session)"),
+        ("Sessions", "No live session"),
         "combined dashboard after direct startup",
     )
     evidence.event(

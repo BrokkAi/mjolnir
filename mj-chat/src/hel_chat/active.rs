@@ -2769,10 +2769,14 @@ pub(super) fn render_in(
     } else {
         chat.split_action_areas.clear();
         chat.turn_review_action_areas.clear();
-        let (prompt_title, title_width) = prompt_title_line(chat, prompt_area.width);
+        let (prompt_title, title_width, activity_title) =
+            prompt_title_line(chat, prompt_area.width);
         let mut prompt_block = theme::panel(prompt_focused)
-            .padding(Padding::horizontal(1))
+            .padding(Padding::new(2, 1, 0, 0))
             .title(prompt_title);
+        if let Some(activity_title) = activity_title {
+            prompt_block = prompt_block.title(activity_title.right_aligned());
+        }
         chat.task_control_area = None;
         let bottom_width = prompt_area.width.saturating_sub(2);
         let queue_control = prompt_bottom_queue_control(chat);
@@ -2900,6 +2904,19 @@ pub(super) fn render_in(
                 .block(prompt_block),
             prompt_area,
         );
+        if let Some(marker_row) = queue_rows.checked_sub(input_scroll)
+            && marker_row < usize::from(prompt_inner.height)
+        {
+            frame.render_widget(
+                Line::styled(">", theme::title(prompt_focused)),
+                Rect::new(
+                    prompt_inner.x.saturating_sub(2),
+                    prompt_inner.y.saturating_add(marker_row as u16),
+                    1,
+                    1,
+                ),
+            );
+        }
         if let Some(button_area) = chat.voice_button_area {
             chat.voice_form.register(
                 super::VoiceControl::Microphone,
@@ -3149,7 +3166,11 @@ fn remembered_value(stored: Option<&str>) -> Option<String> {
 
 fn prompt_title(chat: &ChatState) -> String {
     let title = prompt_title_parts(chat).join(" · ");
-    format!(" {title} ")
+    if title.is_empty() {
+        String::new()
+    } else {
+        format!(" {title} ")
+    }
 }
 
 fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
@@ -3162,10 +3183,10 @@ fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
         parts.push("Fast".into());
     }
     if chat.plan_mode_active() {
-        parts.push("Prompt — PLAN MODE".into());
+        parts.push("PLAN MODE".into());
     } else {
         match chat.phase {
-            WorkerPhase::Idle => parts.push("Prompt".into()),
+            WorkerPhase::Idle => {}
             WorkerPhase::Running if chat.pursuing_goal() => parts.push("Pursuing goal".into()),
             // The spinner already indicates an ordinary running turn.
             WorkerPhase::Running => {}
@@ -3182,11 +3203,13 @@ fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
     parts
 }
 
-/// The prompt border keeps model and effort before the microphone chip and
-/// puts any in-progress activity immediately after it. A full configured
-/// spinner is used when the complete title fits; the one-column frame keeps
-/// the status readable on narrower prompts.
-fn prompt_title_line(chat: &ChatState, prompt_width: u16) -> (Line<'static>, usize) {
+/// The prompt border keeps model, effort, and state beside the microphone chip.
+/// Activity owns the upper-right corner. A full configured spinner is used
+/// when both titles fit; the one-column frame keeps narrow prompts readable.
+fn prompt_title_line(
+    chat: &ChatState,
+    prompt_width: u16,
+) -> (Line<'static>, usize, Option<Line<'static>>) {
     let parts = prompt_title_parts(chat);
     let prefix_count =
         usize::from(chat.current_model().is_some()) + usize::from(chat.current_effort().is_some());
@@ -3201,33 +3224,32 @@ fn prompt_title_line(chat: &ChatState, prompt_width: u16) -> (Line<'static>, usi
         Span::raw(before_mic.clone()),
         Span::raw(format!(" {VOICE_BUTTON_GLYPH} ")),
     ];
-    let max_title_width = usize::from(prompt_width.saturating_sub(2));
-    if chat.needs_animation() {
-        let full = chat.activity_spinner();
-        let full_width = spans
-            .iter()
-            .map(Span::width)
-            .sum::<usize>()
-            .saturating_add(full.width())
-            .saturating_add(if suffix.is_empty() {
-                0
-            } else {
-                display_width(&format!(" {suffix} "))
-            });
-        let spinner = if full_width <= max_title_width {
-            full
-        } else {
-            Line::from(crate::spinner::compact_span(
-                chat.spinner_style,
-                crate::spinner::elapsed_ms(),
-            ))
-        };
-        spans.extend(spinner.spans);
-    }
     if !suffix.is_empty() {
         spans.push(Span::raw(format!(" {suffix} ")));
     }
-    (Line::from(spans), display_width(&before_mic))
+    let left_width = spans.iter().map(Span::width).sum::<usize>();
+    let activity_title = chat.needs_animation().then(|| {
+        let full = chat.activity_spinner();
+        let max_title_width = usize::from(prompt_width.saturating_sub(2));
+        let spinner =
+            if left_width.saturating_add(full.width()).saturating_add(3) <= max_title_width {
+                full
+            } else {
+                Line::from(crate::spinner::compact_span(
+                    chat.spinner_style,
+                    crate::spinner::elapsed_ms(),
+                ))
+            };
+        let mut title = vec![Span::raw(" ")];
+        title.extend(spinner.spans);
+        title.push(Span::raw(" "));
+        Line::from(title)
+    });
+    (
+        Line::from(spans),
+        display_width(&before_mic),
+        activity_title,
+    )
 }
 
 /// Queue state and the hint for controlling the current turn live together
@@ -3328,9 +3350,10 @@ fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat: &mut ChatS
         .push(SurfaceFrame::fixed(SurfaceId::ModalBody, inner));
 }
 
-/// The composer keeps one cell of space between its text and each border.
+/// The composer keeps a `>` gutter on the left and one cell of space on the
+/// right.
 fn prompt_content_width(width: u16) -> usize {
-    usize::from(width.saturating_sub(4)).max(1)
+    usize::from(width.saturating_sub(5)).max(1)
 }
 
 enum VoiceUpdate {
@@ -4744,7 +4767,7 @@ mod tests {
         assert!(!prompt_title(&chat).contains("Fast"));
 
         chat.set_config_options(&[fast_mode_option("on")]);
-        assert_eq!(prompt_title(&chat), " Fast · Prompt ");
+        assert_eq!(prompt_title(&chat), " Fast ");
 
         chat.set_config_options(&[]);
         assert!(!prompt_title(&chat).contains("Fast"));
@@ -4875,13 +4898,13 @@ mod tests {
     }
 
     /// Background commands are exposed through the embedded task control;
-    /// the composer title stays focused on the prompt and its state.
+    /// the composer title stays focused on meaningful state.
     #[test]
     fn composer_title_names_the_work_the_agent_left_running() {
         let now_seconds = 10_000;
         let started_at_ms = now_seconds as i64 * 1_000 - 2_616_000;
         let mut chat = ChatState::new(&snapshot(), &[]);
-        assert!(prompt_title(&chat).contains("Prompt"));
+        assert!(prompt_title(&chat).is_empty());
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
             activity_turn_started_at_ms: None,
@@ -4896,7 +4919,7 @@ mod tests {
             }],
             active_user_shells: Vec::new(),
         });
-        assert!(prompt_title(&chat).contains("Prompt"));
+        assert!(prompt_title(&chat).is_empty());
         assert!(!prompt_title(&chat).contains("Background"));
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
@@ -4932,7 +4955,8 @@ mod tests {
         chat.finish_plan_mode_change(true);
         chat.phase = WorkerPhase::Running;
 
-        assert!(prompt_title(&chat).contains("Prompt — PLAN MODE"));
+        assert!(prompt_title(&chat).contains("PLAN MODE"));
+        assert!(!prompt_title(&chat).contains("Prompt"));
     }
 
     #[test]
@@ -4967,7 +4991,7 @@ mod tests {
             request_id: None,
             event: WorkerEvent::TurnCompleted,
         });
-        assert!(prompt_title(&chat).contains("Prompt"));
+        assert!(prompt_title(&chat).is_empty());
         assert!(!prompt_title(&chat).contains("Pursuing goal"));
     }
 
@@ -5066,10 +5090,13 @@ mod tests {
             "the transcript's titled border is the region's first row: {:?}",
             row(4)
         );
-        assert!(
-            row(16).contains("Prompt"),
-            "the prompt's titled border is at the region's top: {:?}",
-            row(16)
+        assert!(row(16).contains(VOICE_BUTTON_GLYPH), "{:?}", row(16));
+        assert!(!row(16).contains("Prompt"), "{:?}", row(16));
+        assert_eq!(
+            row(17).chars().take(4).collect::<String>(),
+            "│> W",
+            "{:?}",
+            row(17)
         );
         // Focus changes the border's color without changing its geometry.
         assert!(
@@ -5110,15 +5137,11 @@ mod tests {
             let prompt_bottom = prompt_top + 1 + usize::from(input.height);
             let prompt_title = &running[prompt_top];
             assert!(prompt_title.contains(VOICE_BUTTON_GLYPH), "{prompt_title}");
+            assert!(!prompt_title.contains("Prompt"), "{prompt_title}");
             assert!(!prompt_title.contains("Running"), "{prompt_title}");
-            let after_mic = prompt_title
-                .split_once(VOICE_BUTTON_GLYPH)
-                .unwrap()
-                .1
-                .trim_start();
-            let spinner_width = after_mic
+            let spinner_width = prompt_title
                 .chars()
-                .take_while(|ch| matches!(ch, '·' | '∙' | '•' | '●'))
+                .filter(|ch| matches!(ch, '·' | '∙' | '•' | '●'))
                 .count();
             assert_eq!(
                 spinner_width,
@@ -5128,6 +5151,17 @@ mod tests {
                     crate::spinner::SPINNER_WIDTH
                 },
                 "{prompt_title}"
+            );
+            let last_spinner = prompt_title
+                .chars()
+                .enumerate()
+                .filter_map(|(index, ch)| matches!(ch, '·' | '∙' | '•' | '●').then_some(index))
+                .last()
+                .expect("spinner frame on the prompt title");
+            assert_eq!(
+                last_spinner,
+                prompt_title.chars().count() - 3,
+                "spinner occupies the upper-right title: {prompt_title}"
             );
             assert!(
                 running[prompt_bottom].contains("Esc cancels"),
