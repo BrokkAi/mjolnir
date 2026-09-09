@@ -184,8 +184,8 @@ impl<S: FeedSource> Feed<S> {
         self.source.wait()
     }
 
-    /// Latches the message that won the select and reports whether the loop
-    /// must redraw.
+    /// Latches the message that won the select and reports whether one arrived.
+    /// Applying it determines whether the visible state needs a redraw.
     pub(crate) fn accept(&mut self, message: Option<S::Item>) -> bool {
         match message {
             Some(message) => {

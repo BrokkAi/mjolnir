@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph, Wrap};
 
 use crate::components::ControlKind;
-use crate::components::{render_scrollbar, scrollbar_geometry};
+use crate::components::{EventResult, Outcome, render_scrollbar, scrollbar_geometry};
 use crate::hel_selection::{FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId};
 use hel::hel_config::HelConfig;
 use hel::hel_database::{HistoryScope, PromptHistoryEntry};
@@ -346,7 +346,10 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         Err(error) => {
             // Keep the transcript readable rather than tearing the surface
             // down around a stopped manager.
-            state.activity_reachable = false;
+            if state.activity_reachable {
+                state.activity_reachable = false;
+                state.mark_visible_changed();
+            }
             tracing::warn!(error = format!("{error:#}"), "chat session view failed");
             state.set_notice(format!("connection lost: {error:#}"));
             return false;
@@ -355,7 +358,11 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     // A transient connection error does not make an as-yet-unavailable
     // transcript empty. The actor keeps retrying, so retain the loading row
     // until a real projection arrives; the error still appears in the notice.
-    state.activity_reachable = view.connected && view.snapshot.is_some() && view.error.is_none();
+    let activity_reachable = view.connected && view.snapshot.is_some() && view.error.is_none();
+    if state.activity_reachable != activity_reachable {
+        state.activity_reachable = activity_reachable;
+        state.mark_visible_changed();
+    }
     if view.snapshot.is_some() {
         state.set_transcript_loading(false);
     }
@@ -373,13 +380,19 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         );
         state.set_current_step_start(snapshot.operational.current_step_started_at_ms);
         state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
-        state.steering_supported = snapshot.operational.steering_supported;
+        if state.steering_supported != snapshot.operational.steering_supported {
+            state.steering_supported = snapshot.operational.steering_supported;
+            state.mark_visible_changed();
+        }
         state.set_session_activity(crate::usage_format::SessionActivity::of(
             &snapshot.operational,
         ));
     }
     if let Some(error) = view.error {
-        state.activity_reachable = false;
+        if state.activity_reachable {
+            state.activity_reachable = false;
+            state.mark_visible_changed();
+        }
         match error {
             ViewError::Unreachable(detail) => {
                 tracing::warn!(%detail, "chat session became unreachable");
@@ -962,16 +975,40 @@ impl ActiveChat {
         self.state.needs_animation()
     }
 
+    /// Whether the transcript or task clocks differ from the last drawn frame.
+    pub fn clock_changed(&self) -> bool {
+        self.state.clock_changed()
+    }
+
+    /// An animation tick changes the activity spinner while work is visible.
+    pub fn animation_changed(&self) -> bool {
+        self.state.animation_changed()
+    }
+
+    /// Consumes a visible mutation performed by an external host callback,
+    /// such as review projection or refreshed session context.
+    pub fn take_render_changed(&mut self) -> bool {
+        self.state.take_render_changed()
+    }
+
+    /// Records the time-dependent cells represented by the frame just drawn.
+    /// The next clock or animation tick can then request a redraw only after
+    /// its displayed value actually moves.
+    pub fn acknowledge_render(&mut self) {
+        self.state.acknowledge_render();
+    }
+
     /// Waits for the next background message, applies it, and drains whatever
-    /// queued behind it, so one wakeup costs one redraw.
+    /// queued behind it, reporting whether their visible state changed.
     ///
     /// `None` means no chat is warm, and the feed never wakes the caller. Cancel
     /// safe: every arm is a cancel-safe receive, and a message is applied only
     /// once its arm has won.
-    pub async fn pump(chat: Option<&mut Self>) {
+    pub async fn pump(chat: Option<&mut Self>) -> Outcome {
         let Some(chat) = chat else {
             return std::future::pending().await;
         };
+        let before = chat.state.visible_revision();
         enum Wakeup {
             Remote(Option<ChatRemoteResult>),
             Io(ChatIoUpdate),
@@ -997,6 +1034,12 @@ impl ActiveChat {
         }
         chat.drain().await;
         chat.report_worker_death().await;
+        let changed = chat.state.visible_revision() != before;
+        if changed {
+            Outcome::Changed
+        } else {
+            Outcome::Unchanged
+        }
     }
 
     async fn drain(&mut self) {
@@ -1051,8 +1094,10 @@ impl ActiveChat {
         else {
             return;
         };
-        if let Some(view) = self.state.second_opinion_mut() {
-            view.set_status("the reviewer is reading the plan…");
+        if let Some(view) = self.state.second_opinion_mut()
+            && view.set_status("the reviewer is reading the plan…")
+        {
+            self.state.mark_visible_changed();
         }
         self.persist_review();
         self.run_workflow_request(request);
@@ -1160,7 +1205,11 @@ impl ActiveChat {
     /// review is open -- a refused `/review` has nowhere else to appear.
     pub fn report_review_refusal(&mut self, message: String) {
         match self.state.turn_review_mut() {
-            Some(review) => review.report_failure(message),
+            Some(review) => {
+                if review.report_failure(message) {
+                    self.state.mark_visible_changed();
+                }
+            }
             None => self.state.set_notice(message),
         }
     }
@@ -1376,7 +1425,10 @@ impl ActiveChat {
             }
             VoiceUpdate::Status(status) => self.state.set_notice(status),
             VoiceUpdate::Finished(result) => {
-                self.state.voice_active = false;
+                if self.state.voice_active {
+                    self.state.voice_active = false;
+                    self.state.mark_visible_changed();
+                }
                 self.voice_cancel = None;
                 self.voice_finishing = false;
                 match result {
@@ -1385,7 +1437,7 @@ impl ActiveChat {
                             self.state
                                 .set_input(append_dictation(&self.state.input, &text));
                         }
-                        self.state.notices.clear();
+                        self.state.clear_notice();
                     }
                     Err(error) => self
                         .state
@@ -1498,16 +1550,39 @@ impl ActiveChat {
 
     /// Applies one terminal event and reports what it asked for.
     pub fn handle_event(&mut self, event: Event) -> ChatEventOutcome {
-        let action = match event {
-            Event::Key(key) => self.state.handle_key(key),
-            Event::Paste(pasted) => self.state.handle_terminal_paste(&pasted),
-            Event::Mouse(mouse) => self.state.handle_mouse(mouse),
-            // Resize and focus changes only need the redraw.
+        self.handle_event_result(event)
+            .action
+            .unwrap_or(ChatEventOutcome::None)
+    }
+
+    /// Applies one terminal event while preserving both dispatch and repaint
+    /// information.  The action is intentionally separate from `Outcome`:
+    /// editing the composer may need a redraw without asking the host to do
+    /// anything, while a remote command can be consumed with no visual delta.
+    pub fn handle_event_result(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
+        let before = self.state.visible_revision();
+        let action = match &event {
+            Event::Key(key) => self.state.handle_key(*key),
+            Event::Paste(pasted) => self.state.handle_terminal_paste(pasted),
+            Event::Mouse(mouse) => self.state.handle_mouse(*mouse),
+            // Resize and focus changes are handled by the host's geometry.
             _ => ChatAction::None,
         };
-        let outcome = self.dispatch(action);
+        let consumed = self.state.event_consumed(&event, &action);
+        let dispatched = self.dispatch(action);
         dispatch_history_search_request(&mut self.state, &self.chat_io_tx);
-        outcome
+        let changed = self.state.visible_revision() != before;
+        let action = (!matches!(dispatched, ChatEventOutcome::None)).then_some(dispatched);
+        EventResult {
+            outcome: if changed {
+                Outcome::Changed
+            } else if consumed || action.is_some() {
+                Outcome::Unchanged
+            } else {
+                Outcome::Continue
+            },
+            action,
+        }
     }
 
     /// A command ID for one remote operation. `None` means the system random
@@ -1715,6 +1790,7 @@ impl ActiveChat {
                     self.voice_cancel = Some(cancel_tx);
                     self.voice_finishing = false;
                     self.state.voice_active = true;
+                    self.state.mark_visible_changed();
                     self.state.set_notice(
                         "Starting microphone… click again or press Alt-V to transcribe",
                     );
@@ -1797,8 +1873,10 @@ impl ActiveChat {
         self.state
             .open_second_opinion(CapturedProposal { request, proposal }, setup);
         if let Some(selection) = remembered {
-            if let Some(view) = self.state.second_opinion_mut() {
-                view.set_status("resuming the reviewer…");
+            if let Some(view) = self.state.second_opinion_mut()
+                && view.set_status("resuming the reviewer…")
+            {
+                self.state.mark_visible_changed();
             }
             self.probe_reviewer(
                 0,
@@ -2348,31 +2426,46 @@ impl ActiveChat {
         let events = match result {
             Ok(events) => events,
             Err(error) => {
-                if let Some(view) = self.state.second_opinion_mut() {
-                    view.report_failure(error);
+                let changed = self
+                    .state
+                    .second_opinion_mut()
+                    .is_some_and(|view| view.report_failure(error));
+                if changed {
+                    self.state.mark_visible_changed();
                 }
                 return;
             }
         };
-        let Some(SecondOpinion::Review(review)) = self.state.second_opinion_mut() else {
-            return;
+        let reviewer_changed = if !events.is_empty() {
+            self.state
+                .second_opinion_mut()
+                .and_then(|view| view.reviewer_mut())
+                .is_some_and(|reviewer| reviewer.apply_events(&session_id, &events))
+        } else {
+            false
         };
-        if !events.is_empty() {
-            review.reviewer.apply_events(&session_id, &events);
-            // A completed answer is what unlocks transfer. The workflow
-            // decides whether this is the turn it was waiting for.
-            if let Some(answer) = review.reviewer.latest_answer()
+        if reviewer_changed {
+            if let Some(SecondOpinion::Review(review)) = self.state.second_opinion_mut()
+                && let Some(answer) = review.reviewer.latest_answer()
                 && let hel::hel_second_opinion::ReviewStage::Reviewing { command_id } =
                     review.workflow.stage().clone()
             {
                 review.workflow.reviewer_turn_completed(&command_id, answer);
             }
+            self.state.mark_visible_changed();
         }
-        let finished = review.workflow.finished();
-        if let Some(view) = self.state.second_opinion_mut()
+        let finished = self.state.second_opinion().is_some_and(
+            |view| matches!(view, SecondOpinion::Review(review) if review.workflow.finished()),
+        );
+        let status_changed = if let Some(view) = self.state.second_opinion_mut()
             && view.reviewer().is_some_and(|reviewer| !reviewer.is_empty())
         {
-            view.set_status("Enter to act · Tab to choose");
+            view.set_status("Enter to act · Tab to choose")
+        } else {
+            false
+        };
+        if status_changed {
+            self.state.mark_visible_changed();
         }
         self.persist_review();
         self.surface_reviewer_elicitations();
@@ -2495,9 +2588,11 @@ impl ActiveChat {
         let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(1);
         match surface {
             SurfaceId::Transcript if direction < 0 => {
-                self.state.scroll_history_up(MOUSE_SCROLL_ROWS)
+                self.state.scroll_history_up(MOUSE_SCROLL_ROWS);
             }
-            SurfaceId::Transcript => self.state.scroll_history_down(MOUSE_SCROLL_ROWS),
+            SurfaceId::Transcript => {
+                self.state.scroll_history_down(MOUSE_SCROLL_ROWS);
+            }
             SurfaceId::ElicitationMessage => self
                 .state
                 .scroll_elicitation_message(if direction < 0 { -rows } else { rows }),
@@ -3227,6 +3322,7 @@ fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat: &mut ChatS
     let visible = usize::from(inner.height).max(1);
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(visible);
+    chat.task_dialog_max_scroll = max_scroll;
     chat.task_dialog_scroll = chat.task_dialog_scroll.min(max_scroll);
     if chat.task_dialog_scroll > 0 {
         lines = lines.into_iter().skip(chat.task_dialog_scroll).collect();
@@ -3318,6 +3414,7 @@ mod tests {
         snapshot,
     };
     use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigOptionCategory};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use hel::hel_elicitation::{ElicitationField, ElicitationFieldKind, ElicitationRequest};
     use hel::hel_transcript::ChatRole;
     use hel::hel_worker::RELAY_EVENT_GENESIS_DIGEST;
@@ -3326,6 +3423,60 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Position, Rect};
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn handle_event_result_reports_only_real_chat_repaints() {
+        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
+            "session-event-result",
+            72,
+        );
+        let mut chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+        );
+        chat.acknowledge_render();
+
+        let moved = chat.handle_event_result(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_ne!(moved.outcome, Outcome::Changed);
+        assert!(!chat.take_render_changed());
+
+        let unchanged = chat.handle_event_result(Event::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(unchanged.outcome, Outcome::Unchanged);
+
+        let ignored = chat.handle_event_result(Event::Key(KeyEvent::new(
+            KeyCode::F(12),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(ignored.outcome, Outcome::Continue);
+
+        let changed = chat.handle_event_result(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(changed.outcome, Outcome::Changed);
+        assert_eq!(chat.draft(), "x");
+
+        let cursor_changed =
+            chat.handle_event_result(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+        assert_eq!(cursor_changed.outcome, Outcome::Changed);
+
+        let clamped =
+            chat.handle_event_result(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+        assert_eq!(clamped.outcome, Outcome::Unchanged);
+    }
 
     #[test]
     fn a_disconnected_view_without_a_snapshot_stops_stale_animation() {

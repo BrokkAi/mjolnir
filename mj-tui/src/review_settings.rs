@@ -124,6 +124,15 @@ pub(crate) struct ReviewSettingsDialog {
 }
 
 impl ReviewSettingsDialog {
+    pub(crate) fn animation_frame(&self) -> Option<&'static str> {
+        (self.probing && self.choices_loading).then(|| {
+            mj_chat::spinner::compact_frame(
+                self.spinner_style,
+                self.discovery_started.elapsed().as_millis(),
+            )
+        })
+    }
+
     pub(crate) fn new(config: &HelConfig) -> Self {
         let mut profiles = vec![None];
         profiles.extend(
@@ -546,7 +555,14 @@ impl ReviewSettingsDialog {
         event: Event,
     ) -> (DashboardAction, ReviewSettingsOutcome) {
         use ReviewSettingsFocus::*;
-        let interaction = self.form.get_mut().handle(&event).action;
+        let result = self.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &dashboard.last_event_outcome,
+            &dashboard.render_changed,
+            &dashboard.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         let changed = interaction.is_some();
         let back = matches!(
             &interaction,
@@ -560,14 +576,19 @@ impl ReviewSettingsDialog {
             }
             Some(Interaction::Toggle(Enabled)) => {
                 self.review.enabled = !self.review.enabled;
+                dashboard.mark_render_changed();
                 DashboardAction::None
             }
             Some(Interaction::Select(Tier, index)) => {
-                self.review.tier = if index == 0 {
+                let tier = if index == 0 {
                     ReviewTier::Quick
                 } else {
                     ReviewTier::Extended
                 };
+                if self.review.tier != tier {
+                    self.review.tier = tier;
+                    dashboard.mark_render_changed();
+                }
                 DashboardAction::None
             }
             Some(Interaction::Select(Profile, index)) => {
@@ -576,6 +597,7 @@ impl ReviewSettingsDialog {
                     DashboardAction::None
                 } else {
                     self.review.profile = profile;
+                    dashboard.mark_render_changed();
                     self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Profile)
                 }
             }
@@ -588,15 +610,20 @@ impl ReviewSettingsDialog {
                     DashboardAction::None
                 } else {
                     self.review.model = model;
+                    dashboard.mark_render_changed();
                     self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Model)
                 }
             }
             Some(Interaction::Select(Effort, index)) => {
-                self.review.effort =
+                let effort =
                     Self::choice_values(self.review.effort.as_deref(), &self.effort_choices)
                         .get(index)
                         .cloned()
                         .flatten();
+                if self.review.effort != effort {
+                    self.review.effort = effort;
+                    dashboard.mark_render_changed();
+                }
                 DashboardAction::None
             }
             // Selector activation only opens the tab list. Discovery is tied
@@ -607,7 +634,9 @@ impl ReviewSettingsDialog {
                 if let Some(profile) = self.review.profile.as_deref() {
                     dashboard.clear_review_settings_choices(profile);
                 }
-                self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Refresh)
+                let action = self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Refresh);
+                dashboard.mark_render_changed();
+                action
             }
             Some(Interaction::Activate(Save)) if self.can_save() => {
                 let had_pending = self.probing;
@@ -621,6 +650,7 @@ impl ReviewSettingsDialog {
                     self.request_key = None;
                 }
                 self.save_error = None;
+                dashboard.mark_render_changed();
                 if had_pending {
                     DashboardAction::CancelReviewSettingsDiscovery
                 } else {
@@ -689,12 +719,29 @@ impl DashboardState {
         let Some(dialog) = review_settings_dialog_mut(&mut self.mode) else {
             return false;
         };
+        let old = (
+            dialog.model_choices.clone(),
+            dialog.effort_choices.clone(),
+            dialog.model_choices_discovered,
+            dialog.effort_capabilities_discovered,
+            dialog.discovery_error.clone(),
+            dialog.choices_loading,
+        );
         if !dialog.apply_choices(generation, profile_id, model, choices.clone()) {
             return false;
         }
         self.review_settings_choices
             .insert((profile_id.to_owned(), model.map(str::to_owned)), choices);
         dialog.prepare();
+        let changed = old.0 != dialog.model_choices
+            || old.1 != dialog.effort_choices
+            || old.2 != dialog.model_choices_discovered
+            || old.3 != dialog.effort_capabilities_discovered
+            || old.4 != dialog.discovery_error
+            || old.5 != dialog.choices_loading;
+        if changed {
+            self.mark_render_changed();
+        }
         true
     }
 
@@ -726,12 +773,35 @@ impl DashboardState {
             return false;
         }
         let key = (profile_id.to_owned(), model.map(str::to_owned));
+        let old = (
+            dialog.probing,
+            dialog.choices_loading,
+            dialog.model_choices.clone(),
+            dialog.effort_choices.clone(),
+            dialog.model_choices_discovered,
+            dialog.effort_capabilities_discovered,
+            dialog.cleanup_warning.clone(),
+            dialog.discovery_error.clone(),
+            dialog.save_error.clone(),
+        );
         let choices = dialog.apply_discovery(generation, profile_id, model, result);
         dialog.request_key = None;
         if let Some(choices) = choices {
             self.review_settings_choices.insert(key, choices);
         }
         dialog.prepare();
+        let changed = old.0 != dialog.probing
+            || old.1 != dialog.choices_loading
+            || old.2 != dialog.model_choices
+            || old.3 != dialog.effort_choices
+            || old.4 != dialog.model_choices_discovered
+            || old.5 != dialog.effort_capabilities_discovered
+            || old.6 != dialog.cleanup_warning
+            || old.7 != dialog.discovery_error
+            || old.8 != dialog.save_error;
+        if changed {
+            self.mark_render_changed();
+        }
         true
     }
 }
@@ -751,10 +821,7 @@ pub(crate) fn render_review_settings(
     surfaces: &mut FrameSurfaces,
 ) {
     use ReviewSettingsFocus::*;
-    let spinner = mj_chat::spinner::compact_frame(
-        dialog.spinner_style,
-        dialog.discovery_started.elapsed().as_millis(),
-    );
+    let spinner = dialog.animation_frame().unwrap_or("");
     let status = if dialog.probing && dialog.choices_loading {
         format!("{spinner} Loading choices…")
     } else if dialog.probing || dialog.model_choices_discovered {

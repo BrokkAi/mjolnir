@@ -1013,6 +1013,80 @@ impl SessionRowFacts<'_> {
     }
 }
 
+/// Return the moving value currently used in a session's activity line.
+/// Keeping this decision beside the renderer prevents invalidation from
+/// inventing a second precedence order for operation, lifecycle, and activity
+/// clocks.
+pub(crate) fn session_display_clock(
+    dashboard: &DashboardState,
+    session: &SessionRecord,
+    detail: Option<&SessionDetail>,
+    review: Option<&RuntimeReviewView>,
+    unreachable: bool,
+    operation: Option<&SessionOperationDisplay>,
+    now_epoch_seconds: u64,
+) -> Option<String> {
+    let started_at = if let Some(operation) = operation {
+        Some(operation_status(operation).1)
+    } else if dashboard.transition_kind(&session.id).is_some()
+        || dashboard.transition_failure_kind(&session.id).is_some()
+        || session.state == SessionState::Provisioning
+    {
+        session_updated_at_epoch_seconds(session)
+    } else {
+        None
+    };
+    if let Some(started_at) = started_at {
+        return Some(mj_chat::usage_format::format_clock(
+            now_epoch_seconds.saturating_sub(started_at),
+        ));
+    }
+
+    if session.last_error.is_some()
+        || unreachable
+        || detail.is_some_and(|detail| !detail.pending_elicitations.is_empty())
+        || review.is_some_and(|review| review.activity_label().is_some())
+        || !session.state.is_active()
+    {
+        return None;
+    }
+    let detail = detail?;
+    if detail.activity.is_idle(detail.current_turn_started_at)
+        || matches!(
+            detail.activity.execution,
+            Some(hel::hel_worker::RelayExecutionState::Closing)
+                | Some(hel::hel_worker::RelayExecutionState::Closed)
+        )
+    {
+        return None;
+    }
+    let detailed = dashboard.pane_size(SupportPane::Sessions) != PaneSize::Minimized
+        && dashboard.project_is_expanded(session)
+        && dashboard.config.advanced.detailed_activity_clocks;
+    Some(
+        SessionRowFacts {
+            detail: Some(detail),
+            unreachable,
+            state: session.state,
+            now_epoch_seconds,
+        }
+        .clock(detailed),
+    )
+}
+
+/// The review fields that can alter a session row: its compact activity label
+/// and whether the row owns an animation frame. Controller progress text and
+/// role details are intentionally omitted because the dashboard does not draw
+/// them.
+pub(crate) fn session_review_display_signature(
+    review: Option<&RuntimeReviewView>,
+) -> (Option<&'static str>, bool) {
+    (
+        review.and_then(RuntimeReviewView::activity_label),
+        review.is_some_and(RuntimeReviewView::is_working),
+    )
+}
+
 /// Select only content authored by the agent for the expanded output rows.
 /// The user prompt is a fallback for the compact summary, never an agent
 /// excerpt with a misleading prefix.
@@ -1437,7 +1511,7 @@ pub(crate) fn render_session_scrollbar(
     }
 }
 
-fn operation_status(operation: &SessionOperationDisplay) -> (String, u64) {
+pub(crate) fn operation_status(operation: &SessionOperationDisplay) -> (String, u64) {
     if matches!(
         operation.kind,
         SessionOperationKind::Launching
@@ -1466,7 +1540,7 @@ fn operation_status(operation: &SessionOperationDisplay) -> (String, u64) {
     }
 }
 
-fn session_updated_at_epoch_seconds(session: &SessionRecord) -> Option<u64> {
+pub(crate) fn session_updated_at_epoch_seconds(session: &SessionRecord) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(&session.updated_at)
         .ok()?
         .timestamp()
@@ -1514,7 +1588,7 @@ fn session_band_color(
     theme::palette().session_activity
 }
 
-fn checkpoint_age(now_epoch_seconds: u64, checkpointed_at: &str) -> String {
+pub(crate) fn checkpoint_age(now_epoch_seconds: u64, checkpointed_at: &str) -> String {
     let Ok(checkpointed_at) = chrono::DateTime::parse_from_rfc3339(checkpointed_at) else {
         return "unknown".into();
     };
@@ -1558,11 +1632,14 @@ fn fleet_vm_label(detail: &CapacityDetail) -> String {
 /// A reading older than this stopped tracking the host: the poller samples
 /// every 30 seconds, so three missed rounds mean the number on screen is no
 /// longer what the host is doing.
-const CAPACITY_SAMPLE_STALE_AFTER_SECONDS: u64 = 90;
+pub(crate) const CAPACITY_SAMPLE_STALE_AFTER_SECONDS: u64 = 90;
 
 /// Why the row's reading cannot be trusted, if it cannot: a probe that failed,
 /// or a sample that stopped refreshing. `None` means the reading is current.
-fn capacity_staleness(detail: &CapacityDetail, now_epoch_seconds: u64) -> Option<String> {
+pub(crate) fn capacity_staleness(
+    detail: &CapacityDetail,
+    now_epoch_seconds: u64,
+) -> Option<String> {
     if let Some(error) = &detail.probe_error {
         return Some(format!("stale: {error}"));
     }
@@ -2093,7 +2170,7 @@ fn five_hour_quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> Str
     }
 }
 
-fn quota_reset_cell(window: Option<&QuotaWindow>, now: u64) -> String {
+pub(crate) fn quota_reset_cell(window: Option<&QuotaWindow>, now: u64) -> String {
     let Some(window) = window else {
         return String::new();
     };
@@ -2104,7 +2181,7 @@ fn quota_reset_cell(window: Option<&QuotaWindow>, now: u64) -> String {
         .unwrap_or_default()
 }
 
-fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, String) {
+pub(crate) fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, String) {
     let mut weekly = quota_reset_cell(quota.weekly_window(), now);
     if let Some(extra) = quota.extra.as_deref() {
         if !weekly.is_empty() {
@@ -2534,7 +2611,7 @@ pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &Dashboard
     }
 }
 
-fn refresh_age(now: u64, refreshed: u64) -> String {
+pub(crate) fn refresh_age(now: u64, refreshed: u64) -> String {
     if refreshed == 0 {
         return "unknown".into();
     }

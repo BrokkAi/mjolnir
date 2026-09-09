@@ -20,7 +20,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction};
+use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, Outcome};
 use crate::hel_selection::{SelectionRange, SurfaceFrame, SurfaceId};
 use hel::hel_elicitation::ElicitationRequest;
 use hel::hel_projection::{apply_committed_projection_event, project_relay_event};
@@ -201,10 +201,15 @@ impl SecondOpinion {
         }
     }
 
-    pub(super) fn set_status(&mut self, text: impl Into<String>) {
+    pub(super) fn set_status(&mut self, text: impl Into<String>) -> bool {
         if let Self::Review(review) = self {
-            review.status = text.into();
+            let text = text.into();
+            if review.status != text {
+                review.status = text;
+                return true;
+            }
         }
+        false
     }
 
     /// Rebuilds the reviewer's pane from a stored transcript.
@@ -220,9 +225,9 @@ impl SecondOpinion {
         workflow: ReviewWorkflow,
         status: impl Into<String>,
         context_baseline: u64,
-    ) {
+    ) -> bool {
         let Self::Setup { captured, .. } = self else {
-            return;
+            return false;
         };
         *self = Self::Review(Box::new(ActiveReview {
             captured: captured.clone(),
@@ -233,14 +238,26 @@ impl SecondOpinion {
             context_baseline,
             form: split_form(),
         }));
+        true
     }
 
     /// Reports a failure in place, leaving the view up so the user can retry
     /// or cancel rather than losing the captured plan to a dismissed dialog.
-    pub(super) fn report_failure(&mut self, message: impl Into<String>) {
+    pub(super) fn report_failure(&mut self, message: impl Into<String>) -> bool {
         match self {
-            Self::Setup { setup, .. } => setup.probe_failed_current(message),
-            Self::Review(review) => review.status = message.into(),
+            Self::Setup { setup, .. } => {
+                setup.probe_failed_current(message);
+                true
+            }
+            Self::Review(review) => {
+                let message = message.into();
+                if review.status != message {
+                    review.status = message;
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 }
@@ -271,11 +288,17 @@ impl ReviewerPane {
     /// Reusing the primary projection is the point of giving the reviewer a
     /// real relay: its transcript is built by the same code, so it renders and
     /// collapses identically.
-    pub(super) fn apply_events(&mut self, session_id: &str, events: &[RelayEvent]) {
+    pub(super) fn apply_events(&mut self, session_id: &str, events: &[RelayEvent]) -> bool {
         let session = self
             .session
             .get_or_insert_with(|| MaterializedSession::empty(session_id));
+        let mut changed = false;
         for event in events {
+            if event.ordinal < self.cursor_ordinal
+                || (event.ordinal == self.cursor_ordinal && event.digest == self.cursor_digest)
+            {
+                continue;
+            }
             let Ok(projected) = project_relay_event(session, event) else {
                 continue;
             };
@@ -284,6 +307,10 @@ impl ReviewerPane {
             }
             self.cursor_ordinal = event.ordinal;
             self.cursor_digest.clone_from(&event.digest);
+            changed = true;
+        }
+        if !changed {
+            return false;
         }
         // Rebuilt whole rather than incrementally: a reviewer's conversation
         // is one short turn, so the simpler path costs nothing here.
@@ -291,6 +318,7 @@ impl ReviewerPane {
         // Rows are rebuilt on the next draw, at whatever width that draw has.
         self.width = 0;
         self.follow = true;
+        true
     }
 
     /// The reviewer's latest complete agent answer, which is what a transfer
@@ -371,7 +399,8 @@ impl ReviewerPane {
     }
 
     /// Scrolls by `delta` rows, leaving follow mode on only at the end.
-    pub(super) fn scroll_by(&mut self, delta: isize, height: usize) {
+    pub(super) fn scroll_by(&mut self, delta: isize, height: usize) -> bool {
+        let before = (self.top_row, self.follow);
         let maximum = self.rows.len().saturating_sub(height);
         let top = if delta.is_negative() {
             self.top_row.saturating_sub(delta.unsigned_abs())
@@ -380,6 +409,7 @@ impl ReviewerPane {
         };
         self.top_row = top.min(maximum);
         self.follow = self.top_row >= maximum;
+        (self.top_row, self.follow) != before
     }
 
     /// The text a selection in this pane covers, resolved against this pane's
@@ -506,6 +536,7 @@ impl super::ChatState {
             form: Box::new(setup_form(&setup)),
             setup: Box::new(setup),
         });
+        self.mark_visible_changed();
     }
 
     pub(super) fn second_opinion(&self) -> Option<&SecondOpinion> {
@@ -529,10 +560,20 @@ impl super::ChatState {
     }
 
     pub(super) fn cancel_second_opinion_pointer(&mut self) {
+        let mut captured = false;
         match self.second_opinion.as_mut() {
-            Some(SecondOpinion::Setup { form, .. }) => form.cancel_pointer(),
-            Some(SecondOpinion::Review(review)) => review.form.cancel_pointer(),
+            Some(SecondOpinion::Setup { form, .. }) => {
+                captured = form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Some(SecondOpinion::Review(review)) => {
+                captured = review.form.captures_pointer();
+                review.form.cancel_pointer();
+            }
             None => {}
+        }
+        if captured {
+            self.mark_visible_changed();
         }
     }
 
@@ -558,6 +599,10 @@ impl super::ChatState {
                 _ => unreachable!(),
             };
             let consumed = result.outcome.is_consumed();
+            let changed = result.outcome == Outcome::Changed;
+            if changed {
+                self.mark_visible_changed();
+            }
             if let Some(interaction) = result.action.map(SetupInteraction::from) {
                 return match interaction {
                     SetupInteraction::Select(selected) => {
@@ -586,6 +631,10 @@ impl super::ChatState {
                 _ => unreachable!(),
             };
             let consumed = result.outcome.is_consumed();
+            let changed = result.outcome == Outcome::Changed;
+            if changed {
+                self.mark_visible_changed();
+            }
             if let Some(SplitInteraction::Activate(control)) =
                 result.action.map(SplitInteraction::from)
             {
@@ -611,13 +660,20 @@ impl super::ChatState {
         if let Some(SecondOpinion::Setup { setup, form, .. }) = self.second_opinion.as_mut() {
             prepare_setup_form(setup, form);
         }
-        let (consumed, interaction) = {
+        let (consumed, changed, interaction) = {
             let Some(SecondOpinion::Setup { form, .. }) = self.second_opinion.as_mut() else {
                 return (false, super::ChatAction::None);
             };
             let result = form.handle(&event);
-            (result.outcome.is_consumed(), result.action)
+            (
+                result.outcome.is_consumed(),
+                result.outcome == Outcome::Changed,
+                result.action,
+            )
         };
+        if changed {
+            self.mark_visible_changed();
+        }
         let Some(interaction) = interaction else {
             return (consumed, super::ChatAction::None);
         };
@@ -657,17 +713,21 @@ impl super::ChatState {
         let event = Event::Key(KeyEvent::new_with_kind_and_state(
             code, modifiers, key.kind, key.state,
         ));
-        let (consumed, interaction, focused) = {
+        let (consumed, changed, interaction, focused) = {
             let Some(SecondOpinion::Review(review)) = self.second_opinion.as_mut() else {
                 return (false, super::ChatAction::None);
             };
             let result = review.form.handle(&event);
             (
                 result.outcome.is_consumed(),
+                result.outcome == Outcome::Changed,
                 result.action,
                 review.form.focused(),
             )
         };
+        if changed {
+            self.mark_visible_changed();
+        }
         if let Some(action) = interaction {
             match action {
                 Interaction::Activate(SplitControl::Transfer) => {
@@ -749,20 +809,26 @@ impl super::ChatState {
             SecondOpinion::Review(review) => match code {
                 KeyCode::Tab | KeyCode::Right => {
                     review.action = review.action.next(1);
+                    self.mark_visible_changed();
                     super::ChatAction::None
                 }
                 KeyCode::BackTab | KeyCode::Left => {
                     review.action = review.action.next(-1);
+                    self.mark_visible_changed();
                     super::ChatAction::None
                 }
                 KeyCode::PageUp => {
                     let page = self.last_viewport_height.max(1);
-                    review.reviewer.scroll_by(-(page as isize), page);
+                    if review.reviewer.scroll_by(-(page as isize), page) {
+                        self.mark_visible_changed();
+                    }
                     super::ChatAction::None
                 }
                 KeyCode::PageDown => {
                     let page = self.last_viewport_height.max(1);
-                    review.reviewer.scroll_by(page as isize, page);
+                    if review.reviewer.scroll_by(page as isize, page) {
+                        self.mark_visible_changed();
+                    }
                     super::ChatAction::None
                 }
                 KeyCode::Enter => self.activate_split_action(),
@@ -910,8 +976,11 @@ impl super::ChatState {
         else {
             return false;
         };
-        reviewer.scroll_by(rows, height);
-        true
+        let changed = reviewer.scroll_by(rows, height);
+        if changed {
+            self.mark_visible_changed();
+        }
+        changed
     }
 
     /// The text a reviewer-pane selection covers.

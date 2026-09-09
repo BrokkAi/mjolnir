@@ -18,6 +18,10 @@ use hel::hel_transcript::{materialized_content_text, materialized_tool_diffstats
 use mj_chat::hel_chat::{Notices, TranscriptSnapshot};
 use mj_controller::hel_quota::ProfileQuota;
 
+use crate::render::session_review_display_signature;
+use crate::render_changes::{
+    capacity_display_signature, epoch_seconds, materialized_display_signature,
+};
 use crate::wizards::clamp_resources;
 use crate::{DashboardState, Mode, SessionOperationKind, nth_key};
 
@@ -474,12 +478,20 @@ pub(crate) struct CapacityDetail {
 
 impl DashboardState {
     pub fn set_workspace_names(&mut self, names: BTreeMap<String, String>) {
+        let changed = self.workspace_names != names;
+        let previous_order = self.workspace_order.clone();
         self.workspace_names = names;
-        self.workspace_name = self
+        let workspace_name = self
             .active_workspace_id
             .as_deref()
             .map(|id| self.workspace_display_name(id).to_owned())
             .unwrap_or_default();
+        if self.workspace_name != workspace_name {
+            self.workspace_name = workspace_name;
+            if !changed {
+                self.mark_render_changed();
+            }
+        }
         self.workspace_order
             .retain(|id| self.workspace_names.contains_key(id));
         for id in self.workspace_names.keys() {
@@ -487,10 +499,16 @@ impl DashboardState {
                 self.workspace_order.push(id.clone());
             }
         }
+        if changed || self.workspace_order != previous_order {
+            self.mark_render_changed();
+        }
     }
 
     pub fn set_workspace_name(&mut self, workspace_name: String) {
-        self.workspace_name = workspace_name;
+        if self.workspace_name != workspace_name {
+            self.workspace_name = workspace_name;
+            self.mark_render_changed();
+        }
     }
 
     pub fn set_config(&mut self, config: HelConfig) {
@@ -504,9 +522,20 @@ impl DashboardState {
         // A background refresh must not dismiss a newer interaction. Forms
         // retain their drafts; command availability reads the current config.
         self.clamp_selections();
+        self.mark_render_changed();
     }
 
     pub fn set_state(&mut self, state: HelState) {
+        let previous_visible = self.visible_state_signature();
+        let resume_dialog_state_changed = matches!(self.mode, Mode::ResumeDialog(_))
+            && (self.state.sessions.iter().any(|(id, previous)| {
+                let current = state.sessions.get(id);
+                (!previous.state.is_active()
+                    || current.is_some_and(|session| !session.state.is_active()))
+                    && current != Some(previous)
+            }) || state.sessions.iter().any(|(id, current)| {
+                !current.state.is_active() && !self.state.sessions.contains_key(id)
+            }));
         self.state = state;
         self.session_details
             .retain(|session_id, _| self.state.sessions.contains_key(session_id));
@@ -536,6 +565,9 @@ impl DashboardState {
         // After the projection, so the rows see the records the dashboard does.
         self.rebuild_resume_rows();
         self.clamp_selections();
+        if self.visible_state_signature() != previous_visible || resume_dialog_state_changed {
+            self.mark_render_changed();
+        }
     }
 
     /// Replace the daemon's complete durable Move projection. Active intents
@@ -544,6 +576,9 @@ impl DashboardState {
     /// row visible while the normal lifecycle feed catches up. Retained failed
     /// and cancelled intents stay attached to resume rows for explicit recovery.
     pub fn set_move_operations(&mut self, operations: impl IntoIterator<Item = MoveOperation>) {
+        let previous_visible = self.visible_state_signature();
+        let previous_move_recoveries = self.move_recovery_signature();
+        let resume_dialog_open = matches!(self.mode, Mode::ResumeDialog(_));
         let previous_active = self
             .move_operations
             .values()
@@ -608,6 +643,37 @@ impl DashboardState {
         }
         self.rebuild_resume_rows();
         self.clamp_selections();
+        if self.visible_state_signature() != previous_visible
+            || (resume_dialog_open && self.move_recovery_signature() != previous_move_recoveries)
+        {
+            self.mark_render_changed();
+        }
+    }
+
+    fn move_recovery_signature(
+        &self,
+    ) -> BTreeMap<String, (hel::hel_state::MovePhase, bool, bool, bool)> {
+        self.move_operations
+            .iter()
+            .filter(|(_, operation)| {
+                matches!(
+                    operation.phase,
+                    hel::hel_state::MovePhase::Failed | hel::hel_state::MovePhase::Cancelled
+                ) && (operation.checkpoint.is_some()
+                    || (operation.queue_admission_started && !operation.queue_admission_finished))
+            })
+            .map(|(session_id, operation)| {
+                (
+                    session_id.clone(),
+                    (
+                        operation.phase,
+                        operation.checkpoint.is_some(),
+                        operation.queue_admission_started,
+                        operation.queue_admission_finished,
+                    ),
+                )
+            })
+            .collect()
     }
 
     pub fn begin_session_operation(
@@ -649,6 +715,7 @@ impl DashboardState {
         operation_id: Option<String>,
         cancellable: bool,
     ) {
+        let previous_visible = self.visible_state_signature();
         self.session_operations.insert(
             session_id,
             SessionOperationDisplay {
@@ -664,6 +731,9 @@ impl DashboardState {
         self.apply_operation_projection();
         self.rebuild_resume_rows();
         self.clamp_selections();
+        if self.visible_state_signature() != previous_visible {
+            self.mark_render_changed();
+        }
     }
 
     pub fn replace_session_operation_stages(
@@ -671,8 +741,15 @@ impl DashboardState {
         session_id: &str,
         stages: impl IntoIterator<Item = (ProvisionStage, u64)>,
     ) {
-        if let Some(operation) = self.session_operations.get_mut(session_id) {
+        let changed = if let Some(operation) = self.session_operations.get_mut(session_id) {
+            let previous = operation.active_stages.clone();
             operation.active_stages = stages.into_iter().collect();
+            previous != operation.active_stages
+        } else {
+            false
+        };
+        if changed && self.session_is_visible(session_id) {
+            self.mark_render_changed();
         }
     }
 
@@ -682,9 +759,16 @@ impl DashboardState {
         operation_id: Option<String>,
         cancellable: bool,
     ) {
-        if let Some(operation) = self.session_operations.get_mut(session_id) {
+        let changed = if let Some(operation) = self.session_operations.get_mut(session_id) {
+            let previous = (operation.operation_id.clone(), operation.cancellable);
             operation.operation_id = operation_id;
             operation.cancellable = cancellable;
+            previous != (operation.operation_id.clone(), operation.cancellable)
+        } else {
+            false
+        };
+        if changed && self.session_is_visible(session_id) {
+            self.mark_render_changed();
         }
     }
 
@@ -698,8 +782,15 @@ impl DashboardState {
         profile_id: String,
         target_template_id: String,
     ) {
-        if let Some(operation) = self.session_operations.get_mut(session_id) {
+        let changed = if let Some(operation) = self.session_operations.get_mut(session_id) {
+            let previous = operation.resume_destination.clone();
             operation.resume_destination = Some((profile_id, target_template_id));
+            previous != operation.resume_destination
+        } else {
+            false
+        };
+        if changed && self.session_is_visible(session_id) {
+            self.mark_render_changed();
         }
     }
 
@@ -712,21 +803,34 @@ impl DashboardState {
         stage: ProvisionStage,
         active: bool,
     ) {
-        if let Some(operation) = self.session_operations.get_mut(session_id) {
+        let changed = if let Some(operation) = self.session_operations.get_mut(session_id) {
             if active {
-                operation.active_stages.entry(stage).or_insert_with(|| {
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                });
+                if let std::collections::btree_map::Entry::Vacant(e) =
+                    operation.active_stages.entry(stage)
+                {
+                    e.insert(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    );
+                    true
+                } else {
+                    false
+                }
             } else {
-                operation.active_stages.remove(&stage);
+                operation.active_stages.remove(&stage).is_some()
             }
+        } else {
+            false
+        };
+        if changed && self.session_is_visible(session_id) {
+            self.mark_render_changed();
         }
     }
 
     pub fn rekey_session_operation(&mut self, previous: &str, session_id: String) {
+        let previous_visible = self.visible_state_signature();
         if let Some(mut operation) = self.session_operations.remove(previous) {
             operation.placeholder = None;
             self.session_operations.insert(session_id, operation);
@@ -734,9 +838,13 @@ impl DashboardState {
         self.apply_operation_projection();
         self.rebuild_resume_rows();
         self.clamp_selections();
+        if self.visible_state_signature() != previous_visible {
+            self.mark_render_changed();
+        }
     }
 
     pub fn finish_session_operation(&mut self, session_id: &str) {
+        let previous_visible = self.visible_state_signature();
         self.session_operations.remove(session_id);
         if self
             .state
@@ -748,6 +856,9 @@ impl DashboardState {
         }
         self.rebuild_resume_rows();
         self.clamp_selections();
+        if self.visible_state_signature() != previous_visible {
+            self.mark_render_changed();
+        }
     }
 
     pub fn session_operation_kind(&self, session_id: &str) -> Option<SessionOperationKind> {
@@ -788,28 +899,65 @@ impl DashboardState {
     }
 
     pub fn set_quotas(&mut self, quotas: BTreeMap<String, ProfileQuota>) {
+        let changed = self.quotas.len() != quotas.len()
+            || self
+                .quotas
+                .iter()
+                .any(|(id, previous)| quotas.get(id) != Some(previous));
+        let refreshing_changed = self
+            .quota_refreshing
+            .iter()
+            .any(|id| quotas.contains_key(id));
         self.quota_refreshing.retain(|id| !quotas.contains_key(id));
         self.quotas = quotas;
         self.clamp_selections();
+        if self.support_projection_visible(crate::SupportPane::Quota)
+            && (changed || refreshing_changed)
+        {
+            self.mark_render_changed();
+        }
     }
 
     pub fn begin_quota_refresh(&mut self, profile_ids: impl IntoIterator<Item = String>) {
-        self.quota_refreshing.extend(profile_ids);
+        let mut changed = false;
+        for profile_id in profile_ids {
+            changed |= self.quota_refreshing.insert(profile_id);
+        }
+        if self.support_projection_visible(crate::SupportPane::Quota) && changed {
+            self.mark_render_changed();
+        }
     }
 
     pub fn apply_quota(&mut self, quota: ProfileQuota) {
+        let changed = self
+            .quotas
+            .get(&quota.profile_id)
+            .is_none_or(|previous| previous != &quota);
+        let was_refreshing = self.quota_refreshing.contains(&quota.profile_id);
         self.quota_refreshing.remove(&quota.profile_id);
         self.quotas.insert(quota.profile_id.clone(), quota);
+        if self.support_projection_visible(crate::SupportPane::Quota) && (changed || was_refreshing)
+        {
+            self.mark_render_changed();
+        }
     }
 
     pub fn apply_resource_usage(&mut self, session_id: &str, usage: SessionResourceUsage) {
-        self.session_details
+        let detail = self
+            .session_details
             .entry(session_id.to_string())
-            .or_default()
-            .resource_usage = Some(usage);
+            .or_default();
+        if detail.resource_usage.as_ref() == Some(&usage) {
+            return;
+        }
+        detail.resource_usage = Some(usage);
+        if self.session_is_visible(session_id) {
+            self.mark_render_changed();
+        }
     }
 
     pub fn set_deployment_capacity_targets(&mut self, targets: Vec<DeploymentCapacityTarget>) {
+        let old = self.capacity_details.clone();
         let mut previous = std::mem::take(&mut self.capacity_details);
         self.capacity_details = targets
             .into_iter()
@@ -832,9 +980,13 @@ impl DashboardState {
                 (id, detail)
             })
             .collect();
+        let changed = self.capacity_details != old;
         self.capacity_index = self
             .capacity_index
             .min(self.capacity_details.len().saturating_sub(1));
+        if changed && self.support_projection_visible(crate::SupportPane::Targets) {
+            self.mark_render_changed();
+        }
     }
 
     /// Folds in one capacity sample. A failed probe keeps the last reading and
@@ -846,24 +998,30 @@ impl DashboardState {
         result: std::result::Result<Option<DeploymentCapacityUsage>, String>,
         sampled_at_epoch_seconds: u64,
     ) {
-        let Some(detail) = self.capacity_details.get_mut(target_id) else {
-            return;
-        };
-        detail.refreshing = false;
-        match result {
-            Ok(usage) => {
-                detail.on_demand = usage.is_none();
-                detail.usage = usage;
-                detail.sampled_at_epoch_seconds = Some(sampled_at_epoch_seconds);
-                detail.probe_error = None;
+        let now = epoch_seconds();
+        let (previous, affected_targets, limits) = {
+            let Some(detail) = self.capacity_details.get_mut(target_id) else {
+                return;
+            };
+            let previous = capacity_display_signature(detail, now);
+            detail.refreshing = false;
+            match result {
+                Ok(usage) => {
+                    detail.on_demand = usage.is_none();
+                    detail.usage = usage;
+                    detail.sampled_at_epoch_seconds = Some(sampled_at_epoch_seconds);
+                    detail.probe_error = None;
+                }
+                Err(error) => detail.probe_error = Some(error),
             }
-            Err(error) => detail.probe_error = Some(error),
-        }
-        let affected_targets = detail.target.target_ids.clone();
-        let limits = detail
-            .usage
-            .as_ref()
-            .map(|usage| (usage.logical_cores, usage.memory_total_bytes));
+            let affected_targets = detail.target.target_ids.clone();
+            let limits = detail
+                .usage
+                .as_ref()
+                .map(|usage| (usage.logical_cores, usage.memory_total_bytes));
+            (previous, affected_targets, limits)
+        };
+        let mut wizard_changed = false;
         if let Some(limits) = limits {
             match &mut self.mode {
                 Mode::New(wizard) => {
@@ -872,11 +1030,20 @@ impl DashboardState {
                         && let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
                             &wizard.resource_allocation
                     {
+                        let previous = (
+                            wizard.resource_allocation.clone(),
+                            wizard.sizing_error.clone(),
+                        );
                         let (cpus, memory_bytes) =
                             clamp_resources(*cpus, *memory_bytes, Some(limits));
                         wizard.resource_allocation =
                             Some(SessionResourceAllocation::Container { cpus, memory_bytes });
                         wizard.sizing_error = None;
+                        wizard_changed = previous
+                            != (
+                                wizard.resource_allocation.clone(),
+                                wizard.sizing_error.clone(),
+                            );
                     }
                 }
                 Mode::Resume(wizard) => {
@@ -885,21 +1052,48 @@ impl DashboardState {
                         && let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
                             &wizard.resource_allocation
                     {
+                        let previous = (
+                            wizard.resource_allocation.clone(),
+                            wizard.sizing_error.clone(),
+                        );
                         let (cpus, memory_bytes) =
                             clamp_resources(*cpus, *memory_bytes, Some(limits));
                         wizard.resource_allocation =
                             Some(SessionResourceAllocation::Container { cpus, memory_bytes });
                         wizard.sizing_error = None;
+                        wizard_changed = previous
+                            != (
+                                wizard.resource_allocation.clone(),
+                                wizard.sizing_error.clone(),
+                            );
                     }
                 }
                 _ => {}
             }
         }
+        let changed = capacity_display_signature(
+            self.capacity_details
+                .get(target_id)
+                .expect("capacity detail remains present"),
+            now,
+        ) != previous;
+        if (changed || wizard_changed)
+            && self.support_projection_visible(crate::SupportPane::Targets)
+        {
+            self.mark_render_changed();
+        }
     }
 
     pub fn begin_capacity_refresh(&mut self) {
+        let changed = self
+            .capacity_details
+            .values()
+            .any(|detail| !detail.refreshing);
         for detail in self.capacity_details.values_mut() {
             detail.refreshing = true;
+        }
+        if changed && self.support_projection_visible(crate::SupportPane::Targets) {
+            self.mark_render_changed();
         }
     }
 
@@ -936,40 +1130,52 @@ impl DashboardState {
         &mut self,
         prepared: PreparedMaterializedSessionDetail,
     ) -> bool {
-        let detail = self
-            .session_details
-            .entry(prepared.session_id.clone())
-            .or_default();
+        let session_id = prepared.session_id.clone();
+        let detail = self.session_details.entry(session_id.clone()).or_default();
         if detail
             .materialized_applied_event_ordinal
             .is_some_and(|current| prepared.applied_event_ordinal < current)
         {
             return false;
         }
-        detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
-        detail.current_turn_started_at = prepared.current_turn_started_at;
-        detail.last_activity_at_ms = prepared.last_activity_at_ms;
-        detail.last_agent_message = prepared.last_agent_message;
-        detail.last_user_message = prepared.last_user_message;
-        detail.last_agent_message_follows_last_user = prepared.last_agent_message_follows_last_user;
-        detail.latest_agent_activity_after_last_user =
-            prepared.latest_agent_activity_after_last_user;
-        detail.agent_message_latest_content_ordinals =
-            prepared.agent_message_latest_content_ordinals;
-        detail.unread_agent_messages = prepared.unread_agent_messages;
-        detail.session_restart_event_ordinals = prepared.session_restart_event_ordinals;
-        detail.unread_session_restarts = prepared.unread_session_restarts;
-        detail.transcript = Some(prepared.transcript);
-        detail.transcript_hydration = TranscriptHydration::Ready;
-        detail.queued_prompts = prepared.queued_prompts;
-        detail.pending_elicitations = prepared.pending_elicitations;
-        detail.pending_elicitations_applied_event_ordinal = Some(prepared.applied_event_ordinal);
-        detail.projection = prepared.projection;
+        let previous = materialized_display_signature(detail);
+        let changed = {
+            detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
+            detail.current_turn_started_at = prepared.current_turn_started_at;
+            detail.last_activity_at_ms = prepared.last_activity_at_ms;
+            detail.last_agent_message = prepared.last_agent_message;
+            detail.last_user_message = prepared.last_user_message;
+            detail.last_agent_message_follows_last_user =
+                prepared.last_agent_message_follows_last_user;
+            detail.latest_agent_activity_after_last_user =
+                prepared.latest_agent_activity_after_last_user;
+            detail.agent_message_latest_content_ordinals =
+                prepared.agent_message_latest_content_ordinals;
+            detail.unread_agent_messages = prepared.unread_agent_messages;
+            detail.session_restart_event_ordinals = prepared.session_restart_event_ordinals;
+            detail.unread_session_restarts = prepared.unread_session_restarts;
+            detail.transcript = Some(prepared.transcript);
+            detail.transcript_hydration = TranscriptHydration::Ready;
+            detail.queued_prompts = prepared.queued_prompts;
+            detail.pending_elicitations = prepared.pending_elicitations;
+            detail.pending_elicitations_applied_event_ordinal =
+                Some(prepared.applied_event_ordinal);
+            detail.projection = prepared.projection;
+            materialized_display_signature(detail) != previous
+        };
+        let mut title_changed = false;
         if let Some(title) = prepared.session_title.as_ref()
             && let Some(record) = self.state.sessions.get_mut(&prepared.session_id)
+            && record.acp_session_title.as_deref() != Some(title.as_str())
         {
             record.acp_session_title = Some(title.clone());
+            title_changed = true;
+        }
+        if title_changed {
             self.rebuild_resume_rows();
+        }
+        if self.session_is_visible(&session_id) && (changed || title_changed) {
+            self.mark_render_changed();
         }
         true
     }
@@ -980,10 +1186,8 @@ impl DashboardState {
         &mut self,
         prepared: PreparedMaterializedSessionSummary,
     ) -> bool {
-        let detail = self
-            .session_details
-            .entry(prepared.session_id.clone())
-            .or_default();
+        let session_id = prepared.session_id.clone();
+        let detail = self.session_details.entry(session_id.clone()).or_default();
         if detail
             .materialized_applied_event_ordinal
             .is_some_and(|current| {
@@ -993,32 +1197,57 @@ impl DashboardState {
         {
             return false;
         }
-        detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
-        detail.current_turn_started_at = prepared.current_turn_started_at;
-        detail.last_activity_at_ms = prepared.last_activity_at_ms;
-        detail.last_agent_message = prepared.last_agent_message;
-        detail.last_user_message = prepared.last_user_message;
-        detail.last_agent_message_follows_last_user = prepared.last_agent_message_follows_last_user;
-        detail.latest_agent_activity_after_last_user = None;
-        detail.agent_message_latest_content_ordinals =
-            prepared.agent_message_latest_content_ordinals;
-        detail.unread_agent_messages = prepared.unread_agent_messages;
-        detail.session_restart_event_ordinals = prepared.session_restart_event_ordinals;
-        detail.unread_session_restarts = prepared.unread_session_restarts;
+        let previous = materialized_display_signature(detail);
+        let changed = {
+            detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
+            detail.current_turn_started_at = prepared.current_turn_started_at;
+            detail.last_activity_at_ms = prepared.last_activity_at_ms;
+            detail.last_agent_message = prepared.last_agent_message;
+            detail.last_user_message = prepared.last_user_message;
+            detail.last_agent_message_follows_last_user =
+                prepared.last_agent_message_follows_last_user;
+            detail.latest_agent_activity_after_last_user = None;
+            detail.agent_message_latest_content_ordinals =
+                prepared.agent_message_latest_content_ordinals;
+            detail.unread_agent_messages = prepared.unread_agent_messages;
+            detail.session_restart_event_ordinals = prepared.session_restart_event_ordinals;
+            detail.unread_session_restarts = prepared.unread_session_restarts;
+            materialized_display_signature(detail) != previous
+        };
+        let mut title_changed = false;
         if let Some(title) = prepared.session_title.as_ref()
             && let Some(record) = self.state.sessions.get_mut(&prepared.session_id)
+            && record.acp_session_title.as_deref() != Some(title.as_str())
         {
             record.acp_session_title = Some(title.clone());
+            title_changed = true;
+        }
+        if title_changed {
             self.rebuild_resume_rows();
+        }
+        if self.session_is_visible(&session_id) && (changed || title_changed) {
+            self.mark_render_changed();
         }
         true
     }
 
     pub fn set_current_step_start(&mut self, session_id: &str, timestamp_ms: Option<i64>) {
-        self.session_details
+        let timestamp_ms = timestamp_ms.and_then(|value| u64::try_from(value).ok());
+        let changed = self
+            .session_details
             .entry(session_id.to_owned())
             .or_default()
-            .current_step_started_at_ms = timestamp_ms.and_then(|value| u64::try_from(value).ok());
+            .current_step_started_at_ms
+            != timestamp_ms;
+        if changed {
+            self.session_details
+                .get_mut(session_id)
+                .expect("session detail was just inserted")
+                .current_step_started_at_ms = timestamp_ms;
+            if self.session_is_visible(session_id) {
+                self.mark_render_changed();
+            }
+        }
     }
 
     /// Record what a session is doing beyond its turn clock, so a row can say
@@ -1028,19 +1257,33 @@ impl DashboardState {
         session_id: &str,
         activity: mj_chat::usage_format::SessionActivity,
     ) {
-        self.session_details
+        let changed = self
+            .session_details
             .entry(session_id.to_owned())
             .or_default()
-            .activity = activity;
+            .activity
+            != activity;
+        if changed {
+            self.session_details
+                .get_mut(session_id)
+                .expect("session detail was just inserted")
+                .activity = activity;
+            if self.session_is_visible(session_id) {
+                self.mark_render_changed();
+            }
+        }
     }
 
     /// Record whether the controller can currently reach a session's relay
     /// worker. An unreachable session renders its summary band red.
     pub fn set_session_connectivity(&mut self, session_id: &str, connected: bool) {
-        if connected {
-            self.unreachable_sessions.remove(session_id);
+        let changed = if connected {
+            self.unreachable_sessions.remove(session_id)
         } else {
-            self.unreachable_sessions.insert(session_id.to_owned());
+            self.unreachable_sessions.insert(session_id.to_owned())
+        };
+        if changed && self.session_is_visible(session_id) {
+            self.mark_render_changed();
         }
     }
 
@@ -1051,10 +1294,23 @@ impl DashboardState {
         &mut self,
         reviews: impl IntoIterator<Item = mj_controller::hel_review_host::RuntimeReviewView>,
     ) {
-        self.session_reviews = reviews
+        let next: BTreeMap<_, _> = reviews
             .into_iter()
             .map(|review| (review.session_id.clone(), review))
             .collect();
+        let changed_visible = self
+            .ordered_sessions()
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| self.session_row_is_visible_at(*index))
+            .any(|(_, session)| {
+                session_review_display_signature(self.session_reviews.get(&session.id))
+                    != session_review_display_signature(next.get(&session.id))
+            });
+        self.session_reviews = next;
+        if changed_visible {
+            self.mark_render_changed();
+        }
     }
 
     /// The authoritative review currently open for a session, if any.
@@ -1069,18 +1325,27 @@ impl DashboardState {
     /// Turn reviews use [`Self::set_session_reviews`] and remain authoritative
     /// even when no chat is attached.
     pub fn set_session_review_open(&mut self, session_id: &str, open: bool) {
-        if open {
-            self.sessions_with_review.insert(session_id.to_owned());
+        let changed = if open {
+            self.sessions_with_review.insert(session_id.to_owned())
         } else {
-            self.sessions_with_review.remove(session_id);
+            self.sessions_with_review.remove(session_id)
+        };
+        if changed && self.session_is_visible(session_id) {
+            self.mark_render_changed();
         }
     }
 
     pub fn mark_transcript_unavailable(&mut self, session_id: &str) {
-        self.session_details
+        let detail = self
+            .session_details
             .entry(session_id.to_string())
-            .or_default()
-            .transcript_hydration = TranscriptHydration::Unavailable;
+            .or_default();
+        if detail.transcript_hydration != TranscriptHydration::Unavailable {
+            detail.transcript_hydration = TranscriptHydration::Unavailable;
+            if self.session_is_visible(session_id) {
+                self.mark_render_changed();
+            }
+        }
     }
 
     pub fn apply_queued_prompts(
@@ -1088,15 +1353,34 @@ impl DashboardState {
         session_id: &str,
         queued_prompts: Vec<hel::hel_worker::QueuedPrompt>,
     ) {
-        self.session_details
+        let changed = self
+            .session_details
             .entry(session_id.to_owned())
             .or_default()
-            .queued_prompts = queued_prompts;
+            .queued_prompts
+            .len()
+            != queued_prompts.len();
+        if changed {
+            self.session_details
+                .get_mut(session_id)
+                .expect("session detail was just inserted")
+                .queued_prompts = queued_prompts;
+            if self.session_is_visible(session_id) {
+                self.mark_render_changed();
+            }
+        } else if let Some(detail) = self.session_details.get_mut(session_id) {
+            detail.queued_prompts = queued_prompts;
+        }
     }
 
     pub fn apply_checkpoint_archive_sizes(&mut self, sizes: BTreeMap<String, Option<u64>>) {
-        self.checkpoint_archive_sizes = sizes;
-        self.rebuild_resume_rows();
+        if self.checkpoint_archive_sizes != sizes {
+            self.checkpoint_archive_sizes = sizes;
+            self.rebuild_resume_rows();
+            if matches!(self.mode, Mode::ResumeDialog(_)) {
+                self.mark_render_changed();
+            }
+        }
     }
 
     /// Installs the process-wide notifications bar, so every view reports
@@ -1173,6 +1457,36 @@ mod tests {
         assert!(matches!(dashboard.mode, crate::Mode::Palette(_)));
         dashboard.handle_key(key(KeyCode::Enter));
         assert!(matches!(dashboard.mode, crate::Mode::Rename(_)));
+    }
+
+    #[test]
+    fn duplicate_visible_activity_update_does_not_request_a_frame() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let activity = mj_chat::usage_format::SessionActivity {
+            activity_turn_started_at_ms: Some(1_000),
+            ..Default::default()
+        };
+
+        dashboard.set_session_activity("session-1", activity.clone());
+        assert!(dashboard.take_render_changed());
+        dashboard.set_session_activity("session-1", activity);
+        assert!(!dashboard.take_render_changed());
+    }
+
+    #[test]
+    fn state_updates_in_hidden_workspaces_do_not_request_a_frame() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.take_render_changed();
+        let mut hidden = stopped_session();
+        hidden.id = "hidden-session".into();
+        hidden.workspace_id = "other-workspace".into();
+        hidden.title = "changed in another tab".into();
+        let mut state = dashboard.state.clone();
+        state.sessions.insert(hidden.id.clone(), hidden);
+
+        dashboard.set_state(state);
+
+        assert!(!dashboard.take_render_changed());
     }
 
     #[test]

@@ -26,6 +26,18 @@ def run_chat_controls(lab, tmux, evidence, session_id):
         time.sleep(0.15)
 
     focus_prompt()
+    tmux.send_key("BTab")
+    screen = tmux.wait_for("Prompt")
+    x, y = locate_text(screen, "Prompt", last=True)
+    tmux.mouse_event(0, x + 2, y + 1)
+    # Prove keyboard input reaches the prompt while the button is still held.
+    # Replaying the press on release cannot make this assertion pass.
+    tmux.send_text("held-button-focus")
+    tmux.wait_for("held-button-focus", "prompt focused before mouse release")
+    record("prompt-focus-on-press", "Shift-Tab; Prompt mouse down; type before release", "prompt accepts input while mouse is held")
+    tmux.mouse_event(0, x + 2, y + 1, release=True)
+    tmux.send_key("End")
+    tmux.send_key("C-u")
     tmux.send_text("/model")
     tmux.send_key("Enter")
     tmux.wait_for("Choose a model")

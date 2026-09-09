@@ -451,9 +451,17 @@ impl DashboardState {
             editor.remove_selected();
             editor.prepare();
             self.mode = Mode::EditContainer(editor);
+            crate::mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
             return DashboardAction::None;
         }
-        let interaction = editor.form.get_mut().handle(&event).action;
+        let result = editor.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         let mut changed_structure = false;
         match interaction {
             Some(Interaction::Cancel | Interaction::Activate(Cancel)) => {
@@ -466,6 +474,10 @@ impl DashboardState {
                     .is_some_and(|field| TextField::apply(field, edit) == Outcome::Changed)
                 {
                     editor.error = None;
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
                 }
             }
             Some(Interaction::Select(Mounts, index)) => editor.mount_index = index,

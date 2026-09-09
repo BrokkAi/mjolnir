@@ -29,7 +29,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::components::{ButtonRow, ControlKind, Form, Interaction, TabStrip};
+use crate::components::{ButtonRow, ControlKind, Form, Interaction, Outcome, TabStrip};
 use hel::hel_review::driver::{Resolution, RoleState, TurnReviewPhase};
 use mj_controller::hel_review_host::{RuntimeReviewView, VerdictKind};
 
@@ -195,7 +195,8 @@ impl TurnReview {
     }
 
     /// Takes the daemon's newer view of the same review.
-    pub(super) fn update(&mut self, view: RuntimeReviewView) {
+    pub(super) fn update(&mut self, view: RuntimeReviewView) -> bool {
+        let changed = self.view != view;
         let verdict_changed = self.view.verdict.as_ref().map(|verdict| verdict.kind)
             != view.verdict.as_ref().map(|verdict| verdict.kind);
         let roles = view.roles.clone();
@@ -224,6 +225,7 @@ impl TurnReview {
             self.action = Self::preferred_action(&view);
         }
         self.view = view;
+        changed
     }
 
     /// One role's pane, created on first use.
@@ -271,18 +273,20 @@ impl TurnReview {
 
     /// Moves the transcript to the next role that has one, so a reader can
     /// follow a lane without losing the supervisor.
-    pub(super) fn cycle_selection(&mut self) {
+    pub(super) fn cycle_selection(&mut self) -> bool {
+        let before_tab = self.tab;
+        let before_selected = self.selected.clone();
         let roles = self.view.roles.clone();
         let verdict = self.verdict_text().is_some();
         if roles.is_empty() && !verdict {
-            return;
+            return false;
         }
         if self.tab == ReviewTab::Verdict {
             if let Some(role) = roles.first() {
                 self.tab = ReviewTab::Transcript;
                 self.selected = role.role.clone();
             }
-            return;
+            return before_tab != self.tab || before_selected != self.selected;
         }
         if self.tab == ReviewTab::Overview {
             if let Some(role) = roles.first() {
@@ -291,7 +295,7 @@ impl TurnReview {
             } else if verdict {
                 self.tab = ReviewTab::Verdict;
             }
-            return;
+            return before_tab != self.tab || before_selected != self.selected;
         }
         let next = roles
             .iter()
@@ -305,6 +309,7 @@ impl TurnReview {
         } else {
             self.tab = ReviewTab::Overview;
         }
+        before_tab != self.tab || before_selected != self.selected
     }
 
     /// Where a role's journal has been read to.
@@ -386,7 +391,8 @@ impl TurnReview {
         self.verdict_top_row = self.verdict_top_row.min(maximum);
     }
 
-    fn scroll_verdict(&mut self, delta: isize) {
+    fn scroll_verdict(&mut self, delta: isize) -> bool {
+        let before = self.verdict_top_row;
         let maximum = self
             .verdict_total_rows
             .saturating_sub(self.verdict_viewport_height);
@@ -396,6 +402,7 @@ impl TurnReview {
             self.verdict_top_row.saturating_add(delta as usize)
         }
         .min(maximum);
+        self.verdict_top_row != before
     }
 
     fn set_overview_viewport(&mut self, total_rows: usize, height: usize) {
@@ -405,7 +412,8 @@ impl TurnReview {
         self.overview_top_row = self.overview_top_row.min(maximum);
     }
 
-    fn scroll_overview(&mut self, delta: isize) {
+    fn scroll_overview(&mut self, delta: isize) -> bool {
+        let before = self.overview_top_row;
         let maximum = self
             .overview_total_rows
             .saturating_sub(self.overview_viewport_height);
@@ -415,20 +423,30 @@ impl TurnReview {
             self.overview_top_row.saturating_add(delta as usize)
         }
         .min(maximum);
+        self.overview_top_row != before
     }
 
-    fn scroll_pane(&mut self, delta: isize, height: usize) {
+    fn scroll_pane(&mut self, delta: isize, height: usize) -> bool {
         if self.tab == ReviewTab::Overview {
-            self.scroll_overview(delta);
+            self.scroll_overview(delta)
         } else if self.tab == ReviewTab::Verdict {
-            self.scroll_verdict(delta);
+            self.scroll_verdict(delta)
         } else if self.tab == ReviewTab::Transcript {
-            self.selected_pane().scroll_by(delta, height);
+            let pane = self.selected_pane();
+            pane.scroll_by(delta, height)
+        } else {
+            false
         }
     }
 
-    pub(super) fn report_failure(&mut self, message: impl Into<String>) {
-        self.failure = Some(message.into());
+    pub(super) fn report_failure(&mut self, message: impl Into<String>) -> bool {
+        let message = message.into();
+        if self.failure.as_deref() != Some(message.as_str()) {
+            self.failure = Some(message);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -541,7 +559,11 @@ impl super::ChatState {
 
     pub(super) fn cancel_turn_review_pointer(&mut self) {
         if let Some(review) = self.turn_review.as_mut() {
+            let captured = review.form.captures_pointer();
             review.form.cancel_pointer();
+            if captured {
+                self.mark_visible_changed();
+            }
         }
     }
 
@@ -560,6 +582,9 @@ impl super::ChatState {
             Some(review) => review.form.handle(&event),
             None => return (false, super::ChatAction::None),
         };
+        if result.outcome == Outcome::Changed {
+            self.mark_visible_changed();
+        }
         match result.action {
             Some(Interaction::Activate(control)) => {
                 if let Some(review) = self.turn_review.as_mut() {
@@ -585,15 +610,24 @@ impl super::ChatState {
     /// Shows the daemon's review, or takes the pane down when it has resolved.
     pub(super) fn set_turn_review(&mut self, view: Option<RuntimeReviewView>) {
         match (view, self.turn_review.as_mut()) {
-            (Some(view), Some(open)) => open.update(view),
-            (Some(view), None) => self.turn_review = Some(Box::new(TurnReview::new(view))),
+            (Some(view), Some(open)) => {
+                if open.update(view) {
+                    self.mark_visible_changed();
+                }
+            }
+            (Some(view), None) => {
+                self.turn_review = Some(Box::new(TurnReview::new(view)));
+                self.mark_visible_changed();
+            }
             (None, _) => self.close_turn_review(),
         }
     }
 
     pub(super) fn close_turn_review(&mut self) {
-        self.turn_review = None;
-        self.turn_review_action_areas.clear();
+        if self.turn_review.take().is_some() {
+            self.turn_review_action_areas.clear();
+            self.mark_visible_changed();
+        }
     }
 
     pub(super) fn handle_turn_review_event(
@@ -606,30 +640,42 @@ impl super::ChatState {
         let event = Event::Key(crossterm::event::KeyEvent::new_with_kind_and_state(
             code, modifiers, key.kind, key.state,
         ));
-        let Some(review) = self.turn_review.as_mut() else {
-            return super::ChatAction::None;
+        let (component_ready, result) = {
+            let Some(review) = self.turn_review.as_mut() else {
+                return super::ChatAction::None;
+            };
+            (review.component_ready, review.form.handle(&event))
         };
-        let component_ready = review.component_ready;
-        let result = review.form.handle(&event);
+        if result.outcome == Outcome::Changed {
+            self.mark_visible_changed();
+        }
         if let Some(interaction) = result.action {
             match interaction {
                 Interaction::Select(ReviewControl::Tabs, selected) => {
-                    select_review_tab(review, selected);
+                    if let Some(review) = self.turn_review.as_mut() {
+                        select_review_tab(review, selected);
+                    }
                     return super::ChatAction::None;
                 }
                 Interaction::Activate(ReviewControl::Tabs) => {
                     return self.activate_turn_review_action();
                 }
                 Interaction::Activate(ReviewControl::Forward) => {
-                    review.action = Some(ReviewAction::Forward);
+                    if let Some(review) = self.turn_review.as_mut() {
+                        review.action = Some(ReviewAction::Forward);
+                    }
                     return self.activate_turn_review_action();
                 }
                 Interaction::Activate(ReviewControl::Dismiss) => {
-                    review.action = Some(ReviewAction::Dismiss);
+                    if let Some(review) = self.turn_review.as_mut() {
+                        review.action = Some(ReviewAction::Dismiss);
+                    }
                     return self.activate_turn_review_action();
                 }
                 Interaction::Activate(ReviewControl::Cancel) => {
-                    review.action = Some(ReviewAction::Cancel);
+                    if let Some(review) = self.turn_review.as_mut() {
+                        review.action = Some(ReviewAction::Cancel);
+                    }
                     return self.activate_turn_review_action();
                 }
                 Interaction::Cancel => {
@@ -648,31 +694,55 @@ impl super::ChatState {
             // the actions, so a fan-out stays readable without giving up the
             // one-key Forward.
             KeyCode::Tab => {
-                review.cycle_selection();
+                if self
+                    .turn_review
+                    .as_mut()
+                    .is_some_and(|review| review.cycle_selection())
+                {
+                    self.mark_visible_changed();
+                }
                 super::ChatAction::None
             }
             KeyCode::Right => {
-                review.action = Some(match review.action {
-                    Some(action) => action.next(1),
-                    None => ReviewAction::Forward,
-                });
+                if let Some(review) = self.turn_review.as_mut() {
+                    review.action = Some(match review.action {
+                        Some(action) => action.next(1),
+                        None => ReviewAction::Forward,
+                    });
+                    self.mark_visible_changed();
+                }
                 super::ChatAction::None
             }
             KeyCode::BackTab | KeyCode::Left => {
-                review.action = Some(match review.action {
-                    Some(action) => action.next(-1),
-                    None => ReviewAction::Cancel,
-                });
+                if let Some(review) = self.turn_review.as_mut() {
+                    review.action = Some(match review.action {
+                        Some(action) => action.next(-1),
+                        None => ReviewAction::Cancel,
+                    });
+                    self.mark_visible_changed();
+                }
                 super::ChatAction::None
             }
             KeyCode::PageUp => {
                 let page = self.last_viewport_height.max(1);
-                review.scroll_pane(-(page as isize), page);
+                if self
+                    .turn_review
+                    .as_mut()
+                    .is_some_and(|review| review.scroll_pane(-(page as isize), page))
+                {
+                    self.mark_visible_changed();
+                }
                 super::ChatAction::None
             }
             KeyCode::PageDown => {
                 let page = self.last_viewport_height.max(1);
-                review.scroll_pane(page as isize, page);
+                if self
+                    .turn_review
+                    .as_mut()
+                    .is_some_and(|review| review.scroll_pane(page as isize, page))
+                {
+                    self.mark_visible_changed();
+                }
                 super::ChatAction::None
             }
             KeyCode::Enter => self.activate_turn_review_action(),
@@ -740,8 +810,11 @@ impl super::ChatState {
         let Some(review) = self.turn_review.as_mut() else {
             return false;
         };
-        review.scroll_pane(rows, height);
-        true
+        let changed = review.scroll_pane(rows, height);
+        if changed {
+            self.mark_visible_changed();
+        }
+        changed
     }
 }
 

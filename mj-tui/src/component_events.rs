@@ -105,27 +105,99 @@ impl DashboardState {
         }
     }
 
-    pub(crate) fn cancel_component_pointer(&mut self) {
-        self.surface_form.get_mut().cancel_pointer();
+    /// Releases any pressed dashboard control. Global shortcuts use this when
+    /// they take ownership of a pointer gesture; clearing an armed control is
+    /// itself a visible change and therefore requests a repaint.
+    pub fn cancel_component_pointer(&mut self) -> bool {
+        let mut changed = {
+            let form = self.surface_form.get_mut();
+            let changed = form.captures_pointer();
+            form.cancel_pointer();
+            changed
+        };
         match &mut self.mode {
-            Mode::Help(overlay) => overlay.form.get_mut().cancel_pointer(),
-            Mode::EditContainer(editor) => editor.form.get_mut().cancel_pointer(),
-            Mode::Setup(dialog) => dialog.cancel_pointer(),
-            Mode::Palette(palette) => palette.form.get_mut().cancel_pointer(),
-            Mode::ResumeDialog(dialog) => dialog.form.get_mut().cancel_pointer(),
-            Mode::Rename(dialog) => dialog.form.get_mut().cancel_pointer(),
-            Mode::ConfigId(dialog) => dialog.form.get_mut().cancel_pointer(),
-            Mode::RepositoryOrigin(dialog) => dialog.form.get_mut().cancel_pointer(),
-            Mode::TargetActions(dialog) => dialog.form.get_mut().cancel_pointer(),
-            Mode::Web(dialog) => dialog.form.get_mut().cancel_pointer(),
-            Mode::WorkspaceManager(dialog) => dialog.form.get_mut().cancel_pointer(),
-            Mode::Importing(dialog) => dialog.form.get_mut().cancel_pointer(),
-            Mode::ConfirmImportBundle(dialog) => dialog.form.get_mut().cancel_pointer(),
-            Mode::Confirm(dialog) => dialog.form.get_mut().cancel_pointer(),
-            Mode::New(wizard) => wizard.form.get_mut().cancel_pointer(),
-            Mode::Resume(wizard) => wizard.form.get_mut().cancel_pointer(),
+            Mode::Help(overlay) => {
+                let form = overlay.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::EditContainer(editor) => {
+                let form = editor.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::Setup(dialog) => changed |= dialog.cancel_pointer(),
+            Mode::Palette(palette) => {
+                let form = palette.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::ResumeDialog(dialog) => {
+                let form = dialog.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::Rename(dialog) => {
+                let form = dialog.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::ConfigId(dialog) => {
+                let form = dialog.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::RepositoryOrigin(dialog) => {
+                let form = dialog.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::TargetActions(dialog) => {
+                let form = dialog.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::Web(dialog) => {
+                let form = dialog.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::WorkspaceManager(dialog) => {
+                let form = dialog.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::Importing(dialog) => {
+                let form = dialog.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::ConfirmImportBundle(dialog) => {
+                let form = dialog.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::Confirm(dialog) => {
+                let form = dialog.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::New(wizard) => {
+                let form = wizard.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
+            Mode::Resume(wizard) => {
+                let form = wizard.form.get_mut();
+                changed |= form.captures_pointer();
+                form.cancel_pointer();
+            }
             _ => {}
         }
+        if changed {
+            self.mark_render_changed();
+        }
+        changed
     }
 
     pub(crate) fn reset_component_geometry(&mut self) {
@@ -164,7 +236,8 @@ impl DashboardState {
         if matches!(self.mode, Mode::WorkspaceManager(_)) {
             return self.handle_workspace_manager_event(event);
         }
-        match std::mem::replace(&mut self.mode, Mode::Dashboard) {
+        let was_modal = !matches!(self.mode, Mode::Dashboard);
+        let action = match std::mem::replace(&mut self.mode, Mode::Dashboard) {
             Mode::EditContainer(editor) => self.handle_container_edit_event(event, editor),
             Mode::Setup(dialog) => self.handle_setup_event(event, dialog),
             Mode::Rename(dialog) => self.handle_rename_event(event, dialog),
@@ -181,6 +254,13 @@ impl DashboardState {
                 self.mode = mode;
                 DashboardAction::None
             }
+        };
+        // Most component handlers receive an extracted modal so that they can
+        // decide whether to restore it. `cancel_modal` cannot observe that
+        // original mode, so account for a real close at this boundary.
+        if was_modal && matches!(self.mode, Mode::Dashboard) {
+            self.mark_render_changed();
         }
+        action
     }
 }

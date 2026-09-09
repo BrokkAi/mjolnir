@@ -230,6 +230,7 @@ impl DashboardState {
         self.workspace_management_generation = self.workspace_management_generation.wrapping_add(1);
         let generation = self.workspace_management_generation;
         self.mode = Mode::WorkspaceManager(WorkspaceManager::loading(generation));
+        self.mark_render_changed();
         DashboardAction::LoadWorkspaceManagement { generation }
     }
 
@@ -262,34 +263,46 @@ impl DashboardState {
                     .selected_entry()
                     .map(|entry| entry.workspace.id.clone())
                     .or(active_workspace_id);
-                manager.entries = entries;
-                manager.selected = selected_id
-                    .and_then(|id| {
-                        manager
-                            .entries
-                            .iter()
-                            .position(|entry| entry.workspace.id == id)
+                let selected = selected_id
+                    .and_then(|id| entries.iter().position(|entry| entry.workspace.id == id))
+                    .unwrap_or_else(|| manager.selected.min(entries.len().saturating_sub(1)));
+                let name = entries
+                    .get(selected)
+                    .map(|entry| {
+                        TextInput::from_value(entry.workspace.name.clone()).with_max_chars(64)
                     })
-                    .unwrap_or_else(|| {
-                        manager
-                            .selected
-                            .min(manager.entries.len().saturating_sub(1))
-                    });
+                    .unwrap_or_else(|| TextInput::default().with_max_chars(64));
+                let changed = manager.entries != entries
+                    || manager.selected != selected
+                    || manager.selected_draft != 0
+                    || manager.confirming_delete
+                    || manager.loading
+                    || manager.busy.is_some()
+                    || manager.error.is_some()
+                    || manager.name != name;
+                manager.entries = entries;
+                manager.selected = selected;
                 manager.selected_draft = 0;
                 manager.confirming_delete = false;
                 manager.loading = false;
                 manager.busy = None;
                 manager.error = None;
-                if let Some(entry) = manager.selected_entry() {
-                    manager.name =
-                        TextInput::from_value(entry.workspace.name.clone()).with_max_chars(64);
-                } else {
-                    manager.name = TextInput::default().with_max_chars(64);
-                }
+                manager.name = name;
                 manager.sync_form();
+                if changed {
+                    self.mark_render_changed();
+                }
                 return foreground;
             }
-            Err(error) => manager.set_error(error),
+            Err(error) => {
+                let changed = manager.loading
+                    || manager.busy.is_some()
+                    || manager.error.as_deref() != Some(error.as_str());
+                manager.set_error(error);
+                if changed {
+                    self.mark_render_changed();
+                }
+            }
         }
         true
     }
@@ -307,11 +320,29 @@ impl DashboardState {
             if focused == Some(WorkspaceControl::List) {
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => {
+                        let previous = manager.selected;
                         manager.select(manager.selected.saturating_add(1));
+                        if manager.selected != previous {
+                            crate::mark_render_changed_cells(
+                                &self.render_changed,
+                                &self.render_change_revision,
+                            );
+                        } else {
+                            self.record_event_handled();
+                        }
                         return DashboardAction::None;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
+                        let previous = manager.selected;
                         manager.select(manager.selected.saturating_sub(1));
+                        if manager.selected != previous {
+                            crate::mark_render_changed_cells(
+                                &self.render_changed,
+                                &self.render_change_revision,
+                            );
+                        } else {
+                            self.record_event_handled();
+                        }
                         return DashboardAction::None;
                     }
                     KeyCode::Char('r') if manager.can_mutate() => {
@@ -322,6 +353,10 @@ impl DashboardState {
                     }
                     KeyCode::Char('c') if manager.can_mutate() => {
                         manager.form.get_mut().focus(WorkspaceControl::Name);
+                        crate::mark_render_changed_cells(
+                            &self.render_changed,
+                            &self.render_change_revision,
+                        );
                         return DashboardAction::None;
                     }
                     _ => {}
@@ -329,6 +364,7 @@ impl DashboardState {
             } else if focused == Some(WorkspaceControl::Drafts) {
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => {
+                        let previous = manager.selected_draft;
                         let len = manager
                             .selected_entry()
                             .map_or(0, |entry| entry.drafts.len());
@@ -336,10 +372,27 @@ impl DashboardState {
                             .selected_draft
                             .saturating_add(1)
                             .min(len.saturating_sub(1));
+                        if manager.selected_draft != previous {
+                            crate::mark_render_changed_cells(
+                                &self.render_changed,
+                                &self.render_change_revision,
+                            );
+                        } else {
+                            self.record_event_handled();
+                        }
                         return DashboardAction::None;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
+                        let previous = manager.selected_draft;
                         manager.selected_draft = manager.selected_draft.saturating_sub(1);
+                        if manager.selected_draft != previous {
+                            crate::mark_render_changed_cells(
+                                &self.render_changed,
+                                &self.render_change_revision,
+                            );
+                        } else {
+                            self.record_event_handled();
+                        }
                         return DashboardAction::None;
                     }
                     KeyCode::Char('r') if manager.can_mutate() => {
@@ -350,17 +403,46 @@ impl DashboardState {
             }
         }
 
-        let interaction = manager.form.get_mut().handle(&event).action;
+        let result = manager.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel | Interaction::Activate(WorkspaceControl::Close)) => {
                 self.cancel_modal();
             }
             Some(Interaction::Edit(WorkspaceControl::Name, edit)) => {
-                TextField::apply(&mut manager.name, edit);
+                if TextField::apply(&mut manager.name, edit)
+                    == mj_chat::components::Outcome::Changed
+                {
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
+                }
             }
-            Some(Interaction::Select(WorkspaceControl::List, index)) => manager.select(index),
+            Some(Interaction::Select(WorkspaceControl::List, index)) => {
+                let previous = manager.selected;
+                manager.select(index);
+                if manager.selected != previous {
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
+                }
+            }
             Some(Interaction::Select(WorkspaceControl::Drafts, index)) => {
-                manager.selected_draft = index;
+                if manager.selected_draft != index {
+                    manager.selected_draft = index;
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
+                }
             }
             Some(Interaction::Activate(WorkspaceControl::List)) if manager.busy.is_none() => {
                 let Some(workspace_id) = manager
@@ -411,6 +493,7 @@ impl DashboardState {
                 let name = manager.name.trim().to_owned();
                 if name.is_empty() {
                     manager.error = Some("Workspace name cannot be empty.".into());
+                    self.mark_render_changed();
                     return DashboardAction::None;
                 }
                 DashboardAction::CreateWorkspace { generation, name }
@@ -422,6 +505,7 @@ impl DashboardState {
                 let name = manager.name.trim().to_owned();
                 if name.is_empty() {
                     manager.error = Some("Workspace name cannot be empty.".into());
+                    self.mark_render_changed();
                     return DashboardAction::None;
                 }
                 DashboardAction::RenameWorkspace {
@@ -446,6 +530,7 @@ impl DashboardState {
                         workspace_name
                     ));
                     manager.form.get_mut().focus(WorkspaceControl::Name);
+                    self.mark_render_changed();
                     return DashboardAction::None;
                 }
                 DashboardAction::DeleteWorkspace {
@@ -457,6 +542,7 @@ impl DashboardState {
             WorkspaceMutation::Recover => {
                 let Some(draft) = manager.selected_draft() else {
                     manager.error = Some("This workspace has no detached drafts.".into());
+                    self.mark_render_changed();
                     return DashboardAction::None;
                 };
                 DashboardAction::RecoverWorkspaceDraft {
@@ -468,6 +554,7 @@ impl DashboardState {
         };
         manager.busy = Some(mutation);
         manager.error = None;
+        self.mark_render_changed();
         action
     }
 }
@@ -490,10 +577,16 @@ pub(crate) fn workspace_tab_click(
         && column < area.right()
         && row >= area.y
         && row < area.bottom()
+        && dashboard.focus != crate::Focus::Workspaces
     {
         dashboard.focus = crate::Focus::Workspaces;
+        dashboard.mark_render_changed();
     }
     let workspace_id = workspace_id?;
+    if dashboard.focus != crate::Focus::Workspaces {
+        dashboard.focus = crate::Focus::Workspaces;
+        dashboard.mark_render_changed();
+    }
     (dashboard.active_workspace_id() != Some(workspace_id.as_str()))
         .then_some(DashboardAction::SelectWorkspace { workspace_id })
 }

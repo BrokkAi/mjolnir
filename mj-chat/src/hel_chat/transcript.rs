@@ -1598,7 +1598,7 @@ impl ChatState {
     /// A live, non-durable tool card for ACP terminals whose agent omitted the
     /// matching tool-call update. It disappears on exit and yields immediately
     /// when a real transcript tool claims an active terminal.
-    fn active_terminal_fallback(&self) -> Option<ChatEntry> {
+    pub(super) fn active_terminal_fallback(&self) -> Option<ChatEntry> {
         let mut unclaimed = self
             .active_agent_terminals
             .iter()
@@ -1669,11 +1669,12 @@ impl ChatState {
         })
     }
 
-    pub(super) fn scroll_history_up(&mut self, rows: usize) {
+    pub(super) fn scroll_history_up(&mut self, rows: usize) -> bool {
+        let before = self.anchor;
         let Some(TranscriptAnchor::Row { mut entry, mut row }) = self.resolved_anchor() else {
             // Either no draw has happened yet, or the transcript is shorter than
             // the viewport and has nothing above it.
-            return;
+            return false;
         };
         self.prepare_entry_rows();
         let mut remaining = rows;
@@ -1690,11 +1691,17 @@ impl ChatState {
             }
         }
         self.anchor = TranscriptAnchor::Row { entry, row };
+        let changed = self.anchor != before;
+        if changed {
+            self.mark_visible_changed();
+        }
+        changed
     }
 
-    pub(super) fn scroll_history_down(&mut self, rows: usize) {
+    pub(super) fn scroll_history_down(&mut self, rows: usize) -> bool {
+        let before = self.anchor;
         let Some(TranscriptAnchor::Row { mut entry, mut row }) = self.resolved_anchor() else {
-            return;
+            return false;
         };
         self.prepare_entry_rows();
         let mut remaining = rows;
@@ -1707,7 +1714,11 @@ impl ChatState {
                 // for them here can strand the viewport in a long tool run.
                 if entry + 1 >= self.entries.len() {
                     self.anchor = TranscriptAnchor::Bottom;
-                    return;
+                    let changed = self.anchor != before;
+                    if changed {
+                        self.mark_visible_changed();
+                    }
+                    return changed;
                 }
                 entry += 1;
                 row = 0;
@@ -1720,7 +1731,11 @@ impl ChatState {
             }
             if entry + 1 >= self.entries.len() {
                 self.anchor = TranscriptAnchor::Bottom;
-                return;
+                let changed = self.anchor != before;
+                if changed {
+                    self.mark_visible_changed();
+                }
+                return changed;
             }
             remaining -= below + 1;
             entry += 1;
@@ -1736,6 +1751,11 @@ impl ChatState {
         } else {
             anchor.anchor()
         };
+        let changed = self.anchor != before;
+        if changed {
+            self.mark_visible_changed();
+        }
+        changed
     }
 
     /// What the current rendered rows depend on wholesale.
@@ -2106,7 +2126,7 @@ pub(super) fn render_transcript(
     }
 }
 
-fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line<'static> {
+pub(super) fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line<'static> {
     let review_activity = chat
         .turn_review()
         .and_then(|review| review.view.activity_label());

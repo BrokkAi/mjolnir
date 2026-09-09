@@ -37,6 +37,7 @@ use hel_tui::{
     PreparedMaterializedSessionDetail, SessionOperationKind, render_combined,
     resume_profile_placeholders,
 };
+use mj_chat::components::Outcome;
 use mj_chat::hel_chat::ChatElicitationDraft;
 use mj_chat::hel_selection::{
     FrameSurfaces, SelectionAction, SelectionRange, SelectionState, SurfaceId,
@@ -356,8 +357,9 @@ pub(crate) struct DashboardContext {
     /// Which conversation the surface opens on, and whether it is still the
     /// surface's choice to make.
     startup: StartupSession,
-    /// The first pass always draws; after that a redraw needs a wakeup.
+    /// The first pass always draws; subsequent frames require a visible change.
     pub(crate) dirty: bool,
+    drawn_size: Option<(u16, u16)>,
     /// The notice generation the frame on screen was drawn from. Background
     /// work writes the shared slot without touching `dirty`, so the draw
     /// compares against this rather than trusting every setter to ask for a
@@ -557,16 +559,13 @@ pub(crate) async fn run_dashboard_for_workspace(
         // The winning arm takes the message that woke the loop; the drains
         // below batch whatever is queued behind it, so one wakeup is one draw.
         tokio::select! {
-            () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {
-                context.dirty = true;
-            }
+            () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {}
             _ = termination.cancelled(), if !context.shutdown_requested => {
                 context.begin_shutdown(false);
             }
             event = next_terminal_event(&mut context.events) => {
                 let Some(event) = event else { break };
                 if context.shutdown_requested {
-                    context.dirty = true;
                     continue;
                 }
                 let mut event = event?;
@@ -581,6 +580,15 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // that asks for work ends the batch so that dispatch still
                 // follows input order.
                 loop {
+                    // Earlier input can change the controls under this pointer.
+                    // A clean view makes this a no-op; dirty geometry is drawn
+                    // before hit-testing, without delaying terminal input.
+                    if matches!(event, Event::Mouse(_)) {
+                        context.draw()?;
+                    }
+                    if let Event::Resize(width, height) = &event {
+                        context.dirty |= context.drawn_size != Some((*width, *height));
+                    }
                     if opening_cancel_event(&event, context.opening_chat_session.is_some(), context.dashboard.modal_open()) {
                         context.cancel_chat_open();
                         context.dashboard.focus_sessions();
@@ -594,6 +602,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                                 || matches!(command, CommandId::Help | CommandId::QuitDetach | CommandId::TogglePanePreset | CommandId::Refresh)
                         })
                     {
+                        context.dashboard.cancel_component_pointer();
                         if let Some(chat) = context.visible_chat() { chat.cancel_component_pointer(); }
                         // Detaching from an open conversation has to save the
                         // draft and the read cursor, which is the chat's own
@@ -642,97 +651,76 @@ pub(crate) async fn run_dashboard_for_workspace(
                     };
                     event = next?;
                 }
-                context.dirty = true;
             }
             // The warm chat's own feeds: remote command results, its clipboard
             // and history I/O, dictation, and the session view. They run
             // whether or not the chat is on screen, which is what keeps an
             // off-screen chat current.
-            () = mj_chat::hel_chat::ActiveChat::pump(context.active_chat.as_mut()) => {
+            outcome = mj_chat::hel_chat::ActiveChat::pump(context.active_chat.as_mut()) => {
                 // A warm chat may be hidden by another tab or selection.
                 // Only visible conversation updates advance its read receipt.
-                context.dirty = true;
+                context.dirty |= outcome == Outcome::Changed && context.visible_chat().is_some();
                 context.acknowledge_visible_chat();
             }
             update = context.quota.wait(), if context.quota.is_open() => {
-                let woke = context.quota.accept(update);
-                context.dirty |= woke;
+                context.quota.accept(update);
             }
             update = context.worker.wait(), if context.worker.is_open() => {
-                let woke = context.worker.accept(update);
-                context.dirty |= woke;
+                context.worker.accept(update);
             }
             update = context.runtime_reviews.wait(), if context.runtime_reviews.is_open() => {
-                let woke = context.runtime_reviews.accept(update);
-                context.dirty |= woke;
+                context.runtime_reviews.accept(update);
             }
             update = context.runtime_notices.wait(), if context.runtime_notices.is_open() => {
-                let woke = context.runtime_notices.accept(update);
-                context.dirty |= woke;
+                context.runtime_notices.accept(update);
             }
             update = context.runtime_config.wait(), if context.runtime_config.is_open() => {
-                let woke = context.runtime_config.accept(update);
-                context.dirty |= woke;
+                context.runtime_config.accept(update);
             }
             update = context.runtime_state.wait(), if context.runtime_state.is_open() => {
-                let woke = context.runtime_state.accept(update);
-                context.dirty |= woke;
+                context.runtime_state.accept(update);
             }
             result = context.credential_sync.wait(), if context.credential_sync.is_open() => {
-                let woke = context.credential_sync.accept(result);
-                context.dirty |= woke;
+                context.credential_sync.accept(result);
             }
             update = context.resource.wait(), if context.resource.is_open() => {
-                let woke = context.resource.accept(update);
-                context.dirty |= woke;
+                context.resource.accept(update);
             }
             update = context.capacity.wait(), if context.capacity.is_open() => {
-                let woke = context.capacity.accept(update);
-                context.dirty |= woke;
+                context.capacity.accept(update);
             }
             options = context.aws_options.wait(), if context.aws_options.is_open() => {
-                let woke = context.aws_options.accept(options);
-                context.dirty |= woke;
+                context.aws_options.accept(options);
             }
             profile = context.import_profiles.wait(), if context.import_profiles.is_open() => {
-                let woke = context.import_profiles.accept(profile);
-                context.dirty |= woke;
+                context.import_profiles.accept(profile);
             }
             update = context.import_tasks.wait(), if context.import_tasks.is_open() => {
-                let woke = context.import_tasks.accept(update);
-                context.dirty |= woke;
+                context.import_tasks.accept(update);
             }
             update = context.lifecycle.wait(), if context.lifecycle.is_open() => {
-                let woke = context.lifecycle.accept(update);
-                context.dirty |= woke;
+                context.lifecycle.accept(update);
             }
             update = context.dashboard_io.wait(), if context.dashboard_io.is_open() => {
-                let woke = context.dashboard_io.accept(update);
-                context.dirty |= woke;
+                context.dashboard_io.accept(update);
             }
             _ = context.critical_operations_changed.changed(),
-                if context.shutdown_requested =>
-            {
-                context.dirty = true;
-            }
-            // Turn clocks, countdowns, and credential-sync backoffs move on
-            // their own, so the dashboard redraws once a second regardless.
-            // The chat redraws only when its own time-driven text has moved:
-            // a running turn clock in the session header, or the checkpoint
-            // title.
+                if context.shutdown_requested => {}
+            // Poll displayed time values without forcing a frame when none
+            // of the visible clocks or countdowns changed.
             _ = clock_tick.tick() => {
                 // Resume search covers the moving "Last active" text, so the
                 // same clock that redraws the dialog rebuilds its rows.
                 context.dashboard.rebuild_resume_rows();
-                // The support panes carry clocks whatever has the keyboard, so
-                // the surface redraws every second regardless.
-                context.dirty = true;
+                context.dirty |= context.dashboard.clock_changed();
+                context.dirty |= context.visible_chat().is_some_and(|chat| chat.clock_changed());
                 context.maybe_open_startup_session();
             }
             // Input redraws never advance animations. Only visible activity
             // arms this timer; settled conversations keep the slow clock.
             _ = animation_tick.tick(), if context.needs_animation() => {
-                context.dirty = true;
+                context.dirty |= context.dashboard.animation_changed();
+                context.dirty |= context.visible_chat().is_some_and(|chat| chat.animation_changed());
             }
             // A drag held past a scrollable surface's edge keeps scrolling it
             // and keeps extending the selection, the way a held pointer does
@@ -759,11 +747,8 @@ pub(crate) async fn run_dashboard_for_workspace(
             // things to go and open, so the transcript follows its selection.
             context.follow_selected_session();
         }
-        if context.shutdown_requested {
-            if context.refresh_shutdown_notice() {
-                break;
-            }
-            context.dirty = true;
+        if context.shutdown_requested && context.refresh_shutdown_notice() {
+            break;
         }
     }
     context.cancel_background_work();
@@ -822,6 +807,7 @@ impl DashboardContext {
         self.cancel_startup_session();
         self.defer_chat_open();
         self.workspace_id = workspace_id.clone().unwrap_or_default();
+        self.selection.clear();
         self.dashboard.set_active_workspace(workspace_id);
         self.dashboard.set_current_session(None);
         self.follow_selected_session();
@@ -1076,6 +1062,7 @@ impl DashboardContext {
             attachment: attachment::SessionAttachment::default(),
             startup: StartupSession::idle(),
             dirty: true,
+            drawn_size: None,
             drawn_notice_generation: 0,
             controller_changed: true,
             quit_detached: false,
@@ -1244,7 +1231,9 @@ impl DashboardContext {
                 .dashboard
                 .begin_startup_session(self.launch_directory.clone())
             {
-                Ok(DashboardAction::None) => self.dashboard.focus_sessions(),
+                Ok(DashboardAction::None) => {
+                    self.dashboard.focus_sessions();
+                }
                 Ok(action) => actions::start_session_launch(self, action),
                 Err(error) => self.dashboard.set_failure_notice(error),
             }
@@ -1418,6 +1407,13 @@ impl DashboardContext {
     fn draw(&mut self) -> Result<()> {
         let notice_generation = self.notices.generation();
         self.dirty |= notice_generation != self.drawn_notice_generation;
+        self.dirty |= self.dashboard.take_render_changed();
+        let chat_visible = self.visible_chat().is_some();
+        let chat_changed = self
+            .active_chat
+            .as_mut()
+            .is_some_and(|chat| chat.take_render_changed());
+        self.dirty |= chat_visible && chat_changed;
         if !self.dirty {
             return Ok(());
         }
@@ -1430,6 +1426,7 @@ impl DashboardContext {
             opening_chat_session,
             selection,
             selection_text,
+            drawn_size,
             ..
         } = self;
         let opening = opening_chat_session.as_deref();
@@ -1439,6 +1436,7 @@ impl DashboardContext {
         // once the surface has drawn: the hitboxes are registered by that
         // render and the cells the selection covers only exist in this frame.
         terminal.terminal.draw(|frame| {
+            *drawn_size = Some((frame.area().width, frame.area().height));
             render_combined(
                 frame,
                 dashboard,
@@ -1454,6 +1452,10 @@ impl DashboardContext {
             );
             *selection_text = draw_selection(frame, selection, dashboard.frame_surfaces());
         })?;
+        self.dashboard.acknowledge_render();
+        if let Some(chat) = self.visible_chat() {
+            chat.acknowledge_render();
+        }
         // The transcript reports a row space it can no longer measure the
         // selection in — a width change, a rebuilt cache, a jump across the
         // deep past. Dropping the selection is the honest answer; walking
@@ -1495,20 +1497,22 @@ impl DashboardContext {
             return Ok(());
         };
         chat.autoscroll_selection(surface, direction);
-        self.dirty = true;
         self.draw()?;
         let Self {
             selection,
             dashboard,
             ..
         } = self;
+        let before = selection.visual_state();
         selection.retrack(dashboard.frame_surfaces());
+        self.dirty |= before != selection.visual_state();
         Ok(())
     }
 
     /// Routes one terminal event through the selection engine, hit-testing
     /// against the surfaces the view on screen registered.
     fn route_selection(&mut self, event: Event) -> SelectionRouting {
+        let before_selection = self.selection.visual_state();
         let chat_owns_pointer = !self.dashboard.modal_open()
             && match &event {
                 Event::Mouse(mouse) => self
@@ -1525,18 +1529,11 @@ impl DashboardContext {
             && (dashboard.component_handles_mouse(*mouse) || chat_owns_pointer)
         {
             selection.clear();
+            self.dirty |= before_selection != selection.visual_state();
             return SelectionRouting::Forward(event);
         }
-        let focus_question = match &event {
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                question_click_focuses(dashboard.modal_open(), dashboard.frame_surfaces(), mouse)
-            }
-            _ => false,
-        };
-        let routed = route_selection_event(selection, dashboard.frame_surfaces(), event);
-        if focus_question {
-            dashboard.focus_prompt();
-        }
+        let routed = route_prompt_selection(selection, dashboard, event);
+        self.dirty |= before_selection != selection.visual_state();
         routed
     }
 
@@ -1547,7 +1544,6 @@ impl DashboardContext {
     /// the text a selection covers, because most of it is not on the frame the
     /// stash is read from; everything else comes out of that stash.
     fn copy_selection(&mut self, surface: SurfaceId, range: SelectionRange) -> Result<()> {
-        self.dirty = true;
         self.draw()?;
         let extracted = match surface {
             SurfaceId::Transcript => self
@@ -1673,6 +1669,8 @@ impl DashboardContext {
                 self.record_detach(ordinal);
             }
             self.active_chat = None;
+            self.selection.clear();
+            self.dirty = true;
         }
     }
 
@@ -1757,6 +1755,13 @@ impl DashboardContext {
     pub(crate) fn open_chat_session(&mut self, session_id: &str) {
         if !self.session_in_active_workspace(session_id) {
             return;
+        }
+        if self
+            .active_chat
+            .as_ref()
+            .is_some_and(|chat| chat.session_id() != session_id)
+        {
+            self.selection.clear();
         }
         // The warm chat remains alive while another session attaches. Capture
         // its current composer before any background snapshot can arrive.
@@ -2561,7 +2566,6 @@ impl DashboardContext {
             | mj_chat::hel_chat::ChatEventOutcome::Handled => {}
             mj_chat::hel_chat::ChatEventOutcome::CycleFocus { reverse } => {
                 self.dashboard.cycle_focus(reverse);
-                self.dirty = true;
             }
             mj_chat::hel_chat::ChatEventOutcome::QuitDetach { .. } => {
                 self.request_shutdown();
@@ -2661,6 +2665,33 @@ fn question_click_focuses(
                     SurfaceId::ElicitationMessage | SurfaceId::ModalBody
                 )
             })
+}
+
+/// Prompt focus follows the press, while selection still owns the gesture.
+fn pointer_press_focuses_prompt(
+    dashboard_modal_open: bool,
+    surfaces: &FrameSurfaces,
+    mouse: &MouseEvent,
+) -> bool {
+    question_click_focuses(dashboard_modal_open, surfaces, mouse)
+        || (!dashboard_modal_open
+            && surfaces
+                .surface_at(mouse.column, mouse.row)
+                .is_some_and(|surface| surface.id == SurfaceId::PromptInput))
+}
+
+fn route_prompt_selection(
+    selection: &mut SelectionState,
+    dashboard: &mut DashboardState,
+    event: Event,
+) -> SelectionRouting {
+    if let Event::Mouse(mouse) = &event
+        && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+        && pointer_press_focuses_prompt(dashboard.modal_open(), dashboard.frame_surfaces(), mouse)
+    {
+        dashboard.focus_prompt();
+    }
+    route_selection_event(selection, dashboard.frame_surfaces(), event)
 }
 
 /// A lifecycle started by another attached surface reaches this UI through
@@ -2805,25 +2836,28 @@ fn dispatch_event(
             });
     match context.visible_chat().filter(|_| to_chat) {
         Some(chat) => {
-            *chat_outcome = chat.handle_event(event);
+            let result = chat.handle_event_result(event);
+            let changed = result.outcome == Outcome::Changed;
+            *chat_outcome = result
+                .action
+                .unwrap_or(mj_chat::hel_chat::ChatEventOutcome::None);
+            context.dirty |= changed;
             matches!(*chat_outcome, mj_chat::hel_chat::ChatEventOutcome::None)
-                && !geometry_event
-                && !chat_modal
-                && !chat.component_modal_open()
+                && !(changed && (geometry_event || chat_modal))
         }
         None => {
             let preflight_generation = context.dashboard.session_preflight_generation();
-            *action = dashboard_event_action(&mut context.dashboard, event);
+            let result = context.dashboard.handle_event_result(event);
+            let changed = result.outcome == Outcome::Changed;
+            *action = result.action.unwrap_or(DashboardAction::None);
+            context.dirty |= changed;
             if context.dashboard.session_preflight_generation() != preflight_generation {
                 context.cancel_session_preflight();
             }
-            context.controller_changed = true;
-            // A modal can change its control geometry without asking for domain
-            // work. Draw that state before taking the next queued pointer event.
+            context.controller_changed |= !matches!(*action, DashboardAction::None);
             matches!(*action, DashboardAction::None)
-                && !dashboard_modal
-                && !context.dashboard.modal_open()
-                && !geometry_event
+                && !(changed
+                    && (geometry_event || dashboard_modal || context.dashboard.modal_open()))
         }
     }
 }
@@ -2932,20 +2966,12 @@ fn route_selection_event(
     }
 }
 
-/// Applies one terminal event to the dashboard and reports the work it asks
-/// for. Every event redraws, so events that carry no action still return
-/// `None` rather than being skipped.
+#[cfg(test)]
 fn dashboard_event_action(dashboard: &mut DashboardState, event: Event) -> DashboardAction {
-    match event {
-        Event::Key(key) => dashboard.handle_key(key),
-        Event::Paste(pasted) => {
-            dashboard.handle_paste(&pasted);
-            DashboardAction::None
-        }
-        Event::Mouse(mouse) => dashboard.handle_mouse(mouse),
-        // Resize and focus changes only need the redraw.
-        _ => DashboardAction::None,
-    }
+    dashboard
+        .handle_event_result(event)
+        .action
+        .unwrap_or(DashboardAction::None)
 }
 
 /// The global chord this event runs, if any.
@@ -3447,6 +3473,84 @@ mod tests {
             ),
             SelectionRouting::Consumed
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_press_focuses_before_release_and_preserves_drag_selection() {
+        let mut dashboard = populated_dashboard();
+        dashboard.focus_sessions();
+        let fixture =
+            mj_controller::hel_session_manager::replacement_session_test_fixture("session-1", 1);
+        let notices = Notices::default();
+        let mut chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            "select this prompt text".into(),
+            notices.clone(),
+        );
+        notices.clear();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
+            .unwrap();
+        dashboard.take_render_changed();
+        let prompt = dashboard
+            .frame_surfaces()
+            .surface(SurfaceId::PromptInput)
+            .unwrap()
+            .rect;
+        let mut selection = SelectionState::new();
+        assert_eq!(
+            route_prompt_selection(
+                &mut selection,
+                &mut dashboard,
+                mouse(MouseEventKind::Down(MouseButton::Left), prompt.x, prompt.y)
+            ),
+            SelectionRouting::Consumed,
+        );
+        assert!(
+            dashboard.prompt_has_focus(),
+            "focus must change before mouse-up"
+        );
+        assert!(
+            dashboard.take_render_changed(),
+            "focus change requests a frame"
+        );
+        assert!(
+            selection.range().is_none(),
+            "the press remains a click candidate"
+        );
+        assert_eq!(
+            route_prompt_selection(
+                &mut selection,
+                &mut dashboard,
+                mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    prompt.x + 5,
+                    prompt.y
+                )
+            ),
+            SelectionRouting::Consumed,
+        );
+        assert!(selection.range().is_some());
+        assert!(matches!(
+            route_prompt_selection(
+                &mut selection,
+                &mut dashboard,
+                mouse(
+                    MouseEventKind::Up(MouseButton::Left),
+                    prompt.x + 5,
+                    prompt.y
+                )
+            ),
+            SelectionRouting::Copy {
+                surface: SurfaceId::PromptInput,
+                ..
+            }
+        ));
     }
 
     #[test]

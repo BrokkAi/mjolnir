@@ -208,6 +208,19 @@ pub struct SelectionRange {
     pub end: ContentPos,
 }
 
+/// The portion of [`SelectionState`] that affects rendered highlighting.
+///
+/// A pressed click candidate is intentionally absent: it has not acquired a
+/// visible highlight yet. Callers can compare this small value before and
+/// after routing a pointer event to decide whether the frame needs repainting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SelectionVisualState {
+    /// Surface containing the visible highlight, if any.
+    pub surface: Option<SurfaceId>,
+    /// Visible selection range, if a drag is in progress or has completed.
+    pub range: Option<SelectionRange>,
+}
+
 impl SelectionRange {
     /// Builds a range from an anchor and a cursor, ordering them row-major.
     #[must_use]
@@ -295,6 +308,7 @@ pub struct SelectionState {
     cursor: ContentPos,
     press_cell: (u16, u16),
     pointer: (u16, u16),
+    visual_revision: u64,
 }
 
 impl SelectionState {
@@ -306,7 +320,34 @@ impl SelectionState {
 
     /// Drops any selection and returns to idle.
     pub fn clear(&mut self) {
-        *self = Self::default();
+        let before = self.visual_state();
+        self.phase = Phase::Idle;
+        self.surface = None;
+        self.anchor = ContentPos::default();
+        self.cursor = ContentPos::default();
+        self.press_cell = (0, 0);
+        self.pointer = (0, 0);
+        self.bump_visual_revision(before);
+    }
+
+    /// Returns the small state that determines whether this engine paints a
+    /// highlight, and which cells it paints.
+    #[must_use]
+    pub fn visual_state(&self) -> SelectionVisualState {
+        let range = self.range();
+        SelectionVisualState {
+            surface: range.and_then(|_| self.active_surface()),
+            range,
+        }
+    }
+
+    /// Returns a cheap revision which advances whenever the visible highlight
+    /// changes. Comparing [`Self::visual_state`] is preferable when a caller
+    /// needs to know what changed; this revision is useful when it only needs
+    /// to detect that a repaint may be needed.
+    #[must_use]
+    pub fn visual_revision(&self) -> u64 {
+        self.visual_revision
     }
 
     /// Surface owning the in-flight or completed gesture, if any.
@@ -421,6 +462,7 @@ impl SelectionState {
     }
 
     fn track(&mut self, column: u16, row: u16, surfaces: &FrameSurfaces) {
+        let before = self.visual_state();
         self.pointer = (column, row);
         let Some(id) = self.surface else {
             return;
@@ -435,6 +477,16 @@ impl SelectionState {
             self.phase = Phase::Dragging;
         }
         self.cursor = cursor;
+        self.bump_visual_revision(before);
+    }
+
+    fn bump_visual_revision(&mut self, before: SelectionVisualState) {
+        if self.visual_state() != before {
+            // The revision is diagnostic/convenience state only. Wrapping is
+            // preferable to making pointer handling fail after an impossible
+            // number of visible selection changes.
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+        }
     }
 }
 
@@ -606,6 +658,72 @@ mod tests {
         assert_eq!(action, SelectionAction::Click { column: 5, row: 4 });
         assert_eq!(state.range(), None);
         assert_eq!(state.active_surface(), None);
+    }
+
+    #[test]
+    fn visual_state_changes_only_when_a_highlight_changes() {
+        let surfaces = registry(&[transcript(0, 4)]);
+        let mut state = SelectionState::new();
+        assert_eq!(state.visual_state(), SelectionVisualState::default());
+        assert_eq!(state.visual_revision(), 0);
+
+        // A click candidate has no highlight, so pressing and releasing it do
+        // not ask the outer loop to repaint for selection alone.
+        state.on_mouse_down(5, 4, &surfaces);
+        assert_eq!(state.visual_state(), SelectionVisualState::default());
+        assert_eq!(state.visual_revision(), 0);
+        assert_eq!(
+            state.on_mouse_up(5, 4, &surfaces),
+            SelectionAction::Click { column: 5, row: 4 }
+        );
+        assert_eq!(state.visual_revision(), 0);
+
+        state.on_mouse_down(5, 4, &surfaces);
+        state.on_mouse_drag(6, 4, &surfaces);
+        assert_eq!(
+            state.visual_state(),
+            SelectionVisualState {
+                surface: Some(SurfaceId::Transcript),
+                range: Some(SelectionRange {
+                    start: ContentPos::new(1, 3),
+                    end: ContentPos::new(1, 4),
+                }),
+            }
+        );
+        assert_eq!(state.visual_revision(), 1);
+
+        // Repeating the same drag and completing it leave the painted range
+        // alone, even though the phase changes from Dragging to Completed.
+        state.on_mouse_drag(6, 4, &surfaces);
+        assert_eq!(state.visual_revision(), 1);
+        assert!(matches!(
+            state.on_mouse_up(6, 4, &surfaces),
+            SelectionAction::CopyRequested { .. }
+        ));
+        assert_eq!(state.visual_revision(), 1);
+
+        state.clear();
+        assert_eq!(state.visual_state(), SelectionVisualState::default());
+        assert_eq!(state.visual_revision(), 2);
+        state.clear();
+        assert_eq!(state.visual_revision(), 2);
+    }
+
+    #[test]
+    fn retrack_reports_a_changed_visible_range_after_scrolling() {
+        let before = registry(&[transcript(10, 100)]);
+        let after = registry(&[transcript(11, 100)]);
+        let mut state = SelectionState::new();
+        state.on_mouse_down(5, 4, &before);
+        state.on_mouse_drag(5, 6, &before);
+        let revision = state.visual_revision();
+
+        state.retrack(&after);
+
+        assert_eq!(state.visual_revision(), revision + 1);
+        assert_eq!(state.visual_state().range.expect("drag range").end.row, 14);
+        state.retrack(&after);
+        assert_eq!(state.visual_revision(), revision + 1);
     }
 
     #[test]

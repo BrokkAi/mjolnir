@@ -52,6 +52,12 @@ impl DashboardState {
 
     pub(crate) fn handle_surface_mouse(&mut self, mouse: MouseEvent) -> Option<DashboardAction> {
         let result = self.surface_form.get_mut().handle(&Event::Mouse(mouse));
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
         if let Some(Interaction::Activate(control)) = result.action {
             self.last_row_click = None;
             return Some(match control {

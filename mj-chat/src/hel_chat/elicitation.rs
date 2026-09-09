@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use rat_event::ConsumedEvent;
+use rat_event::{ConsumedEvent, Outcome};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
@@ -114,6 +114,7 @@ pub(super) struct ElicitationDialog {
     /// Wrapped rows to skip in the form body when a long option list is
     /// taller than the space left above the answer controls.
     focus_scroll: Cell<u16>,
+    changed: Cell<bool>,
 }
 
 impl ElicitationDialog {
@@ -172,6 +173,7 @@ impl ElicitationDialog {
             message_anchor: Cell::new(None),
             message_anchor_width: Cell::new(0),
             focus_scroll: Cell::new(0),
+            changed: Cell::new(false),
         }
     }
 
@@ -225,6 +227,9 @@ impl ElicitationDialog {
 
     pub(super) fn paste(&mut self, text: &str) {
         let text = crate::hel_text_input::single_line_paste(&sanitize_terminal_text(text));
+        if text.is_empty() {
+            return;
+        }
         let Some((field, custom)) = self.editable_field() else {
             return;
         };
@@ -234,6 +239,7 @@ impl ElicitationDialog {
         if let Some(FieldValue::Text(value)) = self.values.get_mut(field) {
             value.insert_str(&text);
             self.error = None;
+            self.mark_changed();
         }
     }
 
@@ -264,7 +270,9 @@ impl ElicitationDialog {
                 _ => {}
             }
         }
-        self.error = None;
+        if self.error.take().is_some() {
+            self.mark_changed();
+        }
         // Inline custom answers retain their parent question's focus. Text
         // editing and option navigation are distinct operations on that page.
         if key.kind != crossterm::event::KeyEventKind::Release
@@ -281,6 +289,9 @@ impl ElicitationDialog {
         }
         let event = crossterm::event::Event::Key(key);
         let result = self.form.borrow_mut().handle(&event);
+        if result.outcome == Outcome::Changed {
+            self.mark_changed();
+        }
         if let Some(interaction) = result.action {
             return self.apply_interaction(interaction);
         }
@@ -323,7 +334,11 @@ impl ElicitationDialog {
                         if let Some((field, _)) = self.editable_field()
                             && let FieldValue::Text(value) = &mut self.values[field]
                         {
+                            let before = value.cursor();
                             value.set_cursor(offset);
+                            if value.cursor() != before {
+                                self.mark_changed();
+                            }
                         }
                     }
                 }
@@ -336,6 +351,9 @@ impl ElicitationDialog {
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<ElicitationResponse> {
         let event = crossterm::event::Event::Mouse(mouse);
         let result = self.form.borrow_mut().handle(&event);
+        if result.outcome == Outcome::Changed {
+            self.mark_changed();
+        }
         if let Some(interaction) = result.action {
             let toggle = matches!(
                 mouse.kind,
@@ -376,7 +394,21 @@ impl ElicitationDialog {
     }
 
     pub(super) fn cancel_component_pointer(&self) {
-        self.form.borrow_mut().cancel_pointer();
+        let mut form = self.form.borrow_mut();
+        let captured = form.captures_pointer();
+        form.cancel_pointer();
+        drop(form);
+        if captured {
+            self.mark_changed();
+        }
+    }
+
+    pub(super) fn take_changed(&self) -> bool {
+        self.changed.take()
+    }
+
+    fn mark_changed(&self) {
+        self.changed.set(true);
     }
 
     pub(super) fn reset_component_geometry(&self) {
@@ -394,6 +426,7 @@ impl ElicitationDialog {
     }
 
     fn focus_control(&mut self, index: usize) {
+        let before = self.focus_index();
         let field_count = self.display_fields.len();
         let control = match index.cmp(&field_count) {
             std::cmp::Ordering::Less => ElicitationControl::Field(index),
@@ -402,11 +435,17 @@ impl ElicitationDialog {
             _ => ElicitationControl::Cancel,
         };
         self.form.borrow_mut().focus(control);
+        if self.focus_index() != before {
+            self.mark_changed();
+        }
     }
 
     fn advance_focus(&mut self) {
         let event = crossterm::event::Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        let _ = self.form.borrow_mut().handle(&event);
+        let result = self.form.borrow_mut().handle(&event);
+        if result.outcome == Outcome::Changed {
+            self.mark_changed();
+        }
     }
 
     fn select_option(&mut self, selected: usize) {
@@ -420,6 +459,7 @@ impl ElicitationDialog {
         if selected >= count {
             return;
         }
+        let before = self.option_cursors[display.field];
         self.option_cursors[display.field] = selected;
         if let FieldValue::Single(value) = &mut self.values[display.field] {
             *value = (selected < option_count).then_some(selected);
@@ -430,6 +470,9 @@ impl ElicitationDialog {
                     self.active_custom_fields.remove(&custom);
                 }
             }
+        }
+        if before != selected {
+            self.mark_changed();
         }
     }
 
@@ -492,7 +535,11 @@ impl ElicitationDialog {
         } else {
             current.saturating_add(delta as usize).min(maximum)
         };
+        if next == current {
+            return;
+        }
         self.message_scroll.set(next as u16);
+        self.mark_changed();
         // A user scroll establishes a new logical anchor. Subsequent redraws
         // and resizes retain that source position instead of repeatedly
         // replacing it with whichever wrapped row happens to be at the top.
@@ -545,7 +592,9 @@ impl ElicitationDialog {
         let Some(FieldValue::Text(value)) = self.values.get_mut(field) else {
             unreachable!("editable fields contain text values")
         };
-        value.handle_key(key);
+        if value.handle_key(key).changed() {
+            self.mark_changed();
+        }
     }
 
     fn accept(&mut self) -> Option<ElicitationResponse> {
@@ -569,6 +618,7 @@ impl ElicitationDialog {
                     Ok(None) => {}
                     Err(error) => {
                         self.error = Some(error);
+                        self.mark_changed();
                         self.focus_control(display_index);
                         if field_index != display.field
                             && let Some(option_count) =

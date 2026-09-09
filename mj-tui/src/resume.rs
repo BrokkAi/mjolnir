@@ -266,7 +266,7 @@ fn hel_row_status(session: &SessionRecord) -> ResumeRowStatus {
 
 const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
-fn format_last_active<Tz>(now: &chrono::DateTime<Tz>, then_ms: i64) -> String
+pub(crate) fn format_last_active<Tz>(now: &chrono::DateTime<Tz>, then_ms: i64) -> String
 where
     Tz: chrono::TimeZone,
     Tz::Offset: std::fmt::Display,
@@ -433,6 +433,7 @@ impl DashboardState {
             self.resume_rows.clear();
             return;
         };
+        let previous_rows = std::mem::take(&mut self.resume_rows);
         self.resume_rows = build_resume_rows(
             &self.config,
             &self.state,
@@ -466,6 +467,9 @@ impl DashboardState {
         // Repair the key and index together so the form never points outside
         // the freshly rebuilt list.
         self.resync_resume_selection();
+        if self.resume_rows != previous_rows {
+            self.mark_render_changed();
+        }
     }
 
     /// The rows the open dialog shows; empty when no dialog is open.
@@ -526,6 +530,7 @@ impl DashboardState {
         // Record which row the initial selection lands on, so the first
         // incremental scan result cannot slide the selection out from under it.
         self.resync_resume_selection();
+        self.mark_render_changed();
     }
 
     /// Fold one profile's scan result into the open dialog, keeping the
@@ -538,15 +543,26 @@ impl DashboardState {
             return;
         }
         let profiles = Arc::make_mut(&mut dialog.profiles);
-        match profiles
+        let changed = match profiles
             .iter()
             .position(|candidate| candidate.profile_id == profile.profile_id)
         {
-            Some(index) => profiles[index] = profile,
-            None => profiles.push(profile),
+            Some(index) if profiles[index] == profile => false,
+            Some(index) => {
+                profiles[index] = profile;
+                true
+            }
+            None => {
+                profiles.push(profile);
+                true
+            }
+        };
+        if !changed {
+            return;
         }
         self.rebuild_resume_rows();
         self.resync_resume_selection();
+        self.mark_render_changed();
     }
 
     /// Keeps `row_index` pointed at the selected row after the list changed.
@@ -564,23 +580,29 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return;
         };
+        let changed = dialog.row_index != index || dialog.selected != key;
         dialog.row_index = index;
         dialog.selected = key;
         dialog.prepare(&self.resume_rows);
+        if changed {
+            self.mark_render_changed();
+        }
     }
 
-    fn switch_resume_tab(&mut self, tab: ResumeTab) {
+    fn switch_resume_tab(&mut self, tab: ResumeTab) -> bool {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
-            return;
+            return false;
         };
         if dialog.tab == tab {
-            return;
+            return false;
         }
         dialog.tab = tab;
         dialog.selected = None;
         dialog.row_index = 0;
         self.rebuild_resume_rows();
         self.resync_resume_selection();
+        self.mark_render_changed();
+        true
     }
 
     pub(crate) fn select_resume_row(&mut self, index: usize) {
@@ -615,12 +637,20 @@ impl DashboardState {
         {
             if focused == Search && key.code == KeyCode::Down {
                 dialog.form.get_mut().focus(Sessions);
+                crate::mark_render_changed_cells(
+                    &self.render_changed,
+                    &self.render_change_revision,
+                );
                 return DashboardAction::None;
             }
             if focused != Search {
                 match key.code {
                     KeyCode::Char('/') => {
                         dialog.form.get_mut().focus(Search);
+                        crate::mark_render_changed_cells(
+                            &self.render_changed,
+                            &self.render_change_revision,
+                        );
                         return DashboardAction::None;
                     }
                     KeyCode::Char('d') | KeyCode::Delete if focused == Sessions => {
@@ -670,21 +700,43 @@ impl DashboardState {
             }
             event => event,
         };
-        let interaction = dialog.form.get_mut().handle(&event).action;
+        let result = dialog.form.get_mut().handle(&event);
+        crate::record_form_outcome_cells(
+            &self.last_event_outcome,
+            &self.render_changed,
+            &self.render_change_revision,
+            &result,
+        );
+        let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel | Interaction::Activate(Cancel)) => self.cancel_modal(),
             Some(Interaction::Edit(Search, edit)) => {
-                TextField::apply(&mut dialog.search, edit);
+                if TextField::apply(&mut dialog.search, edit)
+                    == mj_chat::components::Outcome::Changed
+                {
+                    crate::mark_render_changed_cells(
+                        &self.render_changed,
+                        &self.render_change_revision,
+                    );
+                }
                 self.rebuild_resume_rows();
                 self.select_resume_row(0);
             }
-            Some(Interaction::Select(Tabs, index)) => self.switch_resume_tab(if index == 0 {
-                ResumeTab::Hel
-            } else {
-                ResumeTab::Import
-            }),
+            Some(Interaction::Select(Tabs, index)) => {
+                self.switch_resume_tab(if index == 0 {
+                    ResumeTab::Hel
+                } else {
+                    ResumeTab::Import
+                });
+            }
             Some(Interaction::Select(Sessions, index)) => self.select_resume_row(index),
-            Some(Interaction::Activate(Search | Tabs)) => dialog.form.get_mut().focus(Sessions),
+            Some(Interaction::Activate(Search | Tabs)) => {
+                dialog.form.get_mut().focus(Sessions);
+                crate::mark_render_changed_cells(
+                    &self.render_changed,
+                    &self.render_change_revision,
+                );
+            }
             Some(Interaction::Activate(Sessions | Open)) => {
                 let row = self.selected_resume_row();
                 return self.activate_selected_resume_row(row);
