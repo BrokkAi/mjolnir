@@ -15,7 +15,6 @@ use hel::hel_review::lanes::ReviewTier;
 use mj_chat::components::{
     ButtonRow, Checkbox, ControlKind, Form, FormViewport, Interaction, TabStrip,
 };
-use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -23,7 +22,6 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::widgets::{centered_modal, centered_rect};
 use crate::{DashboardAction, DashboardState, Mode};
 
 /// Selectors advertised by one successful reviewer discovery.
@@ -817,9 +815,8 @@ fn review_settings_dialog_mut(mode: &mut Mode) -> Option<&mut ReviewSettingsDial
 
 pub(crate) fn render_review_settings(
     frame: &mut Frame,
-    area: Rect,
+    popup: Rect,
     dialog: &ReviewSettingsDialog,
-    surfaces: &mut FrameSurfaces,
 ) {
     use ReviewSettingsFocus::*;
     let spinner = dialog.animation_frame().unwrap_or("");
@@ -908,19 +905,9 @@ pub(crate) fn render_review_settings(
     })
     .style(Style::default().fg(theme::palette().muted))
     .wrap(Wrap { trim: true });
-    let description_width = centered_rect(86, 1, area).width.saturating_sub(12);
+    let description_width = popup.width.saturating_sub(12);
     let description_height =
         u16::try_from(description.line_count(description_width.max(1))).unwrap_or(u16::MAX);
-    let popup = centered_modal(
-        frame,
-        surfaces,
-        86,
-        (notes.len() as u16)
-            .saturating_add(10)
-            .saturating_add(description_height)
-            .max(20),
-        area,
-    );
     let block = theme::modal().title(" Setup › Code review ");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
