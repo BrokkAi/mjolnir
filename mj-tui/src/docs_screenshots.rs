@@ -20,7 +20,7 @@ use ratatui::style::{Color, Modifier};
 use hel::hel_config::{HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository};
 use hel::hel_state::{HelState, MaterializedExecutionState, STATE_VERSION, SessionState};
 use hel::hel_targets::{DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage};
-use mj_controller::hel_quota::{ProfileQuota, QuotaWindow};
+use mj_client::quota::{ProfileQuota, QuotaWindow};
 
 use crate::render::render;
 use crate::test_support::{

@@ -31,7 +31,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::components::{ButtonRow, ControlKind, Form, Interaction, Outcome, TabStrip};
 use hel::hel_review::driver::{Resolution, RoleState, TurnReviewPhase};
-use mj_controller::hel_review_host::{RuntimeReviewView, VerdictKind};
+use mj_client::review::{RuntimeReviewView, VerdictKind};
 
 use super::second_opinion::ReviewerPane;
 
@@ -1150,7 +1150,7 @@ mod tests {
     use hel::hel_review::driver::{RoleStatus, TurnReviewPhase};
     use hel::hel_review::lanes::ReviewTier;
     use hel::hel_review::verdict::ReviewPassEvidence;
-    use mj_controller::hel_review_host::VerdictView;
+    use mj_client::review::VerdictView;
 
     fn chat() -> super::super::ChatState {
         super::super::ChatState::new(&snapshot(), &[])

@@ -1,20 +1,20 @@
 //! Shared subscription-backed web and native prompt dictation support.
 //!
-//! The controller owns credential discovery because both the terminal chat and
-//! the authenticated web server need to make the same decision about which
-//! Codex profile may transcribe audio. HTTP handlers send typed requests here;
+//! Shared credential discovery is kept in `mj_client` because both the terminal
+//! chat and authenticated web server need the same decision about which Codex
+//! profile may transcribe audio. HTTP handlers send typed requests here;
 //! filesystem access and the provider call stay off the controller event loop.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anvil_client::codex_auth::read_auth_dot_json_at;
 use anvil_client::codex_client::CodexClient;
 use anvil_client::transcribe::TranscribeRequest;
 use axum::body::Bytes;
-use hel::hel_config::{HarnessKind, HelConfig};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+pub use mj_client::auth::{auth_paths, available_auth};
 
 /// Maximum complete WAV upload accepted by the web endpoint.
 pub const MAX_AUDIO_BYTES: usize = 20 * 1024 * 1024;
@@ -26,40 +26,6 @@ pub const MAX_AUDIO_DURATION: Duration = Duration::from_secs(600);
 const MAX_PCM_DATA_BYTES: u64 = 16_000 * 2 * MAX_AUDIO_DURATION.as_secs();
 /// Whole-request deadline for credential inspection and provider work.
 pub const DICTATION_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Find candidate Codex subscription auth files, preferring the session's
-/// current profile and then sorting all remaining profile IDs.
-pub fn auth_paths(config: &HelConfig, preferred: &str) -> Vec<PathBuf> {
-    let mut profiles = config
-        .profiles
-        .iter()
-        .filter(|(_, profile)| profile.kind == HarnessKind::Codex)
-        .collect::<Vec<_>>();
-    profiles.sort_by_key(|(id, _)| (*id != preferred, *id));
-    profiles
-        .into_iter()
-        .map(|(_, profile)| profile.home.join("auth.json"))
-        .collect()
-}
-
-/// Return the first auth file containing complete ChatGPT-subscription OAuth
-/// tokens. API-key auth files are deliberately skipped.
-pub fn available_auth(paths: Vec<PathBuf>) -> Option<PathBuf> {
-    paths
-        .into_iter()
-        .find(|path| match read_auth_dot_json_at(path) {
-            Ok(Some(auth)) => auth.tokens.is_some_and(|tokens| {
-                !tokens.access_token.trim().is_empty()
-                    && !tokens.refresh_token.trim().is_empty()
-                    && !tokens.account_id.trim().is_empty()
-            }),
-            Ok(None) => false,
-            Err(error) => {
-                tracing::warn!(%error, "could not inspect Codex dictation credentials");
-                false
-            }
-        })
-}
 
 /// An operation submitted by an authenticated HTTP surface.
 #[derive(Debug)]
@@ -319,7 +285,6 @@ async fn execute_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     fn wav(sample_bytes: usize) -> Bytes {
         let padded = sample_bytes + (sample_bytes & 1);
@@ -374,37 +339,6 @@ mod tests {
             validate_wav(&audio),
             Err(DictationError::InvalidAudio(_))
         ));
-    }
-
-    #[test]
-    fn profile_order_prefers_current_then_sorts() {
-        let mut config = HelConfig {
-            profiles: BTreeMap::new(),
-            ..HelConfig::default()
-        };
-        for id in ["z", "a", "m"] {
-            config.profiles.insert(
-                id.into(),
-                hel::hel_config::HarnessProfile {
-                    kind: HarnessKind::Codex,
-                    home: PathBuf::from(id),
-                    environment: Default::default(),
-                    context_window_bytes: None,
-                },
-            );
-        }
-        let mut claude = config.profiles["m"].clone();
-        claude.kind = HarnessKind::Claude;
-        config.profiles.insert("claude".into(), claude);
-        assert_eq!(auth_paths(&config, "claude").len(), 3);
-        assert_eq!(
-            auth_paths(&config, "m"),
-            vec![
-                PathBuf::from("m/auth.json"),
-                PathBuf::from("a/auth.json"),
-                PathBuf::from("z/auth.json")
-            ]
-        );
     }
 
     #[tokio::test]
@@ -485,28 +419,5 @@ mod tests {
         wrong_length[4..8].copy_from_slice(&0_u32.to_le_bytes());
         assert!(validate_wav(&Bytes::from(wrong_length)).is_err());
         assert!(validate_wav(&wav(MAX_PCM_DATA_BYTES as usize)).is_ok());
-    }
-
-    #[test]
-    fn available_auth_skips_api_keys_and_malformed_or_empty_tokens() {
-        let directory = tempfile::tempdir().unwrap();
-        let api_key = directory.path().join("api-key.json");
-        let malformed = directory.path().join("malformed.json");
-        let oauth = directory.path().join("oauth.json");
-        std::fs::write(&api_key, r#"{"OPENAI_API_KEY":"test"}"#).unwrap();
-        std::fs::write(&malformed, "{").unwrap();
-        assert_eq!(
-            available_auth(vec![api_key.clone(), malformed.clone()]),
-            None
-        );
-        std::fs::write(
-            &oauth,
-            r#"{"tokens":{"id_token":"id","access_token":"access","refresh_token":"refresh","account_id":"account"}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            available_auth(vec![api_key, malformed, oauth.clone()]),
-            Some(oauth)
-        );
     }
 }

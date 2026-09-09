@@ -24,9 +24,9 @@ use hel::hel_database::{HistoryScope, PromptHistoryEntry};
 use hel::hel_state::{MaterializedSession, SessionRecord, TranscriptItem, config_command_text};
 use hel::hel_transcript::ChatEntry;
 use hel::hel_worker::WorkerPhase;
-use mj_controller::hel_session_manager::{
-    ManagedSessionHandle, ManagedSessionView, ReviewerAction, ReviewerOutcome,
-    SessionManagerControl, ViewError, new_command_id,
+use mj_client::session::{
+    ManagedSessionView, ReviewerAction, ReviewerOutcome, SessionControl as SessionManagerControl,
+    SessionHandle as ManagedSessionHandle, ViewError, new_command_id,
 };
 
 use super::attachments;
@@ -1108,10 +1108,7 @@ impl ActiveChat {
     /// The terminal hosts no part of a review: it renders this view, reads the
     /// reviewing roles' journals to show their transcripts, and sends
     /// resolutions back. A review therefore survives this view closing.
-    pub fn apply_review_view(
-        &mut self,
-        view: Option<mj_controller::hel_review_host::RuntimeReviewView>,
-    ) {
+    pub fn apply_review_view(&mut self, view: Option<mj_client::review::RuntimeReviewView>) {
         let roles = view
             .as_ref()
             .map(|view| {
@@ -1370,10 +1367,7 @@ impl ActiveChat {
         let Some(context) = &self.context else {
             return;
         };
-        let paths = mj_controller::hel_dictation::auth_paths(
-            &context.config,
-            &context.session.last_profile,
-        );
+        let paths = mj_client::auth::auth_paths(&context.config, &context.session.last_profile);
         if paths != self.voice_probe_paths {
             self.voice_probe_paths.clone_from(&paths);
             self.voice_auth = None;
@@ -1394,7 +1388,7 @@ impl ActiveChat {
             let probed_paths = paths.clone();
             let result = tokio::task::spawn_blocking(move || {
                 if crate::speech::voice_input_supported() {
-                    mj_controller::hel_dictation::available_auth(paths)
+                    mj_client::auth::available_auth(paths)
                 } else {
                     None
                 }
@@ -1994,8 +1988,9 @@ impl ActiveChat {
         let Some(context) = self.context.as_ref() else {
             return;
         };
-        let controller = reviewer_staging_controller(context);
-        let session_id = self.session.session_id().to_owned();
+        let reviewer_stager = context.reviewer_stager.clone();
+        let config = context.config.clone();
+        let session_record = context.session.clone();
         let session = self.session.clone();
         let updates = self.chat_io_tx.clone();
         // The reviewer's lifetime generation is what decides whether the
@@ -2004,7 +1999,7 @@ impl ActiveChat {
         let lifetime = self.reviewer_generation;
         tokio::spawn(async move {
             let staged = tokio::task::spawn_blocking(move || {
-                controller.stage_reviewer_profile(&session_id, &profile_id, lifetime)
+                reviewer_stager.stage(config, session_record, profile_id, lifetime)
             })
             .await;
             let result = async {
@@ -2602,24 +2597,6 @@ impl ActiveChat {
             }
             _ => {}
         }
-    }
-}
-
-/// The one-session controller a reviewer is staged through. Staging reads only
-/// the profiles the reviewer may run under and the record of the session being
-/// reviewed, so the chat builds a controller holding just those.
-fn reviewer_staging_controller(
-    context: &ChatSessionContext,
-) -> mj_controller::hel_controller::Controller {
-    mj_controller::hel_controller::Controller {
-        config: context.config.clone(),
-        state: hel::hel_state::HelState {
-            sessions: std::collections::BTreeMap::from([(
-                context.session.id.clone(),
-                context.session.clone(),
-            )]),
-            ..hel::hel_state::HelState::default()
-        },
     }
 }
 
@@ -3424,10 +3401,8 @@ mod tests {
 
     #[tokio::test]
     async fn handle_event_result_reports_only_real_chat_repaints() {
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-event-result",
-            72,
-        );
+        let fixture =
+            mj_client::session::replacement_session_test_fixture("session-event-result", 72);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -3584,8 +3559,7 @@ mod tests {
     #[tokio::test]
     async fn replacement_chat_preserves_the_latest_same_session_draft_even_when_cleared() {
         fn prepare(id: &str, draft: &str) -> PreparedChat {
-            let fixture =
-                mj_controller::hel_session_manager::replacement_session_test_fixture(id, 89);
+            let fixture = mj_client::session::replacement_session_test_fixture(id, 89);
             ActiveChat::prepare_with_persistence(
                 fixture.stopped,
                 "bundle-1",
@@ -3924,10 +3898,7 @@ mod tests {
 
     #[tokio::test]
     async fn dictation_completion_preserves_edits_and_recovers_after_errors() {
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-dictation",
-            72,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-dictation", 72);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -3955,10 +3926,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_open_chat_hands_off_to_a_replacement_actor_without_losing_its_draft() {
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-replaced",
-            73,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-replaced", 73);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -3989,10 +3957,8 @@ mod tests {
 
     #[tokio::test]
     async fn detaching_a_chat_keeps_a_reviewer_draft_waiting_for_its_late_stream() {
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-deferred-review",
-            74,
-        );
+        let fixture =
+            mj_client::session::replacement_session_test_fixture("session-deferred-review", 74);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4032,10 +3998,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_external_review_removal_closes_its_visible_question() {
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-review-removed",
-            76,
-        );
+        let fixture =
+            mj_client::session::replacement_session_test_fixture("session-review-removed", 76);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4075,10 +4039,7 @@ mod tests {
         use crate::hel_chat::test_support::select_config_option;
         use hel::hel_config::HarnessKind;
 
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-codex",
-            75,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-codex", 75);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4167,6 +4128,9 @@ mod tests {
         ChatSessionContext {
             config: config_with_profiles(profiles),
             session: context_session_record(session_id, CONTEXT_TEST_WORKSPACE),
+            reviewer_stager: mj_client::session::ReviewerStager::unavailable(
+                "reviewer staging is unavailable in this chat test",
+            ),
         }
     }
 
@@ -4177,10 +4141,7 @@ mod tests {
     async fn reviewer_profiles_lists_the_context_profiles_for_the_waterfall() {
         use hel::hel_config::HarnessKind;
 
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-profiles",
-            80,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-profiles", 80);
         let chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4216,10 +4177,7 @@ mod tests {
     async fn review_status_configuration_is_applied_on_open_and_refresh() {
         use hel::hel_review::lanes::ReviewTier;
 
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-review",
-            88,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-review", 88);
         let mut context = chat_context("session-review", &[]);
         context.config.review = hel::hel_config::ReviewConfig {
             enabled: true,
@@ -4261,10 +4219,8 @@ mod tests {
     /// also sets: a notice is a single slot, and the last write wins.
     #[tokio::test]
     async fn a_recorded_checkpoint_error_reaches_the_notice_when_the_chat_opens() {
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-checkpoint",
-            81,
-        );
+        let fixture =
+            mj_client::session::replacement_session_test_fixture("session-checkpoint", 81);
         let mut context = chat_context("session-checkpoint", &[]);
         context.session.last_checkpoint_error = Some("the target ran out of disk".into());
 
@@ -4298,10 +4254,7 @@ mod tests {
             fields: Vec::new(),
         };
 
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-opinion",
-            83,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-opinion", 83);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4329,10 +4282,7 @@ mod tests {
             vec!["claude-1"]
         );
 
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-alone",
-            84,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-alone", 84);
         let mut alone = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4359,10 +4309,7 @@ mod tests {
     async fn a_refreshed_config_changes_the_offered_reviewer_profiles() {
         use hel::hel_config::HarnessKind;
 
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-refresh",
-            85,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-refresh", 85);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4409,10 +4356,7 @@ mod tests {
         );
 
         // A chat opened without a context has nothing to refresh.
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-bare",
-            86,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-bare", 86);
         let mut bare = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4430,10 +4374,8 @@ mod tests {
     async fn a_same_session_context_refresh_updates_the_visible_header_without_losing_chat_state() {
         use hel::hel_config::HarnessKind;
 
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-header-refresh",
-            89,
-        );
+        let fixture =
+            mj_client::session::replacement_session_test_fixture("session-header-refresh", 89);
         let mut initial =
             chat_context("session-header-refresh", &[("codex-1", HarnessKind::Codex)]);
         initial.session.target_template_id = "localhost".into();
@@ -4500,10 +4442,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_active_runtime_record_rearms_a_chat_after_its_handoff_timed_out() {
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-resumed",
-            74,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-resumed", 74);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4537,10 +4476,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_retiring_session_does_not_reconnect_when_its_feed_closes() {
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-stop",
-            12,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-stop", 12);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4578,10 +4514,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_retiring_sessions_reconnect_failure_is_not_reported() {
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-destroy",
-            13,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-destroy", 13);
         let mut chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
@@ -4879,10 +4812,8 @@ mod tests {
                 "Cancellation requested",
             ),
         ] {
-            let mut fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-                "steering-session",
-                12,
-            );
+            let mut fixture =
+                mj_client::session::replacement_session_test_fixture("steering-session", 12);
             let mut chat = ActiveChat::open(
                 fixture.stopped,
                 "bundle-1",

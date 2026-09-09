@@ -31,27 +31,27 @@ Mjolnir appends `config.toml` to it.
 Every current file starts with the required schema version:
 
 ```toml
-version = 6
+version = 7
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `6`. |
+| `version` | integer | yes | none | Configuration schema version; use `7`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
-| `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is not shown in Setup. |
+| `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
 | `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, or `high-contrast`. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
-| `advanced` | table | no | default `[advanced]` values | Detailed activity-clock display options. |
+| `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
 | `startup` | table | no | automatic first-session defaults | Controls the session Mjolnir creates when the opened workspace has no live sessions. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
 | `targets` | table of named tables | no | empty | Named places where sessions run. |
 
-A missing or empty file is treated as an empty version 6 configuration. Older
+A missing or empty file is treated as an empty version 7 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -110,15 +110,17 @@ activity without changing how sessions run:
 ```toml
 [advanced]
 detailed_activity_clocks = false
+show_stopped_sessions = false
 ```
 
 | Field | TOML type | Default | Behavior |
 | --- | --- | --- | --- |
 | `detailed_activity_clocks` | boolean | `false` | When enabled, normal session rows and the conversation header show separate turn, step, and background clocks. |
+| `show_stopped_sessions` | boolean | `false` | When enabled, stopped sessions appear in the terminal Sessions pane for their workspace. |
 
-The terminal Setup screen edits this setting under **Advanced**. The normal
-`Running` status continues across the originating turn and its background work;
-the setting only controls how much timing detail is shown.
+The terminal Setup screen edits these settings under **Advanced**. Detailed
+clocks do not change how sessions run: the normal `Running` status continues
+across the originating turn and its background work.
 
 ## Web viewer `[phone]`
 
@@ -491,7 +493,7 @@ This example contains the sections most installations need. Add other target
 kinds from the examples above rather than mixing fields between variants.
 
 ```toml
-version = 6
+version = 7
 
 [phone]
 enabled = true

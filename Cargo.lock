@@ -604,7 +604,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "base64",
- "brokk-mj-controller",
+ "brokk-mj-client",
  "brokk-mj-core",
  "chrono",
  "crossterm",
@@ -624,6 +624,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-client"
+version = "2.5.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "brokk-anvil-client",
+ "brokk-mj-core",
+ "getrandom 0.3.4",
+ "image",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "brokk-mj-controller"
 version = "2.5.0"
 dependencies = [
@@ -633,6 +649,7 @@ dependencies = [
  "axum-server",
  "base64",
  "brokk-anvil-client",
+ "brokk-mj-client",
  "brokk-mj-core",
  "chrono",
  "dirs",
@@ -737,7 +754,7 @@ version = "2.5.0"
 dependencies = [
  "anyhow",
  "brokk-mj-chat",
- "brokk-mj-controller",
+ "brokk-mj-client",
  "brokk-mj-core",
  "chrono",
  "crossterm",
@@ -790,6 +807,7 @@ dependencies = [
  "anyhow",
  "axum-server",
  "brokk-mj-chat",
+ "brokk-mj-client",
  "brokk-mj-controller",
  "brokk-mj-core",
  "brokk-mj-tui",

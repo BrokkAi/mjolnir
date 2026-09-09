@@ -30,6 +30,7 @@ use hel::hel_worker::{
     ReviewerRequest, validate_relay_event,
 };
 use hel::hel_worker_launch::ReviewerLaunchConfig;
+pub use mj_client::session::{RelayAttachment, StartedReviewer};
 
 const RELAY_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_SLOW_OPERATION_WARNING: Duration = Duration::from_secs(5);
@@ -77,27 +78,6 @@ async fn drain_proxy_stderr(
             }
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct RelayAttachment {
-    pub state: RelayOperationalState,
-    pub events: Vec<RelayEvent>,
-    pub through_ordinal: u64,
-    pub through_digest: String,
-}
-
-/// What the reviewer sidecar reports once it is running.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct StartedReviewer {
-    /// The reviewer's own native session, distinct from the primary's.
-    pub native_session_id: Option<String>,
-    /// What the reviewer's harness advertises right now, which is what the
-    /// selection waterfall offers the user.
-    pub config_options: Vec<agent_client_protocol::schema::v1::SessionConfigOption>,
-    /// Whether an already-running reviewer served this request.
-    pub reused: bool,
-    pub state: RelayOperationalState,
 }
 
 /// One bounded page in a catch-up whose upper frontier was fixed before any

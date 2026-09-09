@@ -16,7 +16,7 @@ use hel::hel_targets::{
 };
 use hel::hel_transcript::{materialized_content_text, materialized_tool_diffstats};
 use mj_chat::hel_chat::{Notices, TranscriptSnapshot};
-use mj_controller::hel_quota::ProfileQuota;
+use mj_client::quota::ProfileQuota;
 
 use crate::render::session_review_display_signature;
 use crate::render_changes::{
@@ -1292,7 +1292,7 @@ impl DashboardState {
     /// and must disappear from every row immediately.
     pub fn set_session_reviews(
         &mut self,
-        reviews: impl IntoIterator<Item = mj_controller::hel_review_host::RuntimeReviewView>,
+        reviews: impl IntoIterator<Item = mj_client::review::RuntimeReviewView>,
     ) {
         let next: BTreeMap<_, _> = reviews
             .into_iter()
@@ -1317,7 +1317,7 @@ impl DashboardState {
     pub(crate) fn session_review(
         &self,
         session_id: &str,
-    ) -> Option<&mj_controller::hel_review_host::RuntimeReviewView> {
+    ) -> Option<&mj_client::review::RuntimeReviewView> {
         self.session_reviews.get(session_id)
     }
 
@@ -1567,7 +1567,7 @@ mod tests {
     #[test]
     fn runtime_review_projection_restores_and_removes_session_activity() {
         let mut dashboard = dashboard_with_session(stopped_session());
-        let review = mj_controller::hel_review_host::RuntimeReviewView {
+        let review = mj_client::review::RuntimeReviewView {
             session_id: "session-1".into(),
             tier: hel::hel_review::lanes::ReviewTier::Quick,
             phase: hel::hel_review::driver::TurnReviewPhase::LaunchingReviewer,

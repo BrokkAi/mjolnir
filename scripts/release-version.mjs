@@ -21,6 +21,7 @@ const manifestPath = path.join(repositoryRoot, "Cargo.toml");
 const internalPackages = [
   "hel",
   "mj-worker",
+  "mj-client",
   "mj-controller",
   "mj-chat",
   "hel-tui",

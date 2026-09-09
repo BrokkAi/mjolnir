@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 anyhow = "1"
 hel = { workspace = true, features = ["controller"] }
-mj-controller.workspace = true
+mj-client.workspace = true
 mj-chat.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crossterm = { version = "0.29", features = ["event-stream"] }

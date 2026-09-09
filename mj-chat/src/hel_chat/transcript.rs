@@ -22,7 +22,7 @@ use hel::hel_state::{MaterializedSession, TerminalOutputRecord, TranscriptBody, 
 use hel::hel_transcript::{
     ChatEntry, ChatRole, PlanLine, PlanStatus, ToolStatus, TranscriptSource,
 };
-use mj_controller::hel_server::{BrowserDiffStat, BrowserTranscript, BrowserTranscriptEntry};
+use mj_client::web::{BrowserDiffStat, BrowserTranscript, BrowserTranscriptEntry};
 // The transcript text helpers live in `hel_transcript`, which sits below every
 // module that reads a transcript. The chat view keeps naming them here.
 pub(super) use hel::hel_transcript::{

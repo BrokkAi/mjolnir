@@ -6,7 +6,9 @@ use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use hel::hel_elicitation::{ElicitationRequest, ElicitationResponse};
 use hel::hel_state::{QueuedCommandKind, config_command_text};
 use hel::hel_worker::RelayCommand;
-use mj_controller::hel_session_manager::{ManagedSessionHandle, SessionManagerControl};
+use mj_client::session::{
+    SessionControl as SessionManagerControl, SessionHandle as ManagedSessionHandle,
+};
 
 use super::PromptImage;
 use super::attachments;
@@ -1006,10 +1008,7 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_reacquires_replacement_actor_before_dispatch() {
-        let fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "session-replaced",
-            73,
-        );
+        let fixture = mj_client::session::replacement_session_test_fixture("session-replaced", 73);
         let mut remote = ChatRemoteSupervisor::spawn(fixture.stopped, fixture.control);
 
         remote
@@ -1038,10 +1037,7 @@ mod tests {
 
     #[tokio::test]
     async fn image_bytes_reach_the_session_actor_and_oversized_prompts_are_refused_intact() {
-        let mut fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "image-session",
-            19,
-        );
+        let mut fixture = mj_client::session::replacement_session_test_fixture("image-session", 19);
         let mut remote = ChatRemoteSupervisor::spawn(fixture.stopped, fixture.control);
         let image = valid_image();
         let mut normalized_image = None;
@@ -1125,10 +1121,8 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_inline_image_is_refused_before_actor_dispatch() {
-        let mut fixture = mj_controller::hel_session_manager::replacement_session_test_fixture(
-            "malformed-image-session",
-            23,
-        );
+        let mut fixture =
+            mj_client::session::replacement_session_test_fixture("malformed-image-session", 23);
         let mut remote = ChatRemoteSupervisor::spawn(fixture.stopped, fixture.control);
         let image = ClipboardImage {
             data_base64: "not-base64".into(),

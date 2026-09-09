@@ -359,7 +359,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
 #[test]
 fn conversation_title_shows_review_activity_then_restores_primary_activity() {
     use hel::hel_review::driver::{RoleState, RoleStatus, TurnReviewPhase, VALIDATOR_ROLE};
-    use mj_controller::hel_review_host::RuntimeReviewView;
+    use mj_client::review::RuntimeReviewView;
 
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_header_summary("podman", "codex3", "Review the build");

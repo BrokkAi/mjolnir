@@ -21,6 +21,7 @@ test-hooks = ["hel/test-hooks", "mj-controller/test-hooks", "mj-chat/test-hooks"
 
 [dependencies]
 hel = { workspace = true, features = ["controller"] }
+mj-client.workspace = true
 mj-controller.workspace = true
 mj-chat.workspace = true
 hel-tui.workspace = true
