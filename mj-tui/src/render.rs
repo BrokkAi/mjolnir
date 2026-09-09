@@ -2224,7 +2224,9 @@ struct QuotaTableRow {
     profile: String,
     harness: String,
     weekly: Line<'static>,
+    weekly_reset: String,
     five_hour: Line<'static>,
+    five_hour_reset: String,
 }
 
 impl QuotaTableRow {
@@ -2233,16 +2235,14 @@ impl QuotaTableRow {
             Cell::from(self.profile),
             Cell::from(self.harness),
             Cell::from(self.weekly),
+            Cell::from(self.weekly_reset),
             Cell::from(self.five_hour),
+            Cell::from(self.five_hour_reset),
         ])
     }
 }
 
-/// A quota window is one logical group: the chart's left rail, its bar and
-/// percentage, and the reset countdown. Keeping those pieces in one cell
-/// makes the single internal separator independent of the other columns'
-/// widths.
-fn quota_group(mut chart: Line<'static>, chart_present: bool, reset: String) -> Line<'static> {
+fn quota_chart(mut chart: Line<'static>, chart_present: bool) -> Line<'static> {
     let mut spans = Vec::new();
     if chart_present {
         spans.push(Span::styled(
@@ -2251,14 +2251,12 @@ fn quota_group(mut chart: Line<'static>, chart_present: bool, reset: String) -> 
         ));
     }
     spans.append(&mut chart.spans);
-    if !reset.is_empty() {
-        if !spans.is_empty() {
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::raw(reset));
-    }
     Line::from(spans)
 }
+
+/// Trailing room after each content column. Quota-window resets sit one cell
+/// after their percentage; the larger table groups retain two-cell gaps.
+const QUOTA_COLUMN_GAPS: [u16; 6] = [2, 2, 1, 2, 1, 0];
 
 fn quota_column_width(
     header: &str,
@@ -2332,14 +2330,16 @@ fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<QuotaTableRow> 
             QuotaTableRow {
                 profile: id.clone(),
                 harness: profile.kind.display_name().into(),
-                weekly: quota_group(weekly, weekly_chart, weekly_reset),
-                five_hour: quota_group(five_hour, five_hour_chart, five_hour_reset),
+                weekly: quota_chart(weekly, weekly_chart),
+                weekly_reset,
+                five_hour: quota_chart(five_hour, five_hour_chart),
+                five_hour_reset,
             }
         })
         .collect()
 }
 
-fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 4] {
+fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 6] {
     [
         quota_column_width(
             "Profile",
@@ -2358,7 +2358,19 @@ fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 4] {
             rows.iter().map(|row| row.weekly.width()),
             u16::MAX,
         ),
+        quota_column_width(
+            "Resets",
+            rows.iter()
+                .map(|row| Line::raw(row.weekly_reset.as_str()).width()),
+            u16::MAX,
+        ),
         quota_column_width("5H", rows.iter().map(|row| row.five_hour.width()), u16::MAX),
+        quota_column_width(
+            "Resets",
+            rows.iter()
+                .map(|row| Line::raw(row.five_hour_reset.as_str()).width()),
+            u16::MAX,
+        ),
     ]
 }
 
@@ -2373,7 +2385,7 @@ pub(crate) fn quota_table_width(dashboard: &DashboardState) -> u16 {
     content_widths
         .into_iter()
         .fold(0_u16, u16::saturating_add)
-        .saturating_add(6) // two spaces at each of the three boundaries
+        .saturating_add(QUOTA_COLUMN_GAPS.into_iter().sum())
         .saturating_add(4) // two borders and two highlight cells
 }
 
@@ -2417,7 +2429,9 @@ pub(crate) fn render_quotas(
     ]);
     let quotas_focused = dashboard.focus == Focus::Quota;
     let content_widths = quota_table_column_widths(&rows);
-    let widths = content_widths.map(Constraint::Length);
+    let widths: [Constraint; 6] = std::array::from_fn(|index| {
+        Constraint::Length(content_widths[index].saturating_add(QUOTA_COLUMN_GAPS[index]))
+    });
     let block = theme::panel(quotas_focused).title(title);
     let block = size.map_or(block.clone(), |size| {
         block.title(pane_size_controls(
@@ -2426,9 +2440,9 @@ pub(crate) fn render_quotas(
         ))
     });
     let table = Table::new(rows.into_iter().map(QuotaTableRow::into_row), widths)
-        .column_spacing(2)
+        .column_spacing(0)
         .header(
-            Row::new(["Profile", "Harness", "Weekly", "5H"])
+            Row::new(["Profile", "Harness", "Weekly", "Resets", "5H", "Resets"])
                 .style(theme::muted().add_modifier(Modifier::BOLD)),
         )
         .row_highlight_style(if quotas_focused {
@@ -6223,9 +6237,9 @@ mod tests {
                 .all(|span| span.style.bg == Some(theme::palette().background))
         );
         assert_eq!(bar.spans[3].style.fg, Some(theme::palette().muted));
-        let group = quota_group(bar, true, "2d".into());
-        assert_eq!(group.to_string(), "▕███████▎  ▏73% 2d");
-        assert_eq!(group.spans[0].style, quota_chart_border_style());
+        let chart = quota_chart(bar, true);
+        assert_eq!(chart.to_string(), "▕███████▎  ▏73%");
+        assert_eq!(chart.spans[0].style, quota_chart_border_style());
         assert!(quota_bar(None).spans.is_empty());
     }
 
@@ -6419,6 +6433,7 @@ mod tests {
 
         assert!(rendered.contains("Weekly"));
         assert!(rendered.contains("5H"));
+        assert_eq!(rendered.matches("Resets").count(), 2);
         assert!(rendered.contains("73%"));
         assert!(rendered.contains("70%"));
         assert!(rendered.contains("2d"));
@@ -6436,7 +6451,7 @@ mod tests {
         let five_hour_percent = cell_column(row, "70%");
         let five_hour_reset = cell_column(row, "1h5m");
         assert_eq!(weekly_reset, weekly_percent + 3 + 1);
-        assert_eq!(five_hour_percent - 12, weekly_reset + 2 + 2);
+        assert_eq!(five_hour_percent - 12, weekly_reset + 6 + 2);
         assert_eq!(five_hour_reset, five_hour_percent + 3 + 1);
     }
 
