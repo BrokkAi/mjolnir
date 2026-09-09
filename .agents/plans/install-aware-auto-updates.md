@@ -76,7 +76,7 @@ or having no update, changes nothing about startup.
 - [x] (2026-09-09) Validate the review repairs: 29 updater tests passed;
       the full `env -u RUST_LOG cargo test` suite passed; clippy with warnings
       denied and rustfmt passed; all 13 npm tests passed. The fixes are ready
-      to commit and push for PR checks and the user-authorized merge.
+      committed in b67398ac and pushed for PR checks and the authorized merge.
 
 ## Surprises & Discoveries
 
@@ -238,6 +238,12 @@ or having no update, changes nothing about startup.
   Date/Author: 2026-09-09, plan author.
 
 ## Outcomes & Retrospective
+
+PR #982 merged at its original head while the repairs were being validated,
+so b67398ac is carried by follow-up PR #983. The user explicitly authorized
+creating and merging that follow-up. A merge-tree check against current
+master was conflict-free; the remaining delivery step is to wait for #983's
+CI and merge that PR.
 
 All four review repairs are implemented and validated: curl upgrades install
 all shipped application binaries; npm restarts through its saved installation
@@ -681,3 +687,7 @@ wrapper contract (documented in RELEASING.md, applied in the tap repo) is
 - 2026-09-09, review validation complete: all 29 updater tests, 13 npm tests,
   the full Rust suite, clippy, and formatting checks passed. Recorded the
   inherited RUST_LOG override and the clean-environment full-suite result.
+
+- 2026-09-09, delivery update: PR #982 merged before the repair commit was
+  pushed. The user authorized follow-up PR #983, which carries the validated
+  repairs. No additional application changes were needed for the new base.
