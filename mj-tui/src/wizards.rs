@@ -1905,11 +1905,8 @@ pub(crate) fn render_resume_wizard(
         let target_id = nth_key(&dashboard.config.targets, wizard.target);
         let reused_project_directory = session
             .filter(|session| {
-                mj_controller::hel_controller::resume_compatibility(
-                    session,
-                    &dashboard.config,
-                    &target_id,
-                ) == Ok(mj_controller::hel_controller::ResumePlan::InPlace)
+                mj_client::target::resume_compatibility(session, &dashboard.config, &target_id)
+                    == Ok(mj_client::target::ResumePlan::InPlace)
             })
             .and_then(|session| session.project_directory.as_deref())
             .map(|directory| directory.display().to_string());

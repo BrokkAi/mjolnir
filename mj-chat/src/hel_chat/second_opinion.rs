@@ -1276,7 +1276,7 @@ pub(super) fn reviewer_session_id(primary_session_id: &str) -> String {
 /// the review can never disagree about which session id a role's events belong
 /// under.
 pub(super) fn review_role_session_id(primary_session_id: &str, role: &str) -> String {
-    mj_controller::hel_review_host::role_session_id(primary_session_id, role)
+    mj_client::review::role_session_id(primary_session_id, role)
 }
 
 /// Builds a pane straight from entries, for tests that need a populated

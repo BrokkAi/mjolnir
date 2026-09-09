@@ -21,6 +21,35 @@ use hel::hel_worker_launch::{
     reviewer_staging_profile_home,
 };
 
+/// Build the capability used by client-side chat views to stage reviewers.
+/// The blocking filesystem and target work remains implemented by the
+/// controller and is invoked from chat's supervised blocking task.
+pub fn reviewer_stager() -> mj_client::session::ReviewerStager {
+    mj_client::session::ReviewerStager::new(ControllerReviewerStager)
+}
+
+struct ControllerReviewerStager;
+
+impl mj_client::session::ReviewerStagerBackend for ControllerReviewerStager {
+    fn stage(
+        &self,
+        config: hel::hel_config::HelConfig,
+        session: hel::hel_state::SessionRecord,
+        profile_id: String,
+        generation: u64,
+    ) -> Result<ReviewerLaunchConfig> {
+        let session_id = session.id.clone();
+        let controller = Controller {
+            config,
+            state: hel::hel_state::HelState {
+                sessions: std::collections::BTreeMap::from([(session_id.clone(), session)]),
+                ..hel::hel_state::HelState::default()
+            },
+        };
+        controller.stage_reviewer_profile(&session_id, &profile_id, generation)
+    }
+}
+
 impl Controller {
     /// Copy `profile_id`'s home into the session worker's reviewer directory
     /// and describe how the worker should launch it.

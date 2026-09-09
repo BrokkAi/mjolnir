@@ -1204,8 +1204,7 @@ mod tests {
     use mj_chat::hel_chat::{ActiveChat, Notices, SessionHeaderIdentity};
 
     fn open_chat(session_id: &str) -> ActiveChat {
-        let fixture =
-            mj_controller::hel_session_manager::replacement_session_test_fixture(session_id, 1);
+        let fixture = mj_client::session::replacement_session_test_fixture(session_id, 1);
         ActiveChat::open(
             fixture.stopped,
             "bundle-1",

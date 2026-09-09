@@ -36,7 +36,7 @@ const AWS_TARGET_ID: &str = "aws";
 // .github/workflows/publish-agent-dev-image.yml. It already carries Node, Rust,
 // Git, gh, and the pinned ACP bridges, so a first session does not have to
 // install them.
-pub const DEFAULT_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
+pub use mj_client::target::DEFAULT_IMAGE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredHome {
