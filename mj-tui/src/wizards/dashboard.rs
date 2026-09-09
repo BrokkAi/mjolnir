@@ -559,6 +559,10 @@ impl DashboardState {
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
+            Interaction::ComboBoxCommit(_, _) | Interaction::ComboBoxDismiss(_) => {
+                self.mode = Mode::New(wizard);
+                DashboardAction::None
+            }
             Interaction::Activate(id) => self.activate_new_control(wizard, id),
         }
     }
@@ -635,6 +639,10 @@ impl DashboardState {
                 DashboardAction::None
             }
             Interaction::Toggle(_) => {
+                self.mode = Mode::Resume(wizard);
+                DashboardAction::None
+            }
+            Interaction::ComboBoxCommit(_, _) | Interaction::ComboBoxDismiss(_) => {
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }

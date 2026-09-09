@@ -30,6 +30,10 @@ pub enum Interaction<K> {
     Toggle(K),
     /// Select a row or tab.
     Select(K, usize),
+    /// Accept the currently highlighted combobox option.
+    ComboBoxCommit(K, usize),
+    /// Dismiss an expanded combobox without changing its value.
+    ComboBoxDismiss(K),
     /// Edit a text field.
     Edit(K, FieldEdit),
     /// Escape requests dismissal of the active form.
@@ -132,6 +136,15 @@ pub enum ControlKind {
         /// Current row.
         selected: usize,
     },
+    /// A scalar field with a popup list of choices.
+    ComboBox {
+        /// Number of options.
+        len: usize,
+        /// Current popup cursor.
+        selected: usize,
+        /// Whether the popup is expanded.
+        expanded: bool,
+    },
     /// A horizontally navigable tab strip.
     Tabs {
         /// Number of tabs.
@@ -158,13 +171,19 @@ impl ControlKind {
         matches!(self, Self::ChoiceList { .. })
     }
 
+    fn is_combo_box(self) -> bool {
+        matches!(self, Self::ComboBox { .. })
+    }
+
     fn is_tab_strip(self) -> bool {
         matches!(self, Self::Tabs { .. })
     }
 
     fn selected(self) -> Option<usize> {
         match self {
-            Self::ChoiceList { selected, .. } | Self::Tabs { selected, .. } => Some(selected),
+            Self::ChoiceList { selected, .. }
+            | Self::ComboBox { selected, .. }
+            | Self::Tabs { selected, .. } => Some(selected),
             _ => None,
         }
     }
@@ -185,6 +204,8 @@ struct Control<K> {
     list_offset: usize,
     row_map: Vec<Option<usize>>,
     row_enabled: Vec<bool>,
+    popup_area: Rect,
+    popup_row_map: Vec<Option<usize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +244,8 @@ impl<K> Control<K> {
             list_offset: 0,
             row_map: Vec::new(),
             row_enabled: Vec::new(),
+            popup_area: Rect::default(),
+            popup_row_map: Vec::new(),
         }
     }
 }
@@ -349,6 +372,8 @@ impl<K: Copy + Eq> Form<K> {
         control.list_offset = 0;
         control.row_map.clear();
         control.row_enabled.clear();
+        control.popup_area = Rect::default();
+        control.popup_row_map.clear();
         if !self.order.contains(&id) {
             self.order.push(id);
         }
@@ -375,6 +400,8 @@ impl<K: Copy + Eq> Form<K> {
         control.list_offset = 0;
         control.row_map.clear();
         control.row_enabled.clear();
+        control.popup_area = Rect::default();
+        control.popup_row_map.clear();
         if !self.order.contains(&id) {
             self.order.push(id);
         }
@@ -402,6 +429,8 @@ impl<K: Copy + Eq> Form<K> {
         control.list_offset = 0;
         control.row_map = row_map;
         control.row_enabled = row_enabled;
+        control.popup_area = Rect::default();
+        control.popup_row_map.clear();
         if !self.order.contains(&id) {
             self.order.push(id);
         }
@@ -418,6 +447,36 @@ impl<K: Copy + Eq> Form<K> {
             control.editor_area = area;
             control.cursor_map = cursor_map;
             control.multiline_cursor_map.clear();
+        }
+    }
+
+    /// Registers a scalar combobox field and, when expanded, its popup hitbox.
+    pub(crate) fn register_combobox(
+        &mut self,
+        id: K,
+        kind: ControlKind,
+        area: Rect,
+        enabled: bool,
+        popup_area: Rect,
+        popup_row_map: Vec<Option<usize>>,
+    ) {
+        let index = self.ensure_control(id, kind);
+        let control = &mut self.controls[index];
+        control.area = area;
+        control.enabled = enabled;
+        control.active = true;
+        control.kind = kind;
+        control.cursor_map.clear();
+        control.multiline_cursor_map.clear();
+        control.editor_area = Rect::default();
+        control.region_map.clear();
+        control.list_offset = 0;
+        control.row_map.clear();
+        control.row_enabled.clear();
+        control.popup_area = popup_area;
+        control.popup_row_map = popup_row_map;
+        if !self.order.contains(&id) {
+            self.order.push(id);
         }
     }
 
@@ -447,6 +506,8 @@ impl<K: Copy + Eq> Form<K> {
         control.list_offset = 0;
         control.row_map.clear();
         control.row_enabled.clear();
+        control.popup_area = Rect::default();
+        control.popup_row_map.clear();
         if !self.order.contains(&id) {
             self.order.push(id);
         }
@@ -464,7 +525,14 @@ impl<K: Copy + Eq> Form<K> {
         let index = self.ensure_control(id, kind);
         let control = &mut self.controls[index];
         if std::mem::discriminant(&control.kind) != std::mem::discriminant(&kind)
-            || matches!((control.kind, kind), (ControlKind::ChoiceList { len: before, .. }, ControlKind::ChoiceList { len: after, .. }) if before != after)
+            || matches!(
+                (control.kind, kind),
+                (ControlKind::ChoiceList { len: before, .. }, ControlKind::ChoiceList { len: after, .. }) if before != after
+            )
+            || matches!(
+                (control.kind, kind),
+                (ControlKind::ComboBox { len: before, .. }, ControlKind::ComboBox { len: after, .. }) if before != after
+            )
         {
             control.area = Rect::default();
             control.row_map.clear();
@@ -473,6 +541,8 @@ impl<K: Copy + Eq> Form<K> {
             control.multiline_cursor_map.clear();
             control.editor_area = Rect::default();
             control.list_offset = 0;
+            control.popup_area = Rect::default();
+            control.popup_row_map.clear();
         }
         control.active = true;
         control.enabled = enabled;
@@ -494,6 +564,8 @@ impl<K: Copy + Eq> Form<K> {
         for control in &mut self.controls {
             control.active = false;
             control.flag.clear();
+            control.popup_area = Rect::default();
+            control.popup_row_map.clear();
         }
         self.focus_tree.none();
     }
@@ -505,6 +577,8 @@ impl<K: Copy + Eq> Form<K> {
             control.cursor_map.clear();
             control.multiline_cursor_map.clear();
             control.editor_area = Rect::default();
+            control.popup_area = Rect::default();
+            control.popup_row_map.clear();
         }
         self.dismiss_area = Rect::default();
     }
@@ -677,7 +751,7 @@ impl<K: Copy + Eq> Form<K> {
         self.pointer_owner == Some(PointerOwner::Dismiss)
     }
 
-    /// Returns the current selection metadata for a list or tab strip.
+    /// Returns the current selection metadata for a list, combobox, or tab strip.
     #[must_use]
     pub fn selected(&self, id: K) -> Option<usize> {
         self.kind(id).selected()
@@ -700,6 +774,11 @@ impl<K: Copy + Eq> Form<K> {
                 ControlKind::Tabs { len, .. } => ControlKind::Tabs {
                     len,
                     selected: selected.min(len.saturating_sub(1)),
+                },
+                ControlKind::ComboBox { len, expanded, .. } => ControlKind::ComboBox {
+                    len,
+                    selected: selected.min(len.saturating_sub(1)),
+                    expanded,
                 },
                 kind => kind,
             };
@@ -774,7 +853,9 @@ impl<K: Copy + Eq> Form<K> {
             .iter()
             .rev()
             .filter_map(|id| self.active_control(*id))
-            .find(|control| control.area.contains((x, y).into()))
+            .find(|control| {
+                control.area.contains((x, y).into()) || control.popup_area.contains((x, y).into())
+            })
             .map(|control| PointerHit::Control(control.id))
     }
 
@@ -791,7 +872,19 @@ impl<K: Copy + Eq> Form<K> {
         let ordinary = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        let focused = self.focused().filter(|id| self.is_eligible(*id));
         if ordinary && is_tab(*key) {
+            if let Some(id) = focused
+                && let ControlKind::ComboBox {
+                    selected,
+                    expanded: true,
+                    ..
+                } = self.kind(id)
+            {
+                return Some(EventResult::changed(Some(Interaction::ComboBoxCommit(
+                    id, selected,
+                ))));
+            }
             let changed = if is_back_tab(*key) {
                 self.focus_pending_sibling(false)
             } else {
@@ -804,13 +897,15 @@ impl<K: Copy + Eq> Form<K> {
             });
         }
         if is_press && ordinary && key.code == KeyCode::Esc {
+            if let Some(id) = focused
+                && matches!(self.kind(id), ControlKind::ComboBox { expanded: true, .. })
+            {
+                return Some(EventResult::changed(Some(Interaction::ComboBoxDismiss(id))));
+            }
             return Some(EventResult::changed(Some(Interaction::Cancel)));
         }
 
-        let id = self.focused()?;
-        if !self.is_eligible(id) {
-            return Some(EventResult::handled());
-        }
+        let id = focused?;
         let kind = self.kind(id);
         if !is_press
             && ordinary
@@ -852,6 +947,25 @@ impl<K: Copy + Eq> Form<K> {
             && (key.code == KeyCode::Enter || key.code == KeyCode::Char(' '))
         {
             return Some(EventResult::changed(Some(Interaction::Toggle(id))));
+        }
+        if ordinary
+            && let ControlKind::ComboBox {
+                len,
+                selected,
+                expanded,
+            } = kind
+        {
+            if is_press && matches!(key.code, KeyCode::Char(' ') | KeyCode::Enter) {
+                return Some(if expanded {
+                    EventResult::changed(Some(Interaction::ComboBoxCommit(id, selected)))
+                } else {
+                    EventResult::changed(Some(Interaction::Activate(id)))
+                });
+            }
+            if expanded && let Some(next) = list_selection(key.code, selected, len) {
+                self.set_selected(id, next);
+                return Some(EventResult::changed(Some(Interaction::Select(id, next))));
+            }
         }
         if ordinary && let ControlKind::ChoiceList { len, selected } = kind {
             if is_press && matches!(key.code, KeyCode::Char(' ') | KeyCode::Enter) {
@@ -1038,6 +1152,11 @@ impl<K: Copy + Eq> Form<K> {
                                 ControlKind::ChoiceList { len, selected } if control.enabled => {
                                     Some((id, len, selected))
                                 }
+                                ControlKind::ComboBox {
+                                    len,
+                                    selected,
+                                    expanded: true,
+                                } if control.enabled => Some((id, len, selected)),
                                 _ => None,
                             })
                         }
@@ -1077,6 +1196,14 @@ impl<K: Copy + Eq> Form<K> {
                             if !enabled {
                                 return Some(EventResult::handled());
                             }
+                            let in_popup =
+                                kind.is_combo_box() && control.popup_area.contains((x, y).into());
+                            if in_popup {
+                                let row = usize::from(y.saturating_sub(control.popup_area.y));
+                                if control.popup_row_map.get(row).copied().flatten().is_none() {
+                                    return Some(EventResult::handled());
+                                }
+                            }
                             if kind.is_choice_list() && !editor {
                                 let row = usize::from(y.saturating_sub(control.area.y))
                                     + control.list_offset;
@@ -1097,6 +1224,7 @@ impl<K: Copy + Eq> Form<K> {
                             if kind.is_button()
                                 || kind.is_checkbox()
                                 || kind.is_choice_list()
+                                || kind.is_combo_box()
                                 || kind.is_tab_strip()
                             {
                                 self.pointer_owner = Some(PointerOwner::Control(id));
@@ -1114,7 +1242,10 @@ impl<K: Copy + Eq> Form<K> {
     fn pointer_owner_contains(&self, owner: PointerOwner<K>, x: u16, y: u16) -> bool {
         match owner {
             PointerOwner::Control(id) => self.control(id).is_some_and(|control| {
-                control.active && control.enabled && control.area.contains((x, y).into())
+                control.active
+                    && control.enabled
+                    && (control.area.contains((x, y).into())
+                        || control.popup_area.contains((x, y).into()))
             }),
             PointerOwner::Dismiss => {
                 self.dismiss_is_eligible() && self.dismiss_area.contains((x, y).into())
@@ -1154,6 +1285,18 @@ impl<K: Copy + Eq> Form<K> {
                     Interaction::Select(id, index)
                 })
             }
+            ControlKind::ComboBox { expanded, .. } => {
+                if expanded && control.popup_area.contains((x, y).into()) {
+                    let row = usize::from(y.saturating_sub(control.popup_area.y));
+                    let index = control.popup_row_map.get(row).copied().flatten()?;
+                    self.set_selected(id, index);
+                    Some(Interaction::ComboBoxCommit(id, index))
+                } else if expanded {
+                    Some(Interaction::ComboBoxDismiss(id))
+                } else {
+                    Some(Interaction::Activate(id))
+                }
+            }
             ControlKind::TextField => None,
         }
     }
@@ -1188,6 +1331,8 @@ impl<K: Copy + Eq> Clone for Form<K> {
                 cloned.list_offset = control.list_offset;
                 cloned.row_map.clone_from(&control.row_map);
                 cloned.row_enabled.clone_from(&control.row_enabled);
+                cloned.popup_area = control.popup_area;
+                cloned.popup_row_map.clone_from(&control.popup_row_map);
                 cloned
             })
             .collect();
@@ -1815,5 +1960,100 @@ mod tests {
         form.end_frame(1);
         assert!(!form.contains(2, 0));
         assert!(!form.captures_pointer());
+    }
+
+    #[test]
+    fn combobox_keys_preview_without_commit_until_acceptance() {
+        let mut form = Form::new();
+        form.register(
+            1,
+            ControlKind::ComboBox {
+                len: 3,
+                selected: 0,
+                expanded: false,
+            },
+            Rect::new(0, 0, 8, 1),
+            true,
+        );
+        form.end_frame(1);
+        assert_eq!(
+            form.handle(&key(KeyCode::Enter)).action,
+            Some(Interaction::Activate(1))
+        );
+
+        form.begin_frame();
+        form.register(
+            1,
+            ControlKind::ComboBox {
+                len: 3,
+                selected: 0,
+                expanded: true,
+            },
+            Rect::new(0, 0, 8, 1),
+            true,
+        );
+        form.end_frame(1);
+        assert_eq!(
+            form.handle(&key(KeyCode::Down)).action,
+            Some(Interaction::Select(1, 1))
+        );
+        assert_eq!(form.selected(1), Some(1));
+        assert_eq!(
+            form.handle(&key(KeyCode::Tab)).action,
+            Some(Interaction::ComboBoxCommit(1, 1))
+        );
+    }
+
+    #[test]
+    fn expanded_combobox_escape_is_local_and_popup_rows_commit() {
+        let mut form = Form::new();
+        form.register_combobox(
+            1,
+            ControlKind::ComboBox {
+                len: 3,
+                selected: 0,
+                expanded: true,
+            },
+            Rect::new(0, 0, 8, 1),
+            true,
+            Rect::new(0, 2, 10, 5),
+            vec![None, Some(0), Some(1), Some(2), None],
+        );
+        form.end_frame(1);
+        assert_eq!(
+            form.handle(&mouse(MouseEventKind::ScrollDown, 1, 3)).action,
+            Some(Interaction::Select(1, 1))
+        );
+        assert_eq!(
+            form.handle(&key(KeyCode::Esc)).action,
+            Some(Interaction::ComboBoxDismiss(1))
+        );
+
+        let mut form = Form::new();
+        form.register_combobox(
+            1,
+            ControlKind::ComboBox {
+                len: 3,
+                selected: 0,
+                expanded: true,
+            },
+            Rect::new(0, 0, 8, 1),
+            true,
+            Rect::new(0, 2, 10, 5),
+            vec![None, Some(0), Some(1), Some(2), None],
+        );
+        form.end_frame(1);
+        form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 4));
+        assert_eq!(
+            form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 1, 4))
+                .action,
+            Some(Interaction::ComboBoxCommit(1, 1))
+        );
+        form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 0));
+        assert_eq!(
+            form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 1, 0))
+                .action,
+            Some(Interaction::ComboBoxDismiss(1))
+        );
     }
 }

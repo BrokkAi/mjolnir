@@ -6,7 +6,9 @@ mod scope;
 pub mod scrollbar;
 pub(crate) mod text_layout;
 
-pub use controls::{Button, ButtonRow, Checkbox, ChoiceList, TabStrip, TextField};
+pub use controls::{
+    Button, ButtonRow, Checkbox, ChoiceList, ComboBox, ComboBoxState, TabStrip, TextField,
+};
 pub use layout::{
     AutocompletePopup, FormViewport, PopupSide, dialog_content, dialog_rect, form_area,
     form_columns, form_rows,
