@@ -1,0 +1,132 @@
+# Render concise, stable tool-call summaries in the TUI and web viewer
+
+This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. Maintain this document in accordance with `.agents/PLANS.md`.
+
+## Purpose / Big Picture
+
+Tool calls currently change presentation as a conversation advances: a new TUI call first shows its full provider title, then older completed calls collapse to the first whitespace-delimited word. The browser does not apply the same grouping at all. After this work, a shell call such as `cd dir && python x.py | cat | wc ; print ok` appears immediately as `cd && python | cat | wc ; print` in both Rich TUI and web feeds. Consecutive successful completed calls still form one row, while pending, running, and failed calls remain separate. TUI Raw mode continues to show original titles and details.
+
+## Progress
+
+- [x] (2026-09-09 21:17Z) Inspected the live ACP, materialized transcript, TUI collapse, browser projection, HTTP delta, and DOM update paths.
+- [x] (2026-09-09 21:17Z) Settled parser behavior, status/grouping semantics, Raw-mode behavior, and the browser topology-reset protocol.
+- [x] (2026-09-09 23:06Z) Added the shared tree-sitter parser, bounded presentation sidecar, live-update handling, and archive round trips.
+- [x] (2026-09-09 23:06Z) Shared Rich grouping with browser projection and added presentation-key reset handling.
+- [x] (2026-09-09 23:06Z) Updated browser polling/key state and advanced the service-worker shell cache to v12.
+- [x] (2026-09-09 23:06Z) Regenerated dependency/license metadata and passed the focused, workspace, clippy, license, JavaScript, and capture validations.
+- [x] (2026-09-09 23:18Z) Reviewed the integrated diff and prepared the validated implementation for its required current-branch commit.
+
+## Surprises & Discoveries
+
+- Observation: Before this change, the TUI protected the newest completed tool from collapse, which directly caused the visible full-title-to-first-word transition.
+  Evidence: The removed `protected_tool_index` path excluded the newest completed call until a later entry arrived; the replacement applies its compact summary immediately.
+- Observation: The browser updates keyed DOM nodes but does not remove omitted nodes on an ordinary delta.
+  Evidence: `applyConversationEntries` in `mj-controller/src/web/viewer.js` only appends or replaces IDs; `reset` clears the feed.
+- Observation: ACP `ToolCallUpdateFields` values are patches rather than complete calls.
+  Evidence: `apply_session_update_to_entries` currently updates individual title, status, content, and location fields, so a stable summary must retain the source selected by earlier updates.
+- Observation: A status update can change group membership without changing the number of transcript entries.
+  Evidence: The first focused TUI rerun retained a stale collapse decision until the render cache began fingerprinting member revisions as well as entry count.
+- Observation: Cargo's `links` inventory treats both new tree-sitter packages as native-link participants even though `tree-sitter-language` uses the field for ABI uniqueness and wasm metadata.
+  Evidence: The supplemental notice generator rejected the unaudited packages until both roles were recorded in `auditedLinksPackages`; the regenerated notice check then passed.
+- Observation: The optional all-target workspace check reaches desktop bindings unavailable on this host.
+  Evidence: `cargo check --workspace --all-targets` stopped at missing `libsoup-3.0`, Pango, GLib, GDK, and Cairo system packages. The required default workspace test and clippy commands do not select that unavailable desktop host configuration and passed.
+
+## Decision Log
+
+- Decision: Parse Execute calls with `tree-sitter-bash` and keep the existing compact-token rule for other real ACP calls.
+  Rationale: Shell syntax needs structural parsing, while non-shell titles do not represent Bash programs; every real call must still receive its compact label immediately.
+  Date/Author: 2026-09-09 / Codex
+- Decision: Preserve the original provider title and cache bounded presentation source metadata beside the canonical tool call.
+  Rationale: Raw mode needs the original text and patch updates need enough state to recompute without inventing ACP metadata.
+  Date/Author: 2026-09-09 / Codex
+- Decision: Group only completed successful calls; active and failed calls are visible group boundaries. Preserve the newest interleaved thought before a grouped row.
+  Rationale: This is the user-selected behavior and matches the useful part of the existing TUI collapse.
+  Date/Author: 2026-09-09 / Codex
+- Decision: Add an opaque browser presentation key derived from Rich topology.
+  Rationale: A key mismatch can force a full reset when grouping removes or reorders already-delivered rows, including same-relay-ordinal projection repairs, without overloading the event cursor.
+  Date/Author: 2026-09-09 / Codex
+
+## Outcomes & Retrospective
+
+The shared parser now emits `cd && python | cat | wc ; print` for the requested command and uses the same compact summary from the first pending/running frame through completion or failure. Rich TUI and browser projections use one grouping decision, so sequential successful calls form one comma-separated row while active and failed calls remain boundaries. Raw TUI mode still retains provider titles and details.
+
+The browser carries an opaque topology key with its relay cursor. Group formation, growth, dissolution, or thought reordering forces a complete feed replacement; ordinary content changes remain incremental. Older browser/server combinations remain compatible when the key is absent.
+
+Validation passed: focused core/chat/controller/TUI behavior tests; 13 Node viewer tests; the complete `cargo test` workspace suite; `cargo clippy --all-targets -- -D warnings`; `cargo deny` license checks; generated Cargo About and supplemental notices; formatting and diff checks. A 120×42 terminal-cell capture at `/tmp/unified-tool-call-summaries-tui.json` showed `cd && python | cat | wc ; print, cargo` as one completed group and `cargo` immediately for a running call. The only unavailable supplemental check was the optional desktop all-target build described above.
+
+## Context and Orientation
+
+`src/hel_transcript.rs` defines the shared `ChatEntry` rendered by clients and applies live ACP updates. `src/hel_projection.rs` stores canonical transcript items and reconstructs them from legacy entries. `mj-chat/src/hel_chat/transcript.rs` projects canonical items, computes TUI collapse states, and creates browser transcript payloads. `mj-client/src/web.rs` defines that wire payload. `mj-controller/src/hel_server.rs` serves cached projections using a relay-event cursor, while `mj-controller/src/web/viewer.js` polls and updates DOM nodes by entry ID.
+
+A Rich projection is the decluttered transcript used by the normal TUI and browser. Raw mode is the TUI diagnostic view that retains provider titles, tool details, and entries omitted as duplicates. A presentation topology is the ordered set of rows produced after Rich grouping and omission; content may change without changing this topology.
+
+## Plan of Work
+
+Add workspace-compatible `tree-sitter` and `tree-sitter-bash` dependencies to the core crate. Implement one shared helper near `ChatEntry` that selects a command source and parses it outside render loops. For Execute calls, prefer a string `raw_input.command`; for an argv array, unwrap scripts passed through `sh`, `bash`, `dash`, or `zsh` command flags, otherwise use only argv element zero. If raw input is unavailable, strip known lifecycle wrappers from the provider title and parse that. Bound source length before parsing. Walk Bash list, pipeline, subshell, and command nodes through all children so anonymous operator tokens are visible; emit executable names and structural operators, skip arguments, assignments, and redirections, and do not descend into substitutions inside an ordinary command argument. If parsing yields no executable, use the normalized first meaningful title token. Apply that compact-token behavior directly to non-Execute calls.
+
+Extend canonical tool transcript data with optional serde-defaulted presentation metadata holding the summary, its bounded selected source, source kind, and tool kind. Extend `ChatEntry` with an optional serde-defaulted summary. Populate and update these fields in both live ACP and materialized projections, preserving them through legacy reconstruction and canonical serialization. Title-only updates must not erase a raw-command-derived summary; raw input or kind updates recompute it. Keep `ChatEntry.text` unchanged for Raw mode. The client-generated active-terminal card has no real tool-call identity and keeps its current full text. Failed fallback tools must render the compact label plus their failure details in Rich and web while retaining the original full entry in Raw.
+
+Refactor Rich collapse into a shared presentation projection used by TUI line rendering and `TranscriptSnapshot::browser_transcript`. Remove newest-tool protection. A lone real tool renders with its cached summary. Two or more sequential completed-success tools, with thoughts allowed between them, produce the newest thought followed by one synthetic tool entry whose comma-separated components are per-call summaries. The synthetic entry carries the maximum member update cursor and revision. Pending, running, and failed tools terminate a run. Existing restart and raw-only omission rules remain active.
+
+Add `presentation_key` to `BrowserTranscript` and an optional matching query field to the conversation endpoint. Compute a stable SHA-256 digest over only structural Rich decisions: ordered grouped member identities and roles, plus omitted/restart identities. Exclude normal rows and content revisions so ordinary appends and content updates stay incremental. The browser stores the last key and sends it with later `after_seq` polls. A mismatch returns the full current projection with `reset: true`; a match uses existing cursor filtering. Missing keys retain backward compatibility. Update JavaScript state/reset handling and bump `mj-controller/src/web/service-worker.js` from shell cache v11 to v12.
+
+Update focused Rust and JavaScript behavior tests. Regenerate `Cargo.lock`, `licenses/THIRD_PARTY_LICENSES.html`, and any supplemental notice output required by `CONTRIBUTING.md`.
+
+## Concrete Steps
+
+Work from `/home/jonathan/Projects/hel2`.
+
+First implement and run focused parser/transcript tests:
+
+    cargo test -p brokk-mj-core hel_transcript::tests
+    cargo test -p brokk-mj-chat transcript
+
+Then run browser/server tests, using the repository's existing Node test invocation discovered from the test harness and focused Rust test filters. Run all Cargo test commands outside the restricted sandbox because the repository tests require loopback sockets.
+
+After implementation, format and validate the workspace:
+
+    cargo fmt --all
+    cargo test
+    cargo clippy --all-targets -- -D warnings
+    cargo deny --workspace --config licenses/deny.toml --locked check licenses
+    cargo about generate --workspace --offline --config licenses/about.toml --locked --fail licenses/about.hbs -o licenses/THIRD_PARTY_LICENSES.html
+    node scripts/generate-supplemental-third-party-notices.mjs
+
+All commands above completed successfully. The final TUI evidence was generated with:
+
+    MJ_CHAT_CAPTURE_PATH=/tmp/unified-tool-call-summaries-tui.json \
+      MJ_CHAT_CAPTURE_COLUMNS=120 MJ_CHAT_CAPTURE_ROWS=42 \
+      cargo test -p brokk-mj-chat capture_chat_preview -- --ignored --nocapture
+
+Review `git diff`, stage only files changed for this feature, and commit on the current branch. Do not push.
+
+## Validation and Acceptance
+
+The exact shell source `cd dir && python x.py | cat | wc ; print ok` must summarize as `cd && python | cat | wc ; print`. Tests must cover pipelines and lists, quotes, assignments, redirections, subshells, command substitutions, shell `-c` argv, ordinary argv, provider wrappers, malformed input, non-Execute titles, and bounded fallback behavior.
+
+Live and materialized tests must prove that the same compact label is present while pending, running, completed, and failed, without a title transition. They must prove partial updates and legacy round trips preserve the summary, failed details remain visible, and Raw retains original text. Collapse tests must cover one call, two completed calls, interleaved thoughts, group growth, and active/failed boundaries.
+
+Browser tests must prove initial parity with Rich output, maximum-member revisions on synthetic rows, full reset on presentation-key mismatch when a group forms, grows, or dissolves, and incremental updates when only content changes. JavaScript tests must prove key storage and query behavior, reset replacement, and compatibility with a response that omits the key.
+
+All workspace tests and clippy with warnings denied must pass. Dependency license checks and generated notices must be clean. A manual TUI and browser run should show matching compact labels and grouped rows for the same transcript.
+
+## Idempotence and Recovery
+
+All code-generation and validation commands are safe to repeat. If dependency metadata changes partially, rerun Cargo metadata generation and the prescribed license commands rather than editing generated files manually. Never discard unrelated working-tree changes; stage only files changed for this feature.
+
+## Artifacts and Notes
+
+Expected core example:
+
+    input:  cd dir && python x.py | cat | wc ; print ok
+    output: cd && python | cat | wc ; print
+
+Within one tool call, shell operators remain visible. A comma separates summaries from distinct grouped tool calls. Command names remain as written after quote normalization; no special inference is made through wrappers such as `sudo`.
+
+## Interfaces and Dependencies
+
+The core crate uses `tree-sitter` 0.25 with `tree-sitter-bash` 0.25.1. `TranscriptBody::Tool` gains optional presentation metadata with serde defaults. `ChatEntry` gains `tool_summary: Option<String>`. `BrowserTranscript` gains an opaque string `presentation_key`. The conversation GET query gains an optional string with the same name. The wire changes are additive and older persisted transcript bodies and cached browser fixtures must continue to deserialize.
+
+Revision note (2026-09-09): Created the initial implementation-ready plan after repository exploration and two independent flow/parser reviews. It records the user-selected status, grouping, thought, and Raw-mode behavior and the topology-key solution for browser deltas.
+
+Revision note (2026-09-09): Recorded the implemented parser, cross-surface grouping, browser reset protocol, validation results, terminal capture, and the optional desktop dependency limitation before final review and commit.

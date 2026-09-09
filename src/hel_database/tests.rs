@@ -397,6 +397,7 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
                     }),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
+                    presentation: None,
                 },
             }),
             Arc::new(TranscriptItem {
@@ -2439,6 +2440,7 @@ fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<T
             }),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
+            presentation: None,
         },
     })
 }
@@ -2480,6 +2482,7 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
             }),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
+            presentation: None,
         },
     })];
     save_materialized_session_to(&database, &materialized).unwrap();

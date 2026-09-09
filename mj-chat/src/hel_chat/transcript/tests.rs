@@ -4,6 +4,7 @@ use crate::hel_chat::test_support::{
     line_text, mouse_in, queued, snapshot, transcript_text,
 };
 use crate::hel_selection::SelectionState;
+use agent_client_protocol::schema::v1::ToolKind;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
 };
@@ -11,7 +12,20 @@ use hel::hel_acp::RuntimeEvent;
 use hel::hel_worker::{SequencedEvent, WorkerEvent};
 
 fn completed_tool(seq: u64, title: &str) -> ChatEntry {
-    ChatEntry::tool(seq, title, None, ToolStatus::Completed)
+    let mut entry = ChatEntry::tool(seq, title, None, ToolStatus::Completed);
+    entry.tool_summary = Some(title.to_owned());
+    entry
+}
+
+fn completed_execute_tool(seq: u64, title: &str) -> ChatEntry {
+    let call = ToolCall::new(format!("call-{seq}"), title)
+        .kind(ToolKind::Execute)
+        .status(ToolCallStatus::Completed);
+    let presentation = tool_call_presentation(&call);
+    let mut entry = ChatEntry::tool(seq, title, None, ToolStatus::Completed);
+    entry.tool_summary = Some(presentation.summary.clone());
+    entry.tool_presentation = Some(presentation);
+    entry
 }
 
 fn session_restart(seq: u64) -> ChatEntry {
@@ -503,6 +517,7 @@ fn real_tool_claim_suppresses_only_the_matching_terminal_incarnation() {
             }),
             terminal_outputs: Vec::new(),
             terminal_refs: vec!["term-1".into()],
+            presentation: None,
         },
     })];
     let mut chat = ChatState::from_materialized(&session, &[], &[]);
@@ -647,6 +662,7 @@ fn fixture_tool_item(position: u64) -> Arc<TranscriptItem> {
             }),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
+            presentation: None,
         },
     )
 }
@@ -1060,12 +1076,7 @@ fn live_acp_diffs_render_paths_without_counting_lines_on_the_event_loop() {
 
     assert_eq!(
         transcript_text(&mut chat, 80),
-        [
-            "● Tool · running",
-            "│ Edit src/lib.rs",
-            "│ /workspace/src/lib.rs",
-            ""
-        ]
+        ["● Tool · running", "│ Edit", "│ /workspace/src/lib.rs", ""]
     );
 
     chat.apply_session_update(
@@ -1086,13 +1097,45 @@ fn live_acp_diffs_render_paths_without_counting_lines_on_the_event_loop() {
     assert_eq!(chat.entries[0].tool_diffstats, ["/workspace/src/lib.rs"]);
     assert_eq!(
         transcript_text(&mut chat, 80),
-        [
-            "✓ Tool · done",
-            "│ Edit src/lib.rs",
-            "│ /workspace/src/lib.rs",
-            ""
-        ]
+        ["✓ Tool · done", "│ Edit", "│ /workspace/src/lib.rs", ""]
     );
+}
+
+#[test]
+fn execute_summary_is_immediate_stable_and_raw_keeps_the_provider_title() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.apply_session_update(
+        1,
+        &serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "shell-1",
+            "title": "Bash",
+            "kind": "execute",
+            "status": "pending",
+            "rawInput": {
+                "command": "cd dir && python x.py | cat | wc ; print ok"
+            }
+        }),
+    );
+
+    for (seq, status) in [(2, "in_progress"), (3, "completed")] {
+        let rich = transcript_text(&mut chat, 100);
+        assert!(rich.contains(&"│ cd && python | cat | wc ; print".to_owned()));
+        assert!(!rich.contains(&"│ Bash".to_owned()));
+        chat.apply_session_update(
+            seq,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "shell-1",
+                "status": status
+            }),
+        );
+    }
+    let rich = transcript_text(&mut chat, 100);
+    assert!(rich.contains(&"│ cd && python | cat | wc ; print".to_owned()));
+
+    chat.render_mode = TranscriptRenderMode::Raw;
+    assert!(transcript_text(&mut chat, 100).contains(&"│ Bash".to_owned()));
 }
 
 #[test]
@@ -1108,10 +1151,7 @@ fn completed_tool_run_collapses_to_single_summary_cell() {
         text,
         [
             "✓ Tool · done",
-            "│ grep, grep",
-            "",
-            "✓ Tool · done",
-            "│ cat notes.md",
+            "│ grep -rn alpha src, grep -rn beta src, cat notes.md",
             "",
         ]
     );
@@ -1120,12 +1160,16 @@ fn completed_tool_run_collapses_to_single_summary_cell() {
 #[test]
 fn kimi_shell_tool_run_collapses_to_command_names() {
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(completed_execute_tool(
+        1,
+        "Running: rg -n project_memory src",
+    ));
     chat.entries
-        .push(completed_tool(1, "Running: rg -n project_memory src"));
-    chat.entries
-        .push(completed_tool(2, "Running: cargo test --lib"));
-    chat.entries
-        .push(completed_tool(3, "Starting background: npm run preview"));
+        .push(completed_execute_tool(2, "Running: cargo test --lib"));
+    chat.entries.push(completed_execute_tool(
+        3,
+        "Starting background: npm run preview",
+    ));
     chat.entries
         .push(ChatEntry::plain(4, ChatRole::User, "continue"));
 
@@ -1142,16 +1186,17 @@ fn kimi_shell_tool_run_collapses_to_command_names() {
     );
 }
 
-/// A harness that quotes or decorates the command it reports still names a
-/// tool. The label used to keep the decoration, so a collapsed streak read
-/// `"sed, ./build, ls`.
+/// A parser-derived summary starts at the executable even when a harness
+/// decorates the command title.
 #[test]
 fn a_collapsed_tool_label_starts_at_the_command_name() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries
-        .push(completed_tool(1, "Running: \"sed -n 1,10p\" notes.md"));
-    chat.entries.push(completed_tool(2, "./build.sh --release"));
-    chat.entries.push(completed_tool(3, "Running: `ls -la`"));
+        .push(completed_execute_tool(1, "Running: sed -n 1,10p notes.md"));
+    chat.entries
+        .push(completed_execute_tool(2, "./build.sh --release"));
+    chat.entries
+        .push(completed_execute_tool(3, "Running: ls -la"));
     chat.entries
         .push(ChatEntry::plain(4, ChatRole::User, "continue"));
 
@@ -1159,7 +1204,7 @@ fn a_collapsed_tool_label_starts_at_the_command_name() {
         transcript_text(&mut chat, 80),
         [
             "✓ Tool · done",
-            "│ sed, build.sh, ls",
+            "│ sed, ./build.sh, ls",
             "",
             "❯ You",
             "│ continue",
@@ -1191,7 +1236,8 @@ fn interleaved_tools_and_thoughts_render_latest_thinking_then_tool_cdl() {
             "│ Preparing coverage environment cleanup",
             "",
             "✓ Tool · done",
-            "│ sed, cargo, cargo, cargo, Editing",
+            "│ sed -n 1,260p .agents/PLANS.md, cargo llvm-cov nextest --help, cargo llvm-cov",
+            "│ --help, cargo llvm-cov report --help, Editing files",
             "",
         ]
     );
@@ -1245,7 +1291,7 @@ fn visible_nonmembers_break_tool_thought_streaks() {
 }
 
 #[test]
-fn trailing_tool_stays_detailed_until_a_later_thought_appears() {
+fn trailing_tool_summary_does_not_change_when_a_later_thought_appears() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries.extend([
         completed_tool(1, "grep -rn alpha src"),
@@ -1260,10 +1306,7 @@ fn trailing_tool_stays_detailed_until_a_later_thought_appears() {
             "│ checking the first result",
             "",
             "✓ Tool · done",
-            "│ grep -rn alpha src",
-            "",
-            "✓ Tool · done",
-            "│ cat notes.md",
+            "│ grep -rn alpha src, cat notes.md",
             "",
         ]
     );
@@ -1278,7 +1321,7 @@ fn trailing_tool_stays_detailed_until_a_later_thought_appears() {
             "│ checking the combined result",
             "",
             "✓ Tool · done",
-            "│ grep, cat",
+            "│ grep -rn alpha src, cat notes.md",
             "",
         ]
     );
@@ -1318,7 +1361,7 @@ fn completed_tool_run_collapses_fully_once_a_new_request_starts() {
         text,
         [
             "✓ Tool · done",
-            "│ grep, grep, cat",
+            "│ grep -rn alpha src, grep -rn beta src, cat notes.md",
             "",
             "❯ You",
             "│ now ship it",
@@ -1328,7 +1371,7 @@ fn completed_tool_run_collapses_fully_once_a_new_request_starts() {
 }
 
 #[test]
-fn newest_completed_tool_leaves_a_lone_predecessor_expanded() {
+fn newest_completed_tool_joins_its_predecessor_immediately() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries.push(completed_tool(1, "grep -rn alpha src"));
     chat.entries.push(completed_tool(2, "cat notes.md"));
@@ -1337,14 +1380,7 @@ fn newest_completed_tool_leaves_a_lone_predecessor_expanded() {
 
     assert_eq!(
         text,
-        [
-            "✓ Tool · done",
-            "│ grep -rn alpha src",
-            "",
-            "✓ Tool · done",
-            "│ cat notes.md",
-            "",
-        ]
+        ["✓ Tool · done", "│ grep -rn alpha src, cat notes.md", "",]
     );
 }
 
@@ -1364,7 +1400,7 @@ fn a_later_completed_tool_collapses_the_earlier_run_entirely() {
         text,
         [
             "✓ Tool · done",
-            "│ grep, grep, cat",
+            "│ grep -rn alpha src, grep -rn beta src, cat notes.md",
             "",
             "● Agent",
             "│ found it",
@@ -1424,16 +1460,13 @@ fn failed_tool_renders_alone_and_breaks_the_collapsed_run() {
         text,
         [
             "✓ Tool · done",
-            "│ grep, grep",
+            "│ grep -rn alpha src, grep -rn beta src",
             "",
             "× Tool · failed",
             "│ cat missing.md",
             "",
             "✓ Tool · done",
-            "│ rg gamma src",
-            "",
-            "✓ Tool · done",
-            "│ rg delta src",
+            "│ rg gamma src, rg delta src",
             "",
         ]
     );
@@ -1445,13 +1478,13 @@ fn failed_tool_renders_alone_and_breaks_the_collapsed_run() {
         transcript_text(&mut chat, 80),
         [
             "✓ Tool · done",
-            "│ grep, grep",
+            "│ grep -rn alpha src, grep -rn beta src",
             "",
             "× Tool · failed",
             "│ cat missing.md",
             "",
             "✓ Tool · done",
-            "│ rg, rg",
+            "│ rg gamma src, rg delta src",
             "",
             "❯ You",
             "│ now ship it",
@@ -1517,7 +1550,7 @@ fn raw_mode_preserves_interleaved_tools_and_thoughts_in_source_order() {
 }
 
 #[test]
-fn a_later_running_tool_releases_earlier_results_and_stays_expanded_when_completed() {
+fn a_running_tool_breaks_the_earlier_group_then_joins_when_completed() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries.push(completed_tool(1, "grep -rn alpha src"));
     chat.entries.push(completed_tool(2, "grep -rn beta src"));
@@ -1532,7 +1565,7 @@ fn a_later_running_tool_releases_earlier_results_and_stays_expanded_when_complet
         transcript_text(&mut chat, 80),
         [
             "✓ Tool · done",
-            "│ grep, grep",
+            "│ grep -rn alpha src, grep -rn beta src",
             "",
             "● Tool · running",
             "│ cat notes.md",
@@ -1543,15 +1576,12 @@ fn a_later_running_tool_releases_earlier_results_and_stays_expanded_when_complet
     chat.entries[2].touch(4);
     chat.entries[2].tool_status = Some(ToolStatus::Completed);
 
-    // Once completed, the trailing tool protects its own full result.
+    // Once completed, the third summary joins the same run immediately.
     assert_eq!(
         transcript_text(&mut chat, 80),
         [
             "✓ Tool · done",
-            "│ grep, grep",
-            "",
-            "✓ Tool · done",
-            "│ cat notes.md",
+            "│ grep -rn alpha src, grep -rn beta src, cat notes.md",
             "",
         ]
     );
@@ -1579,6 +1609,7 @@ fn exact_diffstats_are_available_only_after_the_tool_finishes() {
             }),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
+            presentation: None,
         },
     };
 
@@ -2164,6 +2195,7 @@ fn materialized_tool_and_plan_conversion_preserves_more_than_eight_details() {
                 }),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
+                presentation: None,
             },
         }),
         Arc::new(TranscriptItem {
@@ -2224,6 +2256,7 @@ fn materialized_terminal_content_renders_output_and_exit_summary() {
                 signal: None,
             }],
             terminal_refs: vec!["term-1".into()],
+            presentation: None,
         },
     })];
 
@@ -2294,6 +2327,7 @@ fn kimi_text_and_captured_terminal_output_render_once_and_only_in_raw_mode() {
                 signal: None,
             }],
             terminal_refs: vec!["term-1".into()],
+            presentation: None,
         },
     })];
 
@@ -2358,6 +2392,7 @@ fn legacy_kimi_duplicate_is_suppressed_without_reprojecting_history() {
                 }),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
+                presentation: None,
             },
         }),
         Arc::new(TranscriptItem {
@@ -2451,6 +2486,7 @@ fn fallback_terminal_session(record: TerminalOutputRecord) -> MaterializedSessio
             call: serde_json::to_value(call).unwrap(),
             terminal_refs: vec![record.terminal_id.clone()],
             terminal_outputs: vec![record],
+            presentation: None,
         },
     })];
     session
@@ -2634,6 +2670,7 @@ fn attached_terminal_output_renders_when_the_call_no_longer_refers_to_it() {
                 signal: None,
             }],
             terminal_refs: vec!["term-1".into()],
+            presentation: None,
         },
     })];
 
@@ -2680,7 +2717,7 @@ fn codex_raw_output_renders_for_a_terminal_hel_has_no_record_for() {
 }
 
 #[test]
-fn browser_tool_entries_show_the_title_and_diffstats_only() {
+fn browser_tool_entries_show_the_summary_and_diffstats_only() {
     let mut session = MaterializedSession::empty("session-browser-tool");
     session.applied_event_ordinal = 1;
     session.applied_event_digest = "a".repeat(64);
@@ -2711,6 +2748,7 @@ fn browser_tool_entries_show_the_title_and_diffstats_only() {
             }),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
+            presentation: None,
         },
     })];
 
@@ -2726,10 +2764,34 @@ fn browser_tool_entries_show_the_title_and_diffstats_only() {
         .browser_transcript(None);
     assert_eq!(
         browser.entries[0].lines,
-        ["Edit src/lib.rs", "/workspace/src/lib.rs  +1 −0"],
-        "the remote viewer carries the Rich feed's title and diffstat, \
+        ["Edit", "/workspace/src/lib.rs  +1 −0"],
+        "the remote viewer carries the Rich feed's summary and diffstat, \
              not the Raw content or locations"
     );
+}
+
+#[test]
+fn browser_uses_rich_group_order_and_changes_its_topology_key() {
+    let first = completed_tool(1, "cd && python");
+    let initial = TranscriptSnapshot::from_entries(vec![first.clone()]).browser_transcript(None);
+    assert_eq!(initial.entries.len(), 1);
+    assert_eq!(initial.entries[0].lines, ["cd && python"]);
+
+    let grouped = TranscriptSnapshot::from_entries(vec![
+        first,
+        thought(2, "checking commands"),
+        completed_tool(3, "cat | wc"),
+    ])
+    .browser_transcript(None);
+
+    assert_ne!(grouped.presentation_key, initial.presentation_key);
+    assert_eq!(grouped.entries.len(), 2);
+    assert_eq!(grouped.entries[0].role, "thought");
+    assert_eq!(grouped.entries[0].lines, ["checking commands"]);
+    assert_eq!(grouped.entries[1].role, "tool");
+    assert_eq!(grouped.entries[1].id, 1);
+    assert_eq!(grouped.entries[1].updated_seq, 3);
+    assert_eq!(grouped.entries[1].lines, ["cd && python, cat | wc"]);
 }
 
 #[test]

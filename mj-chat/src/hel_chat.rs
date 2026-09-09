@@ -5979,6 +5979,7 @@ mod tests {
                 }),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
+                presentation: None,
             },
         }));
 

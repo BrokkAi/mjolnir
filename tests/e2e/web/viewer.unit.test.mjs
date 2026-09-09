@@ -48,6 +48,57 @@ function makeNode(tag = 'div') {
   };
 }
 
+test('conversation deltas carry the last presentation key and accept older responses', async () => {
+  const requests = [];
+  const renders = [];
+  const responses = [
+    { entries: [{ id: 1 }], latest_seq: 5, presentation_key: 'key one', reset: false },
+    {},
+    { entries: [{ id: 2 }], latest_seq: 6, reset: false },
+    {},
+  ];
+  const context = vm.createContext({
+    currentSession: 'session/1',
+    snapshot: { sessions: [{ id: 'session/1', capabilities: { open: true } }] },
+    conversationInFlight: false,
+    conversationPending: false,
+    conversationGeneration: 0,
+    cursor: 0,
+    presentationKey: null,
+    acknowledged: 0,
+    URLSearchParams,
+    encodeURIComponent,
+    JSON,
+    request: async (url, options) => {
+      requests.push({ url, options });
+      return responses.shift();
+    },
+    renderEntries: (entries, replace) => renders.push({ entries, replace }),
+    isTransitioningSession: () => false,
+    isLoadingConversationSession: () => false,
+    renderConversationTransition: () => assert.fail('conversation unexpectedly transitioned'),
+    showLogin: () => assert.fail('conversation unexpectedly requested login'),
+    document: { querySelector: () => ({ textContent: '' }) },
+  });
+  vm.runInContext(
+    sourceBetween('async function loadConversation(', '\nasync function openConversation('),
+    context,
+  );
+
+  await vm.runInContext('loadConversation(false)', context);
+  assert.equal(requests[0].url, '/api/conversations/session%2F1');
+  assert.equal(context.presentationKey, 'key one');
+  assert.deepEqual(renders[0], { entries: [{ id: 1 }], replace: true });
+
+  await vm.runInContext('loadConversation(true)', context);
+  assert.equal(
+    requests[2].url,
+    '/api/conversations/session%2F1?after_seq=5&presentation_key=key+one',
+  );
+  assert.equal(context.presentationKey, null, 'missing keys remain compatible with an older server');
+  assert.deepEqual(renders[1], { entries: [{ id: 2 }], replace: false });
+});
+
 test('session titles stay blue while truly idle and clear blue when activity resumes', () => {
   const classes = new Set();
   const node = {

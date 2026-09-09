@@ -1301,6 +1301,7 @@ mod tests {
                 call: tool_call("completed", "tool output"),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
+                presentation: None,
             },
         ]))
         .unwrap();
@@ -1328,6 +1329,7 @@ mod tests {
                 call: tool_call("failed", "MCP server startup was cancelled"),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
+                presentation: None,
             },
             user("do the work"),
             agent("done"),

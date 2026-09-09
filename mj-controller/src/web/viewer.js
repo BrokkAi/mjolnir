@@ -102,6 +102,7 @@ let snapshot,
   currentSession,
   moveDraft,
   cursor = 0,
+  presentationKey = null,
   acknowledged = 0,
   eventSource,
   conversationMode = null;
@@ -4269,6 +4270,7 @@ function syncConversationMode(session) {
   conversationGeneration += 1;
   conversationPending = false;
   cursor = 0;
+  presentationKey = null;
   acknowledged = 0;
   conversationTransitionError.textContent = '';
   clearConversationContents();
@@ -4328,8 +4330,14 @@ async function loadConversation(delta = false) {
   const generation = conversationGeneration;
   const sessionId = currentSession;
   try {
+    const query = new URLSearchParams();
+    if (delta && cursor) {
+      query.set('after_seq', String(cursor));
+      if (presentationKey) query.set('presentation_key', presentationKey);
+    }
+    const suffix = query.toString() ? `?${query.toString()}` : '';
     const result = await request(
-      `/api/conversations/${encodeURIComponent(sessionId)}${delta && cursor ? `?after_seq=${cursor}` : ''}`,
+      `/api/conversations/${encodeURIComponent(sessionId)}${suffix}`,
     );
     const latest = snapshot?.sessions.find(session => session.id === sessionId);
     if (
@@ -4338,6 +4346,9 @@ async function loadConversation(delta = false) {
       || isTransitioningSession(latest)
     ) return;
     renderEntries(result.entries, !delta || result.reset);
+    presentationKey = typeof result.presentation_key === 'string'
+      ? result.presentation_key
+      : null;
     cursor = result.latest_seq;
     if (cursor > acknowledged) {
       const through = cursor;
@@ -4391,6 +4402,7 @@ async function openConversation(id) {
   conversationMode = null;
   conversationPending = false;
   cursor = 0;
+  presentationKey = null;
   acknowledged = 0;
   clearConversationContents();
   document.querySelector('#conversation-title').textContent = session.title;
@@ -4501,6 +4513,7 @@ function leaveConversation() {
   conversationGeneration += 1;
   conversationPending = false;
   cursor = 0;
+  presentationKey = null;
   acknowledged = 0;
   clearConversationContents();
   clearPromptImages();
@@ -5044,6 +5057,7 @@ function reconnect() {
   // A reconnect reconciles by full snapshot rather than assuming the deltas
   // missed while offline line up with the cursor.
   cursor = 0;
+  presentationKey = null;
   refresh().then(ok => {
     if (ok) setConnection('online');
     const session = snapshot?.sessions.find(item => item.id === currentSession);
