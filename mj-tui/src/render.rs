@@ -2256,11 +2256,7 @@ fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<QuotaTableRow> 
                         )
                     }
                     Some(quota) => (
-                        Line::raw(
-                            quota
-                                .error_label()
-                                .unwrap_or_else(|| "unavailable: unknown error".into()),
-                        ),
+                        Line::raw(quota.error_label().unwrap_or_else(|| "unavailable".into())),
                         String::new(),
                         Line::default(),
                         String::new(),
@@ -6093,7 +6089,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("unavailable: offline"));
+        assert!(rendered.contains("unavailable"));
+        assert!(!rendered.contains("offline"));
         assert!(rendered.contains("Quota (refreshed"));
         assert!(!rendered.contains("Refreshed"));
         assert!(!rendered.contains("Access"));
