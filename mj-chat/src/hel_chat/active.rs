@@ -2676,6 +2676,67 @@ pub(super) fn render_in(
     let mut transcript_area = regions.transcript;
     let prompt_area = regions.prompt;
     let prompt_width = prompt_content_width(prompt_area.width);
+
+    // An open question replaces the composer, but only with the natural
+    // height of its current page (up to half of the combined conversation
+    // bands). The transcript is rendered into the rows left above it so its
+    // viewport, scrollbar, and selection row space describe what is visible.
+    // This branch deliberately runs before the ordinary prompt/split drawing:
+    // no hidden prompt or autocomplete surface may survive underneath the
+    // question, and both visible scrollable surfaces remain registered.
+    if let Some(question_height) = chat.elicitation.as_ref().map(|dialog| {
+        let combined = Rect::new(
+            transcript_area.x,
+            transcript_area.y,
+            transcript_area.width,
+            prompt_area.bottom().saturating_sub(transcript_area.y),
+        );
+        dialog
+            .natural_height(combined.width)
+            .min(combined.height / 2)
+    }) {
+        let combined = Rect::new(
+            transcript_area.x,
+            transcript_area.y,
+            transcript_area.width,
+            prompt_area.bottom().saturating_sub(transcript_area.y),
+        );
+        let transcript_height = combined.height.saturating_sub(question_height);
+        let question_area = Rect::new(
+            combined.x,
+            combined.bottom().saturating_sub(question_height),
+            combined.width,
+            question_height,
+        );
+        let upper_transcript = Rect::new(combined.x, combined.y, combined.width, transcript_height);
+
+        chat.voice_button_area = None;
+        chat.task_control_area = None;
+        chat.task_dialog_area = None;
+        chat.reviewer_area = None;
+        chat.split_action_areas.clear();
+        chat.turn_review_action_areas.clear();
+        chat.voice_form.cancel_pointer();
+        chat.voice_form.end_frame(super::VoiceControl::Microphone);
+
+        render_transcript(frame, upper_transcript, chat, transcript_selected);
+        if question_height > 0
+            && let Some(dialog) = chat.elicitation.as_ref()
+        {
+            render_elicitation_in(
+                frame,
+                dialog,
+                &mut chat.frame_surfaces,
+                question_area,
+                prompt_focused,
+            );
+        }
+        if let Some(footer) = regions.footer {
+            render_chat_footer(frame, footer, chat, prompt_focused);
+        }
+        return;
+    }
+
     let split = chat.second_opinion_split() || chat.turn_review_split();
     // Review panes replace the composer, so retain their existing activity
     // row. Normal conversations put the spinner in the composer border.
@@ -2996,28 +3057,6 @@ pub(super) fn render_in(
         chat.frame_surfaces
             .push(SurfaceFrame::fixed(SurfaceId::ModalBody, body));
         return;
-    }
-    if let Some(dialog) = chat.elicitation.as_ref() {
-        // The question owns only the session content area while it is up. The
-        // navigator and support panes remain in the host's surface registry,
-        // so they stay clickable even while this form is waiting for an answer.
-        chat.frame_surfaces.clear();
-        let question_area = Rect::new(
-            transcript_area.x,
-            transcript_area.y,
-            transcript_area.width,
-            prompt_area
-                .bottom()
-                .saturating_sub(transcript_area.y)
-                .max(transcript_area.height),
-        );
-        render_elicitation_in(
-            frame,
-            dialog,
-            &mut chat.frame_surfaces,
-            question_area,
-            prompt_focused,
-        );
     }
 }
 
@@ -3738,13 +3777,10 @@ mod tests {
         let popup_top = row_of("Overlaid dialog");
         row_of("Visible dialog message");
         assert!(!lines.iter().any(|line| line.contains("Background tasks")));
-        // The question occupies the conversation bands, so the underlying
-        // transcript cannot be selected or read through it.
-        assert!(
-            !lines
-                .iter()
-                .any(|line| line.contains("UNDERLYING CHAT SENTINEL"))
-        );
+        // The reduced transcript remains visible above the bottom-anchored
+        // question, rather than being hidden behind it.
+        let sentinel_top = row_of("UNDERLYING CHAT SENTINEL");
+        assert!(sentinel_top < popup_top);
         // The footer remains outside the question even when width fitting
         // drops composer hints to make room for the host's function keys.
         assert_eq!(row_of("F1 help"), lines.len() - 1);
@@ -3798,7 +3834,7 @@ mod tests {
     }
 
     #[test]
-    fn an_open_elicitation_replaces_only_chat_surfaces_with_its_own() {
+    fn an_open_elicitation_keeps_the_upper_transcript_and_hides_the_prompt() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
             ElicitationRequest {
@@ -3812,21 +3848,223 @@ mod tests {
 
         drawn_transcript(&mut chat, 80, 24);
 
-        // No drag reaches the hidden chat underneath it, while the host can
-        // still append navigator and support-pane surfaces around this chat.
+        // The question owns the lower half, while the reduced transcript
+        // remains independently selectable and scrollable above it.
         let surfaces = chat.frame_surfaces();
+        let transcript = surfaces
+            .surface(SurfaceId::Transcript)
+            .expect("reduced transcript registered");
         let message = surfaces
             .surface(SurfaceId::ElicitationMessage)
             .expect("message pane registered");
         assert!(surfaces.surface(SurfaceId::ModalBody).is_some());
-        assert!(surfaces.surface(SurfaceId::Transcript).is_none());
         assert!(surfaces.surface(SurfaceId::PromptInput).is_none());
+        assert!(transcript.rect.bottom() <= message.rect.y);
         assert_eq!(
             surfaces
                 .surface_at(message.rect.x, message.rect.y)
                 .map(|surface| surface.id),
             Some(SurfaceId::ElicitationMessage)
         );
+    }
+
+    #[test]
+    fn short_question_stays_natural_and_leaves_more_than_half_to_transcript() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+            ElicitationRequest {
+                id: "short-question".into(),
+                message: "One short question".into(),
+                title: Some("Custom title".into()),
+                description: None,
+                fields: Vec::new(),
+            },
+        ));
+        let natural = chat.elicitation.as_ref().unwrap().natural_height(80);
+
+        drawn_transcript(&mut chat, 80, 24);
+
+        let transcript = chat
+            .frame_surfaces()
+            .surface(SurfaceId::Transcript)
+            .expect("transcript registered");
+        let message = chat
+            .frame_surfaces()
+            .surface(SurfaceId::ElicitationMessage)
+            .expect("question message registered");
+        let question_height = 23 - transcript.rect.bottom() - 1;
+        assert_eq!(question_height, natural);
+        assert!(question_height < 23 / 2);
+        assert!(transcript.rect.height > message.rect.height);
+    }
+
+    #[test]
+    fn tall_question_is_capped_at_half_and_keeps_both_surfaces_non_overlapping() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+            ElicitationRequest {
+                id: "tall-question".into(),
+                message: "Question message".into(),
+                title: Some("Tall question".into()),
+                description: Some("This field description is intentionally long enough to wrap into many rows when it is shown in the focused form.".into()),
+                fields: vec![ElicitationField {
+                    id: "answer".into(),
+                    title: "Answer".into(),
+                    description: Some("The focused answer description also consumes wrapped rows. ".repeat(20)),
+                    required: false,
+                    secret: false,
+                    custom_answer_for: None,
+                    custom_answer_option: None,
+                    kind: ElicitationFieldKind::Text {
+                        default: None,
+                        min_length: None,
+                        max_length: None,
+                        pattern: None,
+                        format: None,
+                    },
+                }],
+            },
+        ));
+        let natural = chat.elicitation.as_ref().unwrap().natural_height(80);
+        assert!(natural > 23 / 2);
+
+        drawn_transcript(&mut chat, 80, 24);
+
+        let surfaces = chat.frame_surfaces();
+        let transcript = surfaces
+            .surface(SurfaceId::Transcript)
+            .expect("transcript registered");
+        let message = surfaces
+            .surface(SurfaceId::ElicitationMessage)
+            .expect("question message registered");
+        let question_height = 23 - transcript.rect.bottom() - 1;
+        assert_eq!(question_height, 23 / 2);
+        assert!(transcript.rect.bottom() <= message.rect.y);
+        assert!(surfaces.surface(SurfaceId::PromptInput).is_none());
+    }
+
+    #[test]
+    fn transcript_wheel_scrolls_the_reduced_viewport_independently() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.entries = (0..40)
+            .map(|index| {
+                ChatEntry::plain(index, ChatRole::Agent, format!("transcript row {index}"))
+            })
+            .collect();
+        chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+            ElicitationRequest {
+                id: "scroll-question".into(),
+                message: "Answer this".into(),
+                title: None,
+                description: None,
+                fields: Vec::new(),
+            },
+        ));
+        chat.task_dialog_open = true;
+        drawn_transcript(&mut chat, 80, 24);
+        let transcript = chat
+            .frame_surfaces()
+            .surface(SurfaceId::Transcript)
+            .expect("transcript registered")
+            .rect;
+        let before = chat.anchor;
+
+        assert_eq!(
+            chat.handle_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: transcript.x + 1,
+                row: transcript.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            ChatAction::None
+        );
+        assert_ne!(chat.anchor, before);
+        assert!(chat.elicitation.is_some());
+
+        let scrollbar_x = chat
+            .frame_surfaces()
+            .surface(SurfaceId::Transcript)
+            .expect("transcript registered")
+            .rect
+            .right();
+        assert_eq!(
+            chat.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: scrollbar_x,
+                row: transcript.y + transcript.height / 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+            ChatAction::None
+        );
+        assert!(chat.transcript_scrollbar_dragging());
+        chat.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: scrollbar_x,
+            row: transcript.y + transcript.height / 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(!chat.transcript_scrollbar_dragging());
+    }
+
+    #[test]
+    fn question_pointer_capture_wins_when_dragged_into_transcript() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.entries = (0..40)
+            .map(|index| ChatEntry::plain(index, ChatRole::Agent, "transcript"))
+            .collect();
+        chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+            ElicitationRequest {
+                id: "captured-question".into(),
+                message: "Choose whether to continue".into(),
+                title: None,
+                description: None,
+                fields: vec![ElicitationField {
+                    id: "continue".into(),
+                    title: "Continue".into(),
+                    description: None,
+                    required: false,
+                    secret: false,
+                    custom_answer_for: None,
+                    custom_answer_option: None,
+                    kind: ElicitationFieldKind::Boolean {
+                        default: Some(false),
+                    },
+                }],
+            },
+        ));
+        drawn_transcript(&mut chat, 80, 24);
+        let form = chat
+            .frame_surfaces()
+            .surface(SurfaceId::ModalBody)
+            .expect("question form registered")
+            .rect;
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: form.x + 1,
+            row: form.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(chat.component_handles_mouse(press));
+        chat.handle_mouse(press);
+        let transcript = chat
+            .frame_surfaces()
+            .surface(SurfaceId::Transcript)
+            .expect("transcript registered")
+            .rect;
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: transcript.x + 1,
+            row: transcript.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(chat.component_handles_mouse(drag));
+        let before = chat.anchor;
+        chat.handle_mouse(drag);
+        assert_eq!(chat.anchor, before);
+        chat.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            ..drag
+        });
     }
 
     #[test]

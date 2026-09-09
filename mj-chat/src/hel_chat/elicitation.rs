@@ -111,6 +111,11 @@ pub(super) struct ElicitationDialog {
     /// of a long source line.
     message_anchor: Cell<Option<(usize, usize)>>,
     message_anchor_width: Cell<u16>,
+    /// The complete question panel bounds from the most recent frame. This
+    /// lets mouse routing distinguish its chrome from the transcript above
+    /// without making the message pane a component hitbox (message text is
+    /// still selectable).
+    rendered_area: Cell<Option<Rect>>,
     /// Wrapped rows to skip in the form body when a long option list is
     /// taller than the space left above the answer controls.
     focus_scroll: Cell<u16>,
@@ -172,6 +177,7 @@ impl ElicitationDialog {
             message_area: Cell::new(None),
             message_anchor: Cell::new(None),
             message_anchor_width: Cell::new(0),
+            rendered_area: Cell::new(None),
             focus_scroll: Cell::new(0),
             changed: Cell::new(false),
         }
@@ -179,6 +185,43 @@ impl ElicitationDialog {
 
     pub(super) fn request(&self) -> &ElicitationRequest {
         &self.request
+    }
+
+    /// The natural height of the current question page, including its panel
+    /// border, message, focused answer content, action row, and footer.
+    ///
+    /// Ordinary elicitation messages retain the existing three-row allowance;
+    /// plan-review messages use their complete wrapped message height and are
+    /// capped by the caller to the space available on screen.
+    pub(super) fn natural_height(&self, width: u16) -> u16 {
+        let content_width = width.saturating_sub(2).max(1);
+        let focus = focus_content(self);
+        let focus_rows = u16::try_from(
+            Paragraph::new(focus.lines)
+                .wrap(Wrap { trim: false })
+                .line_count(content_width),
+        )
+        .unwrap_or(u16::MAX)
+        .max(1);
+        let message_rows = u16::try_from(
+            Paragraph::new(self.request.message.as_str())
+                .wrap(Wrap { trim: true })
+                .line_count(content_width),
+        )
+        .unwrap_or(u16::MAX)
+        .max(1);
+        let message_rows = if self.is_plan_review() {
+            message_rows
+        } else {
+            message_rows.min(3)
+        };
+        // Two border rows, one footer row, and the two action rows match the
+        // full-size renderer. The renderer collapses actions to one row only
+        // when the capped pane itself is exceptionally small.
+        2u16.saturating_add(1)
+            .saturating_add(2)
+            .saturating_add(message_rows)
+            .saturating_add(focus_rows)
     }
 
     pub(super) fn draft(&self) -> ElicitationDraft {
@@ -393,6 +436,12 @@ impl ElicitationDialog {
         form.captures_pointer() || form.contains(column, row)
     }
 
+    pub(super) fn rendered_area_contains(&self, column: u16, row: u16) -> bool {
+        self.rendered_area
+            .get()
+            .is_some_and(|area| area.contains(Position::new(column, row)))
+    }
+
     pub(super) fn cancel_component_pointer(&self) {
         let mut form = self.form.borrow_mut();
         let captured = form.captures_pointer();
@@ -413,6 +462,7 @@ impl ElicitationDialog {
 
     pub(super) fn reset_component_geometry(&self) {
         self.form.borrow_mut().reset_geometry();
+        self.rendered_area.set(None);
     }
 
     fn focus_index(&self) -> usize {
@@ -929,6 +979,7 @@ fn render_elicitation_at(
     // rectangle so hidden transcript text cannot show through it, while the
     // navigator and every neighboring pane remain untouched.
     frame.render_widget(Clear, area);
+    dialog.rendered_area.set(Some(area));
     let title = dialog.request.title.as_deref().unwrap_or("Agent question");
     let block = theme::panel(focused).title(format!(" {title} "));
     let inner = block.inner(area);

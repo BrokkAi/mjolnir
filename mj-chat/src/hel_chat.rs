@@ -2810,6 +2810,12 @@ impl ChatState {
     /// text selection or the host surface. Captured presses remain owned even
     /// after the pointer leaves the control's hitbox.
     pub fn component_handles_mouse(&self, mouse: MouseEvent) -> bool {
+        // An elicitation is the visible modal. Check its captured controls
+        // before retained task/config/review geometry so those hidden states
+        // cannot steal transcript selection or pointer events above it.
+        if let Some(dialog) = self.elicitation.as_ref() {
+            return dialog.component_handles_mouse_at(mouse.column, mouse.row);
+        }
         if self.task_dialog_open {
             return true;
         }
@@ -2827,11 +2833,6 @@ impl ChatState {
             return true;
         }
         if self.config_picker_handles_mouse(mouse.column, mouse.row) {
-            return true;
-        }
-        if let Some(dialog) = self.elicitation.as_ref()
-            && dialog.component_handles_mouse_at(mouse.column, mouse.row)
-        {
             return true;
         }
         self.second_opinion_handles_mouse(mouse.column, mouse.row)
@@ -2910,24 +2911,74 @@ impl ChatState {
         // or a review pane. This also lets reviewer elicitations stay above
         // their split while a stale scrollbar is being redrawn.
         if let Some(dialog) = self.elicitation.as_mut() {
-            let request = dialog.request().clone();
-            let response = dialog.handle_mouse(mouse);
-            let dialog_changed = dialog.take_changed();
-            if dialog_changed {
-                self.mark_visible_changed();
+            let over_form = dialog.component_handles_mouse_at(mouse.column, mouse.row);
+            let over_message = dialog
+                .message_area()
+                .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)));
+            let over_question_chrome = dialog.rendered_area_contains(mouse.column, mouse.row);
+            if over_form || over_message {
+                let request = dialog.request().clone();
+                let response = dialog.handle_mouse(mouse);
+                let dialog_changed = dialog.take_changed();
+                if dialog_changed {
+                    self.mark_visible_changed();
+                }
+                if let Some(response) = response {
+                    self.elicitation = None;
+                    self.mark_visible_changed();
+                    if std::mem::take(&mut self.elicitation_is_reviewers) {
+                        return self.finish_reviewer_elicitation_response(request, response);
+                    }
+                    if let Some(proposal) =
+                        hel::hel_acp::plan_review_second_opinion(&request, &response)
+                            .map(str::to_owned)
+                    {
+                        return ChatAction::StartSecondOpinion { request, proposal };
+                    }
+                    return ChatAction::RespondElicitation { request, response };
+                }
+                return ChatAction::None;
             }
-            if let Some(response) = response {
-                self.elicitation = None;
-                self.mark_visible_changed();
-                if std::mem::take(&mut self.elicitation_is_reviewers) {
-                    return self.finish_reviewer_elicitation_response(request, response);
+            // A transcript thumb can be released after the pointer crosses
+            // the question. Preserve that already-captured transcript
+            // gesture, while the form-capture branch above still has
+            // priority for question controls dragged upward.
+            if self.transcript_scrollbar_dragging() && self.handle_transcript_scrollbar_mouse(mouse)
+            {
+                return ChatAction::None;
+            }
+            // The question owns its border and footer, but those cells are not
+            // controls. Keep a wheel or click there from falling through to
+            // the transcript; the upper transcript remains the only region
+            // that should scroll while the question is open.
+            if over_question_chrome {
+                return ChatAction::None;
+            }
+            // Once a question is visible, stale task/config/review state is
+            // retained for later restoration but must not intercept the
+            // transcript above it. Route every other mouse event directly to
+            // the transcript and stop before those modal handlers below.
+            if self.handle_transcript_scrollbar_mouse(mouse) {
+                return ChatAction::None;
+            }
+            let over_transcript = self
+                .frame_surfaces
+                .surface(crate::hel_selection::SurfaceId::Transcript)
+                .is_some_and(|surface| {
+                    surface
+                        .rect
+                        .contains(Position::new(mouse.column, mouse.row))
+                });
+            if over_transcript {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.scroll_history_up(MOUSE_SCROLL_ROWS);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.scroll_history_down(MOUSE_SCROLL_ROWS);
+                    }
+                    _ => {}
                 }
-                if let Some(proposal) =
-                    hel::hel_acp::plan_review_second_opinion(&request, &response).map(str::to_owned)
-                {
-                    return ChatAction::StartSecondOpinion { request, proposal };
-                }
-                return ChatAction::RespondElicitation { request, response };
             }
             return ChatAction::None;
         }

@@ -1167,10 +1167,10 @@ impl ChatState {
     }
 
     fn transcript_scrollbar_modal_blocked(&self) -> bool {
-        self.elicitation.is_some()
-            || self.config_picker_active()
-            || (self.second_opinion_active() && !self.second_opinion_split())
-            || (self.turn_review_active() && !self.turn_review_split())
+        self.elicitation.is_none()
+            && (self.config_picker_active()
+                || (self.second_opinion_active() && !self.second_opinion_split())
+                || (self.turn_review_active() && !self.turn_review_split()))
     }
 
     /// Handles the primary transcript's one-cell scrollbar. A drag is kept
