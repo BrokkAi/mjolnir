@@ -5,13 +5,15 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "show_stopped_sessions":true, "spinner":"scan", "theme":"midnight", "advanced":{}, "startup":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "startup":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
         }
         "startup" => json!({"enabled":true,"prompt":true,"profile":null,"target":null}),
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
-        "advanced" => json!({"detailed_activity_clocks":false}),
+        "advanced" => {
+            json!({"detailed_activity_clocks":false,"show_stopped_sessions":false})
+        }
         "review" => {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
         }
@@ -45,7 +47,7 @@ fn target_defaults(kind: &str) -> Value {
         "local-podman" | "local-docker" | "apple-container" | "ssh-podman" | "ssh-docker"
     ) {
         fields.as_object_mut().unwrap().extend(json!({
-            "image":mj_controller::hel_setup::DEFAULT_IMAGE,"pull_policy":"auto","platform":null,
+            "image":mj_client::target::DEFAULT_IMAGE,"pull_policy":"auto","platform":null,
             "cpus":null,"memory":null,"environment":{},"workspace_storage":{"kind":"podman-volume"}
         }).as_object().unwrap().clone());
     }
@@ -99,6 +101,7 @@ pub(super) fn label(key: &str) -> String {
         "spinner" => "Activity animation",
         "advanced" => "Advanced",
         "detailed_activity_clocks" => "Detailed activity clocks",
+        "show_stopped_sessions" => "Show stopped sessions",
         "theme" => "Theme",
         "phone" => "Web access",
         "review" => "Code review",
@@ -267,6 +270,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "advanced" => "Optional diagnostics and display details for the activity surface.",
         "detailed_activity_clocks" => "Show elapsed turn and tool clocks in session activity rows.",
+        "show_stopped_sessions" => "Include stopped sessions in the terminal Sessions pane.",
         "bundles" => {
             "Projects can contain one or more repositories. Choose the main repository where the agent starts."
         }

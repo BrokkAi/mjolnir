@@ -385,7 +385,7 @@ fn encode_native_image(image: arboard::ImageData<'_>) -> Result<ClipboardImage> 
     if image.bytes.len() != expected {
         bail!("clipboard image has invalid RGBA data");
     }
-    let optimized = mj_controller::hel_image::optimize_rgba(width, height, image.bytes.as_ref())
+    let optimized = mj_client::image::optimize_rgba(width, height, image.bytes.as_ref())
         .context("optimize clipboard image")?;
     Ok(ClipboardImage {
         data_base64: base64::engine::general_purpose::STANDARD
@@ -460,8 +460,7 @@ pub fn normalize_image(image: ClipboardImage) -> Result<ClipboardImage> {
         return Ok(image);
     }
     let bytes = decode_base64(&image.data_base64)?;
-    let optimized =
-        mj_controller::hel_image::optimize_image(&bytes).context("optimize clipboard image")?;
+    let optimized = mj_client::image::optimize_image(&bytes).context("optimize clipboard image")?;
     Ok(ClipboardImage {
         data_base64: base64::engine::general_purpose::STANDARD
             .encode(optimized.bytes)

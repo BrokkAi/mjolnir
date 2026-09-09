@@ -59,14 +59,14 @@ jobs:
         # Every published crate outside the repository root keeps its own copy
         # of the licence text, because `cargo package` only collects files from
         # the crate's own directory.
-        for directory in voice-worker mj-worker mj-controller mj-chat mj-tui mj-cli mj-desktop; do
+        for directory in voice-worker mj-worker mj-client mj-controller mj-chat mj-tui mj-cli mj-desktop; do
           diff -u LICENSE "$directory/LICENSE"
         done
         # Assemble the file list for each published crate and confirm the
         # licence text ships with it. `--list` does not build, so a crate whose
         # path dependencies are not on the registry yet still works here.
         for package in brokk-mj-core brokk-mj-voice-worker brokk-mj-worker \
-          brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mjolnir \
+          brokk-mj-client brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mjolnir \
           brokk-mj-desktop; do
           cargo package --locked --allow-dirty --list -p "$package" > "/tmp/$package-package-files.txt"
           grep -Fx LICENSE "/tmp/$package-package-files.txt"

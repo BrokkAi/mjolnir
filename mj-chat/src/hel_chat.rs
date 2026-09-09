@@ -443,6 +443,7 @@ pub struct SessionHeaderIdentity {
 pub struct ChatSessionContext {
     pub config: HelConfig,
     pub session: SessionRecord,
+    pub reviewer_stager: mj_client::session::ReviewerStager,
 }
 
 pub struct ChatState {
@@ -3630,7 +3631,7 @@ mod tests {
     use hel::hel_review::driver::TurnReviewPhase;
     use hel::hel_review::lanes::ReviewTier;
     use hel::hel_worker::ActivePrompt;
-    use mj_controller::hel_review_host::RuntimeReviewView;
+    use mj_client::review::RuntimeReviewView;
 
     #[test]
     fn activity_animation_stops_when_foreground_and_background_work_settle() {
