@@ -151,7 +151,8 @@ impl Controller {
             lease.release();
             return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
         }
-        if !snapshot.operational.is_quiet() {
+        let harness = self.state.sessions[session_id].harness_kind;
+        if !snapshot.operational.safe_to_replace(harness) {
             lease.release();
             return Ok(WorkerUpgradeOutcome::Deferred);
         }

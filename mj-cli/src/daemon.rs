@@ -1104,7 +1104,8 @@ impl RuntimeState {
                 // in a turn publishes a view every 150 ms. Skipping those here
                 // keeps the config clone off the streaming path; the
                 // coordinator still decides, from `quiet`, whether to act.
-                let quiet = view.connected && snapshot.operational.is_quiet();
+                let quiet =
+                    view.connected && snapshot.operational.safe_to_replace(session.harness_kind);
                 if quiet {
                     self.worker_upgrade_observer
                         .observe(WorkerUpgradeObservation {

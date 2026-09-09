@@ -3576,6 +3576,7 @@ mod tests {
             harness_turn: None,
             last_harness_turn_started_ordinal: None,
             background_commands: Vec::new(),
+            background_work_known: None,
         };
 
         // A session whose agent has not answered `initialize` has advertised
@@ -3651,6 +3652,7 @@ mod tests {
             harness_turn: None,
             last_harness_turn_started_ordinal: None,
             background_commands: Vec::new(),
+            background_work_known: None,
         };
         let mut operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
         let materialized_activity =

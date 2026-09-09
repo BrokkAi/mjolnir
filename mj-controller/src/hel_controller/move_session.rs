@@ -417,6 +417,7 @@ impl Controller {
                 self.state.sessions[&id].state,
                 SessionState::Running | SessionState::Disconnected
             ) {
+                let source_harness = self.state.sessions[&id].harness_kind;
                 let handle = manager
                     .wait_for_session(&id, std::time::Duration::from_secs(5))
                     .await?;
@@ -427,7 +428,7 @@ impl Controller {
                         let mut operational = snapshot.operational.clone();
                         operational.queued_prompts.clear();
                         operational.checkpoint_barrier = None;
-                        !operational.is_quiet()
+                        !operational.safe_to_replace(source_harness)
                     });
                 checked.queued_commands = queue;
                 checked.fingerprint = fingerprint;

@@ -5,6 +5,7 @@
 //! [`surface`] projects protocol capabilities for the chat control surface.
 
 mod dialect;
+mod kimi_tasks;
 #[cfg(test)]
 mod plan_tests;
 #[cfg(test)]
@@ -12,6 +13,10 @@ mod session_config_tests;
 pub mod step_clock;
 pub mod surface;
 mod terminal_compat;
+pub use kimi_tasks::{
+    KimiBackgroundTask, KimiTaskSnapshot, KimiWireFollower, KimiWireRefresh,
+    resolve_session_dir as resolve_kimi_session_dir,
+};
 pub use step_clock::StepClock;
 pub use surface::PlanControl;
 pub use terminal_compat::fallback_terminal_tool_call;

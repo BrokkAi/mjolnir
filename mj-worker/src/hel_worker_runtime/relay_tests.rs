@@ -14,9 +14,10 @@ use hel::hel_acp::{CommandRequest, RuntimeEvent};
 use hel::hel_config::ExecutionPolicy;
 use hel::hel_elicitation::ElicitationResponse;
 use hel::hel_worker::{
-    DurableRelay, RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION, RelayCommand, RelayErrorCode,
-    RelayExecutionState, RelayObservation, RelayProtocolError, RelayRequest, RelayRequestEnvelope,
-    RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload,
+    BackgroundWorkPolicy, DurableRelay, RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION,
+    RelayCommand, RelayErrorCode, RelayExecutionState, RelayObservation, RelayProtocolError,
+    RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
+    RelayResponsePayload,
 };
 use hel::hel_worker_launch::ProjectMemoryMcpDelivery;
 
@@ -910,6 +911,83 @@ fn assert_prompt(command: CommandRequest, expected_id: &str, expected_text: &str
         prompt.as_slice(),
         [ContentBlock::Text(text)] if text.text == expected_text
     ));
+}
+
+#[tokio::test]
+async fn kimi_native_task_level_blocks_replacement_until_termination() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("kimi");
+    let session_dir = home.join("sessions/workspace").join(SESSION_ID);
+    let wire = session_dir.join("agents/main/wire.jsonl");
+    std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+    std::fs::write(
+        session_dir.join("state.json"),
+        serde_json::json!({"id": SESSION_ID}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"sessionId": SESSION_ID, "sessionDir": session_dir})
+        ),
+    )
+    .unwrap();
+    let started = serde_json::json!({
+        "type": "task.started",
+        "agentId": "main",
+        "info": {
+            "taskId": "agent-1",
+            "description": "fix the regression",
+            "status": "running",
+            "detached": true,
+            "startedAt": 1234,
+            "kind": "agent",
+            "agentId": "agent-1",
+            "parentToolCallId": "tool-agent"
+        }
+    });
+    std::fs::write(&wire, format!("{started}\n")).unwrap();
+
+    let mut durable = DurableRelay::open(temp.path().join("relay"), SESSION_ID, "1.0.0").unwrap();
+    durable.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+    durable
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let relay = Arc::new(Mutex::new(durable));
+    let mut monitor = unix::KimiTaskMonitor::new(Ok(home));
+    monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
+
+    let running = relay.lock().unwrap().operational_state();
+    assert_eq!(running.background_commands.len(), 1);
+    assert!(!running.safe_to_replace(HarnessKind::Kimi));
+
+    let terminated = serde_json::json!({
+        "type": "task.terminated",
+        "agentId": "main",
+        "info": {
+            "taskId": "agent-1",
+            "status": "completed",
+            "agentId": "agent-1",
+            "parentToolCallId": "tool-agent"
+        }
+    });
+    use std::io::Write as _;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wire)
+            .unwrap(),
+        "{terminated}"
+    )
+    .unwrap();
+    monitor.refresh(&relay, true).await.unwrap();
+
+    let finished = relay.lock().unwrap().operational_state();
+    assert!(finished.background_commands.is_empty());
+    assert!(finished.safe_to_replace(HarnessKind::Kimi));
 }
 
 #[tokio::test]

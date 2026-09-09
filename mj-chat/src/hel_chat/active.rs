@@ -3698,6 +3698,7 @@ mod tests {
                     harness_turn: None,
                     last_harness_turn_started_ordinal: None,
                     background_commands: Vec::new(),
+                    background_work_known: None,
                 },
             }),
             connected: true,

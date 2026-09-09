@@ -37,6 +37,15 @@ impl RuntimeState {
         self: &Arc<Self>,
         selection: MoveSelection,
     ) -> Result<MovePreparation> {
+        let source_harness = self
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .sessions
+            .get(&selection.session_id)
+            .context("Move session is missing")?
+            .harness_kind;
         let live = self
             .session_manager
             .session(selection.session_id.clone())
@@ -56,7 +65,7 @@ impl RuntimeState {
             let mut operational = snapshot.operational;
             operational.queued_prompts.clear();
             operational.checkpoint_barrier = None;
-            preparation.active |= !operational.is_quiet();
+            preparation.active |= !operational.safe_to_replace(source_harness);
         }
         Ok(preparation)
     }

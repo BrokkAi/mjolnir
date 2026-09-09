@@ -28,6 +28,8 @@ use hel::hel_worker_protocol::{DecodedRelayRequest, decode_relay_request};
 pub(crate) const ACP_EVENT_CHANNEL_CAPACITY: usize = 256;
 const LOGIN_PATH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const LOGIN_PATH_MARKER: &str = "__HEL_LOGIN_PATH__=";
+const KIMI_TASK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const KIMI_TASK_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(8);
 
 #[derive(Clone)]
 pub(super) struct ProjectMemoryEndpoint {
@@ -77,6 +79,12 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // Resolve this before the launch config's environment is consumed by
     // the ACP supervisor specification below.
     let credentials = super::credential_endpoint(&config);
+    let kimi_task_home = (config.harness == HarnessKind::Kimi).then(|| {
+        credentials
+            .as_ref()
+            .map(|endpoint| endpoint.home.clone())
+            .map_err(Clone::clone)
+    });
     std::fs::create_dir_all(&root)
         .with_context(|| format!("create worker root {}", root.display()))?;
     if config.environment.remove(DISCOVER_LOGIN_PATH_ENV).is_some()
@@ -155,6 +163,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     durable_relay.set_background_work_policy(match config.harness {
         HarnessKind::Codex => hel::hel_worker::BackgroundWorkPolicy::CodexExecCards,
         HarnessKind::Claude => hel::hel_worker::BackgroundWorkPolicy::ClaudeTasks,
+        HarnessKind::Kimi => hel::hel_worker::BackgroundWorkPolicy::KimiTasks,
         _ => hel::hel_worker::BackgroundWorkPolicy::HostedTerminals,
     });
     let resume_session = select_resume_session(&config, &durable_relay);
@@ -310,6 +319,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             dispatch_wake_rx,
             acp_commands_tx.clone(),
             user_shells,
+            kimi_task_home.map(KimiTaskMonitor::new),
         ));
 
         let acp_join = loop {
@@ -572,15 +582,166 @@ pub(super) async fn serve_terminal_relay(
     }
 }
 
+pub(super) struct KimiTaskMonitor {
+    home: std::result::Result<PathBuf, String>,
+    native_session_id: Option<String>,
+    follower: Option<hel_acp::KimiWireFollower>,
+    consecutive_failures: u32,
+    retry_at: tokio::time::Instant,
+    last_warning: Option<String>,
+}
+
+impl KimiTaskMonitor {
+    pub(super) fn new(home: std::result::Result<PathBuf, String>) -> Self {
+        Self {
+            home,
+            native_session_id: None,
+            follower: None,
+            consecutive_failures: 0,
+            retry_at: tokio::time::Instant::now(),
+            last_warning: None,
+        }
+    }
+
+    fn detach(&mut self) {
+        self.native_session_id = None;
+        self.follower = None;
+        self.consecutive_failures = 0;
+        self.retry_at = tokio::time::Instant::now();
+        self.last_warning = None;
+    }
+
+    pub(super) async fn attach(
+        &mut self,
+        native_session_id: String,
+        relay: &Arc<Mutex<DurableRelay>>,
+    ) -> Result<()> {
+        self.native_session_id = Some(native_session_id);
+        self.follower = None;
+        self.consecutive_failures = 0;
+        self.retry_at = tokio::time::Instant::now();
+        self.refresh(relay, true).await
+    }
+
+    pub(super) async fn refresh(
+        &mut self,
+        relay: &Arc<Mutex<DurableRelay>>,
+        force: bool,
+    ) -> Result<()> {
+        if self.native_session_id.is_none()
+            || (!force && tokio::time::Instant::now() < self.retry_at)
+        {
+            return Ok(());
+        }
+        let home = match &self.home {
+            Ok(home) => home.clone(),
+            Err(error) => {
+                return self
+                    .record_failure(relay, anyhow::anyhow!("cannot locate Kimi home: {error}"));
+            }
+        };
+        let native_session_id = self
+            .native_session_id
+            .clone()
+            .expect("Kimi refresh is guarded by a native session id");
+        let follower = self.follower.take();
+        let scanned = tokio::task::spawn_blocking(move || -> Result<_> {
+            let mut follower = match follower {
+                Some(follower) => follower,
+                None => {
+                    let session_dir = hel_acp::resolve_kimi_session_dir(&home, &native_session_id)?;
+                    hel_acp::KimiWireFollower::open(session_dir.join("agents/main/wire.jsonl"))?
+                }
+            };
+            let snapshot = match follower.refresh()? {
+                hel_acp::KimiWireRefresh::Updated(snapshot) => snapshot,
+                hel_acp::KimiWireRefresh::RescanRequired => follower.rescan()?,
+            };
+            Ok((follower, snapshot))
+        })
+        .await;
+        match scanned {
+            Ok(Ok((follower, snapshot))) => {
+                self.follower = Some(follower);
+                self.consecutive_failures = 0;
+                self.retry_at = tokio::time::Instant::now() + KIMI_TASK_POLL_INTERVAL;
+                self.last_warning = None;
+                relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .kimi_background_tasks_changed(snapshot.tasks, snapshot.provider_tool_ids)
+            }
+            Ok(Err(error)) => self.record_failure(relay, error),
+            Err(error) => self.record_failure(
+                relay,
+                anyhow::anyhow!("Kimi background task scan stopped: {error}"),
+            ),
+        }
+    }
+
+    fn record_failure(
+        &mut self,
+        relay: &Arc<Mutex<DurableRelay>>,
+        error: anyhow::Error,
+    ) -> Result<()> {
+        self.follower = None;
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let exponent = self.consecutive_failures.saturating_sub(1).min(4);
+        let delay = KIMI_TASK_POLL_INTERVAL
+            .checked_mul(1_u32 << exponent)
+            .unwrap_or(KIMI_TASK_MAX_RETRY_DELAY)
+            .min(KIMI_TASK_MAX_RETRY_DELAY);
+        self.retry_at = tokio::time::Instant::now() + delay;
+        let message = format!(
+            "Kimi background task tracking is unavailable; worker replacement is blocked: {error:#}"
+        );
+        let mut relay = relay.lock().expect("relay state lock poisoned");
+        relay.kimi_background_tasks_unavailable()?;
+        if self.last_warning.as_deref() != Some(&message) {
+            relay.record_observation(RelayObservation::Warning {
+                message: message.clone(),
+            })?;
+            self.last_warning = Some(message);
+        }
+        Ok(())
+    }
+}
+
+async fn prepare_kimi_runtime_event(
+    monitor: &mut Option<KimiTaskMonitor>,
+    relay: &Arc<Mutex<DurableRelay>>,
+    event: &RuntimeEvent,
+) -> Result<()> {
+    let Some(monitor) = monitor.as_mut() else {
+        return Ok(());
+    };
+    match event {
+        RuntimeEvent::SessionStarted {
+            native_session_id, ..
+        } => monitor.attach(native_session_id.clone(), relay).await,
+        RuntimeEvent::SessionConfigured { .. } | RuntimeEvent::PromptFinished { .. } => {
+            monitor.refresh(relay, true).await
+        }
+        RuntimeEvent::HarnessRestarting { .. } | RuntimeEvent::Stopped => {
+            monitor.detach();
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn run_relay_coordinator_with_shells(
     relay: Arc<Mutex<DurableRelay>>,
     mut events: mpsc::Receiver<RuntimeEvent>,
     mut dispatch_wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
     mut user_shells: crate::hel_user_shell::UserShellRegistry,
+    mut kimi_tasks: Option<KimiTaskMonitor>,
 ) -> Result<()> {
     let mut in_flight = BTreeMap::new();
     let mut session_configured = false;
+    let mut kimi_poll = tokio::time::interval(KIMI_TASK_POLL_INTERVAL);
+    kimi_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     dispatch_pending(
         &relay,
         &commands,
@@ -606,6 +767,7 @@ async fn run_relay_coordinator_with_shells(
                         &mut events,
                         &mut session_configured,
                         &mut user_shells,
+                        &mut kimi_tasks,
                         queued,
                     ).await? {
                         return Ok(());
@@ -635,6 +797,7 @@ async fn run_relay_coordinator_with_shells(
                     &mut events,
                     &mut session_configured,
                     &mut user_shells,
+                    &mut kimi_tasks,
                 ).await? {
                     return Ok(());
                 }
@@ -645,6 +808,13 @@ async fn run_relay_coordinator_with_shells(
                     session_configured,
                     &mut user_shells,
                 )?;
+            }
+            _ = kimi_poll.tick(), if kimi_tasks.is_some() => {
+                kimi_tasks
+                    .as_mut()
+                    .expect("Kimi poll branch is guarded")
+                    .refresh(&relay, false)
+                    .await?;
             }
         }
     }
@@ -668,7 +838,8 @@ pub(crate) async fn run_relay_coordinator(
         BTreeMap::new(),
         shell_events,
     );
-    run_relay_coordinator_with_shells(relay, events, dispatch_wakes, commands, user_shells).await
+    run_relay_coordinator_with_shells(relay, events, dispatch_wakes, commands, user_shells, None)
+        .await
 }
 
 /// Record the complete batch already emitted by the ACP runtime before
@@ -682,7 +853,9 @@ async fn record_runtime_event_batch(
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
     user_shells: &mut crate::hel_user_shell::UserShellRegistry,
+    kimi_tasks: &mut Option<KimiTaskMonitor>,
 ) -> Result<bool> {
+    prepare_kimi_runtime_event(kimi_tasks, relay, &first).await?;
     track_user_shell_completion(user_shells, &first);
     if record_runtime_event_and_track_configuration(relay, in_flight, first, session_configured)? {
         return Ok(true);
@@ -694,6 +867,7 @@ async fn record_runtime_event_batch(
         events,
         session_configured,
         user_shells,
+        kimi_tasks,
         queued,
     )
     .await
@@ -705,11 +879,13 @@ async fn record_queued_runtime_events(
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
     user_shells: &mut crate::hel_user_shell::UserShellRegistry,
+    kimi_tasks: &mut Option<KimiTaskMonitor>,
     maximum: usize,
 ) -> Result<bool> {
     for recorded in 0..maximum {
         match events.try_recv() {
             Ok(event) => {
+                prepare_kimi_runtime_event(kimi_tasks, relay, &event).await?;
                 track_user_shell_completion(user_shells, &event);
                 if record_runtime_event_and_track_configuration(
                     relay,

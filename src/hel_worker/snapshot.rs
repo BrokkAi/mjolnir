@@ -15,6 +15,7 @@ use agent_client_protocol::schema::v1::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::hel_config::HarnessKind;
 use crate::hel_elicitation::ElicitationRequest;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -214,10 +215,10 @@ pub struct ActiveAgentTerminal {
 
 /// A command the agent left running with nothing waiting on it.
 ///
-/// Two harnesses produce these differently - Hel-hosted terminals that outlive
-/// their tool card, and Codex exec cards whose result carries no exit code -
-/// so the relay reduces both to this one shape and every surface renders it
-/// the same way.
+/// Harnesses produce these differently: Hel-hosted terminals that outlive
+/// their tool card, provider-owned task levels, and Codex exec cards whose
+/// result carries no exit code. The relay reduces them to this one shape so
+/// every surface renders them the same way.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundCommand {
     pub started_at_ms: i64,
@@ -422,6 +423,11 @@ pub struct RelayOperationalState {
     /// derived from what the relay can see now, not from the journal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_commands: Vec<BackgroundCommand>,
+    /// Whether provider-owned background work is known for this worker
+    /// process. Only Kimi needs this today; older workers and other harnesses
+    /// omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_work_known: Option<bool>,
 }
 
 impl RelayOperationalState {
@@ -450,6 +456,7 @@ impl RelayOperationalState {
     pub fn is_quiet(&self) -> bool {
         self.execution == RelayExecutionState::Idle
             && self.acp_ready != Some(false)
+            && self.background_work_known != Some(false)
             && self.active_prompt.is_none()
             && self.harness_turn.is_none()
             && self.queued_prompts.is_empty()
@@ -458,6 +465,16 @@ impl RelayOperationalState {
             && self.foreground_tool_started_at_ms.is_none()
             && self.background_commands.is_empty()
             && self.checkpoint_barrier.is_none()
+    }
+
+    /// Whether a controller may replace this worker without losing work.
+    ///
+    /// An older Kimi worker cannot report provider-owned background agents,
+    /// so its otherwise-quiet snapshot is not proof that replacement is safe.
+    #[must_use]
+    pub fn safe_to_replace(&self, harness: HarnessKind) -> bool {
+        self.is_quiet()
+            && (harness != HarnessKind::Kimi || self.background_work_known == Some(true))
     }
 }
 
@@ -843,6 +860,8 @@ impl RelaySnapshot {
             // Filled in by `DurableRelay::operational_state`, which is the
             // only place that can see live processes.
             background_commands: Vec::new(),
+            // Provider task knowledge belongs to the current worker process.
+            background_work_known: None,
         }
     }
 
@@ -2046,6 +2065,28 @@ mod tests {
 
         assert_eq!(restored.acp_ready, None);
         assert!(restored.native_session_is_ready());
+    }
+
+    #[test]
+    fn kimi_replacement_requires_current_background_work_knowledge() {
+        let mut state = RelaySnapshot::new(SESSION.into()).operational_state();
+        state.native_session_id = Some("native-session".into());
+        state.acp_ready = Some(true);
+
+        assert!(state.is_quiet());
+        assert!(state.safe_to_replace(HarnessKind::Codex));
+        assert!(
+            !state.safe_to_replace(HarnessKind::Kimi),
+            "an older Kimi worker cannot prove provider tasks are absent"
+        );
+
+        state.background_work_known = Some(false);
+        assert!(!state.is_quiet());
+        assert!(!state.safe_to_replace(HarnessKind::Kimi));
+
+        state.background_work_known = Some(true);
+        assert!(state.is_quiet());
+        assert!(state.safe_to_replace(HarnessKind::Kimi));
     }
 
     #[test]
