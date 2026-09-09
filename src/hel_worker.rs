@@ -30,10 +30,10 @@ pub use protocol::{
 pub use snapshot::truncate_start_with_marker;
 pub use snapshot::{
     ActiveAgentTerminal, ActiveRelayPrompt, ActiveUserShell, BackgroundCommand,
-    ClaimedRelayCommand, ClaimedSteeringPrompt, HarnessTurn, QueuedRelayPrompt,
-    RELAY_EVENT_FORMAT_V1, RELAY_EVENT_FORMAT_V2, RelayCommand, RelayCommandKind,
-    RelayCommandOutcome, RelayCursor, RelayEvent, RelayExecutionState, RelayObservation,
-    RelayOperationalState, UserShellResult, UserShellStatus, relay_event_digest,
+    BackgroundTaskStopTarget, ClaimedRelayCommand, ClaimedSteeringPrompt, HarnessTurn,
+    QueuedRelayPrompt, RELAY_EVENT_FORMAT_V1, RELAY_EVENT_FORMAT_V2, RelayCommand,
+    RelayCommandKind, RelayCommandOutcome, RelayCursor, RelayEvent, RelayExecutionState,
+    RelayObservation, RelayOperationalState, UserShellResult, UserShellStatus, relay_event_digest,
     validate_relay_event, validate_relay_event_self,
 };
 pub use types::{
@@ -97,6 +97,10 @@ pub enum BackgroundWorkPolicy {
     KimiTasks,
     /// `exec_command` cards whose result has an explicitly null exit code.
     CodexExecCards,
+}
+
+fn background_task_id(kind: &str, provider_id: &str) -> String {
+    format!("{kind}:{provider_id}")
 }
 
 /// `_meta` key the Claude adapter puts on the `usage_update` that settles a
@@ -214,7 +218,7 @@ const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// Current durable ACP relay protocol. Peers that only speak an older
 /// version in [`RELAY_MIN_PROTOCOL_VERSION`]..=this range still connect.
 /// Protocol 0 is the retired pre-relay worker protocol and is rejected.
-pub const RELAY_PROTOCOL_VERSION: u32 = 8;
+pub const RELAY_PROTOCOL_VERSION: u32 = 9;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
 /// Digest for the empty relay event prefix (ordinal zero).
 pub const RELAY_EVENT_GENESIS_DIGEST: &str = crate::hel_archive::EVENT_FRONTIER_GENESIS_DIGEST;
@@ -361,6 +365,8 @@ pub struct DurableRelay {
     /// Whether Kimi's provider-owned background work is synchronized. Other
     /// policies leave this absent.
     background_work_known: Option<bool>,
+    /// Claude AIR tasks that the adapter currently says can be stopped.
+    claude_stoppable_tasks: BTreeSet<String>,
     /// ACP terminals are connection-owned and disappear when that connection
     /// is torn down, so they belong in memory rather than the durable relay
     /// snapshot or transcript journal.
@@ -546,6 +552,7 @@ impl DurableRelay {
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
             background_work_known: None,
+            claude_stoppable_tasks: BTreeSet::new(),
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
             #[cfg(test)]
@@ -727,8 +734,10 @@ impl DurableRelay {
                     self.active_agent_terminals
                         .values()
                         .map(|terminal| BackgroundCommand {
+                            id: background_task_id("terminal", &terminal.terminal_id),
                             started_at_ms: terminal.started_at_ms,
                             command: terminal.command.clone(),
+                            can_stop: true,
                         })
                         .collect()
                 }
@@ -738,7 +747,15 @@ impl DurableRelay {
             }
         };
         if self.background_work == BackgroundWorkPolicy::ClaudeTasks {
-            commands.extend(self.claude_background_tasks.values().cloned());
+            commands.extend(
+                self.claude_background_tasks
+                    .iter()
+                    .map(|(task_id, command)| {
+                        let mut command = command.clone();
+                        command.can_stop = self.claude_stoppable_tasks.contains(task_id);
+                        command
+                    }),
+            );
         }
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             commands.extend(self.kimi_background_tasks.values().cloned());
@@ -771,15 +788,18 @@ impl DurableRelay {
         self.claude_background_tasks = tasks
             .into_iter()
             .map(|task| {
+                let task_id = task.task_id;
                 let started_at_ms = self
                     .claude_background_tasks
-                    .get(&task.task_id)
+                    .get(&task_id)
                     .map_or(now, |previous| previous.started_at_ms);
                 (
-                    task.task_id,
+                    task_id.clone(),
                     BackgroundCommand {
+                        id: background_task_id("claude", &task_id),
                         started_at_ms,
                         command: task.description,
+                        can_stop: false,
                     },
                 )
             })
@@ -809,10 +829,12 @@ impl DurableRelay {
             .into_iter()
             .map(|task| {
                 (
-                    task.task_id,
+                    task.task_id.clone(),
                     BackgroundCommand {
+                        id: background_task_id("kimi", &task.task_id),
                         started_at_ms: task.started_at_ms,
                         command: task.description,
+                        can_stop: false,
                     },
                 )
             })
@@ -828,6 +850,59 @@ impl DurableRelay {
             self.persist_activity_transition()?;
         }
         Ok(())
+    }
+
+    /// Add or remove the stop affordance announced by Claude's AIR extension.
+    /// Task existence remains owned by `claude_background_tasks_changed`.
+    pub fn claude_async_task_control_changed(
+        &mut self,
+        task_id: String,
+        can_stop: bool,
+    ) -> Result<()> {
+        if self.background_work != BackgroundWorkPolicy::ClaudeTasks {
+            return Ok(());
+        }
+        if can_stop {
+            self.claude_stoppable_tasks.insert(task_id);
+        } else {
+            self.claude_stoppable_tasks.remove(&task_id);
+        }
+        self.persist_activity_transition()
+    }
+
+    /// Resolve a public task id only while it still names stoppable background
+    /// work in this process.
+    pub fn background_task_stop_target(
+        &self,
+        requested_id: &str,
+    ) -> Result<BackgroundTaskStopTarget> {
+        let command = self
+            .background_commands()
+            .into_iter()
+            .find(|command| command.id == requested_id)
+            .ok_or_else(|| anyhow!("background task is no longer running"))?;
+        if !command.can_stop {
+            bail!("this background task cannot be stopped by its agent");
+        }
+        if let Some((terminal_id, _)) = self
+            .active_agent_terminals
+            .iter()
+            .find(|(id, _)| background_task_id("terminal", id) == requested_id)
+        {
+            return Ok(BackgroundTaskStopTarget::HostedTerminal {
+                terminal_id: terminal_id.clone(),
+            });
+        }
+        if let Some((task_id, _)) = self
+            .claude_background_tasks
+            .iter()
+            .find(|(id, _)| background_task_id("claude", id) == requested_id)
+        {
+            return Ok(BackgroundTaskStopTarget::ClaudeAsyncTask {
+                task_id: task_id.clone(),
+            });
+        }
+        bail!("background task is no longer running")
     }
 
     pub fn agent_terminal_started(&mut self, terminal: ActiveAgentTerminal) -> Result<()> {
@@ -860,6 +935,7 @@ impl DurableRelay {
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             self.background_work_known = Some(false);
         }
+        self.claude_stoppable_tasks.clear();
         self.foreground_tools.clear();
         self.persist_activity_transition()
     }
@@ -1129,6 +1205,14 @@ impl DurableRelay {
                 return Ok(relay_error(
                     RelayErrorCode::InvalidState,
                     "elicitation responses must be handled by the live relay transport",
+                    false,
+                    None,
+                ));
+            }
+            RelayRequest::StopBackgroundTask { .. } => {
+                return Ok(relay_error(
+                    RelayErrorCode::InvalidState,
+                    "background task stops must be handled by the live relay transport",
                     false,
                     None,
                 ));
@@ -1948,6 +2032,7 @@ impl DurableRelay {
             if self.background_work == BackgroundWorkPolicy::KimiTasks {
                 self.background_work_known = Some(false);
             }
+            self.claude_stoppable_tasks.clear();
             self.foreground_tools.clear();
         }
         let ordinal = self.append_relay_event(None, observation)?;
@@ -2127,8 +2212,10 @@ impl DurableRelay {
         self.background_exec_cards
             .entry(tool_call_id.to_owned())
             .or_insert(BackgroundCommand {
+                id: background_task_id("codex", tool_call_id),
                 started_at_ms: epoch_millis(),
                 command,
+                can_stop: false,
             });
     }
 
@@ -2173,8 +2260,10 @@ impl DurableRelay {
             .entry(tool_call_id.to_owned())
             .and_modify(|task| task.command = command.clone())
             .or_insert(BackgroundCommand {
+                id: background_task_id("kimi-provisional", tool_call_id),
                 started_at_ms,
                 command,
+                can_stop: false,
             });
     }
 
@@ -4660,8 +4749,10 @@ mod tests {
         assert_eq!(
             relay.operational_state().background_commands,
             vec![BackgroundCommand {
+                id: "terminal:terminal-1".into(),
                 started_at_ms: 4_000,
                 command: "cargo test".into(),
+                can_stop: true,
             }],
             "the command outlived the turn that started it"
         );
@@ -4738,13 +4829,81 @@ mod tests {
             assert_eq!(
                 relay.operational_state().background_commands,
                 vec![BackgroundCommand {
+                    id: "claude:design".into(),
                     started_at_ms: 123,
                     command: "Design cleanup".into(),
+                    can_stop: false,
                 }]
             );
             relay.claude_background_tasks_changed(Vec::new()).unwrap();
             assert!(relay.operational_state().is_quiet());
         }
+    }
+
+    #[test]
+    fn background_task_stop_targets_are_live_capability_checked_and_namespaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay
+            .agent_terminal_started(ActiveAgentTerminal {
+                terminal_id: "shared-id".into(),
+                command: "cargo test".into(),
+                started_at_ms: 10,
+            })
+            .unwrap();
+        relay
+            .claude_background_tasks_changed(vec![claude_task("shared-id", "Review tests")])
+            .unwrap();
+
+        assert_eq!(
+            relay
+                .background_task_stop_target("terminal:shared-id")
+                .unwrap(),
+            BackgroundTaskStopTarget::HostedTerminal {
+                terminal_id: "shared-id".into(),
+            }
+        );
+        assert!(
+            relay
+                .background_task_stop_target("claude:shared-id")
+                .is_err(),
+            "Claude must not be stoppable until AIR grants the affordance"
+        );
+
+        relay
+            .claude_async_task_control_changed("shared-id".into(), true)
+            .unwrap();
+        assert_eq!(
+            relay
+                .background_task_stop_target("claude:shared-id")
+                .unwrap(),
+            BackgroundTaskStopTarget::ClaudeAsyncTask {
+                task_id: "shared-id".into(),
+            }
+        );
+        assert!(
+            relay
+                .operational_state()
+                .background_commands
+                .iter()
+                .any(|command| command.id == "claude:shared-id" && command.can_stop)
+        );
+
+        relay
+            .claude_async_task_control_changed("shared-id".into(), false)
+            .unwrap();
+        assert!(
+            relay
+                .background_task_stop_target("claude:shared-id")
+                .is_err()
+        );
+        relay.agent_terminal_closed("shared-id").unwrap();
+        assert!(
+            relay
+                .background_task_stop_target("terminal:shared-id")
+                .is_err(),
+            "a stale UI id must never resolve after its task exits"
+        );
     }
 
     #[test]
@@ -4853,8 +5012,11 @@ mod tests {
 
         let commands = relay.operational_state().background_commands;
         assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].id, "codex:call-1");
         assert_eq!(commands[0].command, "bash -lc sleep 600");
         assert!(commands[0].started_at_ms > 0);
+        assert!(!commands[0].can_stop);
+        assert!(relay.background_task_stop_target("codex:call-1").is_err());
 
         // A card that does report an exit code says the process is done, even
         // when it is the first card for that call.

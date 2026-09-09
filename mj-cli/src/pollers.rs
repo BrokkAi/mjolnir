@@ -1922,6 +1922,21 @@ async fn forward_remote_session_request(request: RemoteSessionRequest) {
             .map_err(|error| format!("{error:#}"));
             let _ = reply.send(result);
         }
+        RemoteSessionRequest::StopBackgroundTask {
+            session_id,
+            background_task_id,
+            reply,
+        } => {
+            let result = async {
+                daemon::connect_or_start()
+                    .await?
+                    .stop_background_task(session_id, background_task_id)
+                    .await
+            }
+            .await
+            .map_err(|error| format!("{error:#}"));
+            let _ = reply.send(result);
+        }
         RemoteSessionRequest::Reviewer {
             session_id,
             role,

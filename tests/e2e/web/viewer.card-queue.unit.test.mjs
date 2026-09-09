@@ -233,8 +233,18 @@ function queueHarness() {
     shells: makeNode('div'),
     queueHeading: makeNode('h3'),
     shellsHeading: makeNode('h3'),
+    backgroundTasks: makeNode('div'),
+    backgroundTasksHeading: makeNode('h3'),
     conversationSide: makeNode('details'),
     conversationSummary: makeNode('summary'),
+    pendingActions: new Set(),
+    backgroundTaskErrors: new Map(),
+    epochMs: value => value,
+    serverClockMs: () => 100_000,
+    formatClock(milliseconds) {
+      const seconds = Math.floor(milliseconds / 1000);
+      return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
+    },
     document: { createElement: makeNode },
   });
   vm.runInContext(
@@ -278,4 +288,92 @@ test('queue details disappear when empty but preserve active shell cancellation'
   assert.equal(context.shells.children.length, 1);
   assert.equal(context.shells.children[0].children[1].textContent, 'Cancel');
   assert.equal(context.shells.children[0].children[1].dataset.shellId, 'shell-1');
+});
+
+test('background task rows expose elapsed time, stop capability, and pending failures', () => {
+  const context = queueHarness();
+  vm.runInContext(
+    `render({ id: 'session-1', queued_prompts: [], active_user_shells: [], background_tasks: [
+      { id: 'task-1', command: 'cargo test', started_at_ms: 40_000, can_stop: true },
+      { id: 'task-2', command: 'watch logs', started_at_ms: 90_000, can_stop: false },
+    ] })`,
+    context,
+  );
+  assert.equal(context.conversationSide.hidden, false);
+  assert.equal(context.backgroundTasksHeading.hidden, false);
+  assert.equal(context.backgroundTasks.children.length, 2);
+  assert.equal(context.backgroundTasks.children[0].children[0].children[1].textContent, '1m00s');
+  assert.equal(context.backgroundTasks.children[0].children[1].textContent, 'Stop');
+  assert.equal(context.backgroundTasks.children[0].children[1].dataset.backgroundTaskId, 'task-1');
+  assert.equal(context.backgroundTasks.children[1].children[1].textContent, 'Stop unavailable');
+
+  context.pendingActions.add('stop-background:session-1:task-1');
+  vm.runInContext(
+    `render({ id: 'session-1', queued_prompts: [], active_user_shells: [], background_tasks: [
+      { id: 'task-1', command: 'cargo test', started_at_ms: 40_000, can_stop: true },
+    ] })`,
+    context,
+  );
+  assert.equal(context.backgroundTasks.children[0].children[1].textContent, 'Stopping…');
+  assert.equal(context.backgroundTasks.children[0].children[1].disabled, true);
+
+  context.pendingActions.delete('stop-background:session-1:task-1');
+  context.backgroundTaskErrors.set('stop-background:session-1:task-1', 'provider unavailable');
+  vm.runInContext(
+    `render({ id: 'session-1', queued_prompts: [], active_user_shells: [], background_tasks: [
+      { id: 'task-1', command: 'cargo test', started_at_ms: 40_000, can_stop: true },
+    ] })`,
+    context,
+  );
+  const error = context.backgroundTasks.children[0].children[2];
+  assert.equal(error.textContent, 'provider unavailable');
+  assert.equal(error.attributes.role, 'alert');
+});
+
+test('background task stop requests are deduplicated and retain pending state until refresh', async () => {
+  const requests = [];
+  let refreshes = 0;
+  let resolveRequest;
+  const session = {
+    id: 'session-1',
+    background_tasks: [{ id: 'task-1', can_stop: true }],
+  };
+  const context = vm.createContext({
+    currentSession: session.id,
+    snapshot: { sessions: [session] },
+    pendingActions: new Set(),
+    backgroundTaskErrors: new Map(),
+    activeSession: () => session,
+    renderQueue: () => {},
+    encodeURIComponent,
+    request: (url, options) => {
+      requests.push({ url, options });
+      return new Promise((resolve, reject) => { resolveRequest = { resolve, reject }; });
+    },
+    refresh: async () => { refreshes++; },
+  });
+  vm.runInContext(
+    `${sourceBetween('function backgroundTaskKey', '\n// Every snapshot revision')}
+globalThis.stop = stopBackgroundTask;`,
+    context,
+  );
+  const first = vm.runInContext('stop("task-1")', context);
+  assert.equal(context.pendingActions.has('stop-background:session-1:task-1'), true);
+  assert.equal(await vm.runInContext('stop("task-1")', context), false);
+  assert.equal(requests.length, 1);
+  resolveRequest.resolve();
+  assert.equal(await first, true);
+  assert.equal(refreshes, 1);
+  assert.equal(context.pendingActions.has('stop-background:session-1:task-1'), true);
+
+  context.request = () => Promise.reject(new Error('provider unavailable'));
+  context.pendingActions.delete('stop-background:session-1:task-1');
+  // The task still appears in the latest snapshot, so a failure has an inline
+  // destination and the next click is available again.
+  assert.equal(await vm.runInContext('stop("task-1")', context), false);
+  assert.equal(context.pendingActions.has('stop-background:session-1:task-1'), false);
+  assert.equal(
+    context.backgroundTaskErrors.get('stop-background:session-1:task-1'),
+    'provider unavailable',
+  );
 });

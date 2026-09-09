@@ -45,7 +45,7 @@ use agent_client_protocol::schema::v1::{
     ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionId, SessionModeState, SessionNotification, SessionUpdate,
+    SessionConfigValueId, SessionId, SessionModeState, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TerminalExitStatus,
     TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCallUpdateFields,
     WaitForTerminalExitRequest, WaitForTerminalExitResponse,
@@ -324,16 +324,17 @@ fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, ser
             "subtype": CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE,
         }]),
     )]);
+    let mut options = serde_json::Map::from_iter([(
+        "perTaskStopAffordance".to_owned(),
+        serde_json::Value::Bool(true),
+    )]);
     if spec.execution_policy.is_unconstrained() {
-        claude_code.insert(
-            "options".to_owned(),
-            serde_json::json!({
-                "sandbox": {
-                    "enabled": false
-                }
-            }),
+        options.insert(
+            "sandbox".to_owned(),
+            serde_json::json!({ "enabled": false }),
         );
     }
+    claude_code.insert("options".to_owned(), serde_json::Value::Object(options));
     Some(serde_json::Map::from_iter([(
         "claudeCode".to_owned(),
         serde_json::Value::Object(claude_code),
@@ -367,6 +368,86 @@ struct ClaudeSdkMessageNotification {
     #[serde(rename = "sessionId")]
     session_id: SessionId,
     message: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcNotification)]
+#[notification(method = "session/update")]
+struct RawSessionNotification {
+    #[serde(rename = "sessionId")]
+    session_id: SessionId,
+    update: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaudeAsyncTaskControlUpdate {
+    Set { task_id: String, can_stop: bool },
+    Ignore,
+}
+
+fn claude_async_task_control_update(
+    update: &serde_json::Value,
+) -> std::result::Result<Option<ClaudeAsyncTaskControlUpdate>, String> {
+    let Some(kind) = update
+        .get("sessionUpdate")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    if !kind.starts_with("async_task_") {
+        return Ok(None);
+    }
+    let task_id = || {
+        update
+            .get("asyncTaskId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{kind} requires a non-empty asyncTaskId"))
+    };
+    match kind {
+        "async_task_spawned" => Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
+            task_id: task_id()?,
+            can_stop: update
+                .get("canStop")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| "async_task_spawned requires canStop".to_owned())?,
+        })),
+        "async_task_state_update" => {
+            let state = update
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "async_task_state_update requires state".to_owned())?;
+            if matches!(state, "completed" | "failed" | "stopped") {
+                Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
+                    task_id: task_id()?,
+                    can_stop: false,
+                }))
+            } else if matches!(state, "running" | "paused") {
+                Ok(Some(ClaudeAsyncTaskControlUpdate::Ignore))
+            } else {
+                Err(format!("unknown Claude async task state {state:?}"))
+            }
+        }
+        "async_task_progress" => {
+            task_id()?;
+            Ok(Some(ClaudeAsyncTaskControlUpdate::Ignore))
+        }
+        _ => Err(format!("unknown Claude async task update {kind:?}")),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcRequest)]
+#[request(method = "_session/async_task/stop", response = ClaudeAsyncTaskStopResponse)]
+struct ClaudeAsyncTaskStopRequest {
+    #[serde(rename = "sessionId")]
+    session_id: SessionId,
+    #[serde(rename = "asyncTaskId")]
+    async_task_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcResponse)]
+struct ClaudeAsyncTaskStopResponse {
+    stopped: bool,
 }
 
 /// Extract the one Claude SDK level signal Hel subscribes to. Edge lifecycle
@@ -484,6 +565,10 @@ pub enum CommandRequest {
         response: ElicitationResponse,
         resolved: oneshot::Sender<std::result::Result<(), String>>,
     },
+    StopBackgroundTask {
+        target: crate::hel_worker::BackgroundTaskStopTarget,
+        resolved: oneshot::Sender<std::result::Result<(), String>>,
+    },
     Cancel {
         request_id: String,
         steering_prompt: Option<ClaimedSteeringPrompt>,
@@ -527,6 +612,10 @@ pub enum RuntimeEvent {
     /// This provider signal does not represent transcript or foreground work.
     ClaudeBackgroundTasksChanged {
         tasks: Vec<ClaudeBackgroundTask>,
+    },
+    ClaudeAsyncTaskControlChanged {
+        task_id: String,
+        can_stop: bool,
     },
     ElicitationRequested {
         request: ElicitationRequest,
@@ -1329,6 +1418,7 @@ where
     // updates on the same ACP connection.
     let live_tool_calls = Arc::new(Mutex::new(BTreeSet::<String>::new()));
     let notification_live_tool_calls = live_tool_calls.clone();
+    let notification_harness = spec.harness;
     let claude_sdk_events = events.clone();
     let claude_sdk_harness = spec.harness;
     let permission_events = events.clone();
@@ -1371,20 +1461,55 @@ where
     Client
         .builder()
         .on_receive_notification(
-            async move |notification: SessionNotification, _cx| {
+            async move |notification: RawSessionNotification, _cx| {
                 notification_activity.mark();
-                notification_step_clock.observe(&notification.update);
+                if notification_harness == HarnessKind::Claude {
+                    match claude_async_task_control_update(&notification.update) {
+                        Ok(Some(ClaudeAsyncTaskControlUpdate::Set { task_id, can_stop })) => {
+                            notification_events
+                                .send(RuntimeEvent::ClaudeAsyncTaskControlChanged {
+                                    task_id,
+                                    can_stop,
+                                })
+                                .await
+                                .map_err(|_| relay_event_channel_error())?;
+                            return Ok(());
+                        }
+                        Ok(Some(ClaudeAsyncTaskControlUpdate::Ignore)) => return Ok(()),
+                        Ok(None) => {}
+                        Err(message) => {
+                            notification_events
+                                .send(RuntimeEvent::Warning {
+                                    message: format!(
+                                        "ignored malformed Claude async task update: {message}"
+                                    ),
+                                })
+                                .await
+                                .map_err(|_| relay_event_channel_error())?;
+                            return Ok(());
+                        }
+                    }
+                }
+                let update = serde_json::from_value::<SessionUpdate>(notification.update)
+                    .map_err(|error| {
+                        agent_client_protocol::Error::invalid_params().data(
+                            serde_json::Value::String(format!(
+                                "decode ACP session update: {error}"
+                            )),
+                        )
+                    })?;
+                notification_step_clock.observe(&update);
                 if !notification_session_updates_enabled.load(Ordering::Acquire) {
                     return Ok(());
                 }
                 if !session_update_is_relay_visible(
-                    &notification.update,
+                    &update,
                     &notification_live_tool_calls,
                     &notification.session_id.to_string(),
                 ) {
                     return Ok(());
                 }
-                let update = serde_json::to_value(notification.update).map_err(|error| {
+                let update = serde_json::to_value(update).map_err(|error| {
                     agent_client_protocol::Error::internal_error().data(serde_json::Value::String(
                         format!("serialize ACP session update for relay: {error}"),
                     ))
@@ -2111,6 +2236,59 @@ async fn apply_cancel(
     }
 }
 
+const BACKGROUND_TASK_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn stop_background_task(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    terminals: &TerminalRegistry,
+    target: crate::hel_worker::BackgroundTaskStopTarget,
+) -> std::result::Result<(), String> {
+    match target {
+        crate::hel_worker::BackgroundTaskStopTarget::HostedTerminal { terminal_id } => {
+            if terminals.kill(&terminal_id) {
+                Ok(())
+            } else {
+                Err("background task is no longer running".into())
+            }
+        }
+        crate::hel_worker::BackgroundTaskStopTarget::ClaudeAsyncTask { task_id } => {
+            let request = ClaudeAsyncTaskStopRequest {
+                session_id: session_id.clone(),
+                async_task_id: task_id,
+            };
+            match tokio::time::timeout(
+                BACKGROUND_TASK_STOP_TIMEOUT,
+                connection.send_request(request).block_task(),
+            )
+            .await
+            {
+                Ok(Ok(response)) if response.stopped => Ok(()),
+                Ok(Ok(_)) => Err("background task is no longer stoppable".into()),
+                Ok(Err(error)) => Err(format!("stop Claude background task: {error}")),
+                Err(_) => Err("timed out stopping Claude background task".into()),
+            }
+        }
+    }
+}
+
+async fn resolve_background_task_stop(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    terminals: &TerminalRegistry,
+    target: crate::hel_worker::BackgroundTaskStopTarget,
+    resolved: oneshot::Sender<std::result::Result<(), String>>,
+) {
+    let result = stop_background_task(connection, session_id, terminals, target).await;
+    if resolved.send(result).is_err() {
+        tracing::debug!(
+            session_id = %session_id,
+            operation = "stop_background_task",
+            "background task stop receiver was already closed"
+        );
+    }
+}
+
 const SESSION_STEERING_METHOD: &str = "_session/steering";
 
 fn steering_supported_from_meta(meta: Option<&agent_client_protocol::schema::v1::Meta>) -> bool {
@@ -2237,6 +2415,10 @@ fn drain_requests_from_the_previous_bridge(requests: &mut mpsc::Receiver<Command
             CommandRequest::Cancel { request_id, .. } => ("Cancel", Some(request_id)),
             CommandRequest::Close { request_id } => ("Close", Some(request_id)),
             CommandRequest::ResolveElicitation { .. } => ("ResolveElicitation", None),
+            CommandRequest::StopBackgroundTask { resolved, .. } => {
+                let _ = resolved.send(Err("ACP bridge restarted before stopping task".into()));
+                ("StopBackgroundTask", None)
+            }
         };
         tracing::debug!(
             operation = "acp_bridge_restart",
@@ -2263,6 +2445,17 @@ async fn serve_session(
 ) -> Result<Option<String>> {
     let mut meta = serde_json::Map::new();
     meta.insert("terminal_output".into(), serde_json::Value::Bool(true));
+    if spec.harness == HarnessKind::Claude {
+        meta.insert(
+            "jetbrains".into(),
+            serde_json::json!({
+                "air": {
+                    "version": 1,
+                    "capabilities": ["asyncTasks"]
+                }
+            }),
+        );
+    }
     // Kimi routes every shell call through the client's terminal surface and
     // has no local fallback, so this capability is what makes Bash work.
     let capabilities = ClientCapabilities::new()
@@ -2842,6 +3035,16 @@ async fn serve_session(
                                     );
                                 }
                             }
+                            Some(CommandRequest::StopBackgroundTask { target, resolved }) => {
+                                resolve_background_task_stop(
+                                    connection,
+                                    &session_id,
+                                    terminals,
+                                    target,
+                                    resolved,
+                                )
+                                .await;
+                            }
                         },
                         restored = async {
                             mode_restoration.as_mut().expect("mode restoration branch is guarded").await
@@ -2998,6 +3201,10 @@ async fn serve_session(
                         "elicitation resolution receiver was already closed"
                     );
                 }
+            }
+            CommandRequest::StopBackgroundTask { target, resolved } => {
+                resolve_background_task_stop(connection, &session_id, terminals, target, resolved)
+                    .await;
             }
             CommandRequest::Close { request_id } => {
                 match connection

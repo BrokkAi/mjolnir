@@ -221,8 +221,25 @@ pub struct ActiveAgentTerminal {
 /// every surface renders them the same way.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundCommand {
+    /// Process-local identity. Clients must treat this as opaque and return it
+    /// unchanged when requesting a stop.
+    #[serde(default)]
+    pub id: String,
     pub started_at_ms: i64,
     pub command: String,
+    /// Whether the current worker can stop this task without ending its turn.
+    #[serde(default)]
+    pub can_stop: bool,
+}
+
+/// The process owner behind one stoppable background-command id.
+///
+/// This never crosses the relay wire. The worker resolves the opaque public id
+/// against its current live state before handing the target to the ACP bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackgroundTaskStopTarget {
+    HostedTerminal { terminal_id: String },
+    ClaudeAsyncTask { task_id: String },
 }
 
 /// A turn the harness started on its own, with no prompt in flight.
@@ -1951,8 +1968,10 @@ mod tests {
                 "the agent left a command running",
                 (|state| {
                     state.background_commands = vec![BackgroundCommand {
+                        id: "task-1".into(),
                         started_at_ms: 1,
                         command: "sleep 600".into(),
+                        can_stop: false,
                     }];
                 }),
             ),

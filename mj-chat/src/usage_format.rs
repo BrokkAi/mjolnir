@@ -487,8 +487,10 @@ mod tests {
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,
             background_commands: vec![hel::hel_worker::BackgroundCommand {
+                id: "test-background".into(),
                 started_at_ms,
                 command: command.to_owned(),
+                can_stop: false,
             }],
             active_user_shells: Vec::new(),
         }
@@ -632,8 +634,10 @@ mod tests {
 
         activity.foreground_tool_started_at_ms = None;
         activity.background_commands = vec![hel::hel_worker::BackgroundCommand {
+            id: "test-background".into(),
             started_at_ms: 19_000_000,
             command: "cargo test".into(),
+            can_stop: false,
         }];
         assert!(!activity.is_idle(None));
     }
@@ -653,8 +657,10 @@ mod tests {
 
         let background = SessionActivity {
             background_commands: vec![hel::hel_worker::BackgroundCommand {
+                id: "test-background".into(),
                 started_at_ms: -1,
                 command: "cargo test".into(),
+                can_stop: false,
             }],
             ..SessionActivity::default()
         };

@@ -91,6 +91,14 @@ enum VoiceControl {
     Microphone,
 }
 
+/// Controls owned by the background-task dialog. The index is only a
+/// frame-local form identity; the task's opaque id is what crosses the remote
+/// boundary and is retained in pending state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BackgroundTaskControl {
+    Stop(usize),
+}
+
 fn voice_form() -> Form<VoiceControl> {
     let mut form = Form::new();
     form.declare(VoiceControl::Microphone, ControlKind::Button);
@@ -222,6 +230,11 @@ pub enum ChatAction {
         id: String,
         text: String,
         kind: QueuedCommandKind,
+    },
+    /// Stop one provider-owned background task without ending the session or
+    /// cancelling its foreground turn.
+    StopBackgroundTask {
+        id: String,
     },
     SetConfig {
         key: String,
@@ -571,14 +584,22 @@ pub struct ChatState {
     /// border rather than inside its selectable text surface.
     voice_button_area: Option<Rect>,
     voice_form: Form<VoiceControl>,
-    /// The embedded background-task control and its read-only dialog.
+    /// The embedded background-task control and its dialog.
     task_control_focused: bool,
     task_dialog_open: bool,
     task_dialog_scroll: usize,
     task_dialog_max_scroll: usize,
-    task_dialog_form: Form<()>,
+    task_dialog_form: Form<BackgroundTaskControl>,
     task_control_area: Option<Rect>,
     task_dialog_area: Option<Rect>,
+    /// The opaque ids represented by the last frame's visible Stop controls.
+    /// Keeping this separate from row indices prevents a snapshot reorder
+    /// between mouse-down and mouse-up from stopping a different task.
+    task_dialog_control_ids: Vec<(BackgroundTaskControl, String)>,
+    /// Task ids for which a stop request has been submitted. A successful
+    /// provider acknowledgement deliberately leaves the id here until the
+    /// next operational snapshot removes the task.
+    pending_background_stops: BTreeSet<String>,
     prompt_content_width: usize,
     /// Session-list identity snapshotted when the chat opened.
     header_target: String,
@@ -708,6 +729,8 @@ impl ChatState {
             task_dialog_form: Form::new(),
             task_control_area: None,
             task_dialog_area: None,
+            task_dialog_control_ids: Vec::new(),
+            pending_background_stops: BTreeSet::new(),
             prompt_content_width: 1,
             header_target: String::new(),
             header_profile: String::new(),
@@ -1364,8 +1387,22 @@ impl ChatState {
     /// Records what the session is doing beyond its phase, so the pane title
     /// and the composer can name background work.
     pub(super) fn set_session_activity(&mut self, activity: crate::usage_format::SessionActivity) {
+        // The provider snapshot remains authoritative for task existence. A
+        // successful stop acknowledgement does not remove the row itself;
+        // only this reconciliation clears its pending label.
+        let live_ids = activity
+            .background_commands
+            .iter()
+            .map(|command| command.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let pending_before = self.pending_background_stops.len();
+        self.pending_background_stops
+            .retain(|id| live_ids.contains(id.as_str()));
         if self.session_activity != activity {
             self.session_activity = activity;
+            self.mark_visible_changed();
+        }
+        if self.pending_background_stops.len() != pending_before {
             self.mark_visible_changed();
         }
         if self.background_task_count() == 0 && self.task_control_focused {
@@ -1385,6 +1422,48 @@ impl ChatState {
     }
 
     #[must_use]
+    pub(super) fn background_stop_pending(&self, id: &str) -> bool {
+        self.pending_background_stops.contains(id)
+    }
+
+    /// Starts a targeted stop request if this task is live, stoppable, and not
+    /// already awaiting a provider response. The caller sends the returned
+    /// action through the supervised remote worker.
+    pub(super) fn request_background_stop(&mut self, id: String) -> ChatAction {
+        let stoppable = self
+            .session_activity
+            .background_commands
+            .iter()
+            .any(|command| command.id == id && command.can_stop);
+        if stoppable && self.pending_background_stops.insert(id.clone()) {
+            self.mark_visible_changed();
+            ChatAction::StopBackgroundTask { id }
+        } else {
+            ChatAction::None
+        }
+    }
+
+    /// Clears a pending stop after the remote provider rejected it. A
+    /// successful acknowledgement intentionally has no corresponding call:
+    /// the next activity snapshot owns removal and keeps the row honest.
+    pub(super) fn fail_background_stop(&mut self, id: &str, error: &str) {
+        if self.pending_background_stops.remove(id) {
+            self.mark_visible_changed();
+            self.set_notice(format!("Background task could not be stopped: {error}"));
+        }
+    }
+
+    pub(super) fn fail_all_background_stops(&mut self) -> bool {
+        if !self.pending_background_stops.is_empty() {
+            self.pending_background_stops.clear();
+            self.mark_visible_changed();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[must_use]
     pub(super) fn task_control_focused(&self) -> bool {
         self.task_control_focused
     }
@@ -1401,6 +1480,7 @@ impl ChatState {
             self.task_dialog_scroll = 0;
             self.task_dialog_max_scroll = 0;
             self.task_dialog_area = None;
+            self.task_dialog_control_ids.clear();
             self.task_dialog_form.clear();
             self.mark_visible_changed();
         }
@@ -1429,6 +1509,13 @@ impl ChatState {
             self.task_dialog_scroll = scroll;
             self.mark_visible_changed();
         }
+    }
+
+    fn activate_background_task_control(&mut self, control: BackgroundTaskControl) -> ChatAction {
+        self.task_dialog_control_ids
+            .iter()
+            .find_map(|(candidate, id)| (*candidate == control).then(|| id.clone()))
+            .map_or(ChatAction::None, |id| self.request_background_stop(id))
     }
 
     fn cursor_is_on_last_prompt_line(&self) -> bool {
@@ -2445,6 +2532,9 @@ impl ChatState {
                     .handle(&Event::Key(KeyEvent::new_with_kind_and_state(
                         code, modifiers, key.kind, key.state,
                     )));
+            if let Some(Interaction::Activate(control)) = result.action.as_ref() {
+                return self.activate_background_task_control(*control);
+            }
             if matches!(result.action, Some(Interaction::Cancel)) {
                 self.close_task_dialog();
                 return ChatAction::None;
@@ -2893,6 +2983,7 @@ impl ChatState {
         self.voice_button_area = None;
         self.task_control_area = None;
         self.task_dialog_area = None;
+        self.task_dialog_control_ids.clear();
         self.reset_config_picker_geometry();
         if let Some(dialog) = self.elicitation.as_ref() {
             dialog.reset_component_geometry();
@@ -3006,6 +3097,9 @@ impl ChatState {
             let result = self.task_dialog_form.handle(&Event::Mouse(mouse));
             if result.outcome == Outcome::Changed {
                 self.mark_visible_changed();
+            }
+            if let Some(Interaction::Activate(control)) = result.action.as_ref() {
+                return self.activate_background_task_control(*control);
             }
             if matches!(result.action, Some(Interaction::Cancel)) {
                 self.close_task_dialog();
@@ -3717,8 +3811,10 @@ mod tests {
         chat.session_activity
             .background_commands
             .push(hel::hel_worker::BackgroundCommand {
+                id: "test:background".into(),
                 started_at_ms: 1,
                 command: "cargo test".into(),
+                can_stop: false,
             });
         assert!(chat.needs_animation());
 
@@ -3761,6 +3857,19 @@ mod tests {
         }
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
         ClipboardImage::from_png_base64(encoded).unwrap()
+    }
+
+    fn background_task(
+        id: &str,
+        command: &str,
+        can_stop: bool,
+    ) -> hel::hel_worker::BackgroundCommand {
+        hel::hel_worker::BackgroundCommand {
+            id: id.into(),
+            started_at_ms: hel::clock::epoch_millis() - 1_000,
+            command: command.into(),
+            can_stop,
+        }
     }
 
     #[test]
@@ -4123,8 +4232,10 @@ mod tests {
         assert_eq!(chat.clock_text(100), chat.clock_text(101));
         chat.set_session_activity(crate::usage_format::SessionActivity {
             background_commands: vec![hel::hel_worker::BackgroundCommand {
+                id: "test:clock".into(),
                 started_at_ms: 0,
                 command: "cargo test".into(),
+                can_stop: false,
             }],
             ..crate::usage_format::SessionActivity::default()
         });
@@ -4143,13 +4254,15 @@ mod tests {
     }
 
     #[test]
-    fn background_tasks_use_the_prompt_border_and_open_a_read_only_dialog() {
+    fn background_tasks_use_the_prompt_border_and_open_a_task_dialog() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_input("keep this draft".into());
         chat.set_session_activity(crate::usage_format::SessionActivity {
             background_commands: vec![hel::hel_worker::BackgroundCommand {
+                id: "test:dialog".into(),
                 started_at_ms: hel::clock::epoch_millis() - 61_000,
                 command: "cargo test --workspace".into(),
+                can_stop: true,
             }],
             ..crate::usage_format::SessionActivity::default()
         });
@@ -4269,6 +4382,161 @@ mod tests {
         chat.set_session_activity(crate::usage_format::SessionActivity::default());
         let empty = drawn_transcript(&mut chat, 80, 12).join("\n");
         assert!(empty.contains("No background tasks remain."), "{empty}");
+    }
+
+    #[test]
+    fn stoppable_background_task_keyboard_activation_is_deduplicated() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_session_activity(crate::usage_format::SessionActivity {
+            background_commands: vec![background_task("task-1", "cargo test", true)],
+            ..crate::usage_format::SessionActivity::default()
+        });
+        chat.open_task_dialog();
+        drawn_transcript(&mut chat, 80, 16);
+
+        // Tab focuses the first Stop button; Enter submits it immediately.
+        assert_eq!(chat.handle_key(key(KeyCode::Tab)), ChatAction::None);
+        assert_eq!(chat.handle_key(key(KeyCode::BackTab)), ChatAction::None);
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::StopBackgroundTask {
+                id: "task-1".into()
+            }
+        );
+        assert!(chat.background_stop_pending("task-1"));
+        drawn_transcript(&mut chat, 80, 16);
+        assert!(
+            drawn_transcript(&mut chat, 80, 16)
+                .iter()
+                .any(|line| line.contains("Stopping…"))
+        );
+
+        // The disabled pending control cannot submit a second request.
+        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    }
+
+    #[test]
+    fn read_only_background_rows_have_no_stop_control() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_session_activity(crate::usage_format::SessionActivity {
+            background_commands: vec![background_task("codex:1", "codex exec", false)],
+            ..crate::usage_format::SessionActivity::default()
+        });
+        chat.open_task_dialog();
+        let screen = drawn_transcript(&mut chat, 80, 16).join("\n");
+        assert!(screen.contains("codex exec"), "{screen}");
+        assert!(!screen.contains("[Stop]"), "{screen}");
+        assert_eq!(chat.handle_key(key(KeyCode::Tab)), ChatAction::None);
+        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    }
+
+    #[test]
+    fn stoppable_background_task_mouse_activation_and_scroll_keep_dialog_state() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_session_activity(crate::usage_format::SessionActivity {
+            background_commands: (0..8)
+                .map(|index| {
+                    background_task(&format!("task-{index}"), &format!("work-{index}"), true)
+                })
+                .collect(),
+            ..crate::usage_format::SessionActivity::default()
+        });
+        chat.open_task_dialog();
+        drawn_transcript(&mut chat, 40, 8);
+        let inner = chat.task_dialog_area.expect("dialog geometry");
+        chat.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: inner.x,
+            row: inner.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(chat.task_dialog_scroll > 0);
+        chat.handle_key(key(KeyCode::PageUp));
+        assert_eq!(chat.task_dialog_scroll, 0);
+
+        // The first row's button is right-aligned in the dialog inner area.
+        let x = inner.right().saturating_sub(2);
+        let y = inner.y;
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(chat.handle_mouse(press), ChatAction::None);
+        assert_eq!(
+            chat.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                ..press
+            }),
+            ChatAction::StopBackgroundTask {
+                id: "task-0".into()
+            }
+        );
+    }
+
+    #[test]
+    fn disappeared_background_task_clears_pending_stop_and_failure_reenables_it() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_session_activity(crate::usage_format::SessionActivity {
+            background_commands: vec![background_task("task-1", "cargo test", true)],
+            ..crate::usage_format::SessionActivity::default()
+        });
+        assert_eq!(
+            chat.request_background_stop("task-1".into()),
+            ChatAction::StopBackgroundTask {
+                id: "task-1".into()
+            }
+        );
+        remote::apply_chat_remote_result(
+            &mut chat,
+            remote::ChatRemoteResult::StopBackgroundTask {
+                id: "task-1".into(),
+                result: Ok(()),
+            },
+        );
+        assert!(chat.background_stop_pending("task-1"));
+        chat.set_session_activity(crate::usage_format::SessionActivity::default());
+        assert!(!chat.background_stop_pending("task-1"));
+        let notice_after_disappearance = chat.notice();
+        remote::apply_chat_remote_result(
+            &mut chat,
+            remote::ChatRemoteResult::StopBackgroundTask {
+                id: "task-1".into(),
+                result: Err("stale request".into()),
+            },
+        );
+        assert_eq!(chat.notice(), notice_after_disappearance);
+
+        chat.set_session_activity(crate::usage_format::SessionActivity {
+            background_commands: vec![background_task("task-1", "cargo test", true)],
+            ..crate::usage_format::SessionActivity::default()
+        });
+        assert_eq!(
+            chat.request_background_stop("task-1".into()),
+            ChatAction::StopBackgroundTask {
+                id: "task-1".into()
+            }
+        );
+        remote::apply_chat_remote_result(
+            &mut chat,
+            remote::ChatRemoteResult::StopBackgroundTask {
+                id: "task-1".into(),
+                result: Err("provider unavailable".into()),
+            },
+        );
+        assert!(!chat.background_stop_pending("task-1"));
+        assert_eq!(
+            chat.notice().as_deref(),
+            Some("Background task could not be stopped: provider unavailable")
+        );
+        chat.open_task_dialog();
+        drawn_transcript(&mut chat, 80, 16);
+        assert!(
+            drawn_transcript(&mut chat, 80, 16)
+                .iter()
+                .any(|line| line.contains("[Stop]"))
+        );
     }
 
     #[test]

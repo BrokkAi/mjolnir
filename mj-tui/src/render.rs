@@ -3707,8 +3707,10 @@ mod tests {
             unread_agent_messages: 1,
             activity: mj_chat::usage_format::SessionActivity {
                 background_commands: vec![hel::hel_worker::BackgroundCommand {
+                    id: "test-background".into(),
                     started_at_ms: 1,
                     command: "cargo test".into(),
+                    can_stop: false,
                 }],
                 ..mj_chat::usage_format::SessionActivity::default()
             },
@@ -4490,8 +4492,10 @@ mod tests {
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,
             background_commands: vec![hel::hel_worker::BackgroundCommand {
+                id: "test-background".into(),
                 started_at_ms,
                 command: "cargo test".into(),
+                can_stop: false,
             }],
             active_user_shells: Vec::new(),
         };

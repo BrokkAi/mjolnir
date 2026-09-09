@@ -161,6 +161,10 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
         meta.pointer("/claudeCode/options/sandbox/enabled"),
         Some(&serde_json::Value::Bool(false))
     );
+    assert_eq!(
+        meta.pointer("/claudeCode/options/perTaskStopAffordance"),
+        Some(&serde_json::Value::Bool(true))
+    );
     let filter = serde_json::json!([{
         "type": "system",
         "subtype": "background_tasks_changed",
@@ -180,6 +184,11 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
             "{request}"
         );
         assert_eq!(
+            request.pointer("/_meta/claudeCode/options/perTaskStopAffordance"),
+            Some(&serde_json::Value::Bool(true)),
+            "{request}"
+        );
+        assert_eq!(
             request.pointer("/_meta/claudeCode/emitRawSDKMessages"),
             Some(&filter),
             "{request}"
@@ -196,6 +205,10 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
     assert_eq!(
         configured_meta.pointer("/claudeCode/emitRawSDKMessages"),
         Some(&filter)
+    );
+    assert_eq!(
+        configured_meta.pointer("/claudeCode/options/perTaskStopAffordance"),
+        Some(&serde_json::Value::Bool(true))
     );
     assert!(
         configured_meta
@@ -221,6 +234,72 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
     spec.execution_policy = ExecutionPolicy::Unconstrained;
     spec.harness = HarnessKind::Codex;
     assert_eq!(session_request_meta(&spec), None);
+}
+
+#[test]
+fn claude_async_task_updates_publish_only_stop_capability_changes() {
+    assert_eq!(
+        claude_async_task_control_update(&serde_json::json!({
+            "sessionUpdate": "async_task_spawned",
+            "asyncTaskId": "task-7",
+            "canStop": true,
+        }))
+        .unwrap(),
+        Some(ClaudeAsyncTaskControlUpdate::Set {
+            task_id: "task-7".into(),
+            can_stop: true,
+        })
+    );
+    assert_eq!(
+        claude_async_task_control_update(&serde_json::json!({
+            "sessionUpdate": "async_task_state_update",
+            "asyncTaskId": "task-7",
+            "state": "stopped",
+        }))
+        .unwrap(),
+        Some(ClaudeAsyncTaskControlUpdate::Set {
+            task_id: "task-7".into(),
+            can_stop: false,
+        })
+    );
+    assert_eq!(
+        claude_async_task_control_update(&serde_json::json!({
+            "sessionUpdate": "async_task_progress",
+            "asyncTaskId": "task-7",
+        }))
+        .unwrap(),
+        Some(ClaudeAsyncTaskControlUpdate::Ignore)
+    );
+    assert!(
+        claude_async_task_control_update(&serde_json::json!({
+            "sessionUpdate": "async_task_spawned",
+            "asyncTaskId": "",
+            "canStop": true,
+        }))
+        .is_err()
+    );
+    assert_eq!(
+        claude_async_task_control_update(&serde_json::json!({
+            "sessionUpdate": "tool_call",
+        }))
+        .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn claude_async_task_stop_request_uses_the_air_wire_shape() {
+    let request = ClaudeAsyncTaskStopRequest {
+        session_id: SessionId::from("native-session"),
+        async_task_id: "task-7".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(request).unwrap(),
+        serde_json::json!({
+            "sessionId": "native-session",
+            "asyncTaskId": "task-7",
+        })
+    );
 }
 
 #[test]

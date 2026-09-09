@@ -19,9 +19,10 @@ use hel::hel_workspace::WorkspaceRecord;
 use mj_controller::hel_controller::Controller;
 use mj_controller::hel_quota::ProfileQuota;
 use mj_controller::hel_server::{
-    ActionOutcome, BrowserTranscript, ControllerAction, ControllerRequest, MovePreparationRequest,
-    PreflightFailure, ReadReceiptRequest, ResumeQueueDisposition, ServerOptions,
-    ViewerActivityDetails, ViewerActivityKind, ViewerMoveRecovery, ViewerQueuedPrompt, ViewerQuota,
+    ActionOutcome, BackgroundTaskStopFailure, BackgroundTaskStopRequest, BrowserTranscript,
+    ControllerAction, ControllerRequest, MovePreparationRequest, PreflightFailure,
+    ReadReceiptRequest, ResumeQueueDisposition, ServerOptions, ViewerActivityDetails,
+    ViewerActivityKind, ViewerBackgroundTask, ViewerMoveRecovery, ViewerQueuedPrompt, ViewerQuota,
     ViewerSnapshot, ViewerUserShell,
 };
 use mj_controller::hel_session_manager::{
@@ -754,6 +755,8 @@ pub(crate) async fn run_server(
     let (client_state_tx, mut client_state_rx) = tokio::sync::mpsc::channel(64);
     let (dictation_tx, mut dictation_rx) =
         tokio::sync::mpsc::channel::<mj_controller::hel_dictation::DictationRequest>(8);
+    let (background_task_stop_tx, mut background_task_stop_rx) =
+        tokio::sync::mpsc::channel::<BackgroundTaskStopRequest>(32);
     let SessionManagerChannels {
         targets: worker_targets_tx,
         control: worker_commands_tx,
@@ -783,6 +786,7 @@ pub(crate) async fn run_server(
             dictation_tx,
         },
     )?;
+    options.set_background_task_stop_tx(background_task_stop_tx);
     options.shutdown = termination.clone();
     // Session cookies are stateless, so a per-process key would sign every
     // phone out on every restart. Delete the key file to sign them out on
@@ -859,6 +863,8 @@ pub(crate) async fn run_server(
         let mut preflight_jobs = tokio::task::JoinSet::new();
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
         let mut move_recovery_jobs = tokio::task::JoinSet::new();
+        let mut background_task_stop_jobs = tokio::task::JoinSet::new();
+        let mut background_task_stop_open = true;
         let mut controller_reload_in_flight = false;
         let mut controller_reload_requested = false;
         let mut controller_reload_invalidated = false;
@@ -928,6 +934,51 @@ pub(crate) async fn run_server(
             project_sources.synchronize(&controller);
             tokio::select! {
                 _ = termination.cancelled() => break,
+                request = background_task_stop_rx.recv(), if background_task_stop_open => {
+                    let Some(request) = request else {
+                        background_task_stop_open = false;
+                        tracing::warn!("background-task stop request feed closed while the phone server was running");
+                        continue;
+                    };
+                    let session_control = worker_commands_tx.clone();
+                    background_task_stop_jobs.spawn(async move {
+                        let result = match session_control.session(&request.session_id).await {
+                            Ok(session) => session
+                                .client()
+                                .stop_background_task(request.background_task_id.clone())
+                                .await
+                                .map_err(|error| {
+                                    tracing::warn!(
+                                        session_id = %request.session_id,
+                                        background_task_id = %request.background_task_id,
+                                        %error,
+                                        "provider rejected background-task stop"
+                                    );
+                                    BackgroundTaskStopFailure::Provider
+                                }),
+                            Err(error) => {
+                                tracing::warn!(
+                                    session_id = %request.session_id,
+                                    %error,
+                                    "could not resolve live session for background-task stop"
+                                );
+                                Err(BackgroundTaskStopFailure::SessionUnavailable)
+                            }
+                        };
+                        if request.reply.send(result).is_err() {
+                            tracing::debug!(
+                                session_id = %request.session_id,
+                                background_task_id = %request.background_task_id,
+                                "background-task stop result dropped after viewer disconnected"
+                            );
+                        }
+                    });
+                }
+                completed = background_task_stop_jobs.join_next(), if !background_task_stop_jobs.is_empty() => {
+                    if let Some(Err(error)) = completed {
+                        tracing::error!(%error, "background-task stop task failed unexpectedly");
+                    }
+                }
                 move_reloaded = move_recovery_rx.recv() => {
                     let Some(result) = move_reloaded else {
                         failure = feed_stopped(
@@ -3142,6 +3193,21 @@ fn viewer_snapshot(
                 started_at_ms: shell.started_at_ms,
             })
             .collect();
+        session.background_tasks = operational
+            .get(&session.id)
+            .map(|state| {
+                state
+                    .background_commands
+                    .iter()
+                    .map(|task| ViewerBackgroundTask {
+                        id: task.id.clone(),
+                        command: task.command.clone(),
+                        started_at_ms: task.started_at_ms,
+                        can_stop: task.can_stop,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         session.pending_elicitations = pending_elicitations
             .get(&session.id)
             .cloned()
@@ -3794,10 +3860,21 @@ mod tests {
         state
             .background_commands
             .push(hel::hel_worker::BackgroundCommand {
+                id: "background-1".into(),
                 started_at_ms: 1_000,
                 command: "background check".into(),
+                can_stop: true,
             });
         let background = project(&operational);
+        assert_eq!(
+            background.sessions[0].background_tasks,
+            vec![ViewerBackgroundTask {
+                id: "background-1".into(),
+                command: "background check".into(),
+                started_at_ms: 1_000,
+                can_stop: true,
+            }]
+        );
         assert!(!background.sessions[0].is_idle);
         assert!(background.sessions[0].activity.starts_with("BG "));
         let state = operational.get_mut("session-1").unwrap();

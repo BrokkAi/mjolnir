@@ -16,7 +16,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph, Wrap};
 
-use crate::components::ControlKind;
+use crate::components::{Button, ControlKind};
 use crate::components::{EventResult, Outcome, render_scrollbar, scrollbar_geometry};
 use crate::hel_selection::{FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId};
 use hel::hel_config::HelConfig;
@@ -48,8 +48,8 @@ use super::second_opinion::{
 };
 use super::transcript::{ToolDiffstatRequest, materialized_prefix_entries, render_transcript};
 use super::{
-    ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatFooter, ChatRegions,
-    ChatSessionContext, ChatState, MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity,
+    BackgroundTaskControl, ChatAction, ChatElicitationDraft, ChatEventOutcome, ChatFooter,
+    ChatRegions, ChatSessionContext, ChatState, MOUSE_SCROLL_ROWS, Notices, SessionHeaderIdentity,
     queued_prompt_preview,
 };
 use crate::hel_clipboard::{ClipboardContent, ClipboardImage};
@@ -1218,8 +1218,13 @@ impl ActiveChat {
             return;
         };
         if let Err(error) = result {
-            self.state
-                .set_notice(format!("Chat background worker failed: {error}"));
+            if self.state.fail_all_background_stops() {
+                self.state
+                    .set_notice(format!("Background task could not be stopped: {error}"));
+            } else {
+                self.state
+                    .set_notice(format!("Chat background worker failed: {error}"));
+            }
         } else {
             self.state
                 .set_notice("Chat background worker stopped unexpectedly");
@@ -1645,6 +1650,13 @@ impl ActiveChat {
                         text,
                         kind,
                     },
+                    &mut self.state,
+                );
+            }
+            ChatAction::StopBackgroundTask { id } => {
+                queue_chat_remote_operation(
+                    self.remote.operations(),
+                    ChatRemoteOperation::StopBackgroundTask { id },
                     &mut self.state,
                 );
             }
@@ -3036,7 +3048,7 @@ pub(super) fn render_in(
         chat.frame_surfaces
             .push(SurfaceFrame::fixed(SurfaceId::AutocompletePopup, popup));
     }
-    // A new elicitation can arrive while the read-only task list is open.
+    // A new elicitation can arrive while the task list is open.
     // Keep the task dialog state so it can reappear afterwards, but let the
     // question render and receive input on top of it.
     if chat.task_dialog_open() && chat.elicitation.is_none() {
@@ -3326,34 +3338,61 @@ fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat: &mut ChatS
         vertical: 1,
     });
     let now = hel::clock::epoch_seconds();
-    let mut lines = if commands.is_empty() {
-        vec![Line::from(Span::styled(
+    let content_width = usize::from(inner.width.max(1));
+    let mut stop_rows = Vec::new();
+    let mut lines = Vec::new();
+    if commands.is_empty() {
+        lines.push(Line::from(Span::styled(
             "No background tasks remain.",
             theme::muted(),
-        ))]
+        )));
     } else {
-        let content_width = usize::from(inner.width.max(1));
-        commands
-            .iter()
-            .flat_map(|command| {
-                let started =
-                    u64::try_from(command.started_at_ms.max(0) / 1_000).unwrap_or_default();
-                let elapsed = crate::usage_format::format_clock(now.saturating_sub(started));
-                let prefix = format!("{elapsed:>8}  ");
-                wrap_styled_line(
-                    Line::from(format!(
-                        "{prefix}{}",
-                        super::rendering::sanitize_terminal_text(&command.command)
-                            .split_whitespace()
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )),
-                    content_width,
-                    display_width(&prefix),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
+        for (index, command) in commands.iter().enumerate() {
+            let started = u64::try_from(command.started_at_ms.max(0) / 1_000).unwrap_or_default();
+            let elapsed = crate::usage_format::format_clock(now.saturating_sub(started));
+            let prefix = format!("{elapsed:>8}  ");
+            let prefix_width = display_width(&prefix);
+            let label = if chat.background_stop_pending(&command.id) {
+                "Stopping…"
+            } else {
+                "[Stop]"
+            };
+            let button_width = display_width(&format!("  {label}  "));
+            // Keep the acknowledgement state visible even if the provider
+            // revokes the affordance before its task-disappeared snapshot.
+            let draw_button = (command.can_stop || chat.background_stop_pending(&command.id))
+                && content_width >= button_width.saturating_add(prefix_width).saturating_add(2);
+            let text_width = if draw_button {
+                content_width
+                    .saturating_sub(button_width.saturating_add(1))
+                    .max(1)
+            } else {
+                content_width
+            };
+            let start = lines.len();
+            lines.extend(wrap_styled_line(
+                Line::from(format!(
+                    "{prefix}{}",
+                    super::rendering::sanitize_terminal_text(&command.command)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )),
+                text_width,
+                prefix_width,
+            ));
+            if draw_button {
+                stop_rows.push((
+                    BackgroundTaskControl::Stop(index),
+                    start,
+                    label,
+                    !chat.background_stop_pending(&command.id),
+                    button_width,
+                    command.id.clone(),
+                ));
+            }
+        }
+    }
     let visible = usize::from(inner.height).max(1);
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(visible);
@@ -3381,6 +3420,34 @@ fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat: &mut ChatS
             .block(block),
         popup,
     );
+    chat.task_dialog_control_ids.clear();
+    for (control, row, label, enabled, button_width, id) in stop_rows {
+        if row < chat.task_dialog_scroll || row >= chat.task_dialog_scroll.saturating_add(visible) {
+            continue;
+        }
+        chat.task_dialog_control_ids.push((control, id));
+        let y = inner
+            .y
+            .saturating_add((row - chat.task_dialog_scroll) as u16);
+        let button_area = Rect::new(
+            inner
+                .right()
+                .saturating_sub(u16::try_from(button_width).unwrap_or(u16::MAX)),
+            y,
+            u16::try_from(button_width)
+                .unwrap_or(u16::MAX)
+                .min(inner.width),
+            1,
+        );
+        Button::render(
+            frame,
+            button_area,
+            label,
+            enabled,
+            &mut chat.task_dialog_form,
+            control,
+        );
+    }
     if let Some(geometry) = scrollbar_geometry(
         Rect::new(inner.right(), inner.y, 1, inner.height),
         total_lines,
@@ -3394,7 +3461,8 @@ fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat: &mut ChatS
     chat.frame_surfaces.clear();
     chat.frame_surfaces
         .push(SurfaceFrame::fixed(SurfaceId::ModalBody, inner));
-    chat.task_dialog_form.end_frame(());
+    chat.task_dialog_form
+        .end_frame(BackgroundTaskControl::Stop(0));
 }
 
 /// The composer keeps a `>` gutter on the left and one cell of space on the
@@ -5161,8 +5229,10 @@ mod tests {
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,
             background_commands: vec![hel::hel_worker::BackgroundCommand {
+                id: "test:active".into(),
                 started_at_ms,
                 command: "cargo   test".into(),
+                can_stop: false,
             }],
             active_user_shells: Vec::new(),
         });
@@ -5178,12 +5248,16 @@ mod tests {
             foreground_tool_started_at_ms: None,
             background_commands: vec![
                 hel::hel_worker::BackgroundCommand {
+                    id: "test:active-1".into(),
                     started_at_ms,
                     command: "cargo test".into(),
+                    can_stop: false,
                 },
                 hel::hel_worker::BackgroundCommand {
+                    id: "test:active-2".into(),
                     started_at_ms: started_at_ms + 1_000,
                     command: "npm run build".into(),
+                    can_stop: false,
                 },
             ],
             active_user_shells: Vec::new(),

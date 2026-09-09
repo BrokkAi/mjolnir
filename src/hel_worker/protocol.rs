@@ -128,6 +128,11 @@ pub enum RelayRequest {
         elicitation_id: String,
         response: ElicitationResponse,
     },
+    /// Stop one task from the current process-local background-work level.
+    /// The opaque id must come from `RelayOperationalState.background_commands`.
+    StopBackgroundTask {
+        background_task_id: String,
+    },
     /// Drive the second-opinion reviewer that runs beside this session.
     ///
     /// The reviewer is a sidecar, not a session: it shares this worker's
@@ -279,6 +284,7 @@ impl RelayRequest {
             Self::InstallGithubToken { .. } => "install_github_token",
             Self::RemoveGithubToken => "remove_github_token",
             Self::RespondElicitation { .. } => "respond_elicitation",
+            Self::StopBackgroundTask { .. } => "stop_background_task",
             Self::Reviewer { request, .. } => request.action_name(),
         }
     }
@@ -292,6 +298,7 @@ impl RelayRequest {
             Self::AttachmentPresent { .. }
             | Self::InstallAttachment { .. }
             | Self::ReadAttachment { .. } => 8,
+            Self::StopBackgroundTask { .. } => 9,
             Self::RespondElicitation { .. } => 2,
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
@@ -422,6 +429,9 @@ pub enum RelayResponsePayload {
     },
     ElicitationResolved {
         elicitation_id: String,
+    },
+    BackgroundTaskStopRequested {
+        background_task_id: String,
     },
     /// The reviewer sidecar is running under the requested configuration.
     ReviewerStarted {
@@ -636,6 +646,12 @@ mod tests {
         assert_eq!(cancel_turn.minimum_protocol(), 7);
         assert!(!cancel_turn.supported_at(6));
         assert!(cancel_turn.supported_at(RELAY_PROTOCOL_VERSION));
+        let stop_background = RelayRequest::StopBackgroundTask {
+            background_task_id: "terminal:task-1".into(),
+        };
+        assert_eq!(stop_background.minimum_protocol(), 9);
+        assert!(!stop_background.supported_at(8));
+        assert!(stop_background.supported_at(RELAY_PROTOCOL_VERSION));
     }
 
     #[test]

@@ -329,8 +329,10 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
         harness_turn_started_at_ms: None,
         foreground_tool_started_at_ms: None,
         background_commands: vec![hel::hel_worker::BackgroundCommand {
+            id: "test-background".into(),
             started_at_ms: 17_384_000,
             command: "cargo test".into(),
+            can_stop: false,
         }],
         active_user_shells: Vec::new(),
     });
