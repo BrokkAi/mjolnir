@@ -68,7 +68,6 @@ export function launch(
   // npm owns upgrades: replacing files under node_modules would corrupt its
   // package database, so mj delegates the upgrade to whichever manager
   // launched it instead of disabling the update check outright.
-  delete childEnv.MJOLNIR_NO_UPDATE_CHECK;
   delete childEnv.MJOLNIR_MANAGED_BY_NPM;
   delete childEnv.MJOLNIR_MANAGED_BY_NPX;
   Object.assign(childEnv, installMethodEnvironment(process.env));

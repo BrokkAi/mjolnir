@@ -17,9 +17,10 @@ runs — whether the channel it was installed from has a newer release. If so,
 it **asks first**, and only after an explicit yes does it upgrade:
 
 - A **curl install** (the `install.sh` release installer, files under
-  `~/.local/bin` by default) keeps the old 1.x mechanism unchanged: download
-  the release archive, verify its SHA-256 sidecar, extract `mj`, replace the
-  running executable, and re-exec.
+  `~/.local/bin` by default) downloads the release archive, verifies its
+  SHA-256 sidecar, stages the controller and every bundled application
+  helper, replaces them, and
+  re-execs. Staging completes before any installed file changes.
 - An **npm install** (`npm install -g @brokkai/mjolnir`) runs
   `npm install -g @brokkai/mjolnir@latest` as a child process after the
   prompt. Mjolnir never writes into `node_modules` itself; npm owns that
@@ -66,7 +67,40 @@ or having no update, changes nothing about startup.
       test` passes with zero failures across every suite (run outside the
       sandbox as the suite requires); `npm test` 12/12.
 
+- [x] (2026-09-09) PR #982 review reproduced npm's deleted executable path,
+      the launcher removing a user opt-out, and Ctrl-D accepting an upgrade;
+      comparison with install.sh identified the omitted workers and desktop.
+- [x] (2026-09-09) Implement review repairs: stage the complete release bundle,
+      save the restart target before npm runs, preserve the opt-out, and
+      distinguish EOF from Enter. Add behavior regressions for all four.
+- [x] (2026-09-09) Validate the review repairs: 29 updater tests passed;
+      the full `env -u RUST_LOG cargo test` suite passed; clippy with warnings
+      denied and rustfmt passed; all 13 npm tests passed. The fixes are ready
+      to commit and push for PR checks and the user-authorized merge.
+
 ## Surprises & Discoveries
+
+- Observation: this Codex session inherits RUST_LOG=warn. The existing
+  logging integration test expects an INFO startup record, so the first full
+  suite failed its checkpoint-log assertion. Running the same test binary
+  without the override passed both logging tests, and the full suite then
+  passed with env -u RUST_LOG. No logging source change was needed.
+
+- Observation: after a real offline npm upgrade on Linux, current_exe names
+  npm's retired package directory with a ` (deleted)` suffix. The original
+  installation path already contains the new executable, but resolving the
+  running executable after the upgrade gives ENOENT when passed to exec.
+  Evidence: a copied Rust probe printed the deleted staging path and
+  `restart_error=No such file or directory (os error 2)`.
+- Observation: read_line returns zero bytes for Ctrl-D on a terminal, which
+  differs from the newline returned by Enter. Both previously became an empty
+  trimmed answer. The npm launcher also deleted an explicit user opt-out.
+  Evidence: PTY reproduction accepted Ctrl-D; the launcher regression received
+  undefined for an inherited MJOLNIR_NO_UPDATE_CHECK=1.
+- Observation: the 2.x installer includes session workers and a separate
+  desktop executable; the 1.x updater only handled mj and the voice worker.
+  Evidence: install.sh names mj-desktop, mj-worker, and both static Linux
+  worker binaries. The updater must install those from the same archive.
 
 - Observation: the 1.x fallback for an npm install whose env marker was
   missing classified the binary as a "direct" install, so the old self-update
@@ -102,6 +136,25 @@ or having no update, changes nothing about startup.
   Evidence: `ls docs/src/content/docs/` has no storage-network.md.
 
 ## Decision Log
+
+- Decision: the review repairs supersede the original 1.x extraction and
+  post-upgrade path lookup described in the initial implementation history.
+  Stage application binaries in one archive pass into a temporary directory
+  beside the installation, reject malformed, empty, or duplicate entries,
+  require mj, then rename companions before the controller. Stream each
+  binary to disk to avoid retaining an entire decompressed bundle in memory.
+  Rationale: a complete 2.x upgrade must include its workers and desktop;
+  malformed downloads must not partially modify an installation. Companions
+  remain optional when a future release deliberately retires them.
+  Date/Author: 2026-09-09, Codex review repair.
+- Decision: run_managed_upgrade captures and returns its RestartTarget before
+  executing npm or brew; EOF declines the prompt; npm preserves inherited
+  MJOLNIR_NO_UPDATE_CHECK. The restart regression launches a copied test
+  binary and a local fake npm that moves and unlinks the old package, then
+  verifies exec reaches the replacement script.
+  Rationale: tests must prove actual restart and input behavior, not only
+  command construction. The fake uses no network or real installed package.
+  Date/Author: 2026-09-09, Codex review repair.
 
 - Decision: npm and brew upgrades delegate to the package manager
   (`npm install -g @brokkai/mjolnir@latest`, `brew update` +
@@ -185,6 +238,13 @@ or having no update, changes nothing about startup.
   Date/Author: 2026-09-09, plan author.
 
 ## Outcomes & Retrospective
+
+All four review repairs are implemented and validated: curl upgrades install
+all shipped application binaries; npm restarts through its saved installation
+path; npm and npx preserve the opt-out; and EOF declines the prompt. The new
+behavior tests and full workspace checks pass. The original implementation
+report below records Milestones 1-5; the review repair milestone supersedes
+its extraction and restart details.
 
 Shipped: interactive `mj` startups check their own install channel at most
 once a day, ask `Upgrade now? [Y/n]` before changing anything, and on
@@ -400,8 +460,8 @@ app, …) never consult the updater.
 
 ### Milestone 4 — npm launcher markers
 
-In `npm/launcher/mj.js`, replace the current env construction: delete
-`MJOLNIR_NO_UPDATE_CHECK` from the inherited environment, then set
+In `npm/launcher/mj.js`, replace the current env construction: preserve any
+user-provided `MJOLNIR_NO_UPDATE_CHECK` in the inherited environment, then set
 `MJOLNIR_MANAGED_BY_NPX: "true"` when `process.env.npm_command === "exec"`
 (the marker of an `npx` run) else `MJOLNIR_MANAGED_BY_NPM: "true"`. Keep
 the existing comment explaining that npm owns upgrades. Update
@@ -427,6 +487,40 @@ the existing comment explaining that npm owns upgrades. Update
   `MJOLNIR_NO_UPDATE_CHECK`), because mj uses that marker to choose
   `brew upgrade` over self-replacement. Note the tap repository is updated
   outside this repository's release workflow.
+
+### Milestone 6 — repair the PR review findings
+
+In mj-controller/src/hel_controller/update.rs, replace the single-binary
+extract-and-install helpers with install_release_archive and
+stage_release_archive. They extract only mj, mj-desktop, mj-voice-worker,
+mj-worker, and the mj-worker-<target> family (including .exe names for ZIP
+parsing). Ignore other release files. Reuse the archive parsers and stream
+entries with io::copy into temporary files on the destination filesystem.
+Reject selected entries that are empty, duplicated, or not regular files.
+Require the controller before renaming anything. Rename companions first and
+mj last, preserving the controller's canonical destination even if renamed.
+The temporary directory is cleaned on success or extraction failure. Each
+rename is atomic; the group of renames is not a filesystem transaction.
+
+Capture the executable path at the start of run_managed_upgrade, derive a
+RestartTarget before running the manager, and return it to the caller for
+exec. Keep Homebrew resolving its wrapper. Replace direct stdin reading with
+read_update_answer over BufRead; require a nonzero read before accepting the
+answer. Remove only the npm launcher's unconditional deletion of the opt-out,
+and keep its install-method markers. Update the installation documentation.
+
+The regressions must install a realistic bundle with binaries larger than
+64 KiB and verify every helper changes while unrelated files do not. Empty,
+duplicate, and missing-controller archives must leave the installation
+unchanged. Cover retired companions and ZIP staging. On Linux, run a copied
+test executable with a fake npm on PATH; have npm move and unlink the old
+package, install a replacement script, and verify restart runs that script.
+Reader tests distinguish EOF, Enter, yes, and no. Launcher tests verify the
+opt-out survives both npm and npx invocations.
+
+Run cargo test -p brokk-mj-controller update:: outside the sandbox, then the
+full validation commands below. Commit only the repair files on the existing
+PR branch, push to its upstream, and merge only after the PR checks pass.
 
 ## Concrete Steps
 
@@ -578,3 +672,12 @@ wrapper contract (documented in RELEASING.md, applied in the tap repo) is
   Homebrew restart targets the wrapper on `PATH` (not the running Cellar
   binary), and the prompt names the semver version uniformly across
   channels.
+
+- 2026-09-09, PR review repair: added Milestone 6 and recorded the four
+  reproduced issues, the complete-bundle staging design, restart-path capture,
+  EOF semantics, and preservation of the user opt-out. These corrections
+  supersede the original port's narrower extraction and restart behavior.
+
+- 2026-09-09, review validation complete: all 29 updater tests, 13 npm tests,
+  the full Rust suite, clippy, and formatting checks passed. Recorded the
+  inherited RUST_LOG override and the clean-environment full-suite result.

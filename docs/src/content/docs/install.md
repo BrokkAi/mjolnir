@@ -40,7 +40,7 @@ Re-run the installer to update or repair an installation. Its checksum cache avo
 
 At most once a day, an interactive `mj` startup asks the channel it was installed from whether a newer release exists. If one does, mj says what it found and asks `Upgrade now? [Y/n]` before changing anything. Answering `y` runs the upgrade for your install method and restarts mj into the new version:
 
-- Release installer installs: mj downloads the release archive, verifies its SHA-256 sidecar, replaces the binary, and re-exec.
+- Release installer installs: mj downloads the release archive, verifies its SHA-256 sidecar, updates the CLI and all bundled helper binaries, and restarts mj.
 - npm installs: mj runs `npm install -g @brokkai/mjolnir@latest` so npm keeps ownership of `node_modules`. `npx` runs are ephemeral, so mj only prints the command.
 - Homebrew installs: mj runs `brew update` (so the local formula index learns about the release) and then `brew upgrade mjolnir`.
 - Cargo installs: mj prints `cargo install --locked brokk-mjolnir` and leaves the rebuild to you.
