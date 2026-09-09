@@ -9,13 +9,47 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use crate::actions::{Availability, CommandId, spec};
-use crate::{DashboardAction, DashboardState};
+use crate::{DashboardAction, DashboardState, Focus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SurfaceControl {
     Command(CommandId),
     Footer(CommandId),
     Session(usize),
+}
+
+pub(crate) const SESSION_ACTIONS: [(CommandId, &str); 2] = [
+    (CommandId::NewSessionWizard, "Create"),
+    (CommandId::ResumeDialog, "Resume"),
+];
+
+pub(crate) fn session_action_enabled(dashboard: &DashboardState, id: CommandId) -> bool {
+    (spec(id).available)(dashboard) == Availability::Ready
+}
+
+pub(crate) fn first_enabled_session_action(dashboard: &DashboardState) -> Option<CommandId> {
+    SESSION_ACTIONS
+        .iter()
+        .map(|(id, _)| *id)
+        .find(|id| session_action_enabled(dashboard, *id))
+}
+
+pub(crate) fn adjacent_enabled_session_action(
+    dashboard: &DashboardState,
+    current: CommandId,
+    forward: bool,
+) -> Option<CommandId> {
+    let index = SESSION_ACTIONS.iter().position(|(id, _)| *id == current)?;
+    (1..SESSION_ACTIONS.len())
+        .map(|step| {
+            if forward {
+                (index + step) % SESSION_ACTIONS.len()
+            } else {
+                (index + SESSION_ACTIONS.len() - step) % SESSION_ACTIONS.len()
+            }
+        })
+        .map(|index| SESSION_ACTIONS[index].0)
+        .find(|id| session_action_enabled(dashboard, *id))
 }
 
 impl DashboardState {
@@ -29,6 +63,19 @@ impl DashboardState {
             self.surface_form.get_mut().cancel_pointer();
         }
         self.session_menu_ids = sessions;
+        if self
+            .session_action_focus
+            .is_some_and(|id| !session_action_enabled(self, id))
+        {
+            self.session_action_focus = first_enabled_session_action(self);
+        }
+        if self.focus() == Focus::Sessions
+            && !self.modal_open()
+            && self.visible_session_indices().is_empty()
+            && self.session_action_focus.is_none()
+        {
+            self.session_action_focus = first_enabled_session_action(self);
+        }
         self.surface_form.get_mut().begin_frame();
     }
 
@@ -77,15 +124,12 @@ impl DashboardState {
     }
 }
 
-pub(crate) fn render_sidebar_actions(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
+pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
     let mut form = dashboard.surface_form.borrow_mut();
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let commands = [
-        (CommandId::NewSessionWizard, "Create"),
-        (CommandId::ResumeDialog, "Resume"),
-    ];
+    let commands = SESSION_ACTIONS;
     let mut x = area.x;
     for (id, label) in commands {
         let width = Line::raw(label).width() as u16 + 2;
@@ -94,9 +138,12 @@ pub(crate) fn render_sidebar_actions(frame: &mut Frame, area: Rect, dashboard: &
         }
         let rect = Rect::new(x, area.y, width, 1);
         let control = SurfaceControl::Command(id);
-        let enabled = (spec(id).available)(dashboard) == Availability::Ready;
+        let enabled = session_action_enabled(dashboard, id);
         form.register(control, ControlKind::Button, rect, enabled);
-        let style = if enabled && form.is_armed(control) {
+        let focused = dashboard.focus() == Focus::Sessions
+            && dashboard.session_action_focus == Some(id)
+            && !dashboard.modal_open();
+        let style = if enabled && (focused || form.is_armed(control)) {
             theme::selection(true)
         } else if enabled {
             ratatui::style::Style::default()
@@ -110,7 +157,7 @@ pub(crate) fn render_sidebar_actions(frame: &mut Frame, area: Rect, dashboard: &
     }
 }
 
-pub(crate) fn render_session_actions(frame: &mut Frame, dashboard: &DashboardState) {
+pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &DashboardState) {
     let mut form = dashboard.surface_form.borrow_mut();
     for &(index, row) in &dashboard.session_row_areas {
         if row.width < 5 || row.height == 0 {
@@ -171,6 +218,7 @@ mod tests {
     };
     use crate::{Focus, Mode, PaneSize, SupportPane};
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+    use mj_chat::theme;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn draw(dashboard: &mut DashboardState, size: (u16, u16)) -> Vec<String> {
@@ -227,6 +275,161 @@ mod tests {
                 DashboardAction::OpenResumeDialog
             );
         }
+    }
+
+    #[test]
+    fn session_action_buttons_render_inside_the_sessions_pane_and_follow_arrow_focus() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+
+        let pane = dashboard.pane_areas.expect("sessions pane")[0];
+        let create = point(&buffer_lines(terminal.backend().buffer()), "Create");
+        assert_eq!(create.1, pane.y + 1, "actions occupy the pane's first row");
+        assert_eq!(dashboard.session_action_focus, None);
+
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Up)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.session_action_focus,
+            Some(CommandId::NewSessionWizard)
+        );
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let create = point(&buffer_lines(terminal.backend().buffer()), "Create");
+        assert_eq!(
+            terminal.backend().buffer()[(create.0, create.1)].bg,
+            theme::palette().selection,
+            "the keyboard-focused action uses the focused button style"
+        );
+
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Right)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.session_action_focus,
+            Some(CommandId::ResumeDialog)
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::OpenResumeDialog
+        );
+    }
+
+    #[test]
+    fn session_action_navigation_returns_to_the_first_session_and_enter_opens_it() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut second = running_session();
+        second.id = "another-session".into();
+        dashboard.state.sessions.insert(second.id.clone(), second);
+        dashboard.focus_sessions();
+        draw(&mut dashboard, (120, 40));
+
+        dashboard.handle_key(key(KeyCode::Down));
+        assert_eq!(dashboard.selected_visible_index(), Some(1));
+        dashboard.handle_key(key(KeyCode::Up));
+        assert_eq!(dashboard.selected_visible_index(), Some(0));
+        dashboard.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            dashboard.session_action_focus,
+            Some(CommandId::NewSessionWizard)
+        );
+        dashboard.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            dashboard.session_action_focus,
+            Some(CommandId::ResumeDialog)
+        );
+        dashboard.handle_key(key(KeyCode::Left));
+        assert_eq!(
+            dashboard.session_action_focus,
+            Some(CommandId::NewSessionWizard),
+            "Left returns from Resume to Create"
+        );
+        dashboard.handle_key(key(KeyCode::Down));
+        assert_eq!(dashboard.session_action_focus, None);
+        assert_eq!(dashboard.selected_visible_index(), Some(0));
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::Open { .. }
+        ));
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        draw(&mut dashboard, (120, 40));
+        dashboard.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::New(_)));
+    }
+
+    #[test]
+    fn empty_sessions_can_select_and_activate_the_action_row() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.state.sessions.clear();
+        dashboard.session_details.clear();
+        dashboard.focus_sessions();
+        draw(&mut dashboard, (120, 40));
+
+        assert_eq!(
+            dashboard.session_action_focus,
+            Some(CommandId::NewSessionWizard)
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Right)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.session_action_focus,
+            Some(CommandId::ResumeDialog)
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::OpenResumeDialog
+        );
+    }
+
+    #[test]
+    fn disabled_create_is_skipped_by_action_navigation_and_mouse_stays_working() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.config.profiles.clear();
+        dashboard.focus_sessions();
+        let lines = draw(&mut dashboard, (120, 40));
+        let create = point(&lines, "Create");
+        let resume = point(&lines, "Resume");
+        assert_eq!(create.1, resume.1);
+
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Up)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.session_action_focus,
+            Some(CommandId::ResumeDialog)
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Left)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.session_action_focus,
+            Some(CommandId::ResumeDialog)
+        );
+
+        dashboard.cancel_modal();
+        let lines = draw(&mut dashboard, (120, 40));
+        assert_eq!(
+            click(&mut dashboard, point(&lines, "Resume")),
+            DashboardAction::OpenResumeDialog
+        );
     }
 
     #[test]

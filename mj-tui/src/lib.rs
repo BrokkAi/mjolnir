@@ -547,6 +547,10 @@ pub struct DashboardState {
     /// selection engine can hit-test the screen the user is looking at.
     pub(crate) frame_surfaces: FrameSurfaces,
     pub(crate) surface_form: RefCell<mj_chat::components::Form<surface_controls::SurfaceControl>>,
+    /// The optional action row selection inside Sessions. A focused action
+    /// temporarily owns Up/Down/Left/Right/Enter while the pane itself keeps
+    /// the selected session anchored to the conversation.
+    pub(crate) session_action_focus: Option<CommandId>,
     pub(crate) session_menu_ids: Vec<String>,
     /// The rows the open resume dialog shows, derived from the records, the
     /// scans, and the dialog's own search. Rebuilt where those change and once
@@ -669,6 +673,7 @@ impl DashboardState {
             resume_sessions_area: None,
             frame_surfaces: FrameSurfaces::new(),
             surface_form: RefCell::new(mj_chat::components::Form::default()),
+            session_action_focus: None,
             session_menu_ids: Vec::new(),
             resume_rows: Vec::new(),
             session_row_areas: Vec::new(),
@@ -863,11 +868,13 @@ impl DashboardState {
 
     pub fn focus_prompt(&mut self) {
         self.focus = Focus::Prompt;
+        self.session_action_focus = None;
     }
 
     /// Focuses the Sessions pane without changing its explicit size.
     pub fn focus_sessions(&mut self) {
         self.focus = Focus::Sessions;
+        self.session_action_focus = None;
         self.clamp_selections();
     }
 
@@ -876,6 +883,9 @@ impl DashboardState {
     /// Pane sizes are the user's setting, so Tab never changes them.
     pub fn cycle_focus(&mut self, reverse: bool) {
         self.focus = cycle_control(self.focus, &FOCUS_ORDER, reverse);
+        if self.focus != Focus::Sessions {
+            self.session_action_focus = None;
+        }
         self.clamp_selections();
     }
 
@@ -1239,6 +1249,7 @@ impl DashboardState {
                 .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
             {
                 self.focus = Focus::Workspaces;
+                self.session_action_focus = None;
                 return DashboardAction::None;
             }
             if let Some(&(pane, size, _)) = self
@@ -1301,6 +1312,9 @@ impl DashboardState {
             MouseEventKind::ScrollDown if rows_visible => self.scroll_selection_for(hovered, 1),
             MouseEventKind::Down(MouseButton::Left) => {
                 self.focus = hovered;
+                if hovered != Focus::Sessions {
+                    self.session_action_focus = None;
+                }
                 self.clamp_selections();
             }
             _ => {}
@@ -1314,6 +1328,7 @@ impl DashboardState {
         // Clicking a row selects it wherever the dial has left the pane.
         self.scroll_lookahead.set(None);
         self.focus = focus;
+        self.session_action_focus = None;
         if focus == Focus::Sessions {
             let clicked = self
                 .ordered_sessions()
@@ -1377,6 +1392,12 @@ impl DashboardState {
                 _ => {}
             }
         }
+        if plain
+            && self.focus == Focus::Sessions
+            && let Some(action) = self.handle_session_action_key(key)
+        {
+            return action;
+        }
         // List navigation, shared by visible lists. It comes before the
         // registry so `j`, `k`, Ctrl-N, and Ctrl-P keep moving the selection.
         if self.focused_rows_visible() {
@@ -1421,6 +1442,64 @@ impl DashboardState {
         match crate::actions::spec_for_key(key, self.focus) {
             Some(id) => self.dispatch_command(id),
             None => DashboardAction::None,
+        }
+    }
+
+    /// Handles the small action row at the top of Sessions. The row is a
+    /// second selection target within the pane: Up from its first session
+    /// enters it, Down returns to the first session, and Left/Right skip any
+    /// disabled action. `None` means the regular dashboard key handling still
+    /// owns the key; `Some` means the key was consumed, including a no-op.
+    fn handle_session_action_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
+        let session_count = self.visible_session_indices().len();
+        let focused_action = self.session_action_focus;
+        match (focused_action, key.code) {
+            (Some(id), KeyCode::Left | KeyCode::Right) => {
+                if let Some(next) = crate::surface_controls::adjacent_enabled_session_action(
+                    self,
+                    id,
+                    key.code == KeyCode::Right,
+                ) {
+                    self.session_action_focus = Some(next);
+                }
+                Some(DashboardAction::None)
+            }
+            (Some(_), KeyCode::Up) => Some(DashboardAction::None),
+            (Some(_), KeyCode::Down) if session_count > 0 => {
+                self.session_action_focus = None;
+                self.set_selection_for(Focus::Sessions, 0);
+                Some(DashboardAction::None)
+            }
+            (Some(_), KeyCode::Down) => Some(DashboardAction::None),
+            (Some(id), KeyCode::Enter) => {
+                self.session_action_focus = None;
+                Some(self.run_available_command(id))
+            }
+            (None, KeyCode::Up)
+                if session_count == 0 || self.selected_visible_index() == Some(0) =>
+            {
+                self.session_action_focus =
+                    crate::surface_controls::first_enabled_session_action(self);
+                Some(DashboardAction::None)
+            }
+            (None, KeyCode::Down) if session_count == 0 => {
+                self.session_action_focus =
+                    crate::surface_controls::first_enabled_session_action(self);
+                Some(DashboardAction::None)
+            }
+            (None, KeyCode::Left | KeyCode::Right) if session_count == 0 => {
+                let first = crate::surface_controls::first_enabled_session_action(self);
+                self.session_action_focus = if key.code == KeyCode::Right {
+                    first
+                } else {
+                    first.and_then(|id| {
+                        crate::surface_controls::adjacent_enabled_session_action(self, id, false)
+                            .or(Some(id))
+                    })
+                };
+                Some(DashboardAction::None)
+            }
+            _ => None,
         }
     }
 
@@ -1780,6 +1859,9 @@ impl DashboardState {
     /// currently on screen.
     fn set_selection_for(&mut self, focus: Focus, index: usize) {
         self.scroll_lookahead.set(None);
+        if focus == Focus::Sessions {
+            self.session_action_focus = None;
+        }
         match focus {
             Focus::Sessions => {
                 let sessions = self.ordered_sessions();
@@ -3156,8 +3238,15 @@ mod tests {
         assert_eq!(
             dashboard.selected_visible_index(),
             Some(0),
-            "Up at the first row stays put"
+            "Up to the actions preserves the selected conversation"
         );
+        assert_eq!(
+            dashboard.session_action_focus,
+            Some(CommandId::NewSessionWizard)
+        );
+        dashboard.handle_key(key(KeyCode::Down));
+        assert_eq!(dashboard.session_action_focus, None);
+        assert_eq!(dashboard.selected_visible_index(), Some(0));
 
         dashboard.handle_key(key(KeyCode::Down));
         dashboard.handle_key(key(KeyCode::Down));

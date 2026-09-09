@@ -492,6 +492,7 @@ pub(crate) fn workspace_tab_click(
         && row < area.bottom()
     {
         dashboard.focus = crate::Focus::Workspaces;
+        dashboard.session_action_focus = None;
     }
     let workspace_id = workspace_id?;
     (dashboard.active_workspace_id() != Some(workspace_id.as_str()))

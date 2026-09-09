@@ -35,6 +35,8 @@ use crate::{
 };
 
 const SESSION_TABLE_CHROME_HEIGHT: u16 = 3;
+/// One fixed row at the top of Sessions for Create and Resume.
+pub(crate) const SESSION_ACTIONS_HEIGHT: u16 = 1;
 
 /// Move a table viewport just far enough to show the row beyond the selection
 /// in the direction the user moved. Variable-height rows only get that margin
@@ -1072,6 +1074,7 @@ pub(crate) fn sessions_content_height(dashboard: &DashboardState, width: u16) ->
         .iter()
         .map(|row| row.content_height().saturating_add(row.spacing))
         .fold(0, u16::saturating_add)
+        .saturating_add(SESSION_ACTIONS_HEIGHT)
 }
 
 pub(crate) fn minimized_sessions_content_height(dashboard: &DashboardState, width: u16) -> u16 {
@@ -1187,7 +1190,18 @@ pub(crate) fn render_sessions(
     // control on each session's title line. The activity and output lines
     // use the full content width; a narrow sidebar must not hide their clock
     // or queued count behind the action button.
-    let rows_area = content;
+    let actions_area = Rect::new(
+        content.x,
+        content.y,
+        content.width,
+        content.height.min(SESSION_ACTIONS_HEIGHT),
+    );
+    let rows_area = Rect::new(
+        content.x,
+        content.y.saturating_add(SESSION_ACTIONS_HEIGHT),
+        content.width,
+        content.height.saturating_sub(SESSION_ACTIONS_HEIGHT),
+    );
     let width = content.width;
     let drawn = if dashboard.sessions_minimized() {
         drawn_session_rows_with_options(dashboard, width, SessionRowsRenderOptions::MINIMIZED)
@@ -1206,6 +1220,7 @@ pub(crate) fn render_sessions(
         ),
         area,
     );
+    crate::surface_controls::render_session_buttons(frame, actions_area, dashboard);
     let table = Table::new(
         drawn.iter().map(|row| {
             Row::new([Cell::from(Text::from(row.lines.clone()))])
@@ -3243,7 +3258,7 @@ mod tests {
 
     #[test]
     fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
-        for (height, expected_sessions_height) in [(32, 27), (44, 39)] {
+        for (height, expected_sessions_height) in [(32, 28), (44, 40)] {
             let mut dashboard = minimized_sessions_dashboard(3, 2);
             dashboard
                 .restore_pane_sizes(crate::PaneSizes::default())
@@ -3928,7 +3943,7 @@ mod tests {
                 .collect::<String>()
         };
 
-        // The workspace pane and action row precede Sessions, while the
+        // The workspace pane precedes Sessions, while the
         // transcript keeps the same upper band height.
         let sessions = dashboard.pane_areas.expect("pane geometry")[0];
         assert!(
@@ -4262,7 +4277,7 @@ mod tests {
                 let [sessions, targets, quota] = dashboard.pane_areas.unwrap();
                 let transcript = dashboard.chat_transcript_area.unwrap();
                 let prompt = dashboard.chat_prompt_area.unwrap();
-                assert_eq!(sessions.y, 4);
+                assert_eq!(sessions.y, 3);
                 assert!(sessions.height > 0);
                 assert!(sessions.width > 0 && transcript.width > 0);
                 for pane in [transcript, prompt, targets, quota] {
@@ -4641,7 +4656,7 @@ mod tests {
     fn minimized_sessions_bound_the_viewport_to_preserve_the_conversation() {
         let mut dashboard = minimized_sessions_dashboard(3, 3);
         let lines = drawn(&mut dashboard, 120, 20);
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 15);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 16);
         assert!(
             dashboard
                 .session_row_areas
@@ -4660,7 +4675,7 @@ mod tests {
             !lines.iter().any(|line| line.contains("more")),
             "no marker expected when all sessions fit: {lines:?}"
         );
-        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 39);
+        assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 40);
     }
 
     /// The minimized row keeps the session name and its actionable status.
@@ -4824,7 +4839,7 @@ mod tests {
             .surface(SurfaceId::DashboardPane(0))
             .expect("tiny minimized selection surface");
         assert_eq!(selection.rect, pane.inner(Margin::new(1, 1)));
-        assert_eq!(selection.rect.height, 11);
+        assert_eq!(selection.rect.height, 12);
     }
 
     #[test]
@@ -4837,7 +4852,7 @@ mod tests {
             tall[usize::from(tall_pane.y)].contains('╭')
                 && tall[usize::from(tall_pane.y)].contains("Sessi")
         );
-        assert_eq!(dashboard.pane_areas.expect("tall panes")[0].height, 39);
+        assert_eq!(dashboard.pane_areas.expect("tall panes")[0].height, 40);
 
         let short = drawn(&mut dashboard, 120, 20);
         let short_pane = dashboard.pane_areas.expect("short panes")[0];
@@ -4845,12 +4860,12 @@ mod tests {
             short[usize::from(short_pane.y)].contains('╭')
                 && short[usize::from(short_pane.y)].contains("Sessi")
         );
-        assert_eq!(dashboard.pane_areas.expect("short panes")[0].height, 15);
+        assert_eq!(dashboard.pane_areas.expect("short panes")[0].height, 16);
 
         drawn(&mut dashboard, 120, 44);
         assert_eq!(
             dashboard.pane_areas.expect("tall panes again")[0].height,
-            39
+            40
         );
     }
 
