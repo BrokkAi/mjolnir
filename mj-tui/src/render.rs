@@ -4257,13 +4257,13 @@ mod tests {
     fn the_empty_prompt_distinguishes_no_session_from_no_conversation() {
         let mut empty = DashboardState::new(config(), HelState::default(), BTreeMap::new());
         let lines = drawn(&mut empty, 120, 44).join("\n");
-        assert!(lines.contains("Prompt (no live session)"), "{lines}");
+        assert!(lines.contains("No live session"), "{lines}");
         assert!(lines.contains("Alt-N to create one"), "{lines}");
 
         // A live session that simply is not open says so instead.
         let mut live = dashboard_with_session(running_session());
         let lines = drawn(&mut live, 120, 44).join("\n");
-        assert!(lines.contains("Prompt (no conversation open)"), "{lines}");
+        assert!(lines.contains("No conversation open"), "{lines}");
         assert!(lines.contains("Enter on the one to open"), "{lines}");
         assert!(!lines.contains("No live session"), "{lines}");
         assert!(!lines.contains("Opening session"), "{lines}");
@@ -4279,7 +4279,7 @@ mod tests {
         dashboard.set_opening_session(Some("session-1"));
 
         let lines = drawn(&mut dashboard, 120, 44).join("\n");
-        assert!(lines.contains("Prompt (opening session)"), "{lines}");
+        assert!(lines.contains("Opening session"), "{lines}");
         assert!(lines.contains("Opening session"), "{lines}");
         assert!(
             lines.contains("Esc cancels · select another session to switch · Alt-Q quits"),
@@ -4368,8 +4368,8 @@ mod tests {
         let tables_freed = (band(&before, "Targets", "Quota") - band(&after, "Targets", "Quota"))
             + (band(&before, "Quota", "Alt-Q detach") - band(&after, "Quota", "Alt-Q detach"));
         let sessions_freed = 0;
-        let transcript_gain =
-            band(&after, "Conversation", "Prompt") - band(&before, "Conversation", "Prompt");
+        let transcript_gain = band(&after, "Conversation", "No conversation open")
+            - band(&before, "Conversation", "No conversation open");
         assert!(tables_freed > 0, "the tables gave up nothing");
         assert_eq!(transcript_gain, tables_freed + sessions_freed);
         // Each minimized pane really is one row.

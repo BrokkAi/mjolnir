@@ -16,8 +16,11 @@ use std::{
 };
 
 /// Empty-session text that appears after the combined dashboard is ready.
-const READY_MARKER: &[u8] = b"Prompt (no live session)";
+const READY_MARKER: &[u8] = b"No live session";
 const TIMEOUT: Duration = Duration::from_secs(5);
+const DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[?u\x1b[c";
+const DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?1;2c";
+const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 
 /// Alt-Q, which a terminal sends as Escape followed by the letter. Alt is the
 /// same modifier on every platform, so unlike the old Ctrl-Q this needs no
@@ -118,8 +121,21 @@ fn drain(master: &mut File, output: &mut Vec<u8>) {
 }
 
 fn wait_for_output(master: &mut File, output: &mut Vec<u8>, marker: &[u8], deadline: Instant) {
+    let mut answered_device_query = output
+        .windows(ENTER_ALTERNATE_SCREEN.len())
+        .any(|window| window == ENTER_ALTERNATE_SCREEN);
     while !output.windows(marker.len()).any(|window| window == marker) {
         drain(master, output);
+        if !answered_device_query
+            && output
+                .windows(DEVICE_ATTRIBUTES_QUERY.len())
+                .any(|window| window == DEVICE_ATTRIBUTES_QUERY)
+        {
+            master
+                .write_all(DEVICE_ATTRIBUTES_RESPONSE)
+                .expect("answer terminal device attributes query");
+            answered_device_query = true;
+        }
         assert!(
             Instant::now() < deadline,
             "PTY child did not emit {marker:?}; output: {:?}",

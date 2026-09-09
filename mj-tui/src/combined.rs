@@ -899,21 +899,21 @@ fn render_empty_conversation(
     }
     let (title, lines) = match reason {
         EmptyConversation::NoLiveSession => (
-            " Prompt (no live session) ",
+            " No live session ",
             [
                 "No live session in this workspace.",
                 "Press Alt-N to create one, or Alt-S to resume one.",
             ],
         ),
         EmptyConversation::NoConversationOpen => (
-            " Prompt (no conversation open) ",
+            " No conversation open ",
             [
                 "No conversation open.",
                 "Press Tab for Sessions, then Enter on the one to open.",
             ],
         ),
         EmptyConversation::Opening => (
-            " Prompt (opening session) ",
+            " Opening session ",
             [
                 "Opening session…",
                 "Esc cancels · select another session to switch · Alt-Q quits",
