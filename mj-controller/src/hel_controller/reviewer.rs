@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::worker_binary::{bridge_launch, stage_profile};
+use super::worker_binary::{bridge_launch, container_upload_ownership_args, stage_profile};
 use super::{Controller, execute_checked, scp_command_spec, ssh_command_spec};
 use hel::hel_targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
 use hel::hel_worker_launch::{
@@ -343,6 +343,7 @@ fn upload_reviewer_profile(
                     format!("{}/.", local.display()),
                     format!("{container_id}:{home}"),
                 ],
+                container_upload_ownership_args(container_id, worker_root, &[&home]),
                 vec![
                     "exec".to_owned(),
                     container_id.clone(),
@@ -431,6 +432,13 @@ fn upload_reviewer_profile(
                     format!("{upload}/."),
                     format!("{container_id}:{home}"),
                 ],
+                std::iter::once(engine.to_owned())
+                    .chain(container_upload_ownership_args(
+                        container_id,
+                        worker_root,
+                        &[&home],
+                    ))
+                    .collect(),
                 vec![
                     engine.to_owned(),
                     "exec".to_owned(),

@@ -75,10 +75,13 @@ relay binary and a staged, allowlisted copy of the harness profile
 container — for example `/var/lib/hel/workers/<session-id>` and
 `/var/lib/hel/profiles/<session-id>`.
 
-mj creates these directories itself with `mkdir -p` and writes into them
-with plain file copies; it does not pass any specific user to the runtime's `exec`,
-so those commands run as whatever user the image's `USER` (or its absence)
-puts them in. A rootless Podman container defaults to root inside when no
+mj creates these directories with `mkdir -p` as the image's configured user.
+Container copies can produce root-owned files, so mj assigns uploaded workers
+and profiles to the directory's owner before restricting their permissions.
+Only this ownership adjustment runs with `exec --user 0`; the worker and
+harness still run as the image's configured user. Images need `chown` and
+`stat -c '%u:%g'` (GNU coreutils and BusyBox both provide these). A rootless
+Podman container defaults to root inside when no
 `USER` is set, which can write anywhere. If your image sets a non-root
 `USER`, as the reference image does with its `hel` user, that user needs
 write access to `/workspace` and `/var/lib/hel` — the reference image grants

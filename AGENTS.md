@@ -36,6 +36,12 @@ Reserve `docs/` for future documentation for human readers. Do not store ExecPla
 
 # Releases
 
+"Cut a new release" and equivalent release requests explicitly authorize
+pushing the release commit to the configured upstream, pushing the release
+tag, and publishing remotely through the normal release workflows, including
+required package-channel updates. Treat this as an explicit push request;
+do not ask for separate push or publication confirmation.
+
 Follow `RELEASING.md` for every release. The release version must be committed
 in the workspace manifest, synchronized internal dependency constraints,
 `Cargo.lock`, and the generated license report before creating the tag. Run
@@ -52,7 +58,8 @@ to the current branch without waiting for a separate request to commit. For a
 larger task, also commit each logically distinct, validated set of changes when
 it forms a coherent checkpoint. Treat committing as part of finishing the task
 unless the user explicitly says not to commit. Do not push unless the user
-explicitly asks.
+explicitly asks. Release requests are explicit push authorization as defined
+under Releases above.
 
 Commit directly to the current branch. This rule also applies when the current branch is `master`.
 When explicitly asked to push, push to upstream, even when upstream is `master`.
