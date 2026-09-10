@@ -14,7 +14,7 @@
 use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use mj_chat::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
+use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TextField};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -51,7 +51,7 @@ pub(crate) struct CommandPalette {
     pub(crate) entries: Vec<PaletteEntry>,
     /// Index into `entries` of the highlighted row.
     pub(crate) selected: usize,
-    pub(crate) form: RefCell<Form<PaletteControl>>,
+    pub(crate) form: RefCell<Dialog<PaletteControl>>,
     session_only: bool,
     session_id: Option<String>,
 }
@@ -82,6 +82,11 @@ impl CommandPalette {
             self.entries
                 .get(self.selected)
                 .is_some_and(|entry| entry.availability == Availability::Ready),
+        );
+        form.set_menu(true);
+        form.set_list_activation(
+            PaletteControl::Commands,
+            mj_chat::components::ListActivation::SingleClick,
         );
         form.end_frame(PaletteControl::Query);
     }
@@ -188,7 +193,7 @@ impl DashboardState {
             query: TextInput::new(),
             entries,
             selected: 0,
-            form: RefCell::new(Form::default()),
+            form: RefCell::new(Dialog::default()),
             session_only: false,
             session_id: self.selected_session_id.clone(),
         };
@@ -303,6 +308,11 @@ impl DashboardState {
             Some(Interaction::Activate(
                 PaletteControl::Query | PaletteControl::Commands | PaletteControl::Run,
             )) => {
+                palette.selected = palette
+                    .form
+                    .borrow()
+                    .selected(PaletteControl::Commands)
+                    .unwrap_or(palette.selected);
                 let Some(entry) = palette.entries.get(palette.selected).cloned() else {
                     return DashboardAction::None;
                 };
@@ -396,6 +406,7 @@ pub(crate) fn render_palette(
 
     let mut form = palette.form.borrow_mut();
     form.begin_frame();
+    form.set_bounds(popup);
     let title = dismissible_modal_title(&mut form, popup, "✦ Commands", theme::title(true), true);
     let outer = theme::modal()
         .title(title)
@@ -406,10 +417,7 @@ pub(crate) fn render_palette(
             )
             .right_aligned(),
         )
-        .title_bottom(Line::styled(
-            " ↑↓ browse · Tab moves · Enter runs · Esc closes ",
-            theme::muted(),
-        ));
+        .title_bottom(mj_chat::components::DialogShell::hints(true));
     frame.render_widget(outer, popup);
     TextField::render(
         frame,
@@ -538,7 +546,7 @@ pub(crate) fn render_palette(
         form.list_offset(PaletteControl::Commands),
         usize::from(list_area.height).max(1),
     );
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         rows[3],
         &[(

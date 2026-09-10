@@ -242,12 +242,13 @@ def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
     _record(evidence, tmux, "review-settings-open", "open review settings", "review form visible")
     tmux.send_key("Space")
     time.sleep(0.15)
-    screen = _wait(tmux, "No reviewer profile")
-    _record(evidence, tmux, "review-settings-enabled", "toggle automatic review", "review enabled", screen)
-    x, y = locate_text(screen, "No reviewer profile")
-    tmux.mouse_click(x + 2, y)
-    time.sleep(0.15)
+    # Open the profile dropdown, then choose its explicit empty option.
     screen = _capture(tmux)
+    row = next((y, line) for y, line in enumerate(screen.splitlines()) if "Profile   " in line)
+    tmux.mouse_click(row[1].index("Profile   ") + 12, row[0])
+    tmux.send_key("Home")
+    tmux.send_key("Enter")
+    screen = _wait(tmux, "No reviewer profile")
     x, y = locate_text(screen, "  Save Setup  ")
     tmux.mouse_click(x + 3, y)
     time.sleep(0.3)
@@ -255,23 +256,26 @@ def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
     if lab.snapshot()["review_config"] != before:
         raise AssertionError("disabled Save persisted an invalid review draft")
     _record(evidence, tmux, "review-disabled-save", "enable without a reviewer; click disabled Save", "invalid draft stays open and persisted settings are unchanged")
-    tmux.send_key("Right")
-    tmux.send_key("Right")
     tmux.send_key("F1")
     _wait(tmux, "Keyboard shortcuts")
     tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Keyboard shortcuts" not in _capture(tmux), "Help dismissed during review discovery")
-    _wait(tmux, "Choices loaded")
-    _record(evidence, tmux, "review-async-help", "select fake profile; open and close Help during discovery", "choices arrive and the review draft is restored")
-    from tui_review_discovery import exercise_choices
-    exercise_choices(lab, tmux, evidence)
+    tmux.wait_until(lambda: "Keyboard shortcuts" not in _capture(tmux), "Help dismissed over review editor")
+    _wait(tmux, "No reviewer profile")
     x, y = locate_text(_capture(tmux), "  Cancel  ", last=True)
     tmux.mouse_click(x + 3, y)
-    tmux.wait_until(lambda: "╭ Setup" not in _capture(tmux), "review cancellation")
+    _wait(tmux, "Discard unsaved changes?", "review draft protection")
+    tmux.send_key("Enter")
+    tmux.wait_until(lambda: "Discard unsaved changes?" not in _capture(tmux), "safe default keeps review edits")
+    _wait(tmux, "No reviewer profile")
+    tmux.send_key("Escape")
+    _wait(tmux, "Discard unsaved changes?")
+    tmux.send_key("Right")
+    tmux.send_key("Enter")
+    tmux.wait_until(lambda: "Setup › Code Review" not in _capture(tmux), "review child cancellation")
+    tmux.send_key("Escape")
     if lab.snapshot()["review_config"] != before:
         raise AssertionError("cancelling review settings persisted the draft")
-    from tui_review_discovery import exercise_cached_reopen
-    exercise_cached_reopen(lab, tmux, evidence)
+    _record(evidence, tmux, "review-protected-cancel", "Cancel; keep editing; Escape; discard", "safe default preserves edits and discard restores Setup without saving")
 
 
 def probe_new_wizard(lab: Any, tmux: Any, evidence: Any) -> None:
@@ -377,20 +381,45 @@ def probe_web_dialog(lab: Any, tmux: Any, evidence: Any) -> None:
         tmux,
         "dialog-web-open",
         "press F4",
-        "web dialog and standard Close button are visible",
+        "web dialog and title close control are visible",
         web,
     )
-    tmux.send_key("Enter")
+    tmux.send_key("Escape")
     tmux.wait_until(lambda: "Web viewer" not in _capture(tmux), "Web dialog dismissed")
     closed = _capture(tmux)
     _record(
         evidence,
         tmux,
         "dialog-web-close",
-        "press Enter on Close",
+        "press Escape",
         "web dialog closes and dashboard returns",
         closed,
     )
+
+
+def probe_setup_double_click(lab: Any, tmux: Any, evidence: Any) -> None:
+    """Selection and activation use the same row as keyboard Enter."""
+    del lab
+    from tui_components_tmux import locate_text
+    tmux.send_key("F7")
+    screen = _wait(tmux, "Interface", "setup categories")
+    x, y = locate_text(screen, "Interface")
+    tmux.mouse_click(x, y)
+    selected = _capture(tmux)
+    if "Setup › Interface" in selected:
+        raise AssertionError("one setup click activated instead of selecting")
+    # A fresh pair is sent together so capture latency cannot affect the interval.
+    tmux.send_key("Home")
+    tmux.mouse_click(x, y)
+    tmux.mouse_click(x, y)
+    opened = _wait(tmux, "Setup › Interface", "double-click opens selected setup category")
+    _record(evidence, tmux, "setup-double-click", "select once, then double-click Interface", "Interface opens like Enter", opened)
+    tmux.send_key("BSpace")
+    _wait(tmux, "Interface", "setup parent category")
+    tmux.send_key("Enter")
+    _wait(tmux, "Setup › Interface", "Enter reopens the restored selection")
+    tmux.send_key("Escape")
+    tmux.wait_until(lambda: "Setup › Interface" not in _capture(tmux), "setup dismissed without edits")
 
 
 def run_dialog_acceptance(lab: Any, tmux: Any, evidence: Any) -> None:
@@ -401,6 +430,7 @@ def run_dialog_acceptance(lab: Any, tmux: Any, evidence: Any) -> None:
     preconditions; every probe restores them before returning.
     """
 
+    probe_setup_double_click(lab, tmux, evidence)
     probe_rename(lab, tmux, evidence)
     probe_target_config_id(lab, tmux, evidence)
     probe_review_settings(lab, tmux, evidence)

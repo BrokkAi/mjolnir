@@ -4,7 +4,7 @@ use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use hel::hel_workspace::WorkspaceRecord;
-use mj_chat::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
+use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TextField};
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 use mj_chat::theme;
@@ -98,47 +98,47 @@ pub(crate) struct WorkspaceManager {
     pub(crate) selected_draft: usize,
     pub(crate) view: WorkspaceManagerView,
     pub(crate) name: TextInput,
-    pub(crate) form: RefCell<Form<WorkspaceControl>>,
+    pub(crate) form: RefCell<Dialog<WorkspaceControl>>,
     pub(crate) loading: bool,
     pub(crate) busy: Option<WorkspaceMutation>,
     pub(crate) error: Option<String>,
     pub(crate) success: Option<String>,
 }
 
-fn manager_form() -> RefCell<Form<WorkspaceControl>> {
-    let mut form = Form::new();
-    form.declare(
-        WorkspaceControl::List,
-        ControlKind::ChoiceList {
-            len: 0,
-            selected: 0,
-        },
-    );
-    form.declare(
-        WorkspaceControl::DraftList,
-        ControlKind::ChoiceList {
-            len: 0,
-            selected: 0,
-        },
-    );
-    form.declare(WorkspaceControl::New, ControlKind::Button);
-    form.declare(WorkspaceControl::Open, ControlKind::Button);
-    form.declare(WorkspaceControl::Rename, ControlKind::Button);
-    form.declare(WorkspaceControl::Save, ControlKind::Button);
-    form.declare(WorkspaceControl::Delete, ControlKind::Button);
-    form.declare(WorkspaceControl::ConfirmDelete, ControlKind::Button);
-    form.declare(WorkspaceControl::Drafts, ControlKind::Button);
-    form.declare(WorkspaceControl::Name, ControlKind::TextField);
-    form.declare(WorkspaceControl::Create, ControlKind::Button);
-    form.declare(WorkspaceControl::ForceDelete, ControlKind::Button);
-    form.declare(WorkspaceControl::Recover, ControlKind::Button);
-    form.declare(WorkspaceControl::Cancel, ControlKind::Button);
-    form.declare(WorkspaceControl::Back, ControlKind::Button);
-    form.end_frame(WorkspaceControl::List);
-    RefCell::new(form)
+fn manager_form() -> RefCell<Dialog<WorkspaceControl>> {
+    RefCell::new(Dialog::new())
 }
 
 impl WorkspaceManager {
+    pub(crate) fn prepare_dialog_state(&mut self) {
+        self.sync_form();
+        use WorkspaceControl::*;
+        let form = self.form.get_mut();
+        form.set_dismissal_enabled(
+            self.busy
+                .is_none_or(|operation| operation == WorkspaceMutation::Load),
+        );
+        form.set_action_role(Cancel, mj_chat::components::ActionRole::Cancel);
+        form.set_action_role(Back, mj_chat::components::ActionRole::Back);
+        match self.view {
+            WorkspaceManagerView::Create | WorkspaceManagerView::Rename { .. } => {
+                form.track_draft(vec![self.name.to_string()]);
+                form.set_dismiss_actions(&[Cancel, Back]);
+                let primary = if matches!(self.view, WorkspaceManagerView::Create) {
+                    Create
+                } else {
+                    Save
+                };
+                form.set_default_action(primary);
+                form.set_submit(Name, primary);
+            }
+            _ => {
+                form.reset_draft();
+                form.set_dismiss_actions(&[Cancel]);
+            }
+        }
+    }
+
     pub(crate) fn loading(generation: u64, active_workspace_id: Option<String>) -> Self {
         Self {
             generation,
@@ -233,38 +233,123 @@ impl WorkspaceManager {
         self.form.get_mut().focus(WorkspaceControl::List);
     }
 
+    fn actions(&self) -> Vec<(WorkspaceControl, &'static str, bool)> {
+        use WorkspaceControl::*;
+        let ready = self.can_mutate();
+        let dismiss = self.busy.is_none();
+        match &self.view {
+            WorkspaceManagerView::List => {
+                let selected = self.selected_entry();
+                let mut actions = vec![
+                    (Cancel, "Close", dismiss),
+                    (Rename, "Rename", ready && selected.is_some()),
+                    (Delete, "Delete", ready && selected.is_some()),
+                ];
+                if selected.is_some_and(|entry| !entry.drafts.is_empty()) {
+                    actions.push((Drafts, "Drafts", ready));
+                }
+                actions.push((Open, "Open", ready && selected.is_some()));
+                actions
+            }
+            WorkspaceManagerView::Create => vec![
+                (Cancel, "Cancel", dismiss),
+                (Back, "Back", dismiss),
+                (Create, "Create", ready),
+            ],
+            WorkspaceManagerView::Rename { .. } => vec![
+                (Cancel, "Cancel", dismiss),
+                (Back, "Back", dismiss),
+                (Save, "Save", ready),
+            ],
+            WorkspaceManagerView::Delete { .. } if self.delete_is_destructive() => vec![
+                (Cancel, "Cancel", dismiss),
+                (
+                    ForceDelete,
+                    "Force delete",
+                    ready && self.force_delete_ready(),
+                ),
+            ],
+            WorkspaceManagerView::Delete { .. } => vec![
+                (Cancel, "Cancel", dismiss),
+                (ConfirmDelete, "Delete", ready),
+            ],
+            WorkspaceManagerView::Drafts { .. } => vec![
+                (Back, "Back", dismiss),
+                (
+                    Recover,
+                    "Recover",
+                    ready
+                        && self
+                            .viewed_entry()
+                            .is_some_and(|entry| !entry.drafts.is_empty()),
+                ),
+            ],
+        }
+    }
+
     fn sync_form(&mut self) {
+        use WorkspaceControl::*;
+        use mj_chat::components::{ActionRole, DialogAction};
+        let actions = self.actions();
         let draft_len = self.viewed_entry().map_or(0, |entry| entry.drafts.len());
+        let ready = self.can_mutate();
+        let destructive = self.delete_is_destructive();
         let form = self.form.get_mut();
         form.begin_update();
-        form.declare(
-            WorkspaceControl::List,
-            ControlKind::ChoiceList {
-                len: self.entries.len(),
-                selected: self.selected,
-            },
-        );
-        form.declare(
-            WorkspaceControl::DraftList,
-            ControlKind::ChoiceList {
-                len: draft_len,
-                selected: self.selected_draft,
-            },
-        );
-        form.declare(WorkspaceControl::New, ControlKind::Button);
-        form.declare(WorkspaceControl::Open, ControlKind::Button);
-        form.declare(WorkspaceControl::Rename, ControlKind::Button);
-        form.declare(WorkspaceControl::Save, ControlKind::Button);
-        form.declare(WorkspaceControl::Delete, ControlKind::Button);
-        form.declare(WorkspaceControl::ConfirmDelete, ControlKind::Button);
-        form.declare(WorkspaceControl::Drafts, ControlKind::Button);
-        form.declare(WorkspaceControl::Name, ControlKind::TextField);
-        form.declare(WorkspaceControl::Create, ControlKind::Button);
-        form.declare(WorkspaceControl::ForceDelete, ControlKind::Button);
-        form.declare(WorkspaceControl::Recover, ControlKind::Button);
-        form.declare(WorkspaceControl::Cancel, ControlKind::Button);
-        form.declare(WorkspaceControl::Back, ControlKind::Button);
-        form.end_frame(WorkspaceControl::List);
+        let initial = match self.view {
+            WorkspaceManagerView::List => {
+                form.declare_with_enabled(New, ControlKind::Button, ready);
+                form.declare_with_enabled(
+                    List,
+                    ControlKind::ChoiceList {
+                        len: self.entries.len(),
+                        selected: self.selected,
+                    },
+                    !self.entries.is_empty(),
+                );
+                if self.entries.is_empty() { New } else { List }
+            }
+            WorkspaceManagerView::Create | WorkspaceManagerView::Rename { .. } => {
+                form.declare(Name, ControlKind::TextField);
+                Name
+            }
+            WorkspaceManagerView::Delete { .. } => {
+                if destructive {
+                    form.declare(Name, ControlKind::TextField);
+                }
+                Cancel
+            }
+            WorkspaceManagerView::Drafts { .. } => {
+                form.declare_with_enabled(
+                    DraftList,
+                    ControlKind::ChoiceList {
+                        len: draft_len,
+                        selected: self.selected_draft,
+                    },
+                    draft_len > 0,
+                );
+                form.set_list_identity(DraftList, format!("{:?}", self.view));
+                DraftList
+            }
+        };
+        let actions = actions
+            .iter()
+            .map(|(id, label, enabled)| DialogAction {
+                id: *id,
+                label,
+                enabled: *enabled,
+                role: match id {
+                    Cancel => ActionRole::Cancel,
+                    Back => ActionRole::Back,
+                    Open | Create | Save | ConfirmDelete | ForceDelete | Recover => {
+                        ActionRole::Primary
+                    }
+                    _ => ActionRole::Secondary,
+                },
+            })
+            .collect::<Vec<_>>();
+        form.declare_actions(&actions);
+        form.end_frame(initial);
     }
 }
 
@@ -532,7 +617,12 @@ impl DashboardState {
                     .busy
                     .is_some_and(|mutation| mutation != WorkspaceMutation::Load);
                 if !locked {
-                    self.cancel_modal();
+                    if matches!(manager.view, WorkspaceManagerView::List) {
+                        self.cancel_modal();
+                    } else {
+                        manager.reset_to_list();
+                        self.mark_render_changed();
+                    }
                 }
             }
             Some(Interaction::Edit(WorkspaceControl::Name, edit)) => {
@@ -892,7 +982,7 @@ fn workspace_label(name: &str, width: u16) -> String {
     format!(" {content} ")
 }
 
-/// The standard Form modal renderer used by the parent combined renderer.
+/// The standard Dialog modal renderer used by the parent combined renderer.
 pub(crate) fn render_workspace_manager(
     frame: &mut Frame,
     area: Rect,
@@ -1034,13 +1124,13 @@ fn render_manager_list(
     frame: &mut Frame,
     rows: &[Rect],
     dialog: &WorkspaceManager,
-    form: &mut Form<WorkspaceControl>,
+    form: &mut Dialog<WorkspaceControl>,
 ) {
     let body = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(rows[1]);
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         body[0],
         &[(WorkspaceControl::New, "New workspace", dialog.can_mutate())],
@@ -1101,38 +1191,17 @@ fn render_manager_list(
             WorkspaceControl::List,
         );
     }
-    let selected = dialog.selected_entry();
-    let mut actions = vec![
-        (
-            WorkspaceControl::Open,
-            "Open",
-            dialog.can_mutate() && selected.is_some(),
-        ),
-        (
-            WorkspaceControl::Rename,
-            "Rename",
-            dialog.can_mutate() && selected.is_some(),
-        ),
-        (
-            WorkspaceControl::Delete,
-            "Delete",
-            dialog.can_mutate() && selected.is_some(),
-        ),
-    ];
-    if selected.is_some_and(|entry| !entry.drafts.is_empty()) {
-        actions.push((WorkspaceControl::Drafts, "Drafts", dialog.can_mutate()));
-    }
-    ButtonRow::render(frame, rows[2], &actions, form);
+    Dialog::render_actions(frame, rows[2], &dialog.actions(), form);
 }
 
 fn render_manager_name_view(
     frame: &mut Frame,
     rows: &[Rect],
     dialog: &WorkspaceManager,
-    form: &mut Form<WorkspaceControl>,
+    form: &mut Dialog<WorkspaceControl>,
     label: &str,
-    submit: WorkspaceControl,
-    submit_label: &str,
+    _submit: WorkspaceControl,
+    _submit_label: &str,
 ) {
     let field = Rect::new(rows[1].x, rows[1].y, rows[1].width, 1);
     let label_width = Line::raw(label).width() as u16 + 1;
@@ -1155,23 +1224,14 @@ fn render_manager_name_view(
         form,
         WorkspaceControl::Name,
     );
-    ButtonRow::render(
-        frame,
-        rows[2],
-        &[
-            (submit, submit_label, dialog.can_mutate()),
-            (WorkspaceControl::Back, "Back", dialog.busy.is_none()),
-            (WorkspaceControl::Cancel, "Cancel", dialog.busy.is_none()),
-        ],
-        form,
-    );
+    Dialog::render_actions(frame, rows[2], &dialog.actions(), form);
 }
 
 fn render_manager_delete(
     frame: &mut Frame,
     rows: &[Rect],
     dialog: &WorkspaceManager,
-    form: &mut Form<WorkspaceControl>,
+    form: &mut Dialog<WorkspaceControl>,
     workspace_name: &str,
     session_count: u64,
     draft_count: usize,
@@ -1203,33 +1263,14 @@ fn render_manager_delete(
         );
         TextField::render(frame, body[2], &dialog.name, form, WorkspaceControl::Name);
     }
-    let buttons = if destructive {
-        vec![
-            (
-                WorkspaceControl::ForceDelete,
-                "Force delete",
-                dialog.can_mutate() && dialog.force_delete_ready(),
-            ),
-            (WorkspaceControl::Cancel, "Cancel", dialog.busy.is_none()),
-        ]
-    } else {
-        vec![
-            (
-                WorkspaceControl::ConfirmDelete,
-                "Delete",
-                dialog.can_mutate(),
-            ),
-            (WorkspaceControl::Cancel, "Cancel", dialog.busy.is_none()),
-        ]
-    };
-    ButtonRow::render(frame, body[3], &buttons, form);
+    Dialog::render_actions(frame, rows[2], &dialog.actions(), form);
 }
 
 fn render_manager_drafts(
     frame: &mut Frame,
     rows: &[Rect],
     dialog: &WorkspaceManager,
-    form: &mut Form<WorkspaceControl>,
+    form: &mut Dialog<WorkspaceControl>,
 ) {
     let drafts = dialog
         .viewed_entry()
@@ -1272,19 +1313,7 @@ fn render_manager_drafts(
             WorkspaceControl::DraftList,
         );
     }
-    ButtonRow::render(
-        frame,
-        rows[2],
-        &[
-            (
-                WorkspaceControl::Recover,
-                "Recover",
-                dialog.can_mutate() && !drafts.is_empty(),
-            ),
-            (WorkspaceControl::Back, "Back", dialog.busy.is_none()),
-        ],
-        form,
-    );
+    Dialog::render_actions(frame, rows[2], &dialog.actions(), form);
 }
 
 #[cfg(test)]

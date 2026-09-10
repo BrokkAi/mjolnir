@@ -7,6 +7,28 @@ use rat_event::{ConsumedEvent, Outcome};
 use rat_focus::{Focus, FocusBuilder, FocusFlag, HasFocus, Navigation};
 use ratatui::layout::Rect;
 use std::fmt;
+use std::time::{Duration, Instant};
+
+/// Maximum interval between completed clicks on the same list item.
+pub const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Mouse activation follows the purpose of a list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ListActivation {
+    /// Select on one click, activate on a second click (the default for pickers).
+    #[default]
+    DoubleClick,
+    /// Run a command on one completed click.
+    SingleClick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClickTarget<K> {
+    id: K,
+    item: Option<usize>,
+    area: Rect,
+    revision: u64,
+}
 
 use crate::hel_text_input::{EditOutcome, TextInput};
 
@@ -206,6 +228,10 @@ struct Control<K> {
     row_enabled: Vec<bool>,
     popup_area: Rect,
     popup_row_map: Vec<Option<usize>>,
+    activation: ListActivation,
+    contents: Vec<String>,
+    identity: String,
+    revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +272,10 @@ impl<K> Control<K> {
             row_enabled: Vec::new(),
             popup_area: Rect::default(),
             popup_row_map: Vec::new(),
+            activation: ListActivation::default(),
+            contents: Vec::new(),
+            identity: String::new(),
+            revision: 0,
         }
     }
 }
@@ -287,6 +317,11 @@ pub struct Form<K: Copy + Eq> {
     dismiss_enabled: bool,
     dismiss_active: bool,
     pending_focus: Option<K>,
+    pressed_target: Option<ClickTarget<K>>,
+    last_click: Option<(ClickTarget<K>, Instant)>,
+    event_time: Instant,
+    default_action: Option<K>,
+    blocked_activation: Option<K>,
 }
 
 impl<K: Copy + Eq> Default for Form<K> {
@@ -309,6 +344,11 @@ impl<K: Copy + Eq> Form<K> {
             dismiss_enabled: false,
             dismiss_active: false,
             pending_focus: None,
+            pressed_target: None,
+            last_click: None,
+            event_time: Instant::now(),
+            default_action: None,
+            blocked_activation: None,
         }
     }
 
@@ -328,6 +368,43 @@ impl<K: Copy + Eq> Form<K> {
             control.cursor_map.clear();
             control.multiline_cursor_map.clear();
             control.editor_area = Rect::default();
+        }
+    }
+
+    /// Marks the primary action without moving keyboard focus.
+    pub fn set_default_action(&mut self, id: K) {
+        self.default_action = Some(id);
+    }
+
+    pub fn is_default_action(&self, id: K) -> bool {
+        self.default_action == Some(id)
+    }
+
+    /// Chooses command-menu or selection-list activation for a declared control.
+    pub fn set_list_activation(&mut self, id: K, activation: ListActivation) {
+        if let Some(control) = self.control_mut(id) {
+            control.activation = activation;
+        }
+    }
+
+    /// Identifies list contents independently of selection styling and redraws.
+    /// Changing the items invalidates any gesture begun against the old items.
+    pub fn set_list_contents(&mut self, id: K, contents: Vec<String>) {
+        if let Some(control) = self.control_mut(id)
+            && control.contents != contents
+        {
+            control.revision = control.revision.wrapping_add(1);
+            control.contents = contents;
+        }
+    }
+
+    /// Identifies domain items when distinct items can have identical visible labels.
+    pub fn set_list_identity(&mut self, id: K, identity: String) {
+        if let Some(control) = self.control_mut(id)
+            && control.identity != identity
+        {
+            control.revision = control.revision.wrapping_add(1);
+            control.identity = identity;
         }
     }
 
@@ -554,6 +631,7 @@ impl<K: Copy + Eq> Form<K> {
 
     /// Removes all active controls while retaining their stable identities for future frames.
     pub fn clear(&mut self) {
+        self.cancel_pointer();
         self.order.clear();
         self.last_order.clear();
         self.pending_focus = None;
@@ -586,6 +664,13 @@ impl<K: Copy + Eq> Form<K> {
     /// Rebuilds the focus tree and repairs focus after controls appeared or disappeared.
     pub fn end_frame(&mut self, initial: K) {
         let previous_focus = self.focused();
+        if let Some(id) = self.pending_focus.or(previous_focus)
+            && self
+                .active_control(id)
+                .is_some_and(|control| !control.enabled && control.kind.is_button())
+        {
+            self.blocked_activation = Some(id);
+        }
         let previous_order = self.last_order.clone();
         let old_focus = std::mem::take(&mut self.focus_tree);
         let mut builder = FocusBuilder::new(Some(old_focus));
@@ -656,7 +741,35 @@ impl<K: Copy + Eq> Form<K> {
 
     /// Handles keyboard and mouse input for the form.
     pub fn handle(&mut self, event: &Event) -> EventResult<Interaction<K>> {
+        self.handle_at(event, Instant::now())
+    }
+
+    /// Handles input with an explicit monotonic time, also useful for deterministic tests.
+    pub fn handle_at(&mut self, event: &Event, now: Instant) -> EventResult<Interaction<K>> {
+        self.event_time = now;
+        if matches!(
+            event,
+            Event::Resize(..) | Event::Paste(_) | Event::FocusLost
+        ) || matches!(event, Event::Mouse(mouse) if matches!(mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight))
+        {
+            self.cancel_pointer();
+        }
         let before = self.visual_state();
+        if matches!(event, Event::Key(key) if key.code == KeyCode::Enter && key.kind == KeyEventKind::Press)
+            && let Some(id) = self.blocked_activation
+        {
+            if !self.is_enabled(id) {
+                return EventResult::handled();
+            }
+            self.focus(id);
+            self.blocked_activation = None;
+        } else if matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press)
+            || matches!(event, Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_)))
+        {
+            self.blocked_activation = None;
+        }
         let result = self.handle_inner(event);
         self.report_result(before, result)
     }
@@ -725,6 +838,8 @@ impl<K: Copy + Eq> Form<K> {
     /// Cancels a captured mouse gesture.
     pub fn cancel_pointer(&mut self) {
         self.pointer_owner = None;
+        self.pressed_target = None;
+        self.last_click = None;
     }
 
     /// Whether the control is declared and accepts keyboard focus.
@@ -1119,8 +1234,10 @@ impl<K: Copy + Eq> Form<K> {
                     match mouse.kind {
                         MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved => {
                             let owner = self.pointer_owner?;
-                            if !self.pointer_owner_contains(owner, x, y) {
-                                self.pointer_owner = None;
+                            if !self.pointer_owner_contains(owner, x, y)
+                                || matches!(owner, PointerOwner::Control(id) if self.pressed_target.as_ref() != self.click_target(id, x, y).as_ref())
+                            {
+                                self.cancel_pointer();
                                 return Some(EventResult::changed(None));
                             }
                             return Some(EventResult::handled());
@@ -1128,6 +1245,13 @@ impl<K: Copy + Eq> Form<K> {
                         MouseEventKind::Up(MouseButton::Left) => {
                             let owner = self.pointer_owner.take()?;
                             if !self.pointer_owner_contains(owner, x, y) {
+                                self.cancel_pointer();
+                                return Some(EventResult::changed(None));
+                            }
+                            if let PointerOwner::Control(id) = owner
+                                && self.pressed_target.take() != self.click_target(id, x, y)
+                            {
+                                self.cancel_pointer();
                                 return Some(EventResult::changed(None));
                             }
                             let interaction = match owner {
@@ -1175,11 +1299,16 @@ impl<K: Copy + Eq> Form<K> {
                     return Some(EventResult::handled());
                 }
                 if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                    match self.hit(x, y)? {
+                    let Some(hit) = self.hit(x, y) else {
+                        self.cancel_pointer();
+                        return None;
+                    };
+                    match hit {
                         PointerHit::Dismiss => {
                             if !self.dismiss_enabled {
                                 return Some(EventResult::handled());
                             }
+                            self.last_click = None;
                             self.pointer_owner = Some(PointerOwner::Dismiss);
                             return Some(EventResult::changed(None));
                         }
@@ -1194,6 +1323,7 @@ impl<K: Copy + Eq> Form<K> {
                                     .contains(ratatui::layout::Position::new(x, y)),
                             );
                             if !enabled {
+                                self.cancel_pointer();
                                 return Some(EventResult::handled());
                             }
                             let in_popup =
@@ -1211,8 +1341,17 @@ impl<K: Copy + Eq> Form<K> {
                                     || (!control.row_map.is_empty()
                                         && control.row_map.get(row).copied().flatten().is_none())
                                 {
+                                    self.cancel_pointer();
                                     return Some(EventResult::handled());
                                 }
+                            }
+                            let target = self.click_target(id, x, y);
+                            if self
+                                .last_click
+                                .as_ref()
+                                .is_some_and(|(last, _)| Some(last) != target.as_ref())
+                            {
+                                self.last_click = None;
                             }
                             self.focus(id);
                             if kind.is_field() || editor {
@@ -1227,6 +1366,7 @@ impl<K: Copy + Eq> Form<K> {
                                 || kind.is_combo_box()
                                 || kind.is_tab_strip()
                             {
+                                self.pressed_target = target;
                                 self.pointer_owner = Some(PointerOwner::Control(id));
                                 return Some(EventResult::changed(None));
                             }
@@ -1253,6 +1393,41 @@ impl<K: Copy + Eq> Form<K> {
         }
     }
 
+    fn click_target(&self, id: K, x: u16, y: u16) -> Option<ClickTarget<K>> {
+        let control = self.active_control(id)?;
+        let item = if control.kind.is_choice_list() {
+            let row = usize::from(y.saturating_sub(control.area.y)) + control.list_offset;
+            if !control.row_enabled.get(row).copied().unwrap_or(true) {
+                return None;
+            }
+            Some(if control.row_map.is_empty() {
+                row
+            } else {
+                control.row_map.get(row).copied().flatten()?
+            })
+        } else if control.kind.is_tab_strip() {
+            control
+                .region_map
+                .iter()
+                .find(|(start, end, _)| x >= *start && x < *end)
+                .map(|(_, _, item)| *item)
+        } else if control.popup_area.contains((x, y).into()) {
+            control
+                .popup_row_map
+                .get(usize::from(y.saturating_sub(control.popup_area.y)))
+                .copied()
+                .flatten()
+        } else {
+            None
+        };
+        Some(ClickTarget {
+            id,
+            item,
+            area: control.area,
+            revision: control.revision,
+        })
+    }
+
     fn pointer_interaction(&mut self, id: K, x: u16, y: u16) -> Option<Interaction<K>> {
         let control = self.control(id)?;
         match control.kind {
@@ -1270,8 +1445,24 @@ impl<K: Copy + Eq> Form<K> {
                 } else {
                     control.row_map.get(row).copied().flatten()?
                 };
+                let target = self.click_target(id, x, y)?;
+                let activate = control.activation == ListActivation::SingleClick
+                    || self.last_click.as_ref().is_some_and(|(previous, at)| {
+                        *previous == target
+                            && self.event_time.saturating_duration_since(*at)
+                                <= DOUBLE_CLICK_INTERVAL
+                    });
+                self.last_click = if activate {
+                    None
+                } else {
+                    Some((target, self.event_time))
+                };
                 self.set_selected(id, selected);
-                Some(Interaction::Select(id, selected))
+                Some(if activate {
+                    Interaction::Activate(id)
+                } else {
+                    Interaction::Select(id, selected)
+                })
             }
             ControlKind::Tabs { len, .. } => {
                 let index = control
@@ -1312,6 +1503,8 @@ impl<K: Copy + Eq> Clone for Form<K> {
         clone.dismiss_area = self.dismiss_area;
         clone.dismiss_enabled = self.dismiss_enabled;
         clone.dismiss_active = self.dismiss_active;
+        clone.default_action = self.default_action;
+        clone.blocked_activation = self.blocked_activation;
         // A physical pointer gesture belongs to the original view, never a draft copy.
         clone.pointer_owner = None;
         clone.controls = self
@@ -1333,6 +1526,10 @@ impl<K: Copy + Eq> Clone for Form<K> {
                 cloned.row_enabled.clone_from(&control.row_enabled);
                 cloned.popup_area = control.popup_area;
                 cloned.popup_row_map.clone_from(&control.popup_row_map);
+                cloned.activation = control.activation;
+                cloned.contents.clone_from(&control.contents);
+                cloned.identity.clone_from(&control.identity);
+                cloned.revision = control.revision;
                 cloned
             })
             .collect();
@@ -1519,6 +1716,145 @@ mod tests {
         form.register(2, ControlKind::Button, Rect::new(0, 1, 5, 1), true);
         form.end_frame(1);
         form
+    }
+
+    fn list_form() -> Form<u8> {
+        let mut form = Form::new();
+        form.register(
+            1,
+            ControlKind::ChoiceList {
+                len: 3,
+                selected: 0,
+            },
+            Rect::new(0, 0, 10, 3),
+            true,
+        );
+        form.set_list_contents(1, vec!["Alpha".into(), "Beta".into(), "Gamma".into()]);
+        form.end_frame(1);
+        form
+    }
+
+    fn click_at(form: &mut Form<u8>, row: u16, at: Instant) -> Option<Interaction<u8>> {
+        form.handle_at(&mouse(MouseEventKind::Down(MouseButton::Left), 1, row), at);
+        form.handle_at(&mouse(MouseEventKind::Up(MouseButton::Left), 1, row), at)
+            .action
+    }
+
+    #[test]
+    fn list_double_click_is_enter_on_the_clicked_item() {
+        let mut form = list_form();
+        let now = Instant::now();
+        assert_eq!(click_at(&mut form, 1, now), Some(Interaction::Select(1, 1)));
+        let mut keyboard = form.clone();
+        let enter = keyboard.handle(&key(KeyCode::Enter)).action;
+        assert_eq!(
+            click_at(&mut form, 1, now + Duration::from_millis(200)),
+            enter
+        );
+        assert_eq!(form.selected(1), Some(1));
+    }
+
+    #[test]
+    fn command_click_activates_and_updates_selection_atomically() {
+        let mut form = list_form();
+        form.set_list_activation(1, ListActivation::SingleClick);
+        assert_eq!(
+            click_at(&mut form, 2, Instant::now()),
+            Some(Interaction::Activate(1))
+        );
+        assert_eq!(form.selected(1), Some(2));
+    }
+
+    #[test]
+    fn different_rows_expired_clicks_and_navigation_do_not_activate() {
+        let mut form = list_form();
+        let now = Instant::now();
+        click_at(&mut form, 0, now);
+        assert_eq!(click_at(&mut form, 1, now), Some(Interaction::Select(1, 1)));
+        assert_eq!(
+            click_at(&mut form, 1, now + Duration::from_millis(501)),
+            Some(Interaction::Select(1, 1))
+        );
+        form.handle_at(&key(KeyCode::Down), now + Duration::from_millis(502));
+        assert_eq!(
+            click_at(&mut form, 1, now + Duration::from_millis(503)),
+            Some(Interaction::Select(1, 1))
+        );
+    }
+
+    #[test]
+    fn identical_labels_with_new_identities_do_not_activate_the_replacement() {
+        let mut form = list_form();
+        let now = Instant::now();
+        form.set_list_identity(1, "old ids".into());
+        click_at(&mut form, 1, now);
+        form.set_list_identity(1, "replacement ids".into());
+        assert_eq!(click_at(&mut form, 1, now), Some(Interaction::Select(1, 1)));
+    }
+
+    #[test]
+    fn a_disabled_row_between_clicks_breaks_the_pair() {
+        let mut form = list_form();
+        form.controls[0].row_enabled = vec![true, false, true];
+        let now = Instant::now();
+        click_at(&mut form, 0, now);
+        assert_eq!(click_at(&mut form, 1, now), None);
+        assert_eq!(click_at(&mut form, 0, now), Some(Interaction::Select(1, 0)));
+    }
+
+    #[test]
+    fn changed_contents_and_resize_invalidate_double_clicks() {
+        let mut form = list_form();
+        let now = Instant::now();
+        click_at(&mut form, 1, now);
+        form.set_list_contents(
+            1,
+            vec!["Alpha".into(), "Different item".into(), "Gamma".into()],
+        );
+        assert_eq!(click_at(&mut form, 1, now), Some(Interaction::Select(1, 1)));
+        form.handle_at(&Event::Resize(80, 24), now);
+        assert_eq!(click_at(&mut form, 1, now), Some(Interaction::Select(1, 1)));
+    }
+
+    #[test]
+    fn moving_between_rows_during_a_press_does_not_select_or_activate() {
+        let mut form = list_form();
+        form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 0));
+        form.handle(&mouse(MouseEventKind::Drag(MouseButton::Left), 1, 1));
+        assert_eq!(
+            form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 1, 1))
+                .action,
+            None
+        );
+        assert_eq!(form.selected(1), Some(0));
+    }
+
+    #[test]
+    fn ordinary_redraw_preserves_double_click_but_a_clone_does_not() {
+        let mut form = list_form();
+        let now = Instant::now();
+        click_at(&mut form, 1, now);
+        let mut clone = form.clone();
+        assert_eq!(
+            click_at(&mut clone, 1, now),
+            Some(Interaction::Select(1, 1))
+        );
+        form.reset_geometry();
+        form.begin_frame();
+        form.register(
+            1,
+            ControlKind::ChoiceList {
+                len: 3,
+                selected: 1,
+            },
+            Rect::new(0, 0, 10, 3),
+            true,
+        );
+        form.end_frame(1);
+        assert_eq!(
+            click_at(&mut form, 1, now + DOUBLE_CLICK_INTERVAL),
+            Some(Interaction::Activate(1))
+        );
     }
 
     #[test]

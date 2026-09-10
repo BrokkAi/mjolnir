@@ -13,8 +13,7 @@ use hel::hel_acp::SessionConfigChoice;
 use hel::hel_config::{HelConfig, ReviewConfig, SpinnerStyle};
 use hel::hel_review::lanes::ReviewTier;
 use mj_chat::components::{
-    ButtonRow, Checkbox, ComboBox, ComboBoxState, ControlKind, Form, FormViewport, Interaction,
-    PopupSide,
+    Checkbox, ComboBox, ComboBoxState, ControlKind, Dialog, FormViewport, Interaction, PopupSide,
 };
 use mj_chat::theme;
 use ratatui::Frame;
@@ -98,8 +97,9 @@ enum ReviewSettingsDiscoveryKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewSettingsDialog {
     pub(crate) review: ReviewConfig,
+    original_review: ReviewConfig,
     pub(crate) profiles: Vec<Option<String>>,
-    pub(crate) form: RefCell<Form<ReviewSettingsFocus>>,
+    pub(crate) form: RefCell<Dialog<ReviewSettingsFocus>>,
     combo: ComboBoxState<ReviewSettingsFocus>,
     scroll: Cell<u16>,
     pub(crate) model_choices: Vec<SessionConfigChoice>,
@@ -125,6 +125,26 @@ pub(crate) struct ReviewSettingsDialog {
 }
 
 impl ReviewSettingsDialog {
+    pub(crate) fn prepare_dialog_state(&mut self) {
+        self.form.get_mut().set_action_role(
+            ReviewSettingsFocus::Cancel,
+            mj_chat::components::ActionRole::Cancel,
+        );
+        self.form.get_mut().set_action_role(
+            ReviewSettingsFocus::Back,
+            mj_chat::components::ActionRole::Back,
+        );
+        self.form
+            .get_mut()
+            .track_draft(vec![format!("{:?}", self.review)]);
+        self.form
+            .get_mut()
+            .set_dismiss_actions(&[ReviewSettingsFocus::Back, ReviewSettingsFocus::Cancel]);
+        self.form
+            .get_mut()
+            .set_default_action(ReviewSettingsFocus::Save);
+    }
+
     pub(crate) fn animation_frame(&self) -> Option<&'static str> {
         (self.probing && self.choices_loading).then(|| {
             mj_chat::spinner::compact_frame(
@@ -144,8 +164,9 @@ impl ReviewSettingsDialog {
         );
         let dialog = Self {
             review: config.review.clone(),
+            original_review: config.review.clone(),
             profiles,
-            form: RefCell::new(Form::default()),
+            form: RefCell::new(Dialog::default()),
             combo: ComboBoxState::default(),
             scroll: Cell::new(0),
             model_choices: Vec::new(),
@@ -285,9 +306,9 @@ impl ReviewSettingsDialog {
                 !self.saving,
             );
         }
-        form.declare_with_enabled(Refresh, ControlKind::Button, !self.saving);
-        form.declare_with_enabled(Back, ControlKind::Button, true);
         form.declare_with_enabled(Cancel, ControlKind::Button, true);
+        form.declare_with_enabled(Back, ControlKind::Button, true);
+        form.declare_with_enabled(Refresh, ControlKind::Button, !self.saving);
         form.declare_with_enabled(Save, ControlKind::Button, self.can_save());
         form.end_frame(Enabled);
     }
@@ -685,9 +706,12 @@ impl ReviewSettingsDialog {
         if changed {
             self.prepare();
         }
-        let outcome = if cancel_setup || dismiss {
+        if cancel_setup || dismiss || back {
+            self.review = self.original_review.clone();
+        }
+        let outcome = if cancel_setup {
             ReviewSettingsOutcome::CancelSetup
-        } else if back {
+        } else if back || dismiss {
             ReviewSettingsOutcome::Back
         } else if apply {
             ReviewSettingsOutcome::Save
@@ -1041,13 +1065,13 @@ pub(crate) fn render_review_settings(
     if inner.height > 1 {
         frame.render_widget(
             Line::styled(
-                "Tab moves · Enter opens choices · Space toggles · Esc closes Setup",
+                "Tab moves · Enter opens choices · Space toggles · Esc goes back",
                 Style::default().fg(theme::palette().muted),
             ),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
         );
     }
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         footer,
         &[
@@ -1266,9 +1290,9 @@ mod tests {
         assert!(!dialog(&dashboard).can_save());
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Esc)),
-            DashboardAction::CancelReviewSettingsDiscovery
+            DashboardAction::None
         );
-        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+        assert!(dashboard.dialog_confirmation_open());
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Esc)),
             DashboardAction::None

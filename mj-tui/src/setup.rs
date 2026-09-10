@@ -13,8 +13,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use hel::hel_config::HelConfig;
 use mj_chat::components::PathField;
 use mj_chat::components::{
-    ButtonRow, ChoiceList, ComboBox, ComboBoxState, ControlKind, Form, Interaction, PopupSide,
-    TextField,
+    ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, Interaction, PopupSide, TextField,
 };
 use mj_chat::hel_path_input::PathInput;
 use mj_chat::hel_selection::FrameSurfaces;
@@ -99,7 +98,7 @@ pub(crate) struct SetupDialog {
     editor: Option<Editor>,
     pub(crate) review_editor: Option<Box<ReviewSettingsDialog>>,
     review_validation: Option<ReviewSettingsValidation>,
-    pub(crate) form: RefCell<Form<SetupControl>>,
+    pub(crate) form: RefCell<Dialog<SetupControl>>,
     pub(crate) saving: bool,
     discovering: bool,
     pub(crate) notice: Option<String>,
@@ -298,6 +297,66 @@ fn changed_profile_ids(
 }
 
 impl SetupDialog {
+    pub(crate) fn layer_key(&self) -> String {
+        format!(
+            "{:?}/{:?}/{}",
+            self.path,
+            self.editor.as_ref().map(|editor| &editor.path),
+            self.review_editor.is_some()
+        )
+    }
+
+    pub(crate) fn prepare_dialog_state(&mut self) {
+        self.form.get_mut().set_action_role(
+            SetupControl::Cancel,
+            mj_chat::components::ActionRole::Cancel,
+        );
+        self.form
+            .get_mut()
+            .set_action_role(SetupControl::Back, mj_chat::components::ActionRole::Back);
+        if let Some(review) = &mut self.review_editor {
+            review.prepare_dialog_state();
+        } else if let Some(editor) = &self.editor {
+            self.form
+                .get_mut()
+                .track_draft(vec![editor.input.to_string()]);
+            self.form
+                .get_mut()
+                .set_dismiss_actions(&[SetupControl::Back]);
+            self.form.get_mut().set_default_action(SetupControl::Apply);
+        } else {
+            // The outer setup draft uses its normalized saved-config comparison.
+            self.form.get_mut().set_dirty(false);
+            self.form.get_mut().set_dismiss_actions(&[]);
+            self.form.get_mut().set_default_action(SetupControl::Save);
+        }
+    }
+
+    pub(crate) fn confirmation_open(&self) -> bool {
+        self.review_editor.as_ref().map_or_else(
+            || self.form.borrow().confirmation_open(),
+            |review| review.form.borrow().confirmation_open(),
+        )
+    }
+
+    pub(crate) fn render_confirmation(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        surfaces: &mut FrameSurfaces,
+    ) {
+        if let Some(review) = &self.review_editor {
+            review
+                .form
+                .borrow_mut()
+                .render_confirmation(frame, area, surfaces);
+        } else {
+            self.form
+                .borrow_mut()
+                .render_confirmation(frame, area, surfaces);
+        }
+    }
+
     fn new(config: &HelConfig) -> Self {
         let mut draft = serde_json::to_value(config).expect("configuration serializes");
         let original = draft.to_string();
@@ -313,7 +372,7 @@ impl SetupDialog {
             editor: None,
             review_editor: None,
             review_validation: None,
-            form: RefCell::new(Form::default()),
+            form: RefCell::new(Dialog::default()),
             saving: false,
             discovering: false,
             notice: None,
@@ -357,6 +416,7 @@ impl SetupDialog {
         let len = self.keys().len();
         self.selected = self.selected.min(len.saturating_sub(1));
         let collection = self.collection();
+        let identity = format!("{:?}/{:?}", self.path, self.keys());
         let form = self.form.get_mut();
         form.begin_frame();
         let initial = if let Some(editor) = &self.editor {
@@ -380,6 +440,7 @@ impl SetupDialog {
                 selected: self.selected,
             };
             form.declare(List, kind);
+            form.set_list_identity(List, identity);
             List
         };
         form.declare(Back, ControlKind::Button);
@@ -394,12 +455,12 @@ impl SetupDialog {
                 ControlKind::Button,
                 !self.discovering && !self.saving,
             );
+            form.declare(Cancel, ControlKind::Button);
             form.declare_with_enabled(
                 Save,
                 ControlKind::Button,
                 !self.saving && self.read_only.is_none(),
             );
-            form.declare(Cancel, ControlKind::Button);
         }
         form.end_frame(initial);
     }
@@ -454,7 +515,7 @@ impl SetupDialog {
                 adding: false,
             });
         }
-        self.form = RefCell::new(Form::default());
+        self.form = RefCell::new(Dialog::default());
     }
 
     fn clear_disabled_profile_references(&mut self, profile_id: &str) {
@@ -479,11 +540,17 @@ impl SetupDialog {
     }
 
     fn back(&mut self) -> bool {
-        if self.editor.take().is_none() && self.path.pop().is_none() {
+        let selected_key = if let Some(editor) = self.editor.take() {
+            editor.path.last().cloned()
+        } else if let Some(key) = self.path.pop() {
+            Some(key)
+        } else {
             return true;
-        }
-        self.selected = 0;
-        self.form = RefCell::new(Form::default());
+        };
+        self.selected = selected_key
+            .and_then(|key| self.keys().iter().position(|candidate| *candidate == key))
+            .unwrap_or(0);
+        self.form = RefCell::new(Dialog::default());
         false
     }
 
@@ -515,7 +582,7 @@ impl SetupDialog {
                 combo: ComboBoxState::default(),
                 adding: true,
             });
-            self.form = RefCell::new(Form::default());
+            self.form = RefCell::new(Dialog::default());
         }
     }
 
@@ -671,7 +738,7 @@ impl SetupDialog {
             self.invalidate_review_validation_for(editor.path.get(1).map(String::as_str));
         }
         self.editor = None;
-        self.form = RefCell::new(Form::default());
+        self.form = RefCell::new(Dialog::default());
         Ok(())
     }
 
@@ -734,7 +801,7 @@ impl SetupDialog {
                 self.notice = Some(format!(
                     "Fix the invalid setup draft before opening Code Review: {error}"
                 ));
-                self.form = RefCell::new(Form::default());
+                self.form = RefCell::new(Dialog::default());
                 self.prepare();
                 return DashboardAction::None;
             }
@@ -748,7 +815,7 @@ impl SetupDialog {
             DashboardAction::None
         };
         self.review_editor = Some(Box::new(review));
-        self.form = RefCell::new(Form::default());
+        self.form = RefCell::new(Dialog::default());
         self.prepare();
         action
     }
@@ -849,18 +916,19 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if let Some(mut review) = dialog.review_editor.take() {
-            let save_shortcut = matches!(
-                &event,
-                Event::Key(key)
-                    if key.kind != KeyEventKind::Release
-                        && key.code == KeyCode::Char('s')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-            );
+            let save_shortcut = !review.form.borrow().confirmation_open()
+                && matches!(
+                    &event,
+                    Event::Key(key)
+                        if key.kind != KeyEventKind::Release
+                            && key.code == KeyCode::Char('s')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                );
             if save_shortcut {
                 dialog.sync_review_validation(&review);
                 let action = dialog.save();
                 if dialog.saving {
-                    dialog.form = RefCell::new(Form::default());
+                    dialog.form = RefCell::new(Dialog::default());
                     self.mode = Mode::Setup(dialog);
                 } else {
                     review.save_error = dialog.notice.clone();
@@ -877,7 +945,7 @@ impl DashboardState {
                 }
                 ReviewSettingsOutcome::Back => {
                     dialog.sync_review_validation(&review);
-                    dialog.form = RefCell::new(Form::default());
+                    dialog.form = RefCell::new(Dialog::default());
                 }
                 ReviewSettingsOutcome::CancelSetup => {
                     review.cancel_discovery(self);
@@ -890,7 +958,7 @@ impl DashboardState {
                 ReviewSettingsOutcome::Save => {
                     dialog.sync_review_validation(&review);
                     dialog.review_editor = None;
-                    dialog.form = RefCell::new(Form::default());
+                    dialog.form = RefCell::new(Dialog::default());
                     action = dialog.save();
                     if !dialog.saving {
                         review.save_error = dialog.notice.clone();
@@ -910,15 +978,26 @@ impl DashboardState {
             .as_ref()
             .is_some_and(|editor| !editor.choices.is_empty());
         let shortcut = match &event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
-                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Some(Interaction::Activate(Save))
+            Event::Key(key)
+                if key.kind != KeyEventKind::Release
+                    && !dialog.form.borrow().confirmation_open() =>
+            {
+                match key.code {
+                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(Interaction::Activate(Save))
+                    }
+                    KeyCode::Backspace if dialog.editor.is_none() => {
+                        Some(Interaction::Activate(Back))
+                    }
+                    KeyCode::Char('a') if dialog.editor.is_none() => {
+                        Some(Interaction::Activate(Add))
+                    }
+                    KeyCode::Delete if dialog.editor.is_none() => {
+                        Some(Interaction::Activate(Remove))
+                    }
+                    _ => None,
                 }
-                KeyCode::Backspace if dialog.editor.is_none() => Some(Interaction::Activate(Back)),
-                KeyCode::Char('a') if dialog.editor.is_none() => Some(Interaction::Activate(Add)),
-                KeyCode::Delete if dialog.editor.is_none() => Some(Interaction::Activate(Remove)),
-                _ => None,
-            },
+            }
             _ => None,
         };
         let form_result = shortcut
@@ -944,6 +1023,9 @@ impl DashboardState {
         };
         let mut action = DashboardAction::None;
         match interaction {
+            Some(Interaction::Cancel) if dialog.editor.is_some() => {
+                dialog.back();
+            }
             Some(Interaction::Cancel) | Some(Interaction::Activate(Cancel)) => {
                 return self.dismiss_setup(dialog);
             }
@@ -988,7 +1070,7 @@ impl DashboardState {
             }
             Some(Interaction::ComboBoxDismiss(Choices)) => {
                 dialog.editor = None;
-                dialog.form = RefCell::new(Form::default());
+                dialog.form = RefCell::new(Dialog::default());
                 self.mark_render_changed();
             }
             Some(Interaction::Activate(Field | Apply)) => {
@@ -1180,7 +1262,42 @@ pub(crate) fn render_setup(
         vertical: 1,
     });
     if inner.height < 7 {
-        dialog.form.borrow_mut().reset_geometry();
+        let mut form = dialog.form.borrow_mut();
+        form.begin_frame();
+        let title = dismissible_modal_title(
+            &mut form,
+            popup,
+            "Setup",
+            theme::title(true),
+            !dialog.saving,
+        );
+        frame.render_widget(theme::modal().title(title), popup);
+        let layout = mj_chat::components::DialogShell::layout(inner, 0);
+        frame.render_widget(
+            Paragraph::new("Enlarge the terminal to edit these settings.")
+                .wrap(Wrap { trim: false }),
+            layout.body,
+        );
+        if dialog.editor.is_some() {
+            Dialog::render_actions(
+                frame,
+                layout.actions,
+                &[(Back, "Back", true), (Apply, "Apply", !dialog.saving)],
+                &mut form,
+            );
+            form.end_frame(Back);
+        } else {
+            Dialog::render_actions(
+                frame,
+                layout.actions,
+                &[
+                    (Cancel, "Cancel", !dialog.saving),
+                    (Save, "Save", !dialog.saving && dialog.read_only.is_none()),
+                ],
+                &mut form,
+            );
+            form.end_frame(Cancel);
+        }
         return;
     }
     let text_editor = dialog
@@ -1250,9 +1367,9 @@ pub(crate) fn render_setup(
             EditorInput::Path(input) => PathField::render(frame, area, input, &mut form, Field),
         }
         initial = Field;
-        ButtonRow::render(
+        Dialog::render_actions(
             frame,
-            Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+            mj_chat::components::DialogShell::layout(inner, 0).actions,
             &[
                 (Back, "Back", true),
                 (Clear, "Use default", true),
@@ -1316,7 +1433,7 @@ pub(crate) fn render_setup(
         }
         initial = List;
         let top_footer = Rect::new(inner.x, inner.bottom() - 2, inner.width, 1);
-        let bottom_footer = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+        let bottom_footer = mj_chat::components::DialogShell::layout(inner, 0).actions;
         if choice_editor {
             frame.render_widget(
                 Paragraph::new("  Back   Add   Remove   Detect machine").style(theme::muted()),
@@ -1327,7 +1444,7 @@ pub(crate) fn render_setup(
                 bottom_footer,
             );
         } else {
-            ButtonRow::render(
+            Dialog::render_actions(
                 frame,
                 top_footer,
                 &[
@@ -1342,7 +1459,7 @@ pub(crate) fn render_setup(
                 ],
                 &mut form,
             );
-            ButtonRow::render(
+            Dialog::render_actions(
                 frame,
                 bottom_footer,
                 &[
@@ -2077,9 +2194,9 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Char(' ')));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Esc)),
-            DashboardAction::CancelReviewSettingsDiscovery
+            DashboardAction::None
         );
-        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+        assert!(dashboard.dialog_confirmation_open());
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Esc)),
             DashboardAction::None
@@ -2094,6 +2211,12 @@ mod tests {
         assert!(dashboard.modal_open());
         dashboard.handle_key(key(KeyCode::Right));
         dashboard.handle_key(key(KeyCode::Enter));
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("discard returns to setup")
+        };
+        assert!(dialog.review_editor.is_none());
+        assert!(!dialog.draft["review"]["enabled"].as_bool().unwrap_or(false));
+        dashboard.handle_key(key(KeyCode::Esc));
         assert!(!dashboard.modal_open());
         assert!(!dashboard.config.review.enabled);
 

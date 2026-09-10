@@ -35,6 +35,10 @@ fn control_style<K: Copy + Eq>(form: &Form<K>, id: K, enabled: bool) -> Style {
         disabled_style()
     } else if form.is_focused(id) || form.is_armed(id) {
         focus_style()
+    } else if form.is_default_action(id) {
+        normal_style()
+            .fg(theme::palette().accent)
+            .add_modifier(Modifier::BOLD)
     } else {
         normal_style()
     }
@@ -618,6 +622,7 @@ impl ChoiceList {
             mapped,
             vec![],
         );
+        form.set_list_contents(id, rows.iter().map(ToString::to_string).collect());
         form.set_list_offset(id, usize::from(scroll));
         frame.render_widget(
             Paragraph::new(rows.to_vec())
@@ -664,6 +669,7 @@ impl ChoiceList {
             mapped.clone(),
             enabled.clone(),
         );
+        form.set_list_contents(id, rows.iter().map(ToString::to_string).collect());
         let items = rows
             .iter()
             .enumerate()

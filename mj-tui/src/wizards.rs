@@ -23,14 +23,14 @@ use hel::hel_state::{
 use hel::hel_targets::{AdditionalMount, default_mount_destination, path_completion};
 use mj_chat::components::PathField;
 use mj_chat::components::{
-    ButtonRow, Checkbox, ChoiceList, ConsumedEvent, ControlKind, FieldEdit, Form, FormViewport,
-    Interaction, Outcome,
+    Checkbox, ChoiceList, ConsumedEvent, ControlKind, Dialog, FieldEdit, FormViewport, Interaction,
+    Outcome,
 };
 use mj_chat::hel_selection::FrameSurfaces;
 
 use crate::widgets::{centered_modal, dismissible_modal_title, format_resource_bytes};
 use crate::{
-    DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, cycle_control, move_index,
+    DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index,
     nth_enabled_profile, nth_key,
 };
 
@@ -48,14 +48,6 @@ pub(crate) enum WizardStep {
     Review,
     Mounts,
     NewBundle,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WizardFocus {
-    Content,
-    Cancel,
-    Back,
-    Next,
 }
 
 /// Stable control identities shared by the new-session and resume wizards.
@@ -85,13 +77,12 @@ pub(crate) struct NewWizard {
     /// Creation stays in this workspace even if the visible tab changes.
     pub(crate) workspace_id: String,
     pub(crate) step: WizardStep,
-    pub(crate) focus: WizardFocus,
+
     pub(crate) profile: usize,
     bundle: usize,
     pub(crate) target: usize,
     pub(crate) mounts: MountWizard,
-    review_focus: ReviewFocus,
-    pub(crate) new_bundle_focus: NewBundleFocus,
+
     pub(crate) new_bundle_selected: usize,
     pub(crate) new_bundle_repositories: Vec<String>,
     pub(crate) new_bundle_source: PathInput,
@@ -108,20 +99,17 @@ pub(crate) struct NewWizard {
     pub(crate) remote_repositories: Option<Vec<RemoteRepositoryPreview>>,
     pub(crate) remote_preflight_in_flight: bool,
     pub(crate) remote_preflight_error: Option<String>,
-    pub(crate) form: RefCell<Form<WizardControl>>,
+    pub(crate) form: RefCell<Dialog<WizardControl>>,
 }
 
 impl PartialEq for NewWizard {
     fn eq(&self, other: &Self) -> bool {
         self.workspace_id == other.workspace_id
             && self.step == other.step
-            && self.focus == other.focus
             && self.profile == other.profile
             && self.bundle == other.bundle
             && self.target == other.target
             && self.mounts == other.mounts
-            && self.review_focus == other.review_focus
-            && self.new_bundle_focus == other.new_bundle_focus
             && self.new_bundle_selected == other.new_bundle_selected
             && self.new_bundle_repositories == other.new_bundle_repositories
             && self.new_bundle_source == other.new_bundle_source
@@ -141,51 +129,11 @@ impl PartialEq for NewWizard {
 
 impl Eq for NewWizard {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NewBundleFocus {
-    Repositories,
-    Source,
-    Add,
-    Remove,
-    Cancel,
-    Back,
-    Create,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MountFocus {
-    Source,
-    Destination,
-    ReadOnly,
-    Cancel,
-    Back,
-    Add,
-}
-
-/// Tab order for the mount editor, shared by the new-session and resume paths.
-const MOUNT_FOCUS_ORDER: [MountFocus; 6] = [
-    MountFocus::Source,
-    MountFocus::Destination,
-    MountFocus::ReadOnly,
-    MountFocus::Cancel,
-    MountFocus::Back,
-    MountFocus::Add,
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReviewFocus {
-    Attachments,
-    Cancel,
-    Back,
-    Add,
-    Submit,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MountWizard {
     pub(crate) source: PathInput,
     pub(crate) destination: PathInput,
-    pub(crate) focus: MountFocus,
+
     pub(crate) read_only: bool,
     pub(crate) mounts: Vec<AdditionalMount>,
     pub(crate) history: Vec<std::path::PathBuf>,
@@ -205,7 +153,7 @@ impl MountWizard {
         Self {
             source: PathInput::new(),
             destination: PathInput::new(),
-            focus: MountFocus::Source,
+
             read_only: false,
             mounts: Vec::new(),
             history,
@@ -255,13 +203,45 @@ impl MountWizard {
         self.source.clear();
         self.destination.clear();
         self.read_only = false;
-        self.focus = MountFocus::Source;
         self.completion_candidates.clear();
         self.error = None;
     }
 }
 
 impl NewWizard {
+    pub(crate) fn prepare_dialog_state(&mut self) {
+        let form = self.form.get_mut();
+        form.set_dismiss_actions(&[WizardControl::Cancel, WizardControl::Back]);
+        form.set_escape_action(
+            (self.step == WizardStep::Mounts || self.step == WizardStep::NewBundle)
+                .then_some(WizardControl::Back),
+        );
+        form.set_dismissal_scope(WizardControl::Back, "attachment editor");
+        form.track_draft_part("attachments", vec![format!("{:?}", self.mounts.mounts)]);
+        if self.step == WizardStep::Mounts {
+            form.track_draft_part(
+                "attachment editor",
+                vec![
+                    self.mounts.source.to_string(),
+                    self.mounts.destination.to_string(),
+                    self.mounts.read_only.to_string(),
+                ],
+            );
+        }
+        if self.step == WizardStep::ProjectDirectory {
+            form.track_draft_part("project", vec![self.project_directory.to_string()]);
+        }
+        if self.step == WizardStep::NewBundle {
+            form.track_draft_part(
+                "repositories",
+                vec![
+                    self.new_bundle_source.to_string(),
+                    format!("{:?}", self.new_bundle_repositories),
+                ],
+            );
+        }
+    }
+
     pub(crate) fn text_input_focused(&self) -> bool {
         if let Some(id) = self.form.borrow().focused() {
             return match self.step {
@@ -276,19 +256,36 @@ impl NewWizard {
                 _ => false,
             };
         }
-        self.step == WizardStep::ProjectDirectory
-            || self.step == WizardStep::NewBundle
-                && self.new_bundle_focus == NewBundleFocus::Source
-                && !self.bundle_creation_in_flight
-            || self.step == WizardStep::Mounts
-                && matches!(
-                    self.mounts.focus,
-                    MountFocus::Source | MountFocus::Destination
-                )
+        matches!(
+            self.step,
+            WizardStep::ProjectDirectory | WizardStep::NewBundle | WizardStep::Mounts
+        )
     }
 }
 
 impl ResumeWizard {
+    pub(crate) fn prepare_dialog_state(&mut self) {
+        let form = self.form.get_mut();
+        form.track_draft_part("queued work", vec![self.discard_queue.to_string()]);
+        form.set_dismiss_actions(&[WizardControl::Cancel, WizardControl::Back]);
+        form.set_escape_action(
+            (self.step == WizardStep::Mounts || self.step == WizardStep::NewBundle)
+                .then_some(WizardControl::Back),
+        );
+        form.set_dismissal_scope(WizardControl::Back, "attachment editor");
+        form.track_draft_part("attachments", vec![format!("{:?}", self.mounts.mounts)]);
+        if self.step == WizardStep::Mounts {
+            form.track_draft_part(
+                "attachment editor",
+                vec![
+                    self.mounts.source.to_string(),
+                    self.mounts.destination.to_string(),
+                    self.mounts.read_only.to_string(),
+                ],
+            );
+        }
+    }
+
     fn has_queued_work(&self, dashboard: &DashboardState) -> bool {
         self.preparation.as_ref().map_or_else(
             || {
@@ -322,10 +319,6 @@ impl ResumeWizard {
                 );
         }
         self.step == WizardStep::Mounts
-            && matches!(
-                self.mounts.focus,
-                MountFocus::Source | MountFocus::Destination
-            )
     }
 }
 
@@ -347,16 +340,16 @@ pub(crate) struct ResumeWizard {
     /// an explicit, single action.
     pub(crate) preparation_error: Option<String>,
     pub(crate) step: WizardStep,
-    pub(crate) focus: WizardFocus,
+
     pub(crate) profile: usize,
     pub(crate) target: usize,
     pub(crate) mounts: MountWizard,
-    review_focus: ReviewFocus,
+
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
     aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
     pub(crate) discard_queue: bool,
-    pub(crate) form: RefCell<Form<WizardControl>>,
+    pub(crate) form: RefCell<Dialog<WizardControl>>,
 }
 
 impl PartialEq for ResumeWizard {
@@ -369,11 +362,9 @@ impl PartialEq for ResumeWizard {
             && self.preparation_request_id == other.preparation_request_id
             && self.preparation_error == other.preparation_error
             && self.step == other.step
-            && self.focus == other.focus
             && self.profile == other.profile
             && self.target == other.target
             && self.mounts == other.mounts
-            && self.review_focus == other.review_focus
             && self.resource_allocation == other.resource_allocation
             && self.aws_options == other.aws_options
             && self.sizing_error == other.sizing_error
@@ -382,40 +373,6 @@ impl PartialEq for ResumeWizard {
 }
 
 impl Eq for ResumeWizard {}
-
-fn cycle_wizard_focus(current: WizardFocus, has_back: bool, reverse: bool) -> WizardFocus {
-    if has_back {
-        cycle_control(
-            current,
-            &[
-                WizardFocus::Content,
-                WizardFocus::Cancel,
-                WizardFocus::Back,
-                WizardFocus::Next,
-            ],
-            reverse,
-        )
-    } else {
-        cycle_control(
-            current,
-            &[WizardFocus::Content, WizardFocus::Cancel, WizardFocus::Next],
-            reverse,
-        )
-    }
-}
-
-fn review_focus_order(can_attach: bool, has_attachments: bool) -> Vec<ReviewFocus> {
-    let mut order = Vec::new();
-    if has_attachments {
-        order.push(ReviewFocus::Attachments);
-    }
-    order.extend([ReviewFocus::Cancel, ReviewFocus::Back]);
-    if can_attach {
-        order.push(ReviewFocus::Add);
-    }
-    order.push(ReviewFocus::Submit);
-    order
-}
 
 fn remove_selected_mount(mounts: &mut MountWizard) {
     if mounts.mounts.is_empty() {
@@ -431,7 +388,6 @@ fn prepare_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard) {
     mounts.source.clear();
     mounts.destination.clear();
     mounts.read_only = false;
-    mounts.focus = MountFocus::Source;
     mounts.error = None;
     mounts.editing_mount = None;
     mounts.completion_candidates.clear();
@@ -447,7 +403,6 @@ fn prepare_selected_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard
     mounts.source = mount.source.to_string_lossy().into_owned().into();
     mounts.destination = mount.destination.to_string_lossy().into_owned().into();
     mounts.read_only = mount.read_only || mounts.forced_read_only().is_some();
-    mounts.focus = MountFocus::Source;
     mounts.error = None;
     mounts.editing_mount = Some(index);
     mounts.completion_candidates.clear();
@@ -456,18 +411,26 @@ fn prepare_selected_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard
 
 fn begin_mount_editor(wizard: &mut NewWizard) {
     prepare_mount_editor(&mut wizard.step, &mut wizard.mounts);
+    wizard.form.get_mut().forget_draft_part("attachment editor");
+    wizard.form.get_mut().focus(WizardControl::MountSource);
 }
 
 fn edit_selected_mount(wizard: &mut NewWizard) {
     prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
+    wizard.form.get_mut().forget_draft_part("attachment editor");
+    wizard.form.get_mut().focus(WizardControl::MountSource);
 }
 
 fn begin_resume_mount_editor(wizard: &mut ResumeWizard) {
     prepare_mount_editor(&mut wizard.step, &mut wizard.mounts);
+    wizard.form.get_mut().forget_draft_part("attachment editor");
+    wizard.form.get_mut().focus(WizardControl::MountSource);
 }
 
 fn edit_selected_resume_mount(wizard: &mut ResumeWizard) {
     prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
+    wizard.form.get_mut().forget_draft_part("attachment editor");
+    wizard.form.get_mut().focus(WizardControl::MountSource);
 }
 
 fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
@@ -632,18 +595,6 @@ fn adjust_resources(
 }
 
 impl NewWizard {
-    fn active_index_mut(&mut self) -> &mut usize {
-        match self.step {
-            WizardStep::Profile => &mut self.profile,
-            WizardStep::Bundle => &mut self.bundle,
-            WizardStep::Target => &mut self.target,
-            WizardStep::ProjectDirectory => unreachable!("project directory has no picker index"),
-            WizardStep::Review => unreachable!("review input has no picker index"),
-            WizardStep::Mounts => unreachable!("mount input has no picker index"),
-            WizardStep::NewBundle => unreachable!("bundle input has no picker index"),
-        }
-    }
-
     fn add_new_bundle_repository(&mut self) -> bool {
         let source = self.new_bundle_source.trim();
         if source.is_empty() {
@@ -652,7 +603,7 @@ impl NewWizard {
         self.new_bundle_repositories.push(source.to_owned());
         self.new_bundle_selected = self.new_bundle_repositories.len() - 1;
         self.new_bundle_source.clear();
-        self.new_bundle_focus = NewBundleFocus::Source;
+        self.form.get_mut().focus(WizardControl::NewBundleSource);
         true
     }
 
@@ -667,11 +618,13 @@ impl NewWizard {
         self.new_bundle_selected = self
             .new_bundle_selected
             .min(self.new_bundle_repositories.len().saturating_sub(1));
-        self.new_bundle_focus = if self.new_bundle_repositories.is_empty() {
-            NewBundleFocus::Source
-        } else {
-            NewBundleFocus::Repositories
-        };
+        self.form
+            .get_mut()
+            .focus(if self.new_bundle_repositories.is_empty() {
+                WizardControl::NewBundleSource
+            } else {
+                WizardControl::NewBundleRepositories
+            });
         true
     }
 
@@ -685,21 +638,7 @@ impl NewWizard {
     }
 }
 
-impl ResumeWizard {
-    fn active_index_mut(&mut self) -> &mut usize {
-        match self.step {
-            WizardStep::Profile => &mut self.profile,
-            WizardStep::Target => &mut self.target,
-            WizardStep::Review => unreachable!("review input has no picker index"),
-            WizardStep::Bundle => unreachable!("resume does not select a bundle"),
-            WizardStep::Mounts => unreachable!("resume does not select mounts"),
-            WizardStep::NewBundle => unreachable!("resume does not create bundles"),
-            WizardStep::ProjectDirectory => {
-                unreachable!("resume does not select a project directory")
-            }
-        }
-    }
-}
+impl ResumeWizard {}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PickerNavigation {
@@ -736,7 +675,7 @@ pub(crate) fn render_picker(
     choices: Vec<PickerChoice>,
     help: &[&str],
     navigation: PickerNavigation,
-    form: &mut Form<WizardControl>,
+    form: &mut Dialog<WizardControl>,
     surfaces: &mut FrameSurfaces,
 ) {
     let width_percent = if area.width < 64 { 100 } else { 68 };
@@ -767,8 +706,7 @@ pub(crate) fn render_picker(
     let help_y = list_area.y.saturating_add(list_area.height);
     let help_height = (help.len() as u16).min(content.bottom().saturating_sub(help_y + 1));
     let help_area = Rect::new(content.x, help_y, content.width, help_height);
-    let button_y = content.bottom().saturating_sub(1);
-    let button_area = Rect::new(content.x, button_y, content.width, 1.min(content.height));
+    let button_area = mj_chat::components::DialogShell::layout(content, 0).actions;
     let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
     frame.render_widget(theme::modal().title(title_line), popup);
     ChoiceList::render_with_rows(
@@ -794,92 +732,23 @@ pub(crate) fn render_picker(
         buttons.push((WizardControl::Back, "Back", true));
     }
     buttons.push((WizardControl::Next, "Next", navigation.next_enabled));
-    ButtonRow::render(frame, button_area, &buttons, form);
+    Dialog::render_actions(frame, button_area, &buttons, form);
 }
 
-fn begin_form_frame(form: &mut Form<WizardControl>, initial: WizardControl) {
-    let previous = form.focused();
-    form.begin_frame();
-    if previous != Some(initial) && !form.captures_pointer() {
-        // A domain step transition may choose a control not registered yet.
-        // Its pending focus becomes visible as soon as that control renders.
-        form.focus(initial);
-    }
-}
-
-fn wizard_control(
-    step: WizardStep,
-    focus: WizardFocus,
-    review_focus: ReviewFocus,
-    mounts: &MountWizard,
-) -> WizardControl {
+fn step_initial(step: WizardStep) -> WizardControl {
     match step {
-        WizardStep::Profile => match focus {
-            WizardFocus::Content => WizardControl::ProfileList,
-            WizardFocus::Cancel => WizardControl::Cancel,
-            WizardFocus::Back => WizardControl::Back,
-            WizardFocus::Next => WizardControl::Next,
-        },
-        WizardStep::Bundle => match focus {
-            WizardFocus::Content => WizardControl::BundleList,
-            WizardFocus::Cancel => WizardControl::Cancel,
-            WizardFocus::Back => WizardControl::Back,
-            WizardFocus::Next => WizardControl::Next,
-        },
-        WizardStep::Target => match focus {
-            WizardFocus::Content => WizardControl::TargetList,
-            WizardFocus::Cancel => WizardControl::Cancel,
-            WizardFocus::Back => WizardControl::Back,
-            WizardFocus::Next => WizardControl::Next,
-        },
-        WizardStep::ProjectDirectory => match focus {
-            WizardFocus::Content => WizardControl::ProjectDirectory,
-            WizardFocus::Cancel => WizardControl::Cancel,
-            WizardFocus::Back => WizardControl::Back,
-            WizardFocus::Next => WizardControl::Next,
-        },
-        WizardStep::NewBundle => match focus {
-            WizardFocus::Content => WizardControl::NewBundleSource,
-            WizardFocus::Cancel => WizardControl::Cancel,
-            WizardFocus::Back => WizardControl::Back,
-            WizardFocus::Next => WizardControl::Next,
-        },
-        WizardStep::Mounts => match mounts.focus {
-            MountFocus::Source => WizardControl::MountSource,
-            MountFocus::Destination => WizardControl::MountDestination,
-            MountFocus::ReadOnly => WizardControl::MountReadOnly,
-            MountFocus::Cancel => WizardControl::Cancel,
-            MountFocus::Back => WizardControl::Back,
-            MountFocus::Add => WizardControl::Add,
-        },
-        WizardStep::Review => match review_focus {
-            ReviewFocus::Attachments => WizardControl::ReviewAttachments,
-            ReviewFocus::Cancel => WizardControl::Cancel,
-            ReviewFocus::Back => WizardControl::Back,
-            ReviewFocus::Add => WizardControl::Add,
-            ReviewFocus::Submit => WizardControl::Submit,
-        },
+        WizardStep::Profile => WizardControl::ProfileList,
+        WizardStep::Target => WizardControl::TargetList,
+        WizardStep::Bundle => WizardControl::BundleList,
+        WizardStep::ProjectDirectory => WizardControl::ProjectDirectory,
+        WizardStep::NewBundle => WizardControl::NewBundleSource,
+        WizardStep::Mounts => WizardControl::MountSource,
+        WizardStep::Review => WizardControl::Submit,
     }
 }
 
-fn new_wizard_control(wizard: &NewWizard) -> WizardControl {
-    if wizard.step == WizardStep::NewBundle {
-        return match wizard.new_bundle_focus {
-            NewBundleFocus::Repositories => WizardControl::NewBundleRepositories,
-            NewBundleFocus::Source => WizardControl::NewBundleSource,
-            NewBundleFocus::Add => WizardControl::Add,
-            NewBundleFocus::Remove => WizardControl::NewBundleRemove,
-            NewBundleFocus::Cancel => WizardControl::Cancel,
-            NewBundleFocus::Back => WizardControl::Back,
-            NewBundleFocus::Create => WizardControl::Next,
-        };
-    }
-    wizard_control(
-        wizard.step,
-        wizard.focus,
-        wizard.review_focus,
-        &wizard.mounts,
-    )
+fn begin_form_frame(form: &mut Dialog<WizardControl>, _initial: WizardControl) {
+    form.begin_frame();
 }
 
 pub(crate) fn render_new_wizard(
@@ -890,7 +759,7 @@ pub(crate) fn render_new_wizard(
     surfaces: &mut FrameSurfaces,
 ) {
     let mut form = wizard.form.borrow_mut();
-    let initial = new_wizard_control(wizard);
+    let initial = step_initial(wizard.step);
     begin_form_frame(&mut form, initial);
     if wizard.step == WizardStep::Review {
         let target_id = nth_key(&dashboard.config.targets, wizard.target);
@@ -992,7 +861,7 @@ pub(crate) fn render_new_wizard(
             ));
         }
         lines.push(Line::styled(
-            "Enter validates · Backspace on empty goes back · Esc cancels",
+            "Enter validates · Tab moves · Back returns · Esc cancels",
             Style::default().fg(theme::palette().muted),
         ));
         let popup = centered_modal(
@@ -1042,9 +911,9 @@ pub(crate) fn render_new_wizard(
             &mut form,
             WizardControl::ProjectDirectory,
         );
-        ButtonRow::render(
+        Dialog::render_actions(
             frame,
-            Rect::new(content.x, button_y, content.width, 1.min(content.height)),
+            mj_chat::components::DialogShell::layout(content, 0).actions,
             &[
                 (WizardControl::Cancel, "Cancel", true),
                 (WizardControl::Back, "Back", true),
@@ -1176,7 +1045,7 @@ pub(crate) fn render_new_wizard(
         );
         let action_enabled =
             !wizard.bundle_creation_in_flight && !wizard.new_bundle_source.trim().is_empty();
-        ButtonRow::render(
+        Dialog::render_actions(
             frame,
             Rect::new(
                 content.x,
@@ -1194,7 +1063,7 @@ pub(crate) fn render_new_wizard(
             ],
             &mut form,
         );
-        ButtonRow::render(
+        Dialog::render_actions(
             frame,
             Rect::new(
                 content.x,
@@ -1347,7 +1216,7 @@ fn render_review_wizard(
     area: Rect,
     dashboard: &DashboardState,
     view: ReviewWizardView<'_>,
-    form: &mut Form<WizardControl>,
+    form: &mut Dialog<WizardControl>,
     surfaces: &mut FrameSurfaces,
 ) {
     let ReviewWizardView {
@@ -1655,7 +1524,6 @@ fn render_review_wizard(
             );
         }
     }
-    let button_y = inner.bottom().saturating_sub(1);
     let mut buttons = vec![
         (WizardControl::Cancel, "Cancel", true),
         (WizardControl::Back, "Back", true),
@@ -1673,9 +1541,9 @@ fn render_review_wizard(
                 || remote_preflight_error.is_some())
             && (allocation.is_some() || !matches!(target, TargetTemplate::AwsEc2 { .. })),
     ));
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
-        Rect::new(inner.x, button_y, inner.width, 1.min(inner.height)),
+        mj_chat::components::DialogShell::layout(inner, 0).actions,
         &buttons,
         form,
     );
@@ -1694,7 +1562,7 @@ fn render_mount_wizard(
     dashboard: &DashboardState,
     target_index: usize,
     mounts: &MountWizard,
-    form: &mut Form<WizardControl>,
+    form: &mut Dialog<WizardControl>,
     title: &str,
     surfaces: &mut FrameSurfaces,
 ) {
@@ -1737,7 +1605,9 @@ fn render_mount_wizard(
             ))
         }));
     }
-    if mounts.focus == MountFocus::Source && mounts.source.is_empty() && !mounts.history.is_empty()
+    if form.is_focused(WizardControl::MountSource)
+        && mounts.source.is_empty()
+        && !mounts.history.is_empty()
     {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
@@ -1883,10 +1753,9 @@ fn render_mount_wizard(
         form,
         WizardControl::MountReadOnly,
     );
-    let button_y = inner.bottom().saturating_sub(1);
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
-        Rect::new(inner.x, button_y, inner.width, 1.min(inner.height)),
+        mj_chat::components::DialogShell::layout(inner, 0).actions,
         &[
             (WizardControl::Cancel, "Cancel", true),
             (WizardControl::Back, "Back", true),
@@ -1904,12 +1773,7 @@ pub(crate) fn render_resume_wizard(
     surfaces: &mut FrameSurfaces,
 ) {
     let mut form = wizard.form.borrow_mut();
-    let initial = wizard_control(
-        wizard.step,
-        wizard.focus,
-        wizard.review_focus,
-        &wizard.mounts,
-    );
+    let initial = step_initial(wizard.step);
     begin_form_frame(&mut form, initial);
     if wizard.step == WizardStep::Review {
         let profile_id = dashboard
