@@ -32,6 +32,7 @@ pub fn format_turn_clock(now_epoch_seconds: u64, current_turn_started_at: Option
 /// activity facts from this, so they agree on what "idle" means.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionActivity {
+    pub capacity_retry: Option<hel::hel_worker::CapacityRetry>,
     /// Durable turn start retained through the background work it launched.
     pub activity_turn_started_at_ms: Option<i64>,
     pub prompt_in_flight: bool,
@@ -59,6 +60,7 @@ impl SessionActivity {
     /// Read the activity out of what a session's relay last reported.
     pub fn of(operational: &hel::hel_worker::RelayOperationalState) -> Self {
         Self {
+            capacity_retry: operational.capacity_retry.clone(),
             activity_turn_started_at_ms: operational
                 .active_prompt
                 .as_ref()
@@ -90,10 +92,11 @@ impl SessionActivity {
     /// than the relay's operational snapshot.
     #[must_use]
     pub fn is_idle(&self, current_turn_started_at: Option<u64>) -> bool {
-        matches!(
-            self.kind(current_turn_started_at),
-            SessionActivityKind::Idle
-        )
+        self.capacity_retry.is_none()
+            && matches!(
+                self.kind(current_turn_started_at),
+                SessionActivityKind::Idle
+            )
     }
 
     /// Waiting for an answer and queued work are not computation. Background
@@ -125,6 +128,10 @@ impl SessionActivity {
         current_step_started_at_ms: Option<u64>,
         detailed: bool,
     ) -> String {
+        if let Some(retry) = &self.capacity_retry {
+            return retry
+                .status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64);
+        }
         let kind = self.kind(current_turn_started_at);
         if kind == SessionActivityKind::Idle {
             return "Idle".into();
@@ -334,6 +341,11 @@ pub fn format_activity_columns(
     current_step_started_at_ms: Option<u64>,
     activity: &SessionActivity,
 ) -> Vec<String> {
+    if let Some(retry) = &activity.capacity_retry {
+        return vec![
+            retry.status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64),
+        ];
+    }
     match activity.kind(current_turn_started_at) {
         SessionActivityKind::Turn => {
             let turn_started = current_turn_started_at.or_else(|| activity.harness_turn_since());
@@ -374,6 +386,9 @@ pub fn format_activity_clock(
     current_turn_started_at: Option<u64>,
     activity: &SessionActivity,
 ) -> String {
+    if let Some(retry) = &activity.capacity_retry {
+        return retry.status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64);
+    }
     match activity.kind(current_turn_started_at) {
         SessionActivityKind::Turn => {
             if current_turn_started_at.is_some() {
@@ -480,6 +495,7 @@ mod tests {
 
     fn background(started_at_ms: i64, command: &str) -> SessionActivity {
         SessionActivity {
+            capacity_retry: None,
             execution: None,
             activity_turn_started_at_ms: None,
             prompt_in_flight: false,

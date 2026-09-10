@@ -13,6 +13,11 @@
 //! external path this module exposed before the split is re-exported here so
 //! callers outside this module never need to change.
 
+mod capacity;
+use capacity::CapacityResponse;
+pub(crate) use capacity::{CAPACITY_STOP_REASON, capacity_error};
+pub use capacity::{CapacityRetry, is_capacity_retry_command};
+
 mod journal;
 mod protocol;
 mod snapshot;
@@ -352,6 +357,7 @@ pub struct DurableRelay {
     harness_turns: HarnessTurnPolicy,
     /// Where commands the agent left running are read from.
     background_work: BackgroundWorkPolicy,
+    capacity_response: CapacityResponse,
     /// Tool calls that still report pending or in-progress, with the start of
     /// their current status. This is stronger foreground evidence than a
     /// harness-neutral step clock, whose prose steps have no portable ending.
@@ -557,6 +563,7 @@ impl DurableRelay {
             step_clock: crate::hel_acp::StepClock::default(),
             harness_turns: HarnessTurnPolicy::default(),
             background_work: BackgroundWorkPolicy::default(),
+            capacity_response: CapacityResponse::default(),
             foreground_tools: BTreeMap::new(),
             codex_execute_tools: BTreeMap::new(),
             background_exec_cards: BTreeMap::new(),
@@ -1591,6 +1598,11 @@ impl DurableRelay {
         }
         if let RelayCommand::Cancel = command
             && self.snapshot.active_prompt.is_none()
+            && self
+                .snapshot
+                .capacity_retry
+                .as_ref()
+                .is_none_or(|r| r.submitted)
         {
             let message = if self.snapshot.harness_turn.is_some() {
                 "the agent is working on its own after a background task; there is no prompt to cancel"
@@ -1948,6 +1960,12 @@ impl DurableRelay {
             // An in-flight claim is not in the journal, so it is only durable
             // once the snapshot itself is.
             self.commit_snapshot(next_snapshot)?;
+            if claimed
+                .iter()
+                .any(|claim| matches!(claim.command, RelayCommand::Prompt { .. }))
+            {
+                self.capacity_response = CapacityResponse::default();
+            }
         }
         Ok(claimed)
     }
@@ -2182,6 +2200,11 @@ impl DurableRelay {
                 }
             }
             _ => {}
+        }
+        if self.background_work == BackgroundWorkPolicy::CodexExecCards
+            && self.snapshot.active_prompt.is_some()
+        {
+            self.capacity_response.observe(&update);
         }
         let claude = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter;
         if claude && self.opens_harness_turn(&update) {
@@ -2432,6 +2455,45 @@ impl DurableRelay {
             )
     }
 
+    pub fn capacity_retry_deadline(&self) -> Option<i64> {
+        self.snapshot
+            .capacity_retry
+            .as_ref()
+            .filter(|r| !r.submitted)
+            .map(|r| r.retry_at_ms)
+    }
+
+    /// Admit a due retry through the same durable queue as an external prompt.
+    pub fn submit_due_capacity_retry(&mut self, now_ms: i64) -> Result<bool> {
+        let Some(retry) = self
+            .snapshot
+            .capacity_retry
+            .as_ref()
+            .filter(|r| !r.submitted)
+        else {
+            return Ok(false);
+        };
+        if retry.retry_at_ms > now_ms
+            || self.background_work != BackgroundWorkPolicy::CodexExecCards
+            || !self.acp_ready
+            || self.snapshot.execution != RelayExecutionState::Idle
+            || self.snapshot.active_prompt.is_some()
+            || self.snapshot.harness_turn.is_some()
+            || !self.snapshot.queued_prompts.is_empty()
+            || self.snapshot.checkpoint_barrier.is_some()
+            || self.pending_close_barrier_id().is_some()
+        {
+            return Ok(false);
+        }
+        let id = retry.command_id.clone();
+        let prompt = vec![ContentBlock::Text(
+            agent_client_protocol::schema::v1::TextContent::new("Continue"),
+        )];
+        self.submit_command(&id, RelayCommand::Prompt { prompt })?
+            .map_err(|error| anyhow!("submit capacity retry: {error:?}"))?;
+        Ok(true)
+    }
+
     pub fn record_command_completed(
         &mut self,
         command_id: &str,
@@ -2443,6 +2505,19 @@ impl DurableRelay {
             RelayCommand::BeginCheckpoint { .. }
         ) {
             bail!("checkpoint barriers complete through record_checkpoint_ready");
+        }
+        let mut outcome = outcome;
+        if let RelayCommandOutcome::Prompt { stop_reason } = &mut outcome {
+            if self.background_work == BackgroundWorkPolicy::CodexExecCards
+                && matches!(
+                    stop_reason.as_str(),
+                    "EndTurn" | "end_turn" | "Error" | "error"
+                )
+                && self.capacity_response.at_capacity()
+            {
+                *stop_reason = CAPACITY_STOP_REASON.to_owned();
+            }
+            self.capacity_response = CapacityResponse::default();
         }
         let finishes_turn = matches!(outcome, RelayCommandOutcome::Prompt { .. });
         let ordinal = self.append_relay_event(

@@ -4492,6 +4492,7 @@ mod tests {
     fn background_work_reaches_both_session_row_forms() {
         let started_at_ms = i64::try_from(hel::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
         let activity = mj_chat::usage_format::SessionActivity {
+            capacity_retry: None,
             activity_turn_started_at_ms: None,
             prompt_in_flight: false,
             idle_since_ms: None,

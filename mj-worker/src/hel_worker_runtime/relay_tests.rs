@@ -4822,3 +4822,70 @@ async fn large_photo_transfer_is_verified_without_journaling_image_bytes() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    state.set_background_work_policy(hel::hel_worker::BackgroundWorkPolicy::CodexExecCards);
+    let relay = Arc::new(Mutex::new(state));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    submit(
+        &mut relay.lock().unwrap(),
+        "capacity-original",
+        prompt("work"),
+    );
+    unix::wake_dispatch(&relay, &wake_tx).unwrap();
+    assert_prompt(
+        next_command(&mut command_rx).await,
+        "capacity-original",
+        "work",
+    );
+    event_tx.send(RuntimeEvent::SessionUpdate { update: serde_json::json!({
+        "sessionUpdate": "agent_message_chunk",
+        "content": { "type": "text", "text": "Selected model is at capacity. Please try a different model.\n\n" }
+    }) }).unwrap();
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            request_id: "capacity-original".into(),
+            stop_reason: "EndTurn".into(),
+        })
+        .unwrap();
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let retry = relay
+        .lock()
+        .unwrap()
+        .operational_state()
+        .capacity_retry
+        .clone()
+        .unwrap();
+    // No controller wake or connected frontend is needed to drive the timer.
+    drop(wake_tx);
+    tokio::time::advance(std::time::Duration::from_secs(59)).await;
+    tokio::task::yield_now().await;
+    assert!(command_rx.try_recv().is_err());
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    assert_prompt(
+        next_command(&mut command_rx).await,
+        &retry.command_id,
+        "Continue",
+    );
+    assert!(command_rx.try_recv().is_err());
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    coordinator.await.unwrap().unwrap();
+}

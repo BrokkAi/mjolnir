@@ -651,9 +651,23 @@ fn materialized_chat_entry_with_diffstats(
     entry
 }
 
+fn user_label(entry: &ChatEntry) -> &'static str {
+    if entry
+        .source
+        .0
+        .as_ref()
+        .and_then(|item| item.stable_id.strip_prefix("user:"))
+        .is_some_and(hel::hel_worker::is_capacity_retry_command)
+    {
+        "Automatic · capacity retry"
+    } else {
+        "You"
+    }
+}
+
 fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
     let (role, label) = match entry.role {
-        ChatRole::User => ("user", "You".to_owned()),
+        ChatRole::User => ("user", user_label(entry).to_owned()),
         ChatRole::Agent => ("agent", "Agent".to_owned()),
         ChatRole::Thought => ("thought", "Thinking".to_owned()),
         ChatRole::Tool => (
@@ -2920,7 +2934,7 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
             let style = Style::default().fg(theme::palette().accent);
             EntryVisual {
                 glyph: "❯",
-                label: "You".into(),
+                label: user_label(entry).into(),
                 header_style: style,
                 body_style: Style::default(),
                 rail_style: style,

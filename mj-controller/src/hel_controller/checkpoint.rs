@@ -835,6 +835,20 @@ impl Controller {
                 hel_targets::ProvisionStage::Starting,
             )
             .await?;
+            if exclusivity == LatchExclusivity::HoldThroughClose {
+                let snapshot = relay.connection_mut().sync().await?;
+                if snapshot.operational.capacity_retry.is_some() {
+                    // An explicit stop/move cancels recovery before sealing the
+                    // checkpoint. Routine recovery copies preserve its deadline.
+                    relay
+                        .connection_mut()
+                        .submit(
+                            new_command_id("cancel-capacity-retry")?,
+                            RelayCommand::CancelTurn,
+                        )
+                        .await?;
+                }
+            }
             if exclusivity == LatchExclusivity::ReleaseAfterLatch {
                 let snapshot = relay.connection_mut().sync().await?;
                 if snapshot.operational.execution == RelayExecutionState::Running {
@@ -2376,6 +2390,7 @@ mod tests {
             latest_credential_sync_signal: None,
             worker_build: None,
             operational: hel::hel_worker::RelayOperationalState {
+                capacity_retry: None,
                 activity_turn_started_at_ms: None,
                 acp_ready: None,
                 store_id: None,

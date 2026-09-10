@@ -2850,7 +2850,11 @@ async fn serve_session(
                                         },
                                     )
                                     .await?;
-                                    PROMPT_ERROR_STOP_REASON.to_owned()
+                                    if spec.harness == HarnessKind::Codex && crate::hel_worker::capacity_error(&error) {
+                                        crate::hel_worker::CAPACITY_STOP_REASON.to_owned()
+                                    } else {
+                                        PROMPT_ERROR_STOP_REASON.to_owned()
+                                    }
                                 }
                             };
                             emit_runtime_event(
