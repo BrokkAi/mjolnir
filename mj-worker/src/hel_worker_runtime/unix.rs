@@ -75,7 +75,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     let startup_directory = std::env::current_dir()?;
     let root = super::resolve_relative_worker_root(root, &startup_directory);
     super::resolve_relative_harness_home(&mut config, &startup_directory);
-    super::enforce_execution_policy(&mut config);
+    super::enforce_execution_policy(&mut config)?;
     // Resolve this before the launch config's environment is consumed by
     // the ACP supervisor specification below.
     let credentials = super::credential_endpoint(&config);

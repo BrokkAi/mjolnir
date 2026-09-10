@@ -415,7 +415,24 @@ impl HarnessKind {
         self,
         policy: ExecutionPolicy,
         environment: &mut BTreeMap<String, String>,
-    ) {
+    ) -> Result<()> {
+        if self == Self::Codex {
+            let mut config = match environment.get("CODEX_CONFIG") {
+                Some(value) => serde_json::from_str::<serde_json::Value>(value)
+                    .context("parse Codex launch CODEX_CONFIG as JSON")?,
+                None => serde_json::json!({}),
+            };
+            let object = config
+                .as_object_mut()
+                .context("Codex launch CODEX_CONFIG must be a JSON object")?;
+            // Align thread creation and resume with the per-turn ACP full-access
+            // workaround, even when the project selects a named permissions profile.
+            object.insert(
+                "default_permissions".into(),
+                serde_json::json!(":danger-full-access"),
+            );
+            environment.insert("CODEX_CONFIG".into(), serde_json::to_string(&config)?);
+        }
         if self == Self::Muse && policy == ExecutionPolicy::Unconstrained {
             let args = environment.entry("MUSE_SERVE_ARGS".into()).or_default();
             if !args
@@ -431,6 +448,7 @@ impl HarnessKind {
         {
             environment.insert(key.to_owned(), value.to_owned());
         }
+        Ok(())
     }
 
     pub const fn supports_guardian_approvals(self) -> bool {
@@ -1936,6 +1954,62 @@ mod tests {
     }
 
     #[test]
+    fn codex_launch_preserves_config_and_aligns_resume_permissions_with_acp_mode() {
+        for policy in [
+            ExecutionPolicy::ConfiguredApprovals,
+            ExecutionPolicy::Unconstrained,
+        ] {
+            for original in [
+                None,
+                Some(serde_json::json!({
+                    "default_permissions": "bifrost",
+                    "model": "configured-model",
+                    "sandbox_workspace_write": {"writable_roots": ["/extra"]}
+                })),
+            ] {
+                let mut environment = BTreeMap::new();
+                let mut expected = original.clone().unwrap_or_else(|| serde_json::json!({}));
+                if let Some(original) = original {
+                    environment.insert("CODEX_CONFIG".into(), original.to_string());
+                }
+                expected["default_permissions"] = serde_json::json!(":danger-full-access");
+                HarnessKind::Codex
+                    .configure_execution_environment(policy, &mut environment)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&environment["CODEX_CONFIG"])
+                        .unwrap(),
+                    expected
+                );
+                assert_eq!(environment["INITIAL_AGENT_MODE"], "agent-full-access");
+                let once = environment.clone();
+                HarnessKind::Codex
+                    .configure_execution_environment(policy, &mut environment)
+                    .unwrap();
+                assert_eq!(environment, once);
+            }
+        }
+    }
+
+    #[test]
+    fn codex_launch_rejects_invalid_config_without_disclosing_or_replacing_it() {
+        for value in ["{private-token", "null", "[]", "42", "\"private-token\""] {
+            let mut environment = BTreeMap::from([("CODEX_CONFIG".into(), value.into())]);
+            let original = environment.clone();
+            let error = HarnessKind::Codex
+                .configure_execution_environment(
+                    ExecutionPolicy::ConfiguredApprovals,
+                    &mut environment,
+                )
+                .unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("CODEX_CONFIG"));
+            assert!(!message.contains("private-token"));
+            assert_eq!(environment, original);
+        }
+    }
+
+    #[test]
     fn muse_guardian_preserves_policy_and_unconstrained_launch_is_explicit() {
         let original = BTreeMap::from([
             ("MUSE_APPROVAL_MODE".into(), "ask".into()),
@@ -1945,15 +2019,16 @@ mod tests {
             ),
         ]);
         let mut environment = original.clone();
-        HarnessKind::Muse.configure_execution_environment(
-            ExecutionPolicy::ConfiguredApprovals,
-            &mut environment,
-        );
+        HarnessKind::Muse
+            .configure_execution_environment(ExecutionPolicy::ConfiguredApprovals, &mut environment)
+            .unwrap();
         assert_eq!(environment, original);
         HarnessKind::Muse
-            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment);
+            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
+            .unwrap();
         HarnessKind::Muse
-            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment);
+            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
+            .unwrap();
         assert_eq!(environment["MUSE_APPROVAL_MODE"], "auto");
         assert_eq!(
             environment["MUSE_SERVE_ARGS"],

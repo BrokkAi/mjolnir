@@ -357,7 +357,7 @@ fn worker_launch_config(
         .configure_home_environment(Path::new(&target_profile_home), &mut environment);
     profile
         .kind
-        .configure_execution_environment(execution_policy, &mut environment);
+        .configure_execution_environment(execution_policy, &mut environment)?;
     configure_login_path_discovery(&mut environment, backend);
     let mut project_memory =
         project_memory_launch(session, bundle, &workspace, &target_profile_home)?;
@@ -4149,10 +4149,12 @@ mod tests {
     fn codex_execution_environment_is_full_access_under_both_target_policies() {
         let mut podman_environment =
             BTreeMap::from([("INITIAL_AGENT_MODE".to_owned(), "read-only".to_owned())]);
-        hel::hel_config::HarnessKind::Codex.configure_execution_environment(
-            ExecutionPolicy::Unconstrained,
-            &mut podman_environment,
-        );
+        hel::hel_config::HarnessKind::Codex
+            .configure_execution_environment(
+                ExecutionPolicy::Unconstrained,
+                &mut podman_environment,
+            )
+            .unwrap();
         assert_eq!(
             podman_environment
                 .get("INITIAL_AGENT_MODE")
@@ -4162,10 +4164,12 @@ mod tests {
 
         let mut bare_environment =
             BTreeMap::from([("INITIAL_AGENT_MODE".to_owned(), "read-only".to_owned())]);
-        hel::hel_config::HarnessKind::Codex.configure_execution_environment(
-            ExecutionPolicy::ConfiguredApprovals,
-            &mut bare_environment,
-        );
+        hel::hel_config::HarnessKind::Codex
+            .configure_execution_environment(
+                ExecutionPolicy::ConfiguredApprovals,
+                &mut bare_environment,
+            )
+            .unwrap();
         assert_eq!(
             bare_environment
                 .get("INITIAL_AGENT_MODE")
@@ -4254,7 +4258,8 @@ mod tests {
     fn grok_sandbox_environment_follows_the_target_policy() {
         let mut isolated = BTreeMap::from([("GROK_SANDBOX".to_owned(), "strict".to_owned())]);
         hel::hel_config::HarnessKind::Grok
-            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut isolated);
+            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut isolated)
+            .unwrap();
         assert_eq!(
             isolated.get("GROK_SANDBOX").map(String::as_str),
             Some("off")
@@ -4262,7 +4267,8 @@ mod tests {
 
         let mut local = BTreeMap::from([("GROK_SANDBOX".to_owned(), "strict".to_owned())]);
         hel::hel_config::HarnessKind::Grok
-            .configure_execution_environment(ExecutionPolicy::ConfiguredApprovals, &mut local);
+            .configure_execution_environment(ExecutionPolicy::ConfiguredApprovals, &mut local)
+            .unwrap();
         assert_eq!(
             local.get("GROK_SANDBOX").map(String::as_str),
             Some("strict"),

@@ -65,10 +65,10 @@ impl AcpSupervisorSpec {
 /// type it edits. It is a free function because Rust only allows an inherent
 /// method on [`WorkerLaunchConfig`] in the crate that defines it.
 #[cfg(unix)]
-pub(crate) fn enforce_execution_policy(config: &mut WorkerLaunchConfig) {
+pub(crate) fn enforce_execution_policy(config: &mut WorkerLaunchConfig) -> Result<()> {
     config
         .harness
-        .configure_execution_environment(config.execution_policy, &mut config.environment);
+        .configure_execution_environment(config.execution_policy, &mut config.environment)
 }
 
 #[cfg(unix)]
