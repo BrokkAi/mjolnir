@@ -482,12 +482,11 @@ fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
     // selector or Open/New picker is interposed before the wizard.
     assert!(!rendered.contains("Open workspace"));
 
-    // New remains explicit and uses the same full wizard while the first
-    // launch is pending. This second invocation is intentionally driven by
-    // the same explicit shortcut.
+    // New remains explicit and uses the same full wizard whether the first
+    // launch is pending or its failed provisional session has been removed.
+    // This second invocation uses the same explicit shortcut.
     output.clear();
     master.write_all(b"\x1bn").unwrap();
-    let deadline = Instant::now() + TIMEOUT;
     wait_for_output(
         &mut master,
         &mut output,
@@ -519,11 +518,19 @@ fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").unwrap();
+    let deadline = Instant::now() + TIMEOUT;
     let created = loop {
         drain(&mut master, &mut output);
         let state = hel::hel_database::load_state_from(&database).unwrap();
-        if let Some(created) = state.sessions.values().find(|other| other.id != session.id) {
-            assert_eq!(state.sessions.len(), 2);
+        let mut new_sessions = state
+            .sessions
+            .values()
+            .filter(|other| other.id != session.id);
+        if let Some(created) = new_sessions.next() {
+            assert!(
+                new_sessions.next().is_none(),
+                "one New key created multiple sessions"
+            );
             break created.clone();
         }
         assert!(

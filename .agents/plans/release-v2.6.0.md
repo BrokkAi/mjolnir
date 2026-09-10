@@ -16,11 +16,16 @@ Publish the work merged after v2.5.0 and summarize it for users. Version 2.6.0 a
 - [x] Pass formatting, default-member Clippy, npm packaging tests, 24 web unit tests, and portable x86-64 musl worker build and Clippy.
 - [x] Pass the full serialized Cargo suite, host release build, documentation check/build and 1,711 internal links, license checks and fresh notice comparisons, and all nine source packages.
 - [x] Commit candidate `2da5697f3955b6cb74e36e053eafe1879ec881c5`, pass clean-commit formatting, Clippy, the full serialized Cargo suite, host build, packaging, version checks, and the provisioned reliability scenario with zero leaks, then push master for CI run `34405066583`.
-- [ ] Confirm CI passes, create and push the annotated version tag, and monitor all publishing workflows.
+- [x] (2026-09-10) Confirm the earlier candidate was never tagged or published; v2.5.0 remains the remote latest release. Merge origin/master into the current branch to include the overnight tool summaries, Kimi shells, Muse quota and daemon cleanup changes.
+- [x] Diagnose upstream CI 34435674885: the macOS startup PTY test expected a failed provisional session to remain. Check exactly one newly created session independently of earlier rollback. Expand release notes.
+- [ ] Validate the integrated candidate and commit the release completion changes.
+- [ ] Push the integrated candidate, confirm exact-commit CI passes, create and push the annotated version tag, and monitor all publishing workflows.
 - [ ] Verify release archives, registry versions, and Homebrew availability; publish notes and record completion.
 
 ## Surprises & Discoveries
 
+
+Upstream CI 34435674885 failed only the macOS PTY startup test: it found the second session but expected the failed first provisional session to remain. Production intentionally removes failed provisional sessions in `apply_new_session_provisioning_result` and `apply_failed_new_session_rollback`. The corrected assertion counts only sessions created by the second New action; its timeout starts after wizard submission.
 
 The new `brokk-mj-client` crate was manually published as 2.5.0 after the preceding release. Its sole initial owner was `jbellis`, so the local credential could not inspect its trusted publisher. After the user was added, authenticated read-back verified configuration 19515 with the same repository, workflow, and environment as the other eight crates. At the user's request, `cargo owner --add github:brokkai:brokk-eng brokk-mj-client` added the Brokk engineering team, matching the other Mjolnir crates.
 
@@ -33,7 +38,7 @@ The license check reports the previously known unmatched `libbz2-rs-sys@0.2.5` e
 
 Choose 2.6.0 because the changes add user-facing features beyond patch-level repairs. Keep the existing branch and publication workflows. The release request authorizes the source and tag pushes needed to publish it; never force-push or move a published tag.
 
-Automatic approval review initially rejected the master push under the previous explicit-push wording. The user explicitly authorized pushing, tagging, publication, and Homebrew updates; the candidate was then pushed successfully. The user also directed that "cut a new release" always means remote publication. Record that durable authorization in `AGENTS.md`. This documentation follow-up does not change the validated release candidate: tag `2da5697f3955b6cb74e36e053eafe1879ec881c5` after its CI passes.
+Automatic approval review initially rejected the master push under the previous explicit-push wording. The user explicitly authorized pushing, tagging, publication, and Homebrew updates; the candidate was then pushed successfully. The user also directed that "cut a new release" always means remote publication. Record that durable authorization in `AGENTS.md`. That earlier candidate was not tagged. The September 10 release request supersedes it: tag the newly validated integrated release commit, including overnight upstream work and the PTY fixture correction.
 
 Retain the unchanged npm pipeline under the explicit user direction recorded in `.agents/plans/release-v2.3.0.md` and carried forward in `.agents/plans/release-v2.5.0.md`: use the existing publisher configuration without repeating the npm settings-inspection detour. The four npm package identities and `publish-npm.yml` are unchanged since v2.5.0.
 
@@ -42,7 +47,7 @@ Run the full Cargo suite with one test thread because the preceding Kimi validat
 ## Outcomes & Retrospective
 
 
-Candidate `2da5697f3955b6cb74e36e053eafe1879ec881c5` is validated and pushed. CI run `34405066583` is pending. No tag has been created and no 2.6.0 package has been published.
+The earlier candidate passed CI but was never tagged. Publication resumed on September 10 with the latest upstream code merged normally into master. The new candidate is being validated. No v2.6.0 tag or package has been published yet.
 
 ## Context and Orientation
 
@@ -100,3 +105,5 @@ Keep local reports, logs, and downloaded artifacts under `target/release-v2.6.0-
 Use Rust 1.96.0, Node 24, cargo-about 0.9.1, and cargo-deny 0.20.2. Do not add product dependencies, alter package identities, or change publisher settings as part of this release.
 
 Revision 2026-09-09: record scope, synchronized metadata, initial checks, publisher verification, and remaining publication steps.
+
+Revision 2026-09-10: resume the authorized remote publication, include the overnight upstream changes, correct the macOS PTY fixture race, and replace the untagged candidate with a newly validated release commit.
