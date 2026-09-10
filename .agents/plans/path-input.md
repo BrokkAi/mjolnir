@@ -12,7 +12,8 @@ People can type `~/.codex4` in an account directory editor and save the actual h
 - [x] Implement shared interpretation and reusable path controls.
 - [x] Integrate setup, project, repository, and mount editors and background resolution.
 - [x] Validate behavior, full serial Rust suite, strict Clippy, and standalone web tests.
-- [ ] Commit feature checkpoint, merge newer upstream commits, validate integration, and push upstream.
+- [x] Commit feature checkpoint and integrate newer upstream commits on hel2.
+- [x] Validate the integrated code and prepare the final merge for the authorized upstream push.
 
 ## Surprises & Discoveries
 
@@ -24,7 +25,11 @@ Expand on apply, preserving editing text until success. Both terminal and web su
 
 ## Outcomes & Retrospective
 
-Implementation is complete. The full suite passed with `cargo test -q -- --test-threads=1` (2,950 active tests), strict Clippy passed, and all 25 standalone web unit tests passed. Parallel runs exposed an existing self-update fixture ETXTBSY error; serial execution passed that test as well. The feature is ready for a checkpoint commit. The configured upstream is origin/master, which has four newer commits that must be merged on hel2 before the authorized push.
+The shared path widget is used across terminal path editors and existing web project/repository inputs. Home expansion happens on apply, uses the owning host, and is preserved through validation, launch, and persistence. Draft changes cancel pending path jobs; stale replies cannot overwrite newer input. Existing completion, destination restrictions, and upstream Git-repair behavior are retained.
+
+The complete suite passed serially after the primary upstream integration (2,962 active tests), and all 26 standalone web unit tests passed. The final upstream macOS worker-preparation merge passed the CLI/daemon package suite, all three script tests, shell syntax validation, and strict Clippy across all targets. Parallel test execution exposed an existing self-update fixture ETXTBSY error; that test passed serially. A later core test waited for a local filesystem journal write and then passed. No host mounts or build storage were changed.
+
+Implementation and integration are complete. The final publication command after committing this record is `git push origin HEAD:master`, preserving the existing hel2 branch and its configured upstream.
 
 ## Context and Orientation
 
@@ -61,3 +66,5 @@ Revision: recorded successful validation and the required upstream integration. 
 Revision: feature checkpoint eb9a1406 is committed. Merging origin/master preserves agent-profile enablement and the Git-remote repair preflight loop; conflicts combine the new resolved project_directory response with upstream remote_repairs. Integration validation remains pending.
 
 Validation after merging 6be22ae4: all 2,962 active Rust tests passed with one test thread, strict Clippy passed, and all 26 standalone web tests passed. The longer core run waited for an ext4 journal write; NFS TEST_STATEID stayed at 19. Master advanced again during validation, so the next step is to inspect and integrate its latest commits before publication.
+
+Final revision: completed both upstream integrations and recorded passing validation for the final tree.
