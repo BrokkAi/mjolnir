@@ -116,6 +116,11 @@ Install the release bundle on Linux or macOS (use WSL2 on Windows):
 curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash
 ```
 
+Linux CLI releases target **glibc 2.28 or newer** on x86-64 and ARM64 with a
+standard GNU loader. The desktop application and voice helper have additional
+native system dependencies and may require a newer distribution. Alpine and
+NixOS loader environments are not currently supported by these GNU bundles.
+
 From your project directory, run:
 
 ```sh

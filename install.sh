@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.0.4"
 
 OWNER="${MJOLNIR_GITHUB_OWNER:-BrokkAi}"
 INSTALL_DIR="${MJOLNIR_INSTALL_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
@@ -235,13 +235,10 @@ verify_checksum() {
 }
 
 verify_checksum_if_present() {
-  local release_file="$1"
+  local expected="$1"
   local asset_name="$2"
   local asset_file="$3"
-  local expected
   local actual
-
-  expected="$(fetch_checksum "$release_file" "$asset_name" || true)"
   if [[ -z "$expected" ]]; then
     warn "no checksum published for ${asset_name}; skipping checksum verification"
     return 0
@@ -447,7 +444,6 @@ install_from_asset() {
   local src
   local dest="${INSTALL_DIR}/${bin_name}"
   local expected
-  local actual
 
   fetch_release "$repo" "$version" "$release_file"
   tag="$(release_tag "$release_file")"
@@ -456,7 +452,7 @@ install_from_asset() {
   asset_url="$(select_asset "$release_file" "$label" "$tag" "$@")"
   asset_name="${asset_url##*/}"
 
-  # Skip download when the stored archive checksum matches the remote one
+  # Skip only when the checksum matches and the installed CLI still starts.
   expected="$(fetch_checksum "$release_file" "$asset_name" || true)"
   local companions_present=1
   local companion
@@ -469,7 +465,7 @@ install_from_asset() {
     if [[ -f "$stored_checksum_file" ]]; then
       local stored
       stored="$(cat "$stored_checksum_file")"
-      if [[ "$expected" == "$stored" ]]; then
+      if [[ "$expected" == "$stored" ]] && "$dest" --version >/dev/null 2>&1; then
         log "${bin_name} ${tag} is already installed; skipping download"
         return 0
       fi
@@ -480,13 +476,7 @@ install_from_asset() {
 
   log "downloading ${label} ${tag} (${asset_name})"
   download_file "$asset_url" "$asset_file"
-  verify_checksum_if_present "$release_file" "$asset_name" "$asset_file"
-
-  # Remember the archive checksum so we can skip next time
-  if [[ -n "$expected" ]]; then
-    mkdir -p "$(dirname "$(stored_checksum_path "$bin_name")")"
-    printf '%s\n' "$expected" > "$(stored_checksum_path "$bin_name")"
-  fi
+  verify_checksum_if_present "$expected" "$asset_name" "$asset_file"
 
   extract_dir="${TMP_DIR}/${repo}-extract"
 
@@ -494,30 +484,46 @@ install_from_asset() {
     *.tar.gz | *.tgz)
       mkdir -p "$extract_dir"
       tar -xzf "$asset_file" -C "$extract_dir"
-      strip_quarantine "$extract_dir"
-      src="$(find_extracted_binary "$extract_dir" "$bin_name")"
-      install_binary "$src" "$bin_name"
-      for companion in $companion_name; do
-        src="$(find_extracted_binary "$extract_dir" "$companion")"
-        install_binary "$src" "$companion"
-      done
       ;;
     *.zip)
       require_command unzip
       mkdir -p "$extract_dir"
       unzip -q "$asset_file" -d "$extract_dir"
-      strip_quarantine "$extract_dir"
-      src="$(find_extracted_binary "$extract_dir" "$bin_name")"
-      install_binary "$src" "$bin_name"
-      for companion in $companion_name; do
-        src="$(find_extracted_binary "$extract_dir" "$companion")"
-        install_binary "$src" "$companion"
-      done
       ;;
     *)
-      install_binary "$asset_file" "$bin_name"
+      mkdir -p "$extract_dir"
+      cp "$asset_file" "$extract_dir/$bin_name"
       ;;
   esac
+  strip_quarantine "$extract_dir"
+
+  # Resolve the complete bundle before changing an existing installation.
+  local -a companion_sources=()
+  src="$(find_extracted_binary "$extract_dir" "$bin_name")"
+  for companion in $companion_name; do
+    companion_sources+=("$(find_extracted_binary "$extract_dir" "$companion")")
+  done
+  chmod 0755 "$src"
+  local startup_output
+  if ! startup_output="$("$src" --version 2>&1)"; then
+    warn "$startup_output"
+    if [[ "$OS_FAMILY" == "linux" ]]; then
+      die "${bin_name} cannot start on this host. New Linux CLI builds target glibc 2.28 or newer with a standard GNU loader. Older releases may require newer glibc; see the loader error above. Alpine and NixOS loaders are not supported. Existing installation was not changed."
+    fi
+    die "${bin_name} cannot start on this host. Existing installation was not changed."
+  fi
+
+  local index=0
+  for companion in $companion_name; do
+    install_binary "${companion_sources[$index]}" "$companion"
+    index=$((index + 1))
+  done
+  install_binary "$src" "$bin_name"
+  # Cache only an archive that was successfully installed.
+  if [[ -n "$expected" ]]; then
+    mkdir -p "$(dirname "$(stored_checksum_path "$bin_name")")"
+    printf '%s\n' "$expected" > "$(stored_checksum_path "$bin_name")"
+  fi
 }
 
 install_mjolnir() {

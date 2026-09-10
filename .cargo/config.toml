@@ -1,6 +1,6 @@
 # Plain Cargo commands build for the current host so local development works
-# without a `--target` override. Release and worker builds select their static
-# musl target explicitly.
+# without a `--target` override. Linux CLI releases select a glibc baseline
+# through zigbuild; portable worker builds select their musl target explicitly.
 
 # rust-lld ships with the toolchain and links the static musl binary in a
 # fraction of GNU ld's time (measured: edit-to-binary 13.6s -> 6.0s).

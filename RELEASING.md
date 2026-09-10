@@ -45,6 +45,14 @@ disposable targets. The macOS archive additionally contains a universal native
 `mj-worker` for `local-bare`. Every archive includes the applicable licenses
 and notices and is published with a SHA-256 sidecar.
 
+Linux CLI builds use `cargo-zigbuild 0.23.3` and Zig `0.15.2` with an explicit
+glibc 2.28 target. `scripts/build-linux-cli.sh` isolates their output under
+`target/release-cli` and verifies the ELF architecture, GNU loader, shared
+libraries, and maximum GLIBC symbol version before packaging. CI runs these
+binaries through tmux on Rocky Linux 8, Debian 12, and Amazon Linux 2023 for
+both architectures. Desktop and voice helpers retain native builds; the CLI
+compatibility floor does not apply to their system dependencies.
+
 Neither registry publish runs off the tag push. Both wait for the release
 workflow to succeed, so a version mismatch or build failure on any target stops
 the release before anything reaches crates.io or npm.

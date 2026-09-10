@@ -125,8 +125,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
-      - name: Build controller and desktop binaries
-        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-desktop --target x86_64-unknown-linux-gnu
+      - name: Install pinned Linux CLI toolchain
+        run: bash scripts/setup-linux-cli-toolchain.sh
+
+      - name: Build and verify glibc 2.28 CLI
+        run: bash scripts/build-linux-cli.sh x86_64-unknown-linux-gnu
+
+      - name: Build desktop binary
+        run: cargo build --release --locked -p brokk-mj-desktop --target x86_64-unknown-linux-gnu
 
       - name: Build voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-unknown-linux-gnu
@@ -142,7 +148,7 @@ jobs:
         run: |
           name="brokk-mjolnir-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
           mkdir "$name"
-          cp "target/x86_64-unknown-linux-gnu/release/mj" "$name/"
+          cp "target/release-cli/x86_64-unknown-linux-gnu/release/mj" "$name/"
           cp "target/x86_64-unknown-linux-gnu/release/mj-desktop" "$name/"
           cp "target/x86_64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
@@ -182,8 +188,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
-      - name: Build controller and desktop binaries
-        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-desktop --target aarch64-unknown-linux-gnu
+      - name: Install pinned Linux CLI toolchain
+        run: bash scripts/setup-linux-cli-toolchain.sh
+
+      - name: Build and verify glibc 2.28 CLI
+        run: bash scripts/build-linux-cli.sh aarch64-unknown-linux-gnu
+
+      - name: Build desktop binary
+        run: cargo build --release --locked -p brokk-mj-desktop --target aarch64-unknown-linux-gnu
 
       - name: Build voice worker
         run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-unknown-linux-gnu
@@ -199,7 +211,7 @@ jobs:
         run: |
           name="brokk-mjolnir-${GITHUB_REF_NAME}-aarch64-unknown-linux-gnu"
           mkdir "$name"
-          cp "target/aarch64-unknown-linux-gnu/release/mj" "$name/"
+          cp "target/release-cli/aarch64-unknown-linux-gnu/release/mj" "$name/"
           cp "target/aarch64-unknown-linux-gnu/release/mj-desktop" "$name/"
           cp "target/aarch64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
