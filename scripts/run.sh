@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 #
 # Rebuild the static musl worker, then build and run the host `mj` with the
-# daemon from that same host build. Linux builds only the target-side worker
-# with musl; macOS builds both binaries for the native target so local-bare
-# development remains available without a Linux cross toolchain.
+# daemon from that same host build. macOS builds the native worker too, and
+# uses its local container engine to build the Linux worker for containers.
 #
-# Plain `cargo build` targets the host (glibc) and never rebuilds the musl
-# worker under target/<triple>/. A long-lived daemon then hands container and
+# Plain `cargo build` targets the host and never rebuilds the musl worker
+# under target/worker/<triple>/. A long-lived daemon then hands container and
 # remote (SSH) sessions whatever musl worker was last built with an explicit
 # `--target`, with no warning that it is stale. This wrapper rebuilds the musl
 # worker at the same profile the run will use, so it is the "just works"
 # replacement for `cargo build && cargo run` when you exercise container or
-# remote sessions. Local-bare sessions run a glibc worker and do not need it,
+# remote sessions. Local-bare sessions run a native worker and do not need it,
 # but building both here is cheap once warm.
 #
 # Any arguments are passed through to `cargo run`, e.g.
@@ -31,10 +30,10 @@ cd "$repo_root"
 
 # Match the run's profile so the daemon finds a current sibling: it looks for
 # the musl worker beside the controller under the same profile directory.
-profile_args=()
+profile_flag=""
 for arg in "$@"; do
   if [ "$arg" = "--release" ]; then
-    profile_args=(--release)
+    profile_flag=--release
   fi
 done
 
@@ -53,10 +52,24 @@ case "$(uname -s)" in
       echo "The $triple target is not installed. Run: rustup target add $triple" >&2
       exit 1
     fi
-    cargo build --target-dir target/worker --target "$triple" -p brokk-mj-worker --bin mj-worker "${profile_args[@]}"
+    cargo build --target-dir target/worker --target "$triple" -p brokk-mj-worker --bin mj-worker ${profile_flag:+"$profile_flag"}
     ;;
   Darwin)
-    cargo build --target-dir target/worker -p brokk-mj-worker --bin mj-worker "${profile_args[@]}"
+    cargo build --target-dir target/worker -p brokk-mj-worker --bin mj-worker ${profile_flag:+"$profile_flag"}
+    # The native macOS worker cannot run in a Linux container. Build through
+    # the available engine before the daemon snapshots its worker sources.
+    engine=""
+    for candidate in docker podman; do
+      if command -v "$candidate" >/dev/null 2>&1 && "$candidate" info >/dev/null 2>&1; then
+        engine="$candidate"
+        break
+      fi
+    done
+    if [ -n "$engine" ]; then
+      "$repo_root/scripts/build-linux-worker.sh" "$engine" ${profile_flag:+"$profile_flag"}
+    else
+      echo "No running Docker or Podman engine; built the native worker for local sessions only." >&2
+    fi
     ;;
   *)
     echo "scripts/run.sh supports Linux and macOS hosts" >&2

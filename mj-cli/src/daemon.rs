@@ -3641,6 +3641,30 @@ fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static DEVELOPMENT_DAEMON_REFRESH: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn development_workers_changed_since(
+    started: SystemTime,
+    resolve: impl Fn(&str) -> Result<mj_controller::hel_controller::WorkerBinaryAvailability>,
+) -> Result<bool> {
+    use mj_controller::hel_controller::WorkerBinaryAvailability;
+
+    for arch in ["aarch64", "x86_64"] {
+        match resolve(arch) {
+            Ok(WorkerBinaryAvailability::Local { path, .. }) => {
+                let modified = fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .with_context(|| format!("inspect development worker {}", path.display()))?;
+                if modified > started {
+                    return Ok(true);
+                }
+            }
+            Ok(WorkerBinaryAvailability::Remote { .. }) => {}
+            Err(error) => tracing::debug!(arch, %error, "development worker source is unavailable"),
+        }
+    }
+    Ok(false)
+}
+
 async fn maybe_replace_stale_development_daemon() -> Result<()> {
     if std::env::var_os(DEV_RESTART_STALE_DAEMON_ENV).is_none() {
         return Ok(());
@@ -3652,10 +3676,19 @@ async fn maybe_replace_stale_development_daemon() -> Result<()> {
                 return Ok(());
             };
             let pid = metadata.pid;
-            let current = tokio::task::spawn_blocking(move || daemon_uses_current_executable(pid))
-                .await
-                .context("inspect development daemon task failed")??;
-            if current != Some(false) {
+            let started: SystemTime = chrono::DateTime::parse_from_rfc3339(&metadata.started_at)
+                .context("parse development daemon start time")?
+                .into();
+            let stale = tokio::task::spawn_blocking(move || -> Result<bool> {
+                Ok(daemon_uses_current_executable(pid)? == Some(false)
+                    || development_workers_changed_since(
+                        started,
+                        mj_controller::hel_controller::worker_binary_prerequisite_for_arch,
+                    )?)
+            })
+            .await
+            .context("inspect development daemon task failed")??;
+            if !stale {
                 return Ok(());
             }
             eprintln!(
@@ -5187,6 +5220,32 @@ mod tests {
             Some(true)
         );
         assert_eq!(daemon_uses_current_executable(u32::MAX).unwrap(), None);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn development_refresh_detects_workers_installed_or_rebuilt_after_startup() {
+        use mj_controller::hel_controller::WorkerBinaryAvailability;
+
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("mj-worker");
+        let started = UNIX_EPOCH + Duration::from_secs(200);
+        let resolve = |arch: &str| {
+            anyhow::ensure!(arch == "aarch64" && worker.exists(), "no worker for {arch}");
+            Ok(WorkerBinaryAvailability::Local {
+                path: worker.clone(),
+                source: "test".into(),
+            })
+        };
+        assert!(!development_workers_changed_since(started, resolve).unwrap());
+        fs::write(&worker, "worker").unwrap();
+        let file = fs::File::options().write(true).open(&worker).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(started - Duration::from_secs(1)))
+            .unwrap();
+        assert!(!development_workers_changed_since(started, resolve).unwrap());
+        file.set_times(fs::FileTimes::new().set_modified(started + Duration::from_secs(1)))
+            .unwrap();
+        assert!(development_workers_changed_since(started, resolve).unwrap());
     }
 
     #[test]
