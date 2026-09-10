@@ -63,7 +63,7 @@ relevant. Compared against repository snapshots inspected on **September 8, 2026
 |---|---|---|---|---|
 | **Native-session adoption** | All supported harnesses | No external adoption; only restarts sessions it was already supervising | All supported providers with native list/load support | No external adoption; continues T3-owned sessions |
 | **Resume sessions across profiles and harnesses** | ✓ | Manual handoff | `/paseo-handoff` skill | Same-harness only² |
-| **Cross-host move and restore** | ✓ — live Move or stop/resume onto another target | — | — | — |
+| **Cross-host move and restore** | ✓ | — | — | — |
 | **Multi-repo projects** | Bundles provision, checkpoint, review, move, and restore member repos together³ | Filesystem access only; separate workspaces or panes | Filesystem/provider access only; one root per workspace | Filesystem access only; one workspace root per project |
 
 ### Harnesses and accounts
