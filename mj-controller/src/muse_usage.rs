@@ -5,8 +5,9 @@
 //! minted API key is persisted or passed through the rest of the controller.
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
@@ -20,6 +21,17 @@ const DEFAULT_MINT_BASE_URL: &str = "https://api.meta.ai";
 const MINT_PATH: &str = "/muse-code/key";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The mint endpoint is the only source of Muse usage and it is rate limited
+/// per account, so every caller in this process shares one reading rather than
+/// minting a key of its own.
+const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// First wait after a 429 that carries no `Retry-After`.
+const INITIAL_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(30 * 60);
+const MAX_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
+/// Prefix that lets the dashboard render a rate-limited profile honestly
+/// instead of calling it unavailable.
+pub const RATE_LIMITED_PREFIX: &str = "rate limited";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MuseUsageWindow {
     pub label: String,
@@ -27,13 +39,167 @@ pub struct MuseUsageWindow {
     pub resets_at: Option<i64>,
 }
 
+/// One usage reading, plus a short note when the windows are the last good
+/// reading served while Meta is rate limiting this account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MuseUsageReport {
+    pub windows: Vec<MuseUsageWindow>,
+    pub note: Option<String>,
+}
+
+/// A 429 from the mint endpoint, with whatever wait it asked for.
+#[derive(Debug)]
+struct RateLimited {
+    retry_after: Option<Duration>,
+}
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Muse usage request returned HTTP 429 Too Many Requests")
+    }
+}
+
+impl std::error::Error for RateLimited {}
+
+#[derive(Debug, Default)]
+struct GateEntry {
+    windows: Option<Vec<MuseUsageWindow>>,
+    fetched_at: Option<SystemTime>,
+    next_allowed_at: Option<SystemTime>,
+    consecutive_rate_limits: u32,
+    rate_limit_reason: Option<String>,
+}
+
+type Gate = Mutex<HashMap<PathBuf, GateEntry>>;
+
+fn shared_gate() -> &'static Gate {
+    static GATE: OnceLock<Gate> = OnceLock::new();
+    GATE.get_or_init(Gate::default)
+}
+
 /// Query the Muse subscription usage for one profile.
-pub async fn query(
-    home: &Path,
-    environment: &HashMap<String, String>,
-) -> Result<Vec<MuseUsageWindow>> {
+pub async fn query(home: &Path, environment: &HashMap<String, String>) -> Result<MuseUsageReport> {
     let base_url = mint_base_url(environment);
-    query_with_timeout(home, &base_url, REQUEST_TIMEOUT).await
+    query_gated(
+        home,
+        &base_url,
+        REQUEST_TIMEOUT,
+        shared_gate(),
+        SystemTime::now(),
+    )
+    .await
+}
+
+/// The rate-limit and minimum-interval gate above the network step. `now` is
+/// supplied by the caller so tests can drive the clock without sleeping.
+async fn query_gated(
+    home: &Path,
+    base_url: &str,
+    timeout: Duration,
+    gate: &Gate,
+    now: SystemTime,
+) -> Result<MuseUsageReport> {
+    let key = gate_key(home);
+    if let Some(report) = cached_report(gate, &key, now)? {
+        return Ok(report);
+    }
+    match query_with_timeout(home, base_url, timeout).await {
+        Ok(windows) => {
+            let mut entries = gate.lock().unwrap_or_else(|error| error.into_inner());
+            let entry = entries.entry(key).or_default();
+            entry.windows = Some(windows.clone());
+            entry.fetched_at = Some(now);
+            entry.next_allowed_at = None;
+            entry.consecutive_rate_limits = 0;
+            entry.rate_limit_reason = None;
+            Ok(MuseUsageReport {
+                windows,
+                note: None,
+            })
+        }
+        Err(error) => {
+            let Some(rate_limited) = error.downcast_ref::<RateLimited>() else {
+                // A transient failure neither clears the last reading nor
+                // blocks the next attempt.
+                return Err(error);
+            };
+            let mut entries = gate.lock().unwrap_or_else(|error| error.into_inner());
+            let entry = entries.entry(key).or_default();
+            let backoff = rate_limited
+                .retry_after
+                .unwrap_or_else(|| exponential_backoff(entry.consecutive_rate_limits));
+            let next_allowed_at = now + backoff;
+            entry.consecutive_rate_limits = entry.consecutive_rate_limits.saturating_add(1);
+            entry.next_allowed_at = Some(next_allowed_at);
+            entry.rate_limit_reason = Some(rate_limit_reason(next_allowed_at));
+            match entry.windows.clone() {
+                Some(windows) => Ok(MuseUsageReport {
+                    windows,
+                    note: Some(RATE_LIMITED_PREFIX.to_owned()),
+                }),
+                None => Err(anyhow::anyhow!(
+                    entry.rate_limit_reason.clone().unwrap_or_default()
+                )),
+            }
+        }
+    }
+}
+
+/// The cached answer, when the gate says no network call is due. `Ok(None)`
+/// means the caller should query the endpoint.
+fn cached_report(gate: &Gate, key: &Path, now: SystemTime) -> Result<Option<MuseUsageReport>> {
+    let entries = gate.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(entry) = entries.get(key) else {
+        return Ok(None);
+    };
+    if entry.next_allowed_at.is_some_and(|allowed| now < allowed) {
+        return match entry.windows.clone() {
+            Some(windows) => Ok(Some(MuseUsageReport {
+                windows,
+                note: Some(RATE_LIMITED_PREFIX.to_owned()),
+            })),
+            None => Err(anyhow::anyhow!(
+                entry.rate_limit_reason.clone().unwrap_or_default()
+            )),
+        };
+    }
+    let fresh = entry
+        .fetched_at
+        .and_then(|fetched_at| now.duration_since(fetched_at).ok())
+        .is_some_and(|age| age < MIN_REFRESH_INTERVAL);
+    match entry.windows.clone().filter(|_| fresh) {
+        Some(windows) => Ok(Some(MuseUsageReport {
+            windows,
+            note: None,
+        })),
+        None => Ok(None),
+    }
+}
+
+fn gate_key(home: &Path) -> PathBuf {
+    home.canonicalize().unwrap_or_else(|_| home.to_path_buf())
+}
+
+fn exponential_backoff(consecutive_rate_limits: u32) -> Duration {
+    INITIAL_RATE_LIMIT_BACKOFF
+        .saturating_mul(1u32 << consecutive_rate_limits.min(8))
+        .min(MAX_RATE_LIMIT_BACKOFF)
+}
+
+fn rate_limit_reason(next_allowed_at: SystemTime) -> String {
+    let next_check = chrono::DateTime::<chrono::Local>::from(next_allowed_at).format("%H:%M");
+    format!("{RATE_LIMITED_PREFIX} by Meta; next check after {next_check}")
+}
+
+/// `Retry-After` as either a delay in seconds or an HTTP date.
+fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let now = chrono::DateTime::<chrono::Utc>::from(now);
+    (at.with_timezone(&chrono::Utc) - now).to_std().ok()
 }
 
 fn mint_base_url(environment: &HashMap<String, String>) -> String {
@@ -73,6 +239,14 @@ async fn query_with_timeout(
     let status = response.status();
     if matches!(status.as_u16(), 401 | 403) {
         bail!("Muse login expired")
+    }
+    if status.as_u16() == 429 {
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| parse_retry_after(value, SystemTime::now()));
+        return Err(anyhow::Error::new(RateLimited { retry_after }));
     }
     if !status.is_success() {
         bail!("Muse usage request returned HTTP {status}")
@@ -444,6 +618,168 @@ mod tests {
         }
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    fn usage_body() -> String {
+        json!({
+            "subs_usage": {"weekly": {"used_percent": 1, "resets_at": 1_789_344_000_i64}}
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn gate_serves_last_reading_while_rate_limited_and_dedupes_refreshes() {
+        let home = tempfile::tempdir().unwrap();
+        write_credentials(home.path(), "profile-token");
+        let state = ServerState {
+            response: Arc::new(Mutex::new((StatusCode::OK, usage_body()))),
+            ..ServerState::default()
+        };
+        let (base_url, server) = spawn_server(state.clone()).await;
+        let gate = Gate::default();
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let report = query_gated(home.path(), &base_url, REQUEST_TIMEOUT, &gate, start)
+            .await
+            .unwrap();
+        assert_eq!(report.windows[0].remaining_percent, 99);
+        assert_eq!(report.note, None);
+
+        // A second caller inside the minimum interval reuses the reading.
+        let report = query_gated(
+            home.path(),
+            &base_url,
+            REQUEST_TIMEOUT,
+            &gate,
+            start + Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.note, None);
+        assert_eq!(state.requests.lock().unwrap().len(), 1);
+
+        // After the interval a 429 keeps the last windows and marks the note.
+        *state.response.lock().unwrap() = (StatusCode::TOO_MANY_REQUESTS, "{}".into());
+        let limited = start + MIN_REFRESH_INTERVAL + Duration::from_secs(1);
+        let report = query_gated(home.path(), &base_url, REQUEST_TIMEOUT, &gate, limited)
+            .await
+            .unwrap();
+        assert_eq!(report.windows[0].remaining_percent, 99);
+        assert_eq!(report.note.as_deref(), Some("rate limited"));
+        assert_eq!(state.requests.lock().unwrap().len(), 2);
+
+        // No further network call until the backoff elapses.
+        let report = query_gated(
+            home.path(),
+            &base_url,
+            REQUEST_TIMEOUT,
+            &gate,
+            limited + INITIAL_RATE_LIMIT_BACKOFF - Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.note.as_deref(), Some("rate limited"));
+        assert_eq!(state.requests.lock().unwrap().len(), 2);
+
+        // Once it elapses the endpoint is tried again, and a success clears
+        // both the note and the consecutive-429 count.
+        *state.response.lock().unwrap() = (StatusCode::OK, usage_body());
+        let recovered = limited + INITIAL_RATE_LIMIT_BACKOFF;
+        let report = query_gated(home.path(), &base_url, REQUEST_TIMEOUT, &gate, recovered)
+            .await
+            .unwrap();
+        assert_eq!(report.note, None);
+        assert_eq!(state.requests.lock().unwrap().len(), 3);
+        assert_eq!(
+            gate.lock().unwrap()[&gate_key(home.path())].consecutive_rate_limits,
+            0
+        );
+
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_without_a_prior_reading_reports_the_rate_limited_marker() {
+        let home = tempfile::tempdir().unwrap();
+        write_credentials(home.path(), "profile-token");
+        let state = ServerState {
+            response: Arc::new(Mutex::new((StatusCode::TOO_MANY_REQUESTS, "{}".into()))),
+            ..ServerState::default()
+        };
+        let (base_url, server) = spawn_server(state.clone()).await;
+        let gate = Gate::default();
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let error = query_gated(home.path(), &base_url, REQUEST_TIMEOUT, &gate, start)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("rate limited"), "{error}");
+        let error = query_gated(
+            home.path(),
+            &base_url,
+            REQUEST_TIMEOUT,
+            &gate,
+            start + Duration::from_secs(60),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("rate limited"), "{error}");
+        assert_eq!(state.requests.lock().unwrap().len(), 1);
+
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn retry_after_seconds_set_the_next_allowed_check() {
+        let home = tempfile::tempdir().unwrap();
+        write_credentials(home.path(), "profile-token");
+        let app = Router::new().route(
+            "/muse-code/key",
+            post(|| async {
+                Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .header("retry-after", "120")
+                    .body("{}".to_owned())
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base_url = format!("http://{address}");
+        let gate = Gate::default();
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        assert!(
+            query_gated(home.path(), &base_url, REQUEST_TIMEOUT, &gate, start)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            gate.lock().unwrap()[&gate_key(home.path())].next_allowed_at,
+            Some(start + Duration::from_secs(120))
+        );
+
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn retry_after_accepts_seconds_and_http_dates_and_backoff_is_capped() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(parse_retry_after("30", now), Some(Duration::from_secs(30)));
+        assert_eq!(
+            parse_retry_after("Tue, 14 Nov 2023 22:23:20 GMT", now),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(parse_retry_after("soon", now), None);
+        assert_eq!(exponential_backoff(0), INITIAL_RATE_LIMIT_BACKOFF);
+        assert_eq!(exponential_backoff(1), INITIAL_RATE_LIMIT_BACKOFF * 2);
+        assert_eq!(exponential_backoff(9), MAX_RATE_LIMIT_BACKOFF);
     }
 
     #[tokio::test]

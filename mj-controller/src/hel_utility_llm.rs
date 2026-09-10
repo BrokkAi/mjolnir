@@ -66,9 +66,15 @@ impl std::fmt::Debug for UtilityCandidate {
     }
 }
 
+/// A built backend and the profile configuration it was built from.
+type CachedBackend = (HarnessProfile, Arc<dyn LlmBackend>);
+
 #[derive(Default)]
 pub struct UtilityLlmRuntime {
     quota_cache: tokio::sync::Mutex<BTreeMap<String, ProfileQuota>>,
+    /// Backends are reused across resolves so a client that mints a key holds
+    /// it in memory instead of minting one per compaction.
+    backend_cache: tokio::sync::Mutex<BTreeMap<String, CachedBackend>>,
 }
 
 impl UtilityLlmRuntime {
@@ -110,7 +116,7 @@ impl UtilityLlmRuntime {
                     continue;
                 }
             };
-            let backend = match backend_for_profile(profile) {
+            let backend = match self.backend(profile_id, profile).await {
                 Ok(Some(backend)) => backend,
                 Ok(None) => {
                     reasons.push(format!("{profile_id}: credentials are unavailable"));
@@ -157,6 +163,27 @@ impl UtilityLlmRuntime {
         Ok(candidates)
     }
 
+    /// The cached backend for a profile, rebuilt when its configuration
+    /// changes. Reuse keeps any in-memory credential the client minted.
+    async fn backend(
+        &self,
+        profile_id: &str,
+        profile: &HarnessProfile,
+    ) -> Result<Option<Arc<dyn LlmBackend>>> {
+        let mut cache = self.backend_cache.lock().await;
+        if let Some((cached_profile, backend)) = cache.get(profile_id)
+            && cached_profile == profile
+        {
+            return Ok(Some(backend.clone()));
+        }
+        cache.remove(profile_id);
+        let backend = backend_for_profile(profile)?;
+        if let Some(backend) = &backend {
+            cache.insert(profile_id.to_owned(), (profile.clone(), backend.clone()));
+        }
+        Ok(backend)
+    }
+
     async fn quotas(
         &self,
         config: &HelConfig,
@@ -183,6 +210,10 @@ impl UtilityLlmRuntime {
             self.quota_cache.lock().await.extend(refreshed);
         }
         let configured = config.profiles.keys().collect::<BTreeSet<_>>();
+        self.backend_cache
+            .lock()
+            .await
+            .retain(|id, _| configured.contains(id));
         let mut cache = self.quota_cache.lock().await;
         cache.retain(|id, _| configured.contains(id));
         cache.clone()

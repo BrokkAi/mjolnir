@@ -104,6 +104,10 @@ fn quota_error_label(error: &str) -> String {
     // adapter. Keep the display contract independent of the controller crate.
     if error == "login expired" {
         error.to_string()
+    } else if error.starts_with("rate limited") {
+        // The provider is throttling the usage endpoint, which is not the same
+        // as the quota being unknown for good.
+        "rate limited".to_string()
     } else {
         "unavailable".to_string()
     }
