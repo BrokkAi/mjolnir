@@ -1710,7 +1710,8 @@ impl ActiveChat {
                     ChatRemoteOperation::Cancel {
                         command_id,
                         intent,
-                        cancel_agent: self.state.prompt_in_flight(),
+                        cancel_agent: self.state.prompt_in_flight()
+                            || self.state.session_activity.capacity_retry.is_some(),
                         shell_command_ids: self.state.active_user_shell_ids(),
                     },
                     &mut self.state,
@@ -3309,7 +3310,7 @@ fn prompt_bottom_queue_control(chat: &ChatState) -> Option<Line<'static>> {
     if !chat.queued_prompts.is_empty() {
         labels.push(format!("{} queued", chat.queued_prompts.len()));
     }
-    if chat.prompt_in_flight() {
+    if chat.prompt_in_flight() || chat.session_activity.capacity_retry.is_some() {
         labels.push(chat.turn_control_intent().escape_hint().to_owned());
     }
     (!labels.is_empty()).then(|| {
@@ -3748,6 +3749,7 @@ mod tests {
                 latest_credential_sync_signal: None,
                 worker_build: None,
                 operational: hel::hel_worker::RelayOperationalState {
+                    capacity_retry: None,
                     activity_turn_started_at_ms: None,
                     store_id: None,
                     idle_since_ms: None,
@@ -5233,6 +5235,7 @@ mod tests {
         assert!(prompt_title(&chat).is_empty());
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            capacity_retry: None,
             activity_turn_started_at_ms: None,
             prompt_in_flight: false,
             idle_since_ms: None,
@@ -5251,6 +5254,7 @@ mod tests {
         assert!(!prompt_title(&chat).contains("Background"));
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            capacity_retry: None,
             activity_turn_started_at_ms: None,
             prompt_in_flight: false,
             idle_since_ms: None,

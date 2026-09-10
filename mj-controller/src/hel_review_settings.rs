@@ -463,6 +463,7 @@ mod tests {
 
     fn operational(session_id: &str) -> RelayOperationalState {
         RelayOperationalState {
+            capacity_retry: None,
             store_id: None,
             idle_since_ms: None,
             session_id: session_id.to_owned(),

@@ -2893,7 +2893,9 @@ fn session_capabilities(
         run_shell: live && attached && !mutation_busy,
         cancel_turn: live
             && !mutation_busy
-            && operational.is_some_and(|state| state.active_prompt.is_some()),
+            && operational.is_some_and(|state| {
+                state.active_prompt.is_some() || state.capacity_retry.is_some()
+            }),
         cancel_operation: operation.is_some_and(|operation| operation.cancellable),
         // Stopping a session that is already stopping asks for something that
         // is happening; resuming one that is running asks for a second copy.
@@ -3298,6 +3300,7 @@ fn viewer_snapshot(
             let turn_started_at = turn_started_at_ms
                 .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
                 .map(|started_at_ms| started_at_ms / 1_000);
+            session.capacity_retry = state.capacity_retry.clone();
             let activity = mj_chat::usage_format::SessionActivity::of(state);
             let activity_details =
                 activity.details(turn_started_at_ms, state.current_step_started_at_ms);
@@ -3709,6 +3712,7 @@ mod tests {
         use hel::hel_worker::{RelayExecutionState, RelayOperationalState};
 
         let operational = |agent_capabilities| RelayOperationalState {
+            capacity_retry: None,
             activity_turn_started_at_ms: None,
             session_id: "session-1".into(),
             store_id: None,
@@ -3773,6 +3777,7 @@ mod tests {
         record.state = SessionState::Running;
         controller.state.sessions.insert(record.id.clone(), record);
         let operational = RelayOperationalState {
+            capacity_retry: None,
             activity_turn_started_at_ms: None,
             session_id: "session-1".into(),
             store_id: None,

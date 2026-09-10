@@ -370,6 +370,7 @@ impl ViewerSnapshot {
                 let lifecycle = ViewerLifecycleCategory::of(session.state);
                 let source = session.project_source(config);
                 ViewerSession {
+                    capacity_retry: None,
                     id: session.id.clone(),
                     workspace_id: session.workspace_id.clone(),
                     title: session.display_title().to_owned(),
@@ -515,6 +516,8 @@ fn project_key(identity: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_retry: Option<hel::hel_worker::CapacityRetry>,
     pub id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,
@@ -4864,6 +4867,21 @@ resolveRequest({ project_directory: '/remote/stale' });
 if (await pending || newDraft.projectDirectory !== '~/newer') throw Error('cancelled reply replaced draft');
 "#;
         run_viewer_script("path-preflight", &format!("{setup}\n{source}\n{checks}"));
+    }
+
+    #[test]
+    fn embedded_viewer_displays_capacity_retry_deadlines() {
+        let source = viewer_source(
+            "function sessionActivityLabel(",
+            "function updateSessionActivity(",
+        );
+        let setup = "function isTransitioningSession() { return false; }";
+        let checks = r#"
+const session = { lifecycle: 'live', capacity_retry: { attempt: 2, retry_at_ms: 120000 } };
+if (sessionActivityLabel(session, 60000) !== 'Model at capacity · retrying in 1m00s') throw Error('missing retry countdown');
+if (sessionActivityLabel(session, 121000) !== 'Model at capacity · retrying in 0m00s') throw Error('negative retry countdown');
+"#;
+        run_viewer_script("capacity-retry", &format!("{setup}\n{source}\n{checks}"));
     }
 
     #[test]
