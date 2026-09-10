@@ -19,6 +19,7 @@ Mjolnir currently mistakes a Kimi session for idle after the parent turn ends ev
 - [x] (2026-09-09 19:35Z) Fixed session-index path rollover and the equal-length partial-record tail bug; added native watcher regression coverage.
 - [x] (2026-09-09 19:43Z) Made routine checkpoints and automatic recovery fail closed for unknown or active Kimi tasks while preserving explicit close semantics; focused Kimi, worker, checkpoint, and recovery tests pass.
 - [x] (2026-09-09 20:18Z) Passed the final serialized full `cargo test -- --test-threads=1`, `cargo clippy --all-targets -- -D warnings`, formatting, and diff checks after reviewing the integrated change.
+- [x] (2026-09-09 21:30Z) Extended tracking to detached shell processes (`kind: "process"`) and deduplicated each one against the hosted terminal its launcher card embedded.
 
 ## Surprises & Discoveries
 
@@ -47,6 +48,10 @@ Mjolnir currently mistakes a Kimi session for idle after the parent turn ends ev
 - Decision: Keep the Kimi monitor in the worker relay coordinator instead of adding Kimi-specific variants to the shared ACP runtime protocol.
   Rationale: the native journal and configured Kimi home exist only on the target worker. Reading them through Tokio's blocking pool lets the coordinator publish live state directly without expanding `LaunchSpec` or `RuntimeEvent` with provider-specific file details.
   Date/Author: 2026-09-09 / Codex
+- Decision: Track detached `process` tasks alongside detached `agent` tasks, and list a detached job through its hosted terminal when the launcher card bound one.
+  Rationale: a Kimi `Bash` call with `run_in_background` runs in a Hel terminal and journals a `kind: "process"` record. Accepting only `agent` records hid the job and let the native scan retire its provisional entry, while accepting both without correlation would list the same job twice. The terminal entry also keeps the job stoppable.
+  Date/Author: 2026-09-09 / Claude
+
 - Decision: Apply the Kimi certainty rule to routine checkpoints at controller synchronization, barrier waiting, capture release, and final revalidation, but not to explicit close.
   Rationale: an automatic archive must never restart or capture across unknown provider work, while an explicit close is an intentional request to interrupt and terminate session-owned work.
   Date/Author: 2026-09-09 / Codex

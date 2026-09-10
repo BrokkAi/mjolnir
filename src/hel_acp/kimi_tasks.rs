@@ -1,10 +1,11 @@
-//! Native Kimi background-agent task tracking.
+//! Native Kimi background-task tracking.
 //!
-//! Kimi does not report its background-agent level through ACP.  The durable
+//! Kimi does not report its detached background work through ACP.  The durable
 //! task lifecycle records in the native session's main wire stream are the
-//! source of truth instead.  This module deliberately contains only file
-//! parsing and state tracking; the caller decides where a snapshot is
-//! published.
+//! source of truth instead.  Both detached agents (`kind: "agent"`) and
+//! detached shell processes (`kind: "process"`) are tracked.  This module
+//! deliberately contains only file parsing and state tracking; the caller
+//! decides where a snapshot is published.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -26,7 +27,8 @@ const TASK_TERMINATED: &str = "task.terminated";
 const LEGACY_TASK_STARTED: &str = "background.task.started";
 const LEGACY_TASK_TERMINATED: &str = "background.task.terminated";
 
-/// A detached Kimi agent which is active according to the durable wire log.
+/// A detached Kimi agent or process which is active according to the durable
+/// wire log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KimiBackgroundTask {
     pub task_id: String,
@@ -574,15 +576,17 @@ fn parse_task_event(record: &Value, event_kind: TaskEventType) -> Result<Option<
         bail!("lifecycle record lacks agentId");
     }
 
+    // Kimi journals detached agents and detached shell processes the same
+    // way; both are background work a turn is no longer waiting on.
     if let Some(kind) = info.get("kind") {
         let kind = kind
             .as_str()
             .context("lifecycle record kind is not a string")?;
-        if kind != "agent" {
+        if kind != "agent" && kind != "process" {
             return Ok(None);
         }
     } else if matches!(event_kind, TaskEventType::Started) {
-        bail!("agent lifecycle record lacks kind");
+        bail!("task lifecycle record lacks kind");
     }
     if let Some(detached) = info.get("detached") {
         let detached = detached
@@ -592,14 +596,14 @@ fn parse_task_event(record: &Value, event_kind: TaskEventType) -> Result<Option<
             return Ok(None);
         }
     } else if matches!(event_kind, TaskEventType::Started) {
-        bail!("agent lifecycle record lacks detached");
+        bail!("task lifecycle record lacks detached");
     }
 
     let task_id = info
         .get("taskId")
         .and_then(Value::as_str)
         .filter(|task_id| !task_id.is_empty())
-        .context("agent lifecycle record lacks non-empty taskId")?
+        .context("task lifecycle record lacks non-empty taskId")?
         .to_owned();
     let parent_tool_call_id = optional_string(info, "parentToolCallId")?;
     match event_kind {
@@ -607,16 +611,16 @@ fn parse_task_event(record: &Value, event_kind: TaskEventType) -> Result<Option<
             let description = info
                 .get("description")
                 .and_then(Value::as_str)
-                .context("agent start record lacks string description")?
+                .context("task start record lacks string description")?
                 .to_owned();
             let started_at_ms = info
                 .get("startedAt")
                 .and_then(Value::as_i64)
-                .context("agent start record lacks integer startedAt")?;
+                .context("task start record lacks integer startedAt")?;
             if let Some(status) = info.get("status") {
                 status
                     .as_str()
-                    .context("agent lifecycle record status is not a string")?;
+                    .context("task lifecycle record status is not a string")?;
             }
             Ok(Some(TaskEvent {
                 kind: TaskEventKind::Started(KimiBackgroundTask {
@@ -632,7 +636,7 @@ fn parse_task_event(record: &Value, event_kind: TaskEventType) -> Result<Option<
             if let Some(status) = info.get("status") {
                 status
                     .as_str()
-                    .context("agent lifecycle record status is not a string")?;
+                    .context("task lifecycle record status is not a string")?;
             }
             Ok(Some(TaskEvent {
                 kind: TaskEventKind::Terminated { task_id },
@@ -834,6 +838,47 @@ mod tests {
         let mut terminate = lifecycle(TASK_TERMINATED, "same", None, true, "agent");
         terminate["info"]["status"] = json!("aborted");
         append_jsonl(&wire, &[start.clone(), start, terminate]);
+        assert!(full_scan(&wire).unwrap().tasks.is_empty());
+    }
+
+    #[test]
+    fn detached_process_task_is_tracked_until_it_terminates() {
+        let temp = tempfile::tempdir().unwrap();
+        let wire = temp.path().join("wire.jsonl");
+        // Kimi's process records carry no info.agentId and may omit timeoutMs.
+        let mut start = lifecycle(
+            TASK_STARTED,
+            "bash-r5ae",
+            Some("tool_bash"),
+            true,
+            "process",
+        );
+        start["info"].as_object_mut().unwrap().remove("agentId");
+        let mut terminate = lifecycle(
+            TASK_TERMINATED,
+            "bash-r5ae",
+            Some("tool_bash"),
+            true,
+            "process",
+        );
+        terminate["info"].as_object_mut().unwrap().remove("agentId");
+        append_jsonl(&wire, &[start.clone()]);
+
+        let snapshot = full_scan(&wire).unwrap();
+        assert_eq!(
+            snapshot
+                .tasks
+                .iter()
+                .map(|task| task.task_id.as_str())
+                .collect::<Vec<_>>(),
+            ["bash-r5ae"]
+        );
+        assert_eq!(
+            snapshot.task("bash-r5ae").unwrap().parent_tool_call_id,
+            Some("tool_bash".to_owned())
+        );
+
+        append_jsonl(&wire, &[start, terminate]);
         assert!(full_scan(&wire).unwrap().tasks.is_empty());
     }
 
