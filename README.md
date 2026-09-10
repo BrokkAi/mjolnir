@@ -80,7 +80,7 @@ relevant. Compared against repository snapshots inspected on **September 8, 2026
 |---|---|---|---|---|
 | **Cross-session project memory** | Synchronized project memory shared across sessions, profiles, harnesses, and targets | — | — | — |
 | **Automatic adversarial review** | Built-in automatic or on-demand independent review | Scriptable through agent automation; no built-in review loop | Manual `/paseo-advisor` second opinion | — |
-| **Control surfaces** | TUI, web, desktop shell, CLI | TUI, CLI | Web, desktop, iOS, Android, CLI | Web, desktop, iOS, Android, CLI |
+| **Control surfaces** | TUI, web, CLI | TUI, CLI | Web, desktop, iOS, Android, CLI | Web, desktop, iOS, Android, CLI |
 | **Voice input** | TUI and web dictation | — | Dictation and conversational voice mode | — |
 
 ### Extensibility
