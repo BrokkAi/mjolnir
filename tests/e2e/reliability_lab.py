@@ -410,6 +410,12 @@ class Lab:
         fixture_bin.mkdir()
         (fixture_bin / "python3").symlink_to(sys.executable)
         (fixture_bin / "sh").symlink_to("/bin/sh")
+        # The Python harness needs no Node installation, but launch preflight
+        # still checks the configured profile's toolchain.
+        for name in ["node", "npm"]:
+            tool = fixture_bin / name
+            tool.write_text("#!/bin/sh\nexit 0\n")
+            tool.chmod(0o700)
         bridge.write_text(
             """#!/usr/bin/env python3
 import json
@@ -421,7 +427,7 @@ import time
 session_id = "reliability-native"
 
 if sys.argv[1:] == ["--version"]:
-    print("@agentclientprotocol/codex-acp 1.8.0")
+    print("@brokkai/codex-acp 1.11.1")
     raise SystemExit(0)
 
 log_path = os.environ["MJ_FAKE_ACP_LOG"]

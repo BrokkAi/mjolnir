@@ -2873,6 +2873,7 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
+    #[cfg(unix)]
     #[test]
     fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
         use std::os::unix::fs::PermissionsExt;
