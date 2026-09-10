@@ -10,7 +10,7 @@ New mj Codex sessions must preserve configured sandbox grants with on-request/au
 
 - [x] Transfer and synchronize the fork (BrokkAi/codex-acp, upstream 51d6247).
 - [x] Fix and test adapter permission handling and tag publishing workflow (e4be839, b07ecef).
-- [ ] Integrate mj and test locally, including image.
+- [x] Integrate mj and test locally, including image (2fca575f).
 - [ ] Release adapter, image, and mj and verify all channels.
 
 ## Surprises & Discoveries
@@ -43,6 +43,13 @@ Do not overwrite tags or registry versions. Commit only changed files on existin
 
 Adapter: 570 tests passed, 26 skipped; typecheck and build passed. Real Codex tests proved guardian legacy/named/project-local grants, additional directories, repeated prompts, and outside-write guardian escalation. Real mj daemon/worker/TUI test passed two guardian prompts with configured external writes and verified on-request/auto_review/workspace-write rollout contexts. Evidence: target/fork-live/ and target/reliability-artifacts/codex-guardian-fork-seed-1-2981822/.
 
-Mj: cargo test -- --test-threads=1 and cargo clippy --all-targets -- -D warnings passed. Native debug and x86_64 musl worker builds passed. License policy passed. Container and release build validation remains in progress.
+Mj: cargo test -- --test-threads=1 and cargo clippy --all-targets -- -D warnings passed. Native debug and x86_64 musl worker builds passed. License policy passed. Native optimized mj and worker release builds passed. The final local image built successfully (18209ee3bd3e86325b806d9f5834d6b2ed8241eee98a7c92cb0f19007adbabe9). A real mj local-podman session completed two prompts using the baked fork and recorded danger-full-access/never on both turns; evidence: target/reliability-artifacts/codex-container-fork-seed-1-3311182/permissions.json and target/fork-live/mj-container-final.log. The test container and copied authentication were removed. Fork CI 34526395101 passed on b07ecefcfe6b181e7a22216fb94071d927a4e71b.
 
 Publication dependency: @brokkai/codex-acp has no registry entry and npm whoami returns ENEEDAUTH. User was asked to perform npm login; no credentials requested in chat. Prepared exact tarball target/brokkai-codex-acp-1.11.1.tgz. The production lock uses the intended registry URL and this tarball's SHA512; verify registry integrity and clean npm ci after bootstrap before shipping mj. Do not publish mj or the image while this dependency is unavailable.
+
+
+## Remaining publication steps
+
+As of 2026-09-10 20:36 UTC, npm whoami still returns ENEEDAUTH. No release tags, npm package, published image, or mj release have been created for this task. Fork changes are pushed; mj changes are committed locally and withheld from origin/master because its container-path push would start image publication against an unavailable npm dependency.
+
+After npm login with @brokkai publishing access, bootstrap the exact tested target/brokkai-codex-acp-1.11.1.tgz. Verify registry integrity equals sha512-eGh2NvM9rsWRNEgqrLXIofxs2+ngOUn5yDsF702MAbG6hV6S4PpYynayWg91xwK/UgqnHsl443Q0oDqDjSu/VQ== and clean managed npm ci works. Set the new npm package's trusted publisher to BrokkAi/codex-acp, publish.yml, environment release; do not alter the existing mj publishers. Tag the tested fork commit v1.11.1 and let the workflow attach the release tarball (its npm step skips an already published exact version). Then complete the mj patch release metadata and all RELEASING.md checks, push the current branch to origin/master, verify image publication and exact-commit CI before the mj tag, and complete registry/Homebrew channels. The user has already authorized these pushes and releases.
