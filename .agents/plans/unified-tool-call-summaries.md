@@ -8,6 +8,8 @@ Tool calls currently change presentation as a conversation advances: a new TUI c
 
 A follow-up enriches direct invocations of common developer CLIs with their semantic command path: `git add`, `cargo test`, `gh pr create`, and `docker volume rm`. Arguments such as paths, package names, and npm script names remain omitted. String shell commands and raw argv use the same invocation summarizer.
 
+A corrective follow-up makes compound Bash summaries structural rather than punctuation-driven. It removes orphan separators from loops and conditionals, represents newline-separated commands, recognizes the command launched through `nice`, and lets a TUI reader expand one completed call in place without losing the compact grouping around it. Completed tool presentation is subdued like thinking in both Rich surfaces so active and failed work remains visually prominent.
+
 ## Progress
 
 - [x] (2026-09-09 21:17Z) Inspected the live ACP, materialized transcript, TUI collapse, browser projection, HTTP delta, and DOM update paths.
@@ -21,6 +23,11 @@ A follow-up enriches direct invocations of common developer CLIs with their sema
 - [x] (2026-09-10 00:31Z) Added shared subcommand extraction for Bash command nodes and ordinary raw argv.
 - [x] (2026-09-10 00:31Z) Proved TUI, browser, grouping, and persisted-summary behavior and recaptured the terminal evidence.
 - [x] (2026-09-10 00:52Z) Merged current upstream, passed final validation on v2.6.0, reviewed the result, and prepared it for push.
+- [x] (2026-09-10 02:05Z) Recovered the exact malformed commands from the live materialized session and identified punctuation flattening plus missing newline separators as distinct parser defects.
+- [x] (2026-09-10 02:05Z) Settled transient TUI expansion identity, group-splitting behavior, selection-safe click routing, and completed-tool visual treatment.
+- [x] (2026-09-10 03:10Z) Corrected compound-command normalization and heredoc-following separation, added `nice` command extraction, and versioned cached summaries so affected saved sessions repair on load.
+- [x] (2026-09-10 03:10Z) Added TUI member hitboxes and per-call expand/collapse behavior, then applied completed-tool desaturation to TUI and web.
+- [x] (2026-09-10 03:38Z) Ran focused and full validation, captured and reviewed the TUI, fast-forwarded current upstream, and committed and pushed the current branch.
 
 ## Surprises & Discoveries
 
@@ -36,6 +43,10 @@ A follow-up enriches direct invocations of common developer CLIs with their sema
   Evidence: The supplemental notice generator rejected the unaudited packages until both roles were recorded in `auditedLinksPackages`; the regenerated notice check then passed.
 - Observation: The optional all-target workspace check reaches desktop bindings unavailable on this host.
   Evidence: `cargo check --workspace --all-targets` stopped at missing `libsoup-3.0`, Pango, GLib, GDK, and Cairo system packages. The required default workspace test and clippy commands do not select that unavailable desktop host configuration and passed.
+- Observation: Anonymous semicolons in the Bash concrete syntax tree serve both executable list separation and compound-keyword punctuation.
+  Evidence: The live `for ...; do ...; done; python3 ...` call summarized as `cd && ; set ; ; ; ; rm ; mkdir ; ; nice ; echo ; ; python3`; the walker emitted punctuation before `do` and `done` even though those keywords produce no command summary.
+- Observation: A newline after a heredoc terminator separates commands but is not an anonymous operator node collected by the original walker.
+  Evidence: Live calls ending `PYEOF\ngrep ... | head` summarized as `python3 grep | head`, joining two independent invocations with a space.
 - Observation: Before the follow-up, ordinary raw argv lost every element after the executable, while shell-interpreter argv already unwrapped its script for tree-sitter.
   Evidence: The old `command_source` returned `ToolSummarySource::Executable(first)` for `['git', 'add', '.']`; it now retains the vector and shares invocation parsing with Bash command nodes.
 - Observation: The upstream branch gained the v2.6.0 release and a Kimi detached-shell fix while this follow-up was in progress.
@@ -66,6 +77,21 @@ A follow-up enriches direct invocations of common developer CLIs with their sema
 - Decision: Do not unwrap launch wrappers and do not retrofit stored presentation summaries.
   Rationale: Direct invocations stay predictable (`sudo git status` remains `sudo`), and existing saved conversations retain the exact presentation already persisted.
   Date/Author: 2026-09-10 / Codex
+- Decision: Derive separators between adjacent summarized command ranges, preferring explicit logical, pipeline, or background operators and using one semicolon for structural or newline-only boundaries.
+  Rationale: A command pair is the semantic unit the compact text connects. This prevents grammar punctuation from appearing without commands and prevents newline-separated commands from being concatenated.
+  Date/Author: 2026-09-10 / Codex
+- Decision: Treat `nice` as a developer-tool summary entry whose first literal non-option operand is the launched command.
+  Rationale: Long-running validation calls commonly use `nice -n 10`; showing `nice cargo` or `nice python3` distinguishes their actual work while preserving the established one-extra-word rule.
+  Date/Author: 2026-09-10 / Codex
+- Decision: Keep expanded-call state local to the TUI and key it by the durable entry's `start_seq`.
+  Rationale: Expansion is a reader preference rather than transcript data. Excluding the expanded call from a completed streak naturally splits the compact group on both sides, and stable sequence identity distinguishes repeated commands.
+  Date/Author: 2026-09-10 / Codex
+- Decision: Toggle expansion only after selection classifies a gesture as a click, using hitboxes rebuilt from the rendered frame.
+  Rationale: This keeps drag selection intact and ensures wrapped or scrolled summary segments target what the reader actually clicked.
+  Date/Author: 2026-09-10 / Codex
+- Decision: Version cached summaries and rederive metadata written by older parser rules from the stored complete call.
+  Rationale: The reported live conversation already contains persisted malformed labels. Versioning repairs those rows after upgrade while continuing to reuse current cached summaries; this supersedes the earlier no-retrofit choice for parser bug fixes.
+  Date/Author: 2026-09-10 / Codex
 
 ## Outcomes & Retrospective
 
@@ -73,11 +99,17 @@ The shared parser now emits `cd && python | cat | wc ; print` for the requested 
 
 The browser carries an opaque topology key with its relay cursor. Group formation, growth, dissolution, or thought reordering forces a complete feed replacement; ordinary content changes remain incremental. Older browser/server combinations remain compatible when the key is absent.
 
-The follow-up now enriches direct developer CLI invocations in both string commands and raw argv. It emits summaries such as `git add`, `cargo test`, `gh pr create`, `docker volume rm`, and `uv tool install`; unknown literal verbs remain visible for whitelisted tools, while arbitrary arguments and non-whitelisted commands stay compact. Existing persisted presentations are read unchanged.
+The follow-up now enriches direct developer CLI invocations in both string commands and raw argv. It emits summaries such as `git add`, `cargo test`, `gh pr create`, `docker volume rm`, and `uv tool install`; unknown literal verbs remain visible for whitelisted tools, while arbitrary arguments and non-whitelisted commands stay compact. Current persisted presentations are read unchanged.
+
+The corrective pass now joins only adjacent parsed commands, so structural punctuation around `for`, `if`, groups, and `case` cannot become orphan separators. Newline-only boundaries such as a command after a heredoc render as one semicolon, and `nice` exposes its launched command after recognized adjustment options. Presentation metadata carries a parser version, so complete calls saved under the old rules are repaired from their stored ACP source when either Rich surface loads them.
+
+Completed TUI tools can be clicked by their exact compact member text. Opening one call renders its full provider title and details and splits completed groups on both sides; clicking its expanded rows closes it and allows the group to reform. Pending and completed tools use the thinking palette in the TUI, and the web viewer applies the same subdued treatment to non-active tool rows. Running and failed calls retain their status emphasis.
 
 Validation passed: focused core/chat/controller/TUI behavior tests; 13 Node viewer tests; the complete `cargo test` workspace suite; `cargo clippy --all-targets -- -D warnings`; `cargo deny` license checks; generated Cargo About and supplemental notices; formatting and diff checks. A 120×42 terminal-cell capture at `/tmp/unified-tool-call-summaries-tui.json` showed `cd && python | cat | wc ; print, cargo` as one completed group and `cargo` immediately for a running call. The only unavailable supplemental check was the optional desktop all-target build described above.
 
 For the follow-up, 18 focused core parser tests and 106 focused chat/TUI/browser transcript tests pass. After merging current upstream, the complete workspace suite and clippy with warnings denied passed on v2.6.0. The Cargo About output exactly matches the committed license report, `cargo deny` passed with its pre-existing unmatched-exception warning, supplemental notices regenerated without a diff, and all 13 browser viewer tests passed. The 120×42 terminal-cell capture at `/tmp/tool-subcommand-summaries-tui.json` shows `cd && python | cat | wc ; print, cargo test` in one completed group and `cargo clippy` immediately for a running call.
+
+For the corrective pass, 23 core parser tests, 112 chat transcript tests, all 25 browser unit tests, the complete workspace suite, and clippy with warnings denied passed. After the final upstream fast-forward, the changed controller suite passed serially with 758 tests and the client suite passed all 7 tests; the ordinary parallel controller run's sole `ETXTBSY` executable-copy failure passed immediately alone and in the serial suite. The 120×42 capture at `/tmp/tool-call-expansion-tui.json` shows the expanded full call split from its compact neighbor, both completed rows muted, and the running row emphasized.
 
 ## Context and Orientation
 
@@ -123,7 +155,13 @@ All commands above completed successfully. The final TUI evidence was generated 
       MJ_CHAT_CAPTURE_COLUMNS=120 MJ_CHAT_CAPTURE_ROWS=42 \
       cargo test -p brokk-mj-chat capture_chat_preview -- --ignored --nocapture
 
-Review `git diff`, stage only files changed for this feature, and commit on the current branch. Do not push.
+The corrective expansion evidence was generated with:
+
+    MJ_CHAT_CAPTURE_PATH=/tmp/tool-call-expansion-tui.json \
+      MJ_CHAT_CAPTURE_COLUMNS=120 MJ_CHAT_CAPTURE_ROWS=42 \
+      cargo test -p brokk-mj-chat capture_chat_preview -- --ignored --nocapture
+
+Review `git diff`, stage only files changed for this feature, commit on the current branch, and push the current branch to its upstream as requested.
 
 ## Validation and Acceptance
 
@@ -166,3 +204,5 @@ Revision note (2026-09-09): Created the initial implementation-ready plan after 
 Revision note (2026-09-09): Recorded the implemented parser, cross-surface grouping, browser reset protocol, validation results, terminal capture, and the optional desktop dependency limitation before final review and commit.
 
 Revision note (2026-09-10): Added the developer-core CLI subcommand follow-up, raw-argv parity, compatibility policy, final v2.6.0 validation, and push preparation.
+
+Revision note (2026-09-10): Added the corrective parser, persisted-summary repair, `nice` extraction, TUI expansion, and completed-tool styling follow-up after reproducing the malformed live transcript.

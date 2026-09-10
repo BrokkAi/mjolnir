@@ -1377,7 +1377,8 @@ article > h3 {
   --role: var(--running);
 }
 .entry.tone-done {
-  --role: var(--done);
+  --role: var(--thinking);
+  color: var(--dim);
 }
 .entry.tone-failed {
   --role: var(--failed);

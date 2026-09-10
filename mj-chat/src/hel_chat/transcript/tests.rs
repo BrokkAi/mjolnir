@@ -6,7 +6,8 @@ use crate::hel_chat::test_support::{
 use crate::hel_selection::SelectionState;
 use agent_client_protocol::schema::v1::ToolKind;
 use crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use hel::hel_acp::RuntimeEvent;
 use hel::hel_worker::{SequencedEvent, WorkerEvent};
@@ -1158,6 +1159,188 @@ fn completed_tool_run_collapses_to_single_summary_cell() {
 }
 
 #[test]
+fn clicking_a_collapsed_member_expands_only_that_call_and_splits_the_run() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.extend([
+        completed_tool(1, "first command"),
+        completed_tool(2, "second command"),
+        completed_tool(3, "third command"),
+        completed_tool(4, "fourth command"),
+    ]);
+
+    drawn_transcript(&mut chat, 80, 24);
+    assert!(
+        chat.transcript_tool_click_targets
+            .iter()
+            .any(|target| target.start_seq == 2)
+    );
+    let target = chat
+        .transcript_tool_click_targets
+        .iter()
+        .find(|target| target.start_seq == 2)
+        .copied()
+        .expect("the second summary segment is clickable");
+    let transcript_inner = Rect::new(1, 1, 78, 22);
+    assert!(chat.transcript_tool_click_targets.iter().all(|target| {
+        transcript_inner.contains(Position::new(target.rect.x, target.rect.y))
+            && transcript_inner.contains(Position::new(
+                target.rect.right().saturating_sub(1),
+                target.rect.bottom().saturating_sub(1),
+            ))
+    }));
+
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: target.rect.x,
+        row: target.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    drawn_transcript(&mut chat, 80, 24);
+
+    assert!(chat.expanded_tool_calls.contains(&2));
+    assert!(matches!(
+        chat.render_cache.collapse[1],
+        EntryCollapse::Expanded
+    ));
+    assert!(matches!(
+        chat.render_cache.collapse[2],
+        EntryCollapse::Summary { end: 4, .. }
+    ));
+
+    let expanded = chat
+        .transcript_tool_click_targets
+        .iter()
+        .find(|target| target.start_seq == 2)
+        .copied()
+        .expect("the expanded call remains clickable");
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: expanded.rect.x,
+        row: expanded.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    drawn_transcript(&mut chat, 80, 24);
+
+    assert!(!chat.expanded_tool_calls.contains(&2));
+    assert!(matches!(
+        chat.render_cache.collapse[0],
+        EntryCollapse::Summary { end: 4, .. }
+    ));
+}
+
+#[test]
+fn wrapped_summary_members_rebuild_hitboxes_for_their_visible_rows() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.extend([
+        completed_tool(1, "first command with a long argument"),
+        completed_tool(2, "second command with a long argument"),
+        completed_tool(3, "third command with a long argument"),
+    ]);
+
+    drawn_transcript(&mut chat, 30, 24);
+    let second_targets = chat
+        .transcript_tool_click_targets
+        .iter()
+        .filter(|target| target.start_seq == 2)
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(second_targets.len() >= 2, "the wrapped member has rows");
+    let target = second_targets[1];
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: target.rect.x,
+        row: target.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert!(chat.expanded_tool_calls.contains(&2));
+}
+
+#[test]
+fn expanded_tool_uses_full_provider_title_and_details_in_rich_mode() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut entry = completed_tool(2, "provider title: edit src/lib.rs");
+    entry.tool_content = vec!["wrote the file".into()];
+    chat.entries.extend([
+        completed_tool(1, "first command"),
+        entry,
+        completed_tool(3, "third command"),
+    ]);
+
+    drawn_transcript(&mut chat, 80, 24);
+    let target = chat
+        .transcript_tool_click_targets
+        .iter()
+        .find(|target| target.start_seq == 2)
+        .copied()
+        .expect("the member is clickable");
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: target.rect.x,
+        row: target.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    let rendered = transcript_text(&mut chat, 80);
+    assert!(rendered.iter().any(|line| line.contains("provider title")));
+    assert!(rendered.iter().any(|line| line.contains("wrote the file")));
+    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
+}
+
+#[test]
+fn a_single_completed_tool_is_clickable_but_running_and_failed_tools_are_not() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.extend([
+        ChatEntry::tool(1, "running command", None, ToolStatus::Running),
+        completed_tool(2, "completed command"),
+        ChatEntry::tool(3, "failed command", None, ToolStatus::Failed),
+    ]);
+
+    drawn_transcript(&mut chat, 80, 24);
+    assert!(
+        chat.transcript_tool_click_targets
+            .iter()
+            .any(|target| target.start_seq == 2)
+    );
+    assert!(
+        !chat
+            .transcript_tool_click_targets
+            .iter()
+            .any(|target| target.start_seq == 1 || target.start_seq == 3)
+    );
+    let target = chat
+        .transcript_tool_click_targets
+        .iter()
+        .find(|target| target.start_seq == 2)
+        .copied()
+        .expect("the singleton completed call is clickable");
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: target.rect.x,
+        row: target.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(chat.expanded_tool_calls.contains(&2));
+}
+
+#[test]
+fn completed_tool_rows_use_thought_muting_while_running_and_failed_keep_emphasis() {
+    let completed = entry_visual(&completed_tool(1, "done"));
+    let pending = entry_visual(&ChatEntry::tool(2, "waiting", None, ToolStatus::Pending));
+    let running = entry_visual(&ChatEntry::tool(3, "running", None, ToolStatus::Running));
+    let failed = entry_visual(&ChatEntry::tool(4, "failed", None, ToolStatus::Failed));
+
+    assert_eq!(completed.header_style.fg, Some(theme::palette().muted));
+    assert_eq!(completed.body_style.fg, Some(theme::palette().muted));
+    assert_eq!(pending.header_style.fg, Some(theme::palette().muted));
+    assert_eq!(pending.body_style.fg, Some(theme::palette().muted));
+    assert_eq!(running.header_style.fg, Some(theme::palette().warning));
+    assert_eq!(running.body_style.fg, None);
+    assert_eq!(failed.header_style.fg, Some(theme::palette().error));
+    assert_eq!(failed.body_style.fg, None);
+}
+
+#[test]
 fn kimi_shell_tool_run_collapses_to_command_names() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries.push(completed_execute_tool(
@@ -1454,8 +1637,6 @@ fn failed_tool_renders_alone_and_breaks_the_collapsed_run() {
 
     let text = transcript_text(&mut chat, 80);
 
-    // The trailing run's last member is the newest result, so it stays
-    // expanded and leaves its single predecessor alone.
     assert_eq!(
         text,
         [
@@ -2618,7 +2799,6 @@ fn a_clean_standalone_terminal_item_between_completed_tools_keeps_one_run() {
         fixture_tool_item(3),
     ];
     let mut chat = ChatState::from_materialized(&session, &[], &[]);
-    // Ends the newest result's protection, so both tools can collapse.
     chat.entries
         .push(ChatEntry::plain(4, ChatRole::User, "now ship it"));
 
@@ -2771,7 +2951,7 @@ fn browser_tool_entries_show_the_summary_and_diffstats_only() {
 }
 
 #[test]
-fn stored_tool_presentation_is_not_retrofitted() {
+fn current_stored_tool_presentation_is_preserved() {
     let mut session = MaterializedSession::empty("session-stored-tool-summary");
     session.applied_event_ordinal = 1;
     session.applied_event_digest = "a".repeat(64);
@@ -2796,12 +2976,49 @@ fn stored_tool_presentation_is_not_retrofitted() {
                 source: "git add src/lib.rs".into(),
                 source_kind: hel::hel_transcript::ToolSummarySourceKind::RawInput,
                 tool_kind: ToolKind::Execute,
+                summary_version: hel::hel_transcript::TOOL_SUMMARY_VERSION,
             })),
         },
     })];
 
     let browser = TranscriptSnapshot::from_materialized(&session).browser_transcript(None);
     assert_eq!(browser.entries[0].lines, ["git"]);
+}
+
+#[test]
+fn stale_stored_tool_presentation_is_reparsed_for_rich_surfaces() {
+    let source = "python3 <<'PYEOF'\nprint('x')\nPYEOF\ngrep -n x file | head";
+    let mut session = MaterializedSession::empty("session-stale-tool-summary");
+    session.applied_event_ordinal = 1;
+    session.applied_event_digest = "a".repeat(64);
+    session.transcript = vec![Arc::new(TranscriptItem {
+        stable_id: "tool:heredoc".into(),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1,
+        last_changed_at_ms: 1,
+        body: TranscriptBody::Tool {
+            call: serde_json::to_value(
+                ToolCall::new("heredoc", "Bash")
+                    .kind(ToolKind::Execute)
+                    .status(ToolCallStatus::Completed)
+                    .raw_input(serde_json::json!({ "command": source })),
+            )
+            .unwrap(),
+            terminal_outputs: Vec::new(),
+            terminal_refs: Vec::new(),
+            presentation: Some(Box::new(hel::hel_transcript::ToolCallPresentation {
+                summary: "python3 grep | head".into(),
+                source: source.into(),
+                source_kind: hel::hel_transcript::ToolSummarySourceKind::RawInput,
+                tool_kind: ToolKind::Execute,
+                summary_version: 0,
+            })),
+        },
+    })];
+
+    let browser = TranscriptSnapshot::from_materialized(&session).browser_transcript(None);
+    assert_eq!(browser.entries[0].lines, ["python3 ; grep | head"]);
 }
 
 #[test]

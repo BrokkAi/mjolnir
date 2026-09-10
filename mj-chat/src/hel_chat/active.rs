@@ -3674,6 +3674,10 @@ mod tests {
                 hel::hel_transcript::ToolStatus::Running,
             ),
         ];
+        // Keep the capture representative of the in-place tool expansion:
+        // the first completed call opens to its provider title and splits the
+        // surrounding completed streak.
+        chat.expanded_tool_calls.insert(3);
         let mut terminal = Terminal::new(TestBackend::new(columns, rows)).expect("terminal");
         terminal
             .draw(|frame| render_full_frame(frame, &mut chat, false))
