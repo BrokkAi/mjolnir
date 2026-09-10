@@ -3335,6 +3335,141 @@ mod terminals {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn unused_codex_bridge_restarts_with_a_new_thread() {
+    codex_bridge_restart_preserves_only_used_threads(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_bridge_restarts_with_the_used_thread_even_if_the_prompt_reply_was_lost() {
+    codex_bridge_restart_preserves_only_used_threads(true).await;
+}
+
+#[cfg(unix)]
+async fn codex_bridge_restart_preserves_only_used_threads(send_prompt: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("restarted");
+    let script = temp.path().join("codex_persistence.py");
+    std::fs::write(&script, format!(r#"
+import json, os, sys, time
+marker = {marker:?}
+used = {send_prompt}
+second = os.path.exists(marker)
+
+def write(payload):
+    print(json.dumps(payload), flush=True)
+
+for line in sys.stdin:
+    request = json.loads(line)
+    ident = request.get("id")
+    method = request.get("method")
+    if method == "initialize":
+        result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}}}
+    elif method in ("session/new", "session/load", "session/resume"):
+        if second and not used and method != "session/new":
+            write({{"jsonrpc": "2.0", "id": ident, "error": {{"code": -32603, "message": "no rollout found for thread id unused"}}}})
+            continue
+        assert method == ("session/load" if second and used else "session/new"), request
+        result = {{"sessionId": "original" if not second or used else "replacement",
+                   "modes": {{"currentModeId": "agent-full-access", "availableModes": [{{"id": "agent-full-access", "name": "Full access"}}]}}}}
+        write({{"jsonrpc": "2.0", "id": ident, "result": result}})
+        continue
+    elif method == "session/prompt":
+        assert not second and used
+        open(marker, "w").close()
+        # Crash after consuming the prompt, before replying.
+        break
+    else:
+        result = {{}}
+    if ident is not None:
+        write({{"jsonrpc": "2.0", "id": ident, "result": result}})
+    if method == "session/set_mode" and not second and not used:
+        open(marker, "w").close()
+        time.sleep(0.2)
+        break
+"#, send_prompt = if send_prompt { "True" } else { "False" })).unwrap();
+    let (request_tx, request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(
+        LaunchSpec {
+            command: "python3".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            environment: BTreeMap::new(),
+            cwd: temp.path().to_path_buf(),
+            additional_directories: Vec::new(),
+            extra_mcp_servers: Vec::new(),
+            project_memory: None,
+            resume_session: None,
+            accepted_config: Default::default(),
+            harness: HarnessKind::Codex,
+            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            acp_activity: AcpActivityClock::default(),
+            step_clock: crate::hel_acp::StepClock::default(),
+        },
+        request_rx,
+        event_tx,
+    ));
+    let mut opened = Vec::new();
+    let mut prompt_sent = false;
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), event_rx.recv())
+            .await
+            .expect("the replacement bridge must become ready")
+            .expect("the runtime must survive the first bridge's death");
+        match event {
+            RuntimeEvent::SessionStarted {
+                native_session_id,
+                resumed,
+                ..
+            } => {
+                opened.push((native_session_id, resumed));
+            }
+            RuntimeEvent::SessionConfigured { .. } => {
+                if opened.len() == 2 {
+                    break;
+                }
+                if send_prompt && !prompt_sent {
+                    request_tx
+                        .send(CommandRequest::Prompt {
+                            request_id: "prompt-1".into(),
+                            prompt: vec![ContentBlock::Text(TextContent::new("do work"))],
+                        })
+                        .await
+                        .unwrap();
+                    prompt_sent = true;
+                }
+            }
+            RuntimeEvent::Stopped => {
+                panic!("runtime stopped instead of recovering: {:?}", runtime.await)
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        opened,
+        vec![
+            ("original".into(), false),
+            (
+                if send_prompt {
+                    "original"
+                } else {
+                    "replacement"
+                }
+                .into(),
+                send_prompt
+            ),
+        ]
+    );
+    drop(request_tx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn dead_bridge_after_session_start_reloads_the_native_session() {
     let temp = tempfile::tempdir().unwrap();
     let marker = temp.path().join("second-bridge");

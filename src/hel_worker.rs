@@ -51,7 +51,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::clock::epoch_millis;
 use crate::hel_archive::CanonicalQueuedCommandKind;
@@ -1037,6 +1037,67 @@ impl DurableRelay {
         plan.validate_cursor(after_ordinal, after_digest)?;
         plan.read_events_after(after_ordinal, after_digest, usize::MAX)
             .map(|page| page.events)
+    }
+
+    /// Prove that this native identity was created here and never used.
+    /// Codex may not persist a new thread until its first prompt. Missing or
+    /// checkpointed history is not evidence that it is safe to replace one.
+    pub fn native_session_is_pristine(&self) -> Result<bool> {
+        if self.snapshot.recovery_floor_ordinal != 0 {
+            return Ok(false);
+        }
+        let Some(native_id) = self.snapshot.native_session_id.as_deref() else {
+            return Ok(false);
+        };
+        let plan = self.replay_plan();
+        let mut ordinal = 0;
+        let mut digest = RELAY_EVENT_GENESIS_DIGEST.to_owned();
+        let mut locally_created = false;
+        while ordinal < self.snapshot.latest_ordinal {
+            let page = plan.read_events_after(ordinal, &digest, 64 * 1024)?;
+            ensure!(
+                !page.events.is_empty(),
+                "native session history is incomplete"
+            );
+            for event in page.events {
+                match event.observation {
+                    RelayObservation::SessionOpened {
+                        native_session_id,
+                        resumed,
+                    } => {
+                        if resumed {
+                            return Ok(false);
+                        }
+                        locally_created = native_session_id == native_id;
+                    }
+                    RelayObservation::CommandStarted { command_id, .. } => {
+                        let Some(dispatch) = self.snapshot.dispatches.get(&command_id) else {
+                            return Ok(false);
+                        };
+                        // Admission records CommandStarted before ACP is
+                        // ready. Only a durable claim can have sent it.
+                        if matches!(dispatch.command, RelayCommand::Prompt { .. })
+                            && !matches!(
+                                dispatch.state,
+                                RelayDispatchState::Queued | RelayDispatchState::Pending
+                            )
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    RelayObservation::HarnessTurnStarted { .. } => return Ok(false),
+                    RelayObservation::SessionUpdate { update }
+                        if crate::hel_acp::session_update_has_native_history(&update) =>
+                    {
+                        return Ok(false);
+                    }
+                    _ => {}
+                }
+                ordinal = event.ordinal;
+                digest = event.digest;
+            }
+        }
+        Ok(locally_created)
     }
 
     /// How many times the journal's files stopped matching a captured
@@ -3256,6 +3317,24 @@ mod tests {
 
     use super::*;
     use test_support::*;
+
+    #[test]
+    fn checkpointed_history_cannot_prove_a_native_session_is_pristine() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "unused".into(),
+                resumed: false,
+            })
+            .unwrap();
+        assert!(relay.native_session_is_pristine().unwrap());
+        let cursor = ready_checkpoint(&mut relay, "checkpoint");
+        submit_floor(&mut relay, "archive-installed", cursor);
+        drop(relay);
+        let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert!(!relay.native_session_is_pristine().unwrap());
+    }
 
     #[test]
     fn hidden_prompt_context_is_removed_from_harness_visible_text() {

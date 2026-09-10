@@ -4183,24 +4183,128 @@ async fn coordinator_failure_aborts_peer_and_preserves_the_cause() {
 }
 
 #[test]
-fn resume_prefers_explicit_identity_then_relay_identity() {
+fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     relay
         .record_observation(RelayObservation::SessionOpened {
             native_session_id: "native-relay".into(),
-            resumed: false,
+            resumed: true,
         })
         .unwrap();
     let mut config = launch_config("/var/lib/hel/profiles/session");
     assert_eq!(
-        unix::select_resume_session(&config, &relay).as_deref(),
+        unix::select_resume_session(&config, &relay)
+            .unwrap()
+            .as_deref(),
         Some("native-relay")
     );
     config.native_session_id = Some("native-explicit".into());
     assert_eq!(
-        unix::select_resume_session(&config, &relay).as_deref(),
-        Some("native-explicit")
+        unix::select_resume_session(&config, &relay)
+            .unwrap()
+            .as_deref(),
+        Some("native-relay")
+    );
+}
+
+#[test]
+fn unused_codex_thread_is_recreated_after_worker_restart_without_losing_queued_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "unused".into(),
+            resumed: false,
+        })
+        .unwrap();
+    // Reproduce the accumulated startup failures in an older worker. Walk
+    // across a replay page boundary without treating warnings as history.
+    relay
+        .record_observation(RelayObservation::Warning {
+            message: "x".repeat(128 * 1024),
+        })
+        .unwrap();
+    submit(
+        &mut relay,
+        "first-prompt",
+        prompt("keep this queued prompt"),
+    );
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    let mut config = launch_config("/profile");
+    config.native_session_id = Some("unused".into());
+    assert_eq!(unix::select_resume_session(&config, &relay).unwrap(), None);
+    assert_eq!(
+        relay.operational_state().active_prompt.unwrap().command_id,
+        "first-prompt"
+    );
+    // Harnesses with different persistence semantics continue to resume.
+    config.harness = HarnessKind::Claude;
+    assert_eq!(
+        unix::select_resume_session(&config, &relay)
+            .unwrap()
+            .as_deref(),
+        Some("unused")
+    );
+}
+
+#[test]
+fn a_dispatched_codex_prompt_keeps_its_native_identity_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "used".into(),
+            resumed: false,
+        })
+        .unwrap();
+    submit(&mut relay, "first-prompt", prompt("already sent"));
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    assert_eq!(
+        unix::select_resume_session(&launch_config("/profile"), &relay)
+            .unwrap()
+            .as_deref(),
+        Some("used")
+    );
+}
+
+#[test]
+fn imported_codex_identity_is_never_replaced_without_local_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    let mut config = launch_config("/profile");
+    config.native_session_id = Some("imported".into());
+    assert_eq!(
+        unix::select_resume_session(&config, &relay)
+            .unwrap()
+            .as_deref(),
+        Some("imported")
+    );
+}
+
+#[test]
+fn codex_agent_content_prevents_replacing_a_native_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "with-content".into(),
+            resumed: false,
+        })
+        .unwrap();
+    relay
+        .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+            ContentBlock::Text(TextContent::new("existing content")),
+        )))
+        .unwrap();
+    assert_eq!(
+        unix::select_resume_session(&launch_config("/profile"), &relay)
+            .unwrap()
+            .as_deref(),
+        Some("with-content")
     );
 }
 
