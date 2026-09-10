@@ -13,6 +13,17 @@ checkpointing, and the handoff.
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
 [Releases](https://github.com/BrokkAi/mjolnir/releases)
 
+## Screenshots
+
+Targets + Quota minimized to show more Sessions details:
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/e444edcd-e9d7-4349-ba70-1ed3dc36d21e" />
+
+Sessions minimized, Targets + Quota showing details:
+<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/84ece206-f3c9-4489-85b6-5d7cf42a08c1" />
+
+On a larger screen, Sessions + Quota both showing details:
+<img width="3768" height="4320" alt="image" src="https://github.com/user-attachments/assets/bd31352c-a961-4bfc-9874-3dc71175937e" />
+
 ## Why Mjolnir
 
 - **Provision the environment with the session.** Launch disposable Docker or
