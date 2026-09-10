@@ -54,6 +54,7 @@ fn add_codex_profile(config: &mut HelConfig, home: &Path) {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
+            enabled: true,
             kind: HarnessKind::Codex,
             home: home.to_path_buf(),
             environment: BTreeMap::new(),

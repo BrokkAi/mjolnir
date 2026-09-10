@@ -78,8 +78,8 @@ def palette_viewport(tmux, evidence):
 
 def open_review_settings(tmux):
     tmux.send_key("F7")
-    tmux.wait_for("Code review")
-    click(tmux, "Code review")
+    tmux.wait_for("Code Review")
+    click(tmux, "Code Review")
     tmux.send_key("Enter")
     tmux.wait_for("Automatic review")
 

@@ -123,6 +123,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         profiles: BTreeMap::from([(
             "claude-e2e".into(),
             HarnessProfile {
+                enabled: true,
                 kind: HarnessKind::Claude,
                 home: claude_home,
                 environment: BTreeMap::new(),
@@ -239,6 +240,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         profiles: BTreeMap::from([(
             "kimi-e2e".into(),
             HarnessProfile {
+                enabled: true,
                 kind: HarnessKind::Kimi,
                 home: kimi_home.clone(),
                 environment: BTreeMap::new(),
@@ -362,6 +364,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         profiles: BTreeMap::from([(
             "grok-e2e".into(),
             HarnessProfile {
+                enabled: true,
                 kind: HarnessKind::Grok,
                 home: grok_home.clone(),
                 environment: BTreeMap::new(),
@@ -592,6 +595,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         profiles: BTreeMap::from([(
             "codex-e2e".into(),
             HarnessProfile {
+                enabled: true,
                 kind: HarnessKind::Codex,
                 home: codex_home.clone(),
                 environment: BTreeMap::new(),

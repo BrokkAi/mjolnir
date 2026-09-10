@@ -762,6 +762,7 @@ impl Controller {
             .get(profile_id)
             .with_context(|| format!("unknown profile {profile_id:?}"))?
             .clone();
+        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
         let target_template = self
             .config
             .targets
@@ -1886,6 +1887,7 @@ mod tests {
         config.profiles.insert(
             "claude".into(),
             HarnessProfile {
+                enabled: true,
                 kind: hel::hel_config::HarnessKind::Claude,
                 home: profile_home,
                 environment: BTreeMap::new(),
@@ -2359,6 +2361,7 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             HarnessProfile {
+                enabled: true,
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: profile_home,
                 environment: BTreeMap::new(),
@@ -2923,6 +2926,7 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             HarnessProfile {
+                enabled: true,
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: profile_home,
                 environment: BTreeMap::new(),
@@ -3079,6 +3083,7 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             HarnessProfile {
+                enabled: true,
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: profile_home,
                 environment: BTreeMap::new(),
@@ -3203,6 +3208,7 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             HarnessProfile {
+                enabled: true,
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: profile_home,
                 environment: BTreeMap::new(),

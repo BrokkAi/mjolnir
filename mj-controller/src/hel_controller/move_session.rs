@@ -305,6 +305,10 @@ impl Controller {
             .profiles
             .get(profile_id)
             .context("unknown destination profile")?;
+        ensure!(
+            profile.enabled,
+            "destination profile {profile_id:?} is disabled"
+        );
         let target = self
             .config
             .targets

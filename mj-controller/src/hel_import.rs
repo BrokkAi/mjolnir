@@ -3093,8 +3093,7 @@ fn canonical_import_session(
 fn default_profile(config: &HelConfig, harness: HarnessKind, home: &Path) -> String {
     let source = fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     config
-        .profiles
-        .iter()
+        .enabled_profiles()
         .find(|(_, profile)| {
             profile.kind == harness
                 && fs::canonicalize(&profile.home).unwrap_or_else(|_| profile.home.clone())
@@ -3102,11 +3101,10 @@ fn default_profile(config: &HelConfig, harness: HarnessKind, home: &Path) -> Str
         })
         .or_else(|| {
             config
-                .profiles
-                .iter()
+                .enabled_profiles()
                 .find(|(_, profile)| profile.kind == harness)
         })
-        .map(|(id, _)| id.clone())
+        .map(|(id, _)| id.to_owned())
         .unwrap_or_else(|| format!("{}-import", harness.id()))
 }
 
@@ -3123,6 +3121,7 @@ fn import_profile_id(
         .profiles
         .get(requested)
         .with_context(|| format!("unknown import profile {requested:?}"))?;
+    ensure!(profile.enabled, "import profile {requested:?} is disabled");
     ensure!(
         profile.kind == harness,
         "import profile {requested:?} does not use {harness:?}"

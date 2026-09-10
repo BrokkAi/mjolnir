@@ -1793,6 +1793,7 @@ mod tests {
             profiles: BTreeMap::from([(
                 "codex-1".into(),
                 HarnessProfile {
+                    enabled: true,
                     context_window_bytes: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/home/test/.codex"),

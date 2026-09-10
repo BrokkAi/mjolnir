@@ -2304,6 +2304,7 @@ mod tests {
         config.profiles.insert(
             record.last_profile.clone(),
             HarnessProfile {
+                enabled: true,
                 kind: record.harness_kind,
                 home: PathBuf::from("/profiles/codex"),
                 environment: BTreeMap::new(),
@@ -2494,6 +2495,7 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             HarnessProfile {
+                enabled: true,
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: PathBuf::from("/profiles/codex"),
                 environment: BTreeMap::new(),

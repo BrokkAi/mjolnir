@@ -361,13 +361,15 @@ fn configuration_checks(path: &Path) -> (Option<HelConfig>, Vec<DoctorCheck>) {
                     format!("{} is valid", path.display()),
                 ),
             }];
-            if config.profiles.is_empty() || config.bundles.is_empty() || config.targets.is_empty()
+            if config.enabled_profiles().next().is_none()
+                || config.bundles.is_empty()
+                || config.targets.is_empty()
             {
                 checks.push(DoctorCheck::fixable(
                     "config.session-prerequisites",
                     "Session configuration",
-                    "At least one profile, bundle, and target are required.",
-                    "Run `mj setup`, or add profiles, bundles, and targets to config.toml.",
+                    "At least one enabled profile, bundle, and target are required.",
+                    "Run `mj setup`, or enable or add profiles, bundles, and targets in config.toml.",
                 ));
             } else {
                 checks.push(DoctorCheck::ready(
@@ -412,6 +414,13 @@ fn harness_checks(config: Option<&HelConfig>, executor: &impl CommandExecutor) -
         .iter()
         .map(|(id, profile)| {
             let title = format!("Harness profile {id}");
+            if !profile.enabled {
+                return DoctorCheck::ready(
+                    format!("harness.{id}"),
+                    title,
+                    "Profile is disabled; home and authentication checks were skipped.",
+                );
+            }
             if !profile.home.is_dir() {
                 return DoctorCheck::fixable(
                     format!("harness.{id}"),
@@ -2323,6 +2332,7 @@ mod tests {
         let home = directory.path().join("claude-home");
         std::fs::create_dir_all(&home).unwrap();
         let profile = HarnessProfile {
+            enabled: true,
             kind: HarnessKind::Claude,
             home,
             environment: std::collections::BTreeMap::new(),
@@ -2350,6 +2360,29 @@ mod tests {
             remediation.contains(&format!("`{program} {}`", arguments.join(" "))),
             "{remediation}"
         );
+    }
+
+    #[test]
+    fn doctor_reports_disabled_profiles_without_probing_them() {
+        let profile = HarnessProfile {
+            enabled: false,
+            kind: HarnessKind::Claude,
+            home: PathBuf::from("/missing/disabled-profile"),
+            environment: std::collections::BTreeMap::new(),
+            context_window_bytes: None,
+        };
+        let config = HelConfig {
+            profiles: [("retired".to_owned(), profile)].into_iter().collect(),
+            ..HelConfig::default()
+        };
+        let executor = FakeExecutor::new([]);
+
+        let checks = harness_checks(Some(&config), &executor);
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, CheckStatus::Ready);
+        assert!(checks[0].detail.contains("disabled"));
+        assert!(executor.commands.borrow().is_empty());
     }
 
     #[test]

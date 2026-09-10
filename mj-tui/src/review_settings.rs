@@ -138,10 +138,9 @@ impl ReviewSettingsDialog {
         let mut profiles = vec![None];
         profiles.extend(
             config
-                .profiles
-                .iter()
+                .enabled_profiles()
                 .filter(|(_, profile)| profile.kind.supports_injected_mcp())
-                .map(|(id, _)| Some(id.clone())),
+                .map(|(id, _)| Some(id.to_owned())),
         );
         let dialog = Self {
             review: config.review.clone(),
@@ -948,7 +947,7 @@ pub(crate) fn render_review_settings(
     let title = dismissible_modal_title(
         &mut form,
         popup,
-        "Setup › Code review",
+        "Setup › Code Review",
         theme::title(true),
         !setup_saving && !dialog.saving && dialog.combo.open_id().is_none(),
     );

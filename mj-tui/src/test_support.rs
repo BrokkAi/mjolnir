@@ -103,6 +103,7 @@ pub(crate) fn config() -> HelConfig {
             (
                 "claude-1".into(),
                 HarnessProfile {
+                    enabled: true,
                     context_window_bytes: None,
                     kind: HarnessKind::Claude,
                     home: PathBuf::from("/profiles/claude"),
@@ -112,6 +113,7 @@ pub(crate) fn config() -> HelConfig {
             (
                 "codex-1".into(),
                 HarnessProfile {
+                    enabled: true,
                     context_window_bytes: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/profiles/codex"),
@@ -121,6 +123,7 @@ pub(crate) fn config() -> HelConfig {
             (
                 "codex-2".into(),
                 HarnessProfile {
+                    enabled: true,
                     context_window_bytes: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/profiles/codex-two"),

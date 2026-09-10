@@ -54,6 +54,7 @@ mod tests {
             config.profiles.insert(
                 id.into(),
                 hel::hel_config::HarnessProfile {
+                    enabled: true,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from(id),
                     environment: Default::default(),

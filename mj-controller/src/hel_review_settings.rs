@@ -64,13 +64,16 @@ pub async fn discover_review_settings(
             .map_err(|error| format!("load review settings task failed: {error}"))?
             .map_err(|error| format!("load review settings: {error:#}"))?,
     );
-    if !controller.config.profiles.contains_key(&request.profile) {
+    let Some(profile) = controller.config.profiles.get(&request.profile) else {
         return Err(format!("Unknown reviewer profile {:?}", request.profile));
+    };
+    if !profile.enabled {
+        return Err(format!(
+            "Reviewer profile {:?} is disabled",
+            request.profile
+        ));
     }
-    if !controller.config.profiles[&request.profile]
-        .kind
-        .supports_injected_mcp()
-    {
+    if !profile.kind.supports_injected_mcp() {
         return Err("Muse Code cannot be a reviewer because muse-acp does not accept the required MCP tools".into());
     }
 
@@ -513,6 +516,7 @@ mod tests {
         config.profiles.insert(
             "reviewer".to_owned(),
             HarnessProfile {
+                enabled: true,
                 kind: HarnessKind::Claude,
                 home: profile_home,
                 environment: BTreeMap::new(),

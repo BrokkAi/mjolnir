@@ -43,6 +43,20 @@ kind = "codex"
 home = "/home/me/.codex-work"
 ```
 
+Profiles are enabled by default. Set `enabled = false` to keep a profile's
+configuration without allowing Mjolnir to select or probe it:
+
+```toml
+[profiles.codex-standby]
+enabled = false
+kind = "codex"
+home = "/home/me/.codex-standby"
+```
+
+A disabled profile is omitted from new, resume, move, review, login, import,
+Quota, and utility-model choices. Sessions already running under that profile
+continue to operate. Re-enable it before starting new work with it.
+
 Optional environment and compaction controls are useful for nonstandard target
 installs:
 
