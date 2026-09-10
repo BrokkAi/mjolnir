@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::hel_config::ProjectBundle;
 use crate::hel_remote_git::{NetworkGitSource, display_url, validate_network_url};
@@ -135,6 +136,114 @@ pub fn resolve_local_repository(
     path: &Path,
     executor: &impl CommandExecutor,
 ) -> Result<NetworkGitSource> {
+    resolve_local_repository_with_remote(path, executor, None)
+}
+
+/// A concrete, read-only proposal. Applying it requires a separate user action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalRemoteRepair {
+    pub path: PathBuf,
+    pub branch: String,
+    pub missing_remote: String,
+    pub replacement_remote: String,
+    pub fetch_url: String,
+    pub push_urls: Vec<String>,
+}
+
+impl std::fmt::Display for LocalRemoteRepair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: branch {:?} tracks missing remote {:?}. Repair tracking to {:?}? Fetch: {}; push: {}",
+            self.path.display(),
+            self.branch,
+            self.missing_remote,
+            self.replacement_remote,
+            self.fetch_url,
+            self.push_urls.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for LocalRemoteRepair {}
+
+/// Inspect every local source without changing host Git configuration.
+pub fn repository_remote_repairs(
+    bundle: &ProjectBundle,
+    executor: &impl CommandExecutor,
+) -> Result<Vec<LocalRemoteRepair>> {
+    let mut repairs = Vec::new();
+    for repository in &bundle.repositories {
+        if let Some(path) = &repository.local {
+            match resolve_local_repository(path, executor) {
+                Ok(_) => {}
+                Err(error) => match error.downcast_ref::<LocalRemoteRepair>() {
+                    Some(repair) => repairs.push(repair.clone()),
+                    None => return Err(error.context(format!("repository {:?}", repository.id))),
+                },
+            }
+        }
+    }
+    Ok(repairs)
+}
+
+/// Apply only reviewed proposals belonging to this bundle, after rechecking
+/// their branch, stale setting, and destination against the current checkout.
+pub fn apply_repository_remote_repairs(
+    bundle: &ProjectBundle,
+    repairs: &[LocalRemoteRepair],
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    for repair in repairs {
+        anyhow::ensure!(
+            bundle
+                .repositories
+                .iter()
+                .any(|repository| repository.local.as_ref() == Some(&repair.path)),
+            "remote repair repository is not part of the selected bundle"
+        );
+        let current = resolve_local_repository(&repair.path, executor);
+        anyhow::ensure!(
+            current
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<LocalRemoteRepair>())
+                == Some(repair),
+            "repository configuration changed; check the repository again before repairing tracking"
+        );
+        git_output(
+            &repair.path,
+            [
+                "config",
+                "--local",
+                "--replace-all",
+                &format!("branch.{}.remote", repair.branch),
+                &repair.replacement_remote,
+            ],
+            executor,
+            "repair branch remote tracking",
+        )?;
+    }
+    Ok(())
+}
+
+fn default_fetch_remote(remotes: &[String]) -> Result<String> {
+    match remotes {
+        [] => bail!("repository has no configured Git remotes"),
+        [remote] => Ok(remote.clone()),
+        _ if remotes.iter().any(|remote| remote == "origin") => Ok("origin".to_owned()),
+        _ => bail!(
+            "repository has multiple Git remotes but no current-branch remote or `origin` to select"
+        ),
+    }
+}
+
+fn resolve_local_repository_with_remote(
+    path: &Path,
+    executor: &impl CommandExecutor,
+    replacement: Option<&str>,
+) -> Result<NetworkGitSource> {
     let branch = git_text(
         path,
         ["branch", "--show-current"],
@@ -154,21 +263,36 @@ pub fn resolve_local_repository(
         None => None,
     };
 
-    let fetch_remote = if let Some(remote) = branch_remote {
+    let fetch_remote = if let Some(remote) = replacement.map(str::to_owned).or(branch_remote) {
         ensure_remote_name(&remote, "current branch")?;
         if !remotes.iter().any(|name| name == &remote) {
+            if let Ok(replacement_remote) = default_fetch_remote(&remotes) {
+                let source = resolve_local_repository_with_remote(
+                    path,
+                    executor,
+                    Some(&replacement_remote),
+                )?;
+                return Err(LocalRemoteRepair {
+                    path: path.to_path_buf(),
+                    branch: branch
+                        .context("missing branch for remote tracking repair")?
+                        .to_owned(),
+                    missing_remote: remote,
+                    replacement_remote,
+                    fetch_url: display_url(&source.fetch_url),
+                    push_urls: source
+                        .push_urls
+                        .iter()
+                        .map(|url| display_url(url))
+                        .collect(),
+                }
+                .into());
+            }
             bail!("current branch names Git remote {remote:?}, but that remote is not configured");
         }
         remote
     } else {
-        match remotes.as_slice() {
-            [] => bail!("repository has no configured Git remotes"),
-            [remote] => remote.clone(),
-            _ if remotes.iter().any(|remote| remote == "origin") => "origin".to_owned(),
-            _ => bail!(
-                "repository has multiple Git remotes but no current-branch remote or `origin` to select"
-            ),
-        }
+        default_fetch_remote(&remotes)?
     };
 
     let push_remote = if let Some(branch) = branch {
@@ -451,6 +575,154 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         git(directory.path(), &["init", "-q", "-b", "main"]);
         directory
+    }
+
+    fn repair_bundle(path: &Path) -> ProjectBundle {
+        ProjectBundle {
+            primary_repo: "repo".into(),
+            repositories: vec![crate::hel_config::ProjectRepository {
+                id: "repo".into(),
+                local: Some(path.to_path_buf()),
+                github: None,
+                destination: "repo".into(),
+                git_ref: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn stale_tracking_repair_is_reviewable_and_preserves_fetch_and_push_intent() {
+        for remote in ["origin", "sole"] {
+            let directory = initialized_repository();
+            let path = directory.path();
+            git(
+                path,
+                &["remote", "add", remote, "https://example.com/fetch.git"],
+            );
+            git(path, &["config", "branch.main.remote", "missing"]);
+            git(path, &["config", "branch.main.merge", "refs/heads/main"]);
+            git(
+                path,
+                &[
+                    "config",
+                    &format!("remote.{remote}.pushurl"),
+                    "ssh://git@example.com/push.git",
+                ],
+            );
+            if remote == "origin" {
+                git(
+                    path,
+                    &[
+                        "remote",
+                        "add",
+                        "publish",
+                        "https://example.com/publish.git",
+                    ],
+                );
+                git(path, &["config", "branch.main.pushRemote", "publish"]);
+            }
+            let bundle = repair_bundle(path);
+            let repairs = repository_remote_repairs(&bundle, &ProcessExecutor).unwrap();
+            assert_eq!(repairs.len(), 1);
+            assert_eq!(repairs[0].replacement_remote, remote);
+            assert_eq!(repairs[0].fetch_url, "https://example.com/fetch.git");
+            let push_url = if remote == "origin" {
+                "https://example.com/publish.git"
+            } else {
+                "ssh://git@example.com/push.git"
+            };
+            assert_eq!(repairs[0].push_urls, [display_url(push_url)]);
+            assert_eq!(
+                git_config(path, "branch.main.remote", &ProcessExecutor)
+                    .unwrap()
+                    .as_deref(),
+                Some("missing")
+            );
+            apply_repository_remote_repairs(&bundle, &repairs, &ProcessExecutor).unwrap();
+            assert_eq!(
+                git_config(path, "branch.main.remote", &ProcessExecutor)
+                    .unwrap()
+                    .as_deref(),
+                Some(remote)
+            );
+            assert_eq!(
+                git_config(path, "branch.main.merge", &ProcessExecutor)
+                    .unwrap()
+                    .as_deref(),
+                Some("refs/heads/main")
+            );
+            let source = resolve_local_repository(path, &ProcessExecutor).unwrap();
+            assert_eq!(source.fetch_url, repairs[0].fetch_url);
+            assert_eq!(source.push_urls, [push_url]);
+            assert!(
+                repository_remote_repairs(&bundle, &ProcessExecutor)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn tracking_repair_rejects_changed_destinations_and_unrelated_repositories() {
+        let directory = initialized_repository();
+        let path = directory.path();
+        git(
+            path,
+            &["remote", "add", "origin", "https://example.com/fetch.git"],
+        );
+        git(path, &["config", "branch.main.remote", "missing"]);
+        let bundle = repair_bundle(path);
+        let repairs = repository_remote_repairs(&bundle, &ProcessExecutor).unwrap();
+        let other = initialized_repository();
+        assert!(
+            apply_repository_remote_repairs(
+                &repair_bundle(other.path()),
+                &repairs,
+                &ProcessExecutor
+            )
+            .is_err()
+        );
+        git(
+            path,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://example.com/changed.git",
+            ],
+        );
+        assert!(apply_repository_remote_repairs(&bundle, &repairs, &ProcessExecutor).is_err());
+        assert_eq!(
+            git_config(path, "branch.main.remote", &ProcessExecutor)
+                .unwrap()
+                .as_deref(),
+            Some("missing")
+        );
+    }
+
+    #[test]
+    fn tracking_repair_does_not_offer_an_unusable_or_ambiguous_destination() {
+        let directory = initialized_repository();
+        let path = directory.path();
+        git(path, &["config", "branch.main.remote", "missing"]);
+        git(path, &["remote", "add", "origin", "../local"]);
+        let bundle = repair_bundle(path);
+        assert!(repository_remote_repairs(&bundle, &ProcessExecutor).is_err());
+        git(path, &["remote", "rename", "origin", "first"]);
+        git(
+            path,
+            &[
+                "remote",
+                "set-url",
+                "first",
+                "https://example.com/first.git",
+            ],
+        );
+        git(
+            path,
+            &["remote", "add", "second", "https://example.com/second.git"],
+        );
+        assert!(repository_remote_repairs(&bundle, &ProcessExecutor).is_err());
     }
 
     #[test]

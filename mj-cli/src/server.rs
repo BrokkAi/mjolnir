@@ -1445,6 +1445,7 @@ pub(crate) async fn run_server(
                         target_id,
                         project_directory,
                         mut reply,
+                        remote_repairs,
                     }) = preflight else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering preflight requests");
                         break;
@@ -1466,6 +1467,7 @@ pub(crate) async fn run_server(
                                 target_id,
                                 project_directory,
                                 cancelled,
+                                remote_repairs,
                             )
                         });
                         let answer = tokio::select! {
@@ -2069,6 +2071,7 @@ fn run_new_preflight(
         target_id,
         project_directory,
         Arc::new(AtomicBool::new(false)),
+        Vec::new(),
     )
 }
 
@@ -2078,9 +2081,19 @@ fn run_new_preflight_with_cancellation(
     target_id: String,
     project_directory: Option<PathBuf>,
     cancelled: Arc<AtomicBool>,
+    remote_repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
 ) -> Result<mj_controller::hel_server::PreflightNew> {
     let executor =
         CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
+    if !remote_repairs.is_empty() {
+        let target = config.targets.get(&target_id).context("unknown target")?;
+        anyhow::ensure!(
+            !is_bare_project_target(target) && project_directory.is_none(),
+            "remote repair requires an isolated target"
+        );
+        let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
+        hel::hel_local_git::apply_repository_remote_repairs(bundle, &remote_repairs, &executor)?;
+    }
     run_new_preflight_with_executor(config, bundle_id, target_id, project_directory, &executor)
 }
 
@@ -2102,6 +2115,7 @@ fn run_new_preflight_with_executor(
         config_only_controller(config)
             .validate_project_directory(&target_id, &directory, executor)?;
         return Ok(mj_controller::hel_server::PreflightNew {
+            remote_repairs: Vec::new(),
             dirty_repositories: Vec::new(),
             remote_repositories: Vec::new(),
             local_changes_excluded: false,
@@ -2112,6 +2126,15 @@ fn run_new_preflight_with_executor(
     }
 
     let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
+    let repairs = hel::hel_local_git::repository_remote_repairs(bundle, executor)?;
+    if !repairs.is_empty() {
+        return Ok(mj_controller::hel_server::PreflightNew {
+            remote_repairs: repairs,
+            dirty_repositories: Vec::new(),
+            remote_repositories: Vec::new(),
+            local_changes_excluded: true,
+        });
+    }
     let remote_repositories = bundle
         .repositories
         .iter()
@@ -2133,6 +2156,7 @@ fn run_new_preflight_with_executor(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(mj_controller::hel_server::PreflightNew {
+        remote_repairs: Vec::new(),
         dirty_repositories: Vec::new(),
         remote_repositories,
         local_changes_excluded: true,

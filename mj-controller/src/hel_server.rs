@@ -1423,6 +1423,7 @@ pub struct PreflightRequest {
     pub bundle_id: String,
     pub target_id: String,
     pub project_directory: Option<PathBuf>,
+    pub remote_repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
     pub reply: tokio::sync::oneshot::Sender<Result<PreflightNew, PreflightFailure>>,
 }
 
@@ -1469,6 +1470,8 @@ pub struct PreflightRepository {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreflightNew {
+    #[serde(default)]
+    pub remote_repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
     #[serde(default)]
     pub dirty_repositories: Vec<String>,
     #[serde(default)]
@@ -2142,6 +2145,8 @@ async fn stop_background_task(
 #[serde(deny_unknown_fields)]
 struct PreflightNewRequest {
     #[serde(default)]
+    remote_repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+    #[serde(default)]
     workspace_id: String,
     profile_id: String,
     bundle_id: String,
@@ -2177,6 +2182,7 @@ async fn preflight_new(
             bundle_id: request.bundle_id,
             target_id: request.target_id,
             project_directory: request.project_directory,
+            remote_repairs: request.remote_repairs,
             reply,
         })
         .await
@@ -5430,6 +5436,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         request
             .reply
             .send(Ok(PreflightNew {
+                remote_repairs: Vec::new(),
                 dirty_repositories: Vec::new(),
                 remote_repositories: Vec::new(),
                 local_changes_excluded: false,
@@ -5525,6 +5532,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         request
             .reply
             .send(Ok(PreflightNew {
+                remote_repairs: Vec::new(),
                 dirty_repositories: Vec::new(),
                 remote_repositories: vec![PreflightRepository {
                     id: "hel".into(),

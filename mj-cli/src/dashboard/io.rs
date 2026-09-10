@@ -42,6 +42,11 @@ use crate::short_id;
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
+    RepositoryRemotesRepaired {
+        generation: Option<u64>,
+        retry: Box<DashboardAction>,
+        result: std::result::Result<(), String>,
+    },
     /// A workspace manager snapshot loaded away from the event loop. The
     /// selection hint is set only by a successful create; the dashboard must
     /// still verify the modal generation before applying it.
@@ -88,7 +93,7 @@ pub(crate) enum DashboardIoUpdate {
     RemotePreflight {
         generation: u64,
         launch: Box<DashboardAction>,
-        result: std::result::Result<Vec<RemoteRepositoryPreview>, String>,
+        result: std::result::Result<RemotePreflightOutcome, String>,
     },
     /// A quick launch has no review modal; show the resolved destinations in
     /// the dashboard notice while creation continues in the worker.
@@ -235,11 +240,21 @@ pub(crate) struct RegisteredDashboardSession {
 }
 
 pub(crate) enum DashboardCreateSessionUpdate {
+    RemoteRepair {
+        bundle_id: String,
+        repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+        retry: Box<DashboardAction>,
+    },
     Registered(Box<RegisteredDashboardSession>),
     Failed {
         error: String,
         retry_launch: Box<DashboardAction>,
     },
+}
+
+pub(crate) enum RemotePreflightOutcome {
+    Ready(Vec<RemoteRepositoryPreview>),
+    Repair(Vec<hel::hel_local_git::LocalRemoteRepair>),
 }
 
 pub(crate) struct ImportedDashboardSessionApply {
@@ -1450,6 +1465,24 @@ pub(crate) fn spawn_dashboard_create_session(
             let executor = CancellableProcessExecutor::new(cancelled.clone())
                 .with_deadline(Duration::from_secs(30));
             if project_directory.is_none() {
+                let bundle = controller
+                    .config
+                    .bundles
+                    .get(&bundle_id)
+                    .context("unknown bundle")?;
+                let repairs = hel::hel_local_git::repository_remote_repairs(bundle, &executor)?;
+                if !repairs.is_empty() {
+                    updates
+                        .send(DashboardIoUpdate::CreateSession(Box::new(
+                            DashboardCreateSessionUpdate::RemoteRepair {
+                                bundle_id: bundle_id.clone(),
+                                repairs,
+                                retry: Box::new(action.clone()),
+                            },
+                        )))
+                        .context("dashboard closed during remote repair preparation")?;
+                    return Ok(None);
+                }
                 let repositories = resolve_remote_repositories(
                     &controller.config,
                     &bundle_id,
@@ -1796,12 +1829,59 @@ impl DashboardContext {
             DashboardIoUpdate::CreateSession(update) => self.apply_create_session_update(*update),
             DashboardIoUpdate::RemotePreflight {
                 generation,
-                launch: _launch,
+                launch,
                 result,
             } => {
                 if generation == self.dashboard.session_preflight_generation() {
-                    self.dashboard
-                        .apply_remote_session_preflight(generation, result);
+                    match result {
+                        Ok(RemotePreflightOutcome::Repair(repairs)) => {
+                            self.dashboard.apply_remote_session_preflight(
+                                generation,
+                                Err("Git tracking needs repair".into()),
+                            );
+                            if let DashboardAction::CreateSession { bundle_id, .. } = &*launch {
+                                self.dashboard.show_remote_repair_confirmation(
+                                    bundle_id.clone(),
+                                    repairs,
+                                    DashboardAction::PreflightCreateSession { launch },
+                                );
+                            }
+                        }
+                        other => self.dashboard.apply_remote_session_preflight(
+                            generation,
+                            other.map(|outcome| match outcome {
+                                RemotePreflightOutcome::Ready(repositories) => repositories,
+                                RemotePreflightOutcome::Repair(_) => unreachable!(),
+                            }),
+                        ),
+                    }
+                }
+            }
+            DashboardIoUpdate::RepositoryRemotesRepaired {
+                generation,
+                retry,
+                result,
+            } => {
+                if generation.is_some_and(|generation| {
+                    generation != self.dashboard.session_preflight_generation()
+                }) {
+                    return;
+                }
+                self.dashboard.clear_notice();
+                match result {
+                    Ok(()) => match *retry {
+                        DashboardAction::PreflightCreateSession { launch } => {
+                            super::actions::start_create_session_preflight(self, *launch)
+                        }
+                        action => super::actions::start_session_launch(self, action),
+                    },
+                    Err(error) => {
+                        if let Some(generation) = generation {
+                            self.dashboard
+                                .apply_remote_session_preflight(generation, Err(error.clone()));
+                        }
+                        self.dashboard.show_launch_failure(error, Some(*retry));
+                    }
                 }
             }
             DashboardIoUpdate::RemoteSourcesResolved { repositories } => {
@@ -2199,6 +2279,15 @@ impl DashboardContext {
 
     fn apply_create_session_update(&mut self, update: DashboardCreateSessionUpdate) {
         match update {
+            DashboardCreateSessionUpdate::RemoteRepair {
+                bundle_id,
+                repairs,
+                retry,
+            } => {
+                self.dashboard.clear_notice();
+                self.dashboard
+                    .show_remote_repair_confirmation(bundle_id, repairs, *retry);
+            }
             DashboardCreateSessionUpdate::Registered(registered) => {
                 let registered = *registered;
                 let session_id = registered.session.id.clone();

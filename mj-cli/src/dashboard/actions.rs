@@ -473,6 +473,39 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::PreflightCreateSession { launch } => {
             start_create_session_preflight(context, *launch);
         }
+        DashboardAction::RepairRepositoryRemotes {
+            bundle_id,
+            repairs,
+            retry,
+        } => {
+            context.dashboard.set_notice("Repairing Git tracking…");
+            let generation = matches!(*retry, DashboardAction::PreflightCreateSession { .. })
+                .then(|| context.dashboard.session_preflight_generation());
+            if let Some(generation) = generation {
+                context.cancel_session_preflight();
+                context.dashboard.begin_remote_session_preflight(generation);
+            }
+            let (cancelled, _) = spawn_cancellable_io_with_token(
+                context.critical_operations.clone(),
+                "repairing Git tracking",
+                context.dashboard_io_tx.clone(),
+                move |cancelled| {
+                    let config = hel::hel_config::HelConfig::load()?;
+                    let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
+                    let executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(std::time::Duration::from_secs(30));
+                    hel::hel_local_git::apply_repository_remote_repairs(bundle, &repairs, &executor)
+                },
+                move |result| DashboardIoUpdate::RepositoryRemotesRepaired {
+                    generation,
+                    retry,
+                    result,
+                },
+            );
+            if let Some(generation) = generation {
+                context.session_preflight_cancel = Some((generation, cancelled));
+            }
+        }
         action @ (DashboardAction::CreateSession { .. }
         | DashboardAction::CreateStartupSession { .. }) => start_session_launch(context, action),
         DashboardAction::RestartSession { session_id } => {
@@ -937,6 +970,10 @@ pub(crate) fn start_create_session_preflight(
                 .bundles
                 .get(&bundle_id)
                 .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
+            let repairs = hel::hel_local_git::repository_remote_repairs(bundle, &executor)?;
+            if !repairs.is_empty() {
+                return Ok(super::io::RemotePreflightOutcome::Repair(repairs));
+            }
             bundle
                 .repositories
                 .iter()
@@ -959,7 +996,8 @@ pub(crate) fn start_create_session_preflight(
                             .collect(),
                     })
                 })
-                .collect()
+                .collect::<Result<Vec<_>>>()
+                .map(super::io::RemotePreflightOutcome::Ready)
         },
         move |result| DashboardIoUpdate::RemotePreflight {
             generation,

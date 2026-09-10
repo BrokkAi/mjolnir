@@ -128,6 +128,11 @@ pub enum DashboardAction {
     PreflightCreateSession {
         launch: Box<DashboardAction>,
     },
+    RepairRepositoryRemotes {
+        bundle_id: String,
+        repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+        retry: Box<DashboardAction>,
+    },
     CompleteMountSource {
         target_template_id: String,
         prefix: String,

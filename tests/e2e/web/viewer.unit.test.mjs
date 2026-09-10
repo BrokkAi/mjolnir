@@ -122,6 +122,43 @@ test('session titles stay blue while truly idle and clear blue when activity res
   assert.ok(!classes.has('idle-title'), 'unknown activity is not confirmed idle');
 });
 
+test('remote tracking is repaired only after confirmation and preflight then continues', async () => {
+  const repair = {
+    path: '/project', branch: 'main', missing_remote: 'upstream', replacement_remote: 'origin',
+    fetch_url: 'https://example.com/repo.git', push_urls: ['ssh://git@example.com/repo.git'],
+  };
+  for (const approve of [false, true]) {
+    const requests = [];
+    const context = vm.createContext({
+      newDraft: { profileId: 'codex', bundleId: 'project', targetId: 'docker' },
+      pendingNewPreflight: null, pendingNewPreflightController: null, AbortController,
+      targetIsBare: () => false, selectedWorkspaceId: () => 'workspace', renderNewForm() {},
+      request: async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return requests.length === 1 ? { remote_repairs: [repair] } : {
+          remote_repositories: [{ id: 'project' }], local_changes_excluded: true,
+        };
+      },
+      confirm: text => {
+        assert.match(text, /upstream/);
+        assert.match(text, /origin/);
+        assert.match(text, /ssh:\/\/git@example.com\/repo.git/);
+        return approve;
+      },
+    });
+    vm.runInContext(sourceBetween('async function preflightNew()', '\nasync function advanceNew()'), context);
+    assert.equal(await vm.runInContext('preflightNew()', context), approve);
+    assert.deepEqual(requests[0].remote_repairs, []);
+    assert.equal(requests.length, approve ? 2 : 1);
+    if (approve) {
+      assert.deepEqual(requests[1].remote_repairs, [repair]);
+      assert.equal(context.newDraft.preflighted, true);
+    } else {
+      assert.notEqual(context.newDraft.preflighted, true);
+    }
+  }
+});
+
 test('project preflight prevents duplicate checks and ignores a cancelled wizard response', async () => {
   let complete;
   let requests = 0;
