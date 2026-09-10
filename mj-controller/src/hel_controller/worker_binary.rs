@@ -19,7 +19,9 @@ use hel::hel_config::{
     ExecutionPolicy, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write,
     data_dir,
 };
-use hel::hel_harness_runtime::{CLAUDE_ACP_VERSION, CODEX_ACP_VERSION, DEEPSEEK_DSH_VERSION};
+use hel::hel_harness_runtime::{
+    CLAUDE_ACP_VERSION, CODEX_ACP_PACKAGE, CODEX_ACP_VERSION, DEEPSEEK_DSH_VERSION,
+};
 use hel::hel_project_memory::{ProjectMemoryIdentity, RepositoryMemoryIdentity};
 use hel::hel_targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProcessExecutor, ProvisionStage, SshTarget,
@@ -1353,7 +1355,7 @@ pub(super) fn bridge_launch(
             "sh".into(),
             vec![
                 "-c".into(),
-                format!("if command -v codex-acp >/dev/null 2>&1 && [ \"$(codex-acp --version 2>/dev/null)\" = \"@agentclientprotocol/codex-acp {CODEX_ACP_VERSION}\" ]; then exec codex-acp; fi; {}; exec npx -y @agentclientprotocol/codex-acp@{CODEX_ACP_VERSION}", ensure_node_script()),
+                format!("if command -v codex-acp >/dev/null 2>&1 && [ \"$(codex-acp --version 2>/dev/null)\" = \"{CODEX_ACP_PACKAGE} {CODEX_ACP_VERSION}\" ]; then exec codex-acp; fi; {}; exec npx -y {CODEX_ACP_PACKAGE}@{CODEX_ACP_VERSION}", ensure_node_script()),
             ],
         ),
         hel::hel_config::HarnessKind::Claude => (
@@ -2871,6 +2873,7 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
+    #[cfg(unix)]
     #[test]
     fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
         use std::os::unix::fs::PermissionsExt;
@@ -4094,7 +4097,7 @@ mod tests {
         );
         assert_eq!(codex_command, "sh");
         assert_eq!(codex_arguments[0], "-c");
-        assert!(codex_arguments[1].contains("@agentclientprotocol/codex-acp@1.8.0"));
+        assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.1"));
         assert!(codex_arguments[1].contains("codex-acp --version"));
 
         let (claude_command, claude_arguments) = bridge_launch(
@@ -4146,7 +4149,7 @@ mod tests {
         );
     }
     #[test]
-    fn codex_execution_environment_is_full_access_under_both_target_policies() {
+    fn codex_execution_environment_follows_the_target_policy() {
         let mut podman_environment =
             BTreeMap::from([("INITIAL_AGENT_MODE".to_owned(), "read-only".to_owned())]);
         hel::hel_config::HarnessKind::Codex
@@ -4174,8 +4177,8 @@ mod tests {
             bare_environment
                 .get("INITIAL_AGENT_MODE")
                 .map(String::as_str),
-            Some("agent-full-access"),
-            "Codex ACP must use full access even on raw localhost"
+            Some("agent"),
+            "Codex uses guardian on raw localhost"
         );
     }
     #[test]

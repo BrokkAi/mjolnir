@@ -20,6 +20,8 @@ use crate::hel_elicitation::ElicitationRequest;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::capacity::{CAPACITY_STOP_REASON, CapacityRetry};
+
 use super::{
     RELAY_EVENT_DIGEST_DOMAIN, RELAY_EVENT_DIGEST_DOMAIN_V2, RELAY_EVENT_GENESIS_DIGEST,
     RELAY_STATE_VERSION, RELAY_TRUNCATION_FLOOR,
@@ -369,6 +371,8 @@ pub struct RelayCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_retry: Option<CapacityRetry>,
     pub session_id: String,
     /// Start of the latest turn, retained until its background work settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -748,6 +752,8 @@ pub(crate) struct HandledRelayCommand {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RelaySnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) capacity_retry: Option<CapacityRetry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) activity_turn_started_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) store_id: Option<String>,
@@ -794,6 +800,7 @@ pub(crate) struct RelaySnapshot {
 impl RelaySnapshot {
     pub(crate) fn new(session_id: String) -> Self {
         Self {
+            capacity_retry: None,
             activity_turn_started_at_ms: None,
             store_id: None,
             format_version: RELAY_STATE_VERSION,
@@ -831,6 +838,7 @@ impl RelaySnapshot {
 
     pub(crate) fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            capacity_retry: self.capacity_retry.clone().filter(|r| !r.submitted),
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
             store_id: self.store_id.clone(),
             session_id: self.session_id.clone(),
@@ -1285,6 +1293,16 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
             command,
             created_at_ms,
         } => {
+            if cancels_capacity_retry(command) {
+                if let Some(retry) = snapshot.capacity_retry.as_mut()
+                    && retry.command_id == *command_id
+                    && matches!(command, RelayCommand::Prompt { .. })
+                {
+                    retry.submitted = true;
+                } else {
+                    snapshot.capacity_retry = None;
+                }
+            }
             snapshot.handled_commands.insert(
                 command_id.clone(),
                 HandledRelayCommand {
@@ -1416,6 +1434,26 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
                 .get_mut(command_id)
                 .ok_or_else(|| anyhow!("completed command {command_id} is not in the ledger"))?
                 .terminal_ordinal = Some(event.ordinal);
+            if let RelayCommandOutcome::Prompt { stop_reason } = outcome {
+                let accepted = snapshot.handled_commands[command_id].accepted_ordinal;
+                let superseded = snapshot.handled_commands.values().any(|handled| {
+                    handled.accepted_ordinal > accepted && cancels_capacity_retry(&handled.command)
+                });
+                let attempt = snapshot
+                    .capacity_retry
+                    .as_ref()
+                    .filter(|retry| retry.command_id == *command_id)
+                    .map_or(1, |retry| retry.attempt.saturating_add(1));
+                snapshot.capacity_retry = if stop_reason == CAPACITY_STOP_REASON && !superseded {
+                    Some(CapacityRetry::new(
+                        attempt,
+                        event.ordinal,
+                        event.recorded_at_ms,
+                    ))
+                } else {
+                    None
+                };
+            }
             match (command, outcome) {
                 (RelayCommand::Prompt { .. }, RelayCommandOutcome::Prompt { .. }) => {
                     if snapshot
@@ -1783,10 +1821,12 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
             }
         }
         RelayObservation::Closing => {
+            snapshot.capacity_retry = None;
             snapshot.harness_turn = None;
             snapshot.execution = RelayExecutionState::Closing;
         }
         RelayObservation::Closed => {
+            snapshot.capacity_retry = None;
             snapshot.activity_turn_started_at_ms = None;
             snapshot.harness_turn = None;
             snapshot.execution = RelayExecutionState::Closed;
@@ -1891,6 +1931,19 @@ pub(crate) fn validate_relay_snapshot_frontiers(snapshot: &RelaySnapshot) -> Res
         bail!("relay recovery floor and genesis digest disagree");
     }
     Ok(())
+}
+
+/// Explicit user work and lifecycle admission supersede automated recovery.
+fn cancels_capacity_retry(command: &RelayCommand) -> bool {
+    matches!(
+        command,
+        RelayCommand::Prompt { .. }
+            | RelayCommand::Cancel
+            | RelayCommand::CancelTurn
+            | RelayCommand::SetConfig { .. }
+            | RelayCommand::SetSessionMode { .. }
+            | RelayCommand::Close { .. }
+    )
 }
 
 #[cfg(test)]

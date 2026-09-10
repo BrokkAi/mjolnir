@@ -177,9 +177,7 @@ pub enum HarnessKind {
 
 /// The target-level execution policy Hel applies independently of the selected
 /// harness. Raw targets may preserve configured approvals; isolated targets
-/// force full access because their boundary contains the blast radius. Codex's
-/// ACP adapter is currently forced into full access on every target; see the
-/// workaround in [`HarnessKind::execution_enforcement`].
+/// force full access because their boundary contains the blast radius.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionPolicy {
@@ -356,9 +354,7 @@ impl HarnessKind {
     }
 
     /// How this harness realizes a target-level execution policy. Configured
-    /// approvals require no override for harnesses that support them; Codex's
-    /// ACP adapter is forced into full access until its upstream mode handling
-    /// is fixed.
+    /// approvals preserve harness configuration; Codex selects guardian explicitly.
     pub const fn execution_enforcement(
         self,
         policy: ExecutionPolicy,
@@ -370,10 +366,13 @@ impl HarnessKind {
                 launch_flag: None,
                 launch_environment: Some(("MUSE_APPROVAL_MODE", "auto")),
             }),
-            // TODO: Remove this Codex workaround once codex-acp preserves
-            // configured sandbox permissions across turns:
-            // https://github.com/agentclientprotocol/codex-acp/issues/477
-            (Self::Codex, _) => Some(ExecutionEnforcement {
+            (Self::Codex, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
+                label: "agent / guardian",
+                acp_mode: Some("agent"),
+                launch_flag: None,
+                launch_environment: Some(("INITIAL_AGENT_MODE", "agent")),
+            }),
+            (Self::Codex, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "agent-full-access",
                 acp_mode: Some("agent-full-access"),
                 launch_flag: None,
@@ -416,23 +415,6 @@ impl HarnessKind {
         policy: ExecutionPolicy,
         environment: &mut BTreeMap<String, String>,
     ) -> Result<()> {
-        if self == Self::Codex {
-            let mut config = match environment.get("CODEX_CONFIG") {
-                Some(value) => serde_json::from_str::<serde_json::Value>(value)
-                    .context("parse Codex launch CODEX_CONFIG as JSON")?,
-                None => serde_json::json!({}),
-            };
-            let object = config
-                .as_object_mut()
-                .context("Codex launch CODEX_CONFIG must be a JSON object")?;
-            // Align thread creation and resume with the per-turn ACP full-access
-            // workaround, even when the project selects a named permissions profile.
-            object.insert(
-                "default_permissions".into(),
-                serde_json::json!(":danger-full-access"),
-            );
-            environment.insert("CODEX_CONFIG".into(), serde_json::to_string(&config)?);
-        }
         if self == Self::Muse && policy == ExecutionPolicy::Unconstrained {
             let args = environment.entry("MUSE_SERVE_ARGS".into()).or_default();
             if !args
@@ -1954,58 +1936,18 @@ mod tests {
     }
 
     #[test]
-    fn codex_launch_preserves_config_and_aligns_resume_permissions_with_acp_mode() {
-        for policy in [
-            ExecutionPolicy::ConfiguredApprovals,
-            ExecutionPolicy::Unconstrained,
+    fn codex_target_policy_selects_mode_without_replacing_host_config() {
+        for (policy, mode) in [
+            (ExecutionPolicy::ConfiguredApprovals, "agent"),
+            (ExecutionPolicy::Unconstrained, "agent-full-access"),
         ] {
-            for original in [
-                None,
-                Some(serde_json::json!({
-                    "default_permissions": "bifrost",
-                    "model": "configured-model",
-                    "sandbox_workspace_write": {"writable_roots": ["/extra"]}
-                })),
-            ] {
-                let mut environment = BTreeMap::new();
-                let mut expected = original.clone().unwrap_or_else(|| serde_json::json!({}));
-                if let Some(original) = original {
-                    environment.insert("CODEX_CONFIG".into(), original.to_string());
-                }
-                expected["default_permissions"] = serde_json::json!(":danger-full-access");
-                HarnessKind::Codex
-                    .configure_execution_environment(policy, &mut environment)
-                    .unwrap();
-                assert_eq!(
-                    serde_json::from_str::<serde_json::Value>(&environment["CODEX_CONFIG"])
-                        .unwrap(),
-                    expected
-                );
-                assert_eq!(environment["INITIAL_AGENT_MODE"], "agent-full-access");
-                let once = environment.clone();
-                HarnessKind::Codex
-                    .configure_execution_environment(policy, &mut environment)
-                    .unwrap();
-                assert_eq!(environment, once);
-            }
-        }
-    }
-
-    #[test]
-    fn codex_launch_rejects_invalid_config_without_disclosing_or_replacing_it() {
-        for value in ["{private-token", "null", "[]", "42", "\"private-token\""] {
-            let mut environment = BTreeMap::from([("CODEX_CONFIG".into(), value.into())]);
-            let original = environment.clone();
-            let error = HarnessKind::Codex
-                .configure_execution_environment(
-                    ExecutionPolicy::ConfiguredApprovals,
-                    &mut environment,
-                )
-                .unwrap_err();
-            let message = format!("{error:#}");
-            assert!(message.contains("CODEX_CONFIG"));
-            assert!(!message.contains("private-token"));
-            assert_eq!(environment, original);
+            let config = r#"{"default_permissions":"project","model":"configured-model"}"#;
+            let mut environment = BTreeMap::from([("CODEX_CONFIG".into(), config.into())]);
+            HarnessKind::Codex
+                .configure_execution_environment(policy, &mut environment)
+                .unwrap();
+            assert_eq!(environment["INITIAL_AGENT_MODE"], mode);
+            assert_eq!(environment["CODEX_CONFIG"], config);
         }
     }
 
@@ -2208,14 +2150,14 @@ mod tests {
     }
 
     #[test]
-    fn configured_approvals_preserve_other_profiles_but_force_codex_full_access() {
+    fn configured_approvals_preserve_other_profiles_and_select_codex_guardian() {
         let codex = HarnessKind::Codex
             .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
-            .expect("Codex ACP always needs its full-access workaround");
-        assert_eq!(codex.acp_mode(), Some("agent-full-access"));
+            .expect("Codex ACP selects guardian explicitly");
+        assert_eq!(codex.acp_mode(), Some("agent"));
         assert_eq!(
             codex.launch_environment(),
-            Some(("INITIAL_AGENT_MODE", "agent-full-access"))
+            Some(("INITIAL_AGENT_MODE", "agent"))
         );
 
         for kind in [

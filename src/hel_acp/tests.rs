@@ -1532,8 +1532,7 @@ async fn mode_change_bridge(
         })
     };
     let modes = serde_json::json!({
-        // Codex ACP can report its default Agent mode here even though Hel
-        // must force the explicit full-access mode before exposing the session.
+        // The target policy must be selected before exposing the session.
         "currentModeId": "agent",
             "availableModes": [
                 {"id": "default", "name": "Default"},
@@ -1661,7 +1660,7 @@ async fn set_session_mode_uses_the_mode_protocol_even_when_config_is_available()
     assert_eq!(request["method"], "session/set_mode");
 }
 
-async fn codex_full_access_is_enforced_before_session_is_reported(
+async fn codex_policy_is_enforced_before_session_is_reported(
     execution_policy: ExecutionPolicy,
     resume_session: Option<&str>,
 ) {
@@ -1703,12 +1702,16 @@ async fn codex_full_access_is_enforced_before_session_is_reported(
         .await
     });
 
+    let expected_mode = match execution_policy {
+        ExecutionPolicy::ConfiguredApprovals => "agent",
+        ExecutionPolicy::Unconstrained => "agent-full-access",
+    };
     let request = tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx)
         .await
         .expect("Hel must enforce the target execution policy")
         .expect("the bridge must publish the request");
     assert_eq!(request["method"], "session/set_config_option");
-    assert_eq!(request["params"]["value"], "agent-full-access");
+    assert_eq!(request["params"]["value"], expected_mode);
 
     let mut reported_mode = None;
     let mut reported_resumed = None;
@@ -1738,9 +1741,15 @@ async fn codex_full_access_is_enforced_before_session_is_reported(
             _ => {}
         }
     }
-    assert_eq!(reported_mode.as_deref(), Some("agent-full-access"));
+    assert_eq!(
+        reported_mode.as_deref(),
+        Some(match execution_policy {
+            ExecutionPolicy::ConfiguredApprovals => "agent / guardian",
+            ExecutionPolicy::Unconstrained => "agent-full-access",
+        })
+    );
     assert_eq!(reported_resumed, Some(resume_session.is_some()));
-    assert_eq!(configured_mode.as_deref(), Some("agent-full-access"));
+    assert_eq!(configured_mode.as_deref(), Some(expected_mode));
 
     drop(request_tx);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), driver).await;
@@ -1748,17 +1757,14 @@ async fn codex_full_access_is_enforced_before_session_is_reported(
 }
 
 #[tokio::test]
-async fn codex_always_forces_full_access_for_a_new_session() {
-    codex_full_access_is_enforced_before_session_is_reported(
-        ExecutionPolicy::ConfiguredApprovals,
-        None,
-    )
-    .await;
+async fn codex_selects_guardian_for_a_new_session() {
+    codex_policy_is_enforced_before_session_is_reported(ExecutionPolicy::ConfiguredApprovals, None)
+        .await;
 }
 
 #[tokio::test]
-async fn codex_always_forces_full_access_when_resuming_a_session() {
-    codex_full_access_is_enforced_before_session_is_reported(
+async fn codex_selects_target_policy_when_loading_a_session() {
+    codex_policy_is_enforced_before_session_is_reported(
         ExecutionPolicy::ConfiguredApprovals,
         Some("native-session"),
     )
@@ -1767,8 +1773,7 @@ async fn codex_always_forces_full_access_when_resuming_a_session() {
 
 #[tokio::test]
 async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
-    codex_full_access_is_enforced_before_session_is_reported(ExecutionPolicy::Unconstrained, None)
-        .await;
+    codex_policy_is_enforced_before_session_is_reported(ExecutionPolicy::Unconstrained, None).await;
 }
 
 #[tokio::test]
@@ -3371,7 +3376,7 @@ for line in sys.stdin:
             continue
         assert method == ("session/load" if second and used else "session/new"), request
         result = {{"sessionId": "original" if not second or used else "replacement",
-                   "modes": {{"currentModeId": "agent-full-access", "availableModes": [{{"id": "agent-full-access", "name": "Full access"}}]}}}}
+                   "modes": {{"currentModeId": "agent", "availableModes": [{{"id": "agent", "name": "Guardian"}}]}}}}
         write({{"jsonrpc": "2.0", "id": ident, "result": result}})
         continue
     elif method == "session/prompt":

@@ -752,7 +752,24 @@ async fn run_relay_coordinator_with_shells(
         &mut user_shells,
     )?;
     let mut wakes_open = true;
+    // A monotonic deadline keeps unrelated events and wall-clock changes from
+    // restarting the wait. Only the persisted wall deadline crosses restarts.
+    let mut capacity_timer: Option<(i64, tokio::time::Instant)> = None;
     loop {
+        let capacity_deadline = relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .capacity_retry_deadline();
+        if capacity_timer.map(|(deadline, _)| deadline) != capacity_deadline {
+            capacity_timer = capacity_deadline.map(|deadline| {
+                let remaining = deadline.saturating_sub(hel::clock::epoch_millis()).max(0) as u64;
+                (
+                    deadline,
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(remaining),
+                )
+            });
+        }
+        let wake_at = capacity_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
         tokio::select! {
             biased;
             wake = dispatch_wakes.recv(), if wakes_open => {
@@ -810,6 +827,16 @@ async fn run_relay_coordinator_with_shells(
                     session_configured,
                     &mut user_shells,
                 )?;
+            }
+            _ = tokio::time::sleep_until(wake_at), if capacity_deadline.is_some() => {
+                let admitted = relay.lock().expect("relay state lock poisoned")
+                    .submit_due_capacity_retry(hel::clock::epoch_millis().max(capacity_deadline.expect("guarded retry timer")))?;
+                if !admitted {
+                    // Wait for readiness/control changes without spinning on an overdue timer.
+                    capacity_timer = capacity_deadline.map(|deadline| (deadline,
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(1)));
+                }
+                dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
             }
             _ = kimi_poll.tick(), if kimi_tasks.is_some() => {
                 kimi_tasks

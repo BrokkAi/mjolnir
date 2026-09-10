@@ -651,7 +651,8 @@ mod tests {
         });
     }
     use hel::hel_harness_runtime::{
-        CLAUDE_ACP_VERSION, CODEX_ACP_VERSION, CODEX_CLI_VERSION, DEEPSEEK_DSH_VERSION,
+        CLAUDE_ACP_VERSION, CODEX_ACP_PACKAGE, CODEX_ACP_VERSION, CODEX_CLI_VERSION,
+        DEEPSEEK_DSH_VERSION,
     };
 
     fn executable(path: &Path, body: &str) {
@@ -700,7 +701,7 @@ mod tests {
             (
                 CODEX_PACKAGE_JSON,
                 vec![
-                    ("@agentclientprotocol/codex-acp", CODEX_ACP_VERSION),
+                    (CODEX_ACP_PACKAGE, CODEX_ACP_VERSION),
                     ("@openai/codex", CODEX_CLI_VERSION),
                 ],
             ),

@@ -337,6 +337,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     chat.render_mode = TranscriptRenderMode::Rich;
     chat.turn_started_at_epoch_seconds = None;
     chat.set_session_activity(crate::usage_format::SessionActivity {
+        capacity_retry: None,
         activity_turn_started_at_ms: None,
         prompt_in_flight: false,
         idle_since_ms: None,
@@ -3489,4 +3490,22 @@ fn scrollbar_drag_keeps_its_mapping_when_history_renders_or_output_arrives() {
     scrollbar_mouse(&mut chat, MouseEventKind::Drag(Left), geometry.track.x, row);
     drawn_transcript(&mut chat, 60, 24);
     assert_eq!(chat.anchor, anchor);
+}
+
+#[test]
+fn capacity_retry_prompt_is_labelled_automatic_without_changing_its_text() {
+    let mut entry = ChatEntry::plain(42, ChatRole::User, "Continue");
+    entry.source = TranscriptSource(Some(std::sync::Arc::new(TranscriptItem {
+        stable_id: "user:capacity-retry-41".into(),
+        position: 42,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1000,
+        last_changed_at_ms: 1000,
+        body: TranscriptBody::User {
+            content: vec![serde_json::json!({"type": "text", "text": "Continue"})],
+        },
+    })));
+    assert_eq!(entry_visual(&entry).label, "Automatic · capacity retry");
+    assert_eq!(browser_entry(&entry).label, "Automatic · capacity retry");
+    assert_eq!(entry.text, "Continue");
 }

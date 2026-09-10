@@ -243,11 +243,24 @@ image = "ubuntu:24.04"
     )
     .expect("write Hel test config");
     if local_startup {
+        use std::os::unix::fs::PermissionsExt;
         let path = config_root.join("hel/config.toml");
         let mut config = hel::hel_config::HelConfig::load_from(&path).unwrap();
         let home = storage.path().join("codex");
         fs::create_dir_all(&home).unwrap();
-        config.profiles.get_mut("codex").unwrap().home = home;
+        // This test checks session creation, not a real Node/Codex install.
+        let tools = storage.path().join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        for name in ["node", "npm"] {
+            let tool = tools.join(name);
+            fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let profile = config.profiles.get_mut("codex").unwrap();
+        profile.home = home;
+        profile
+            .environment
+            .insert("PATH".into(), tools.to_string_lossy().into_owned());
         config.startup.enabled = false;
         config.targets.clear();
         config.targets.insert(

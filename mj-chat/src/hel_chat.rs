@@ -2629,7 +2629,10 @@ impl ChatState {
             // Only a prompt of ours can be cancelled. A turn the harness
             // started on its own also reads as Running, and the relay refuses
             // to cancel it, so Esc must not claim to.
-            return if self.prompt_in_flight || !self.active_user_shells.is_empty() {
+            return if self.prompt_in_flight
+                || self.session_activity.capacity_retry.is_some()
+                || !self.active_user_shells.is_empty()
+            {
                 ChatAction::Cancel
             } else {
                 ChatAction::None
@@ -4238,6 +4241,27 @@ mod tests {
             }),
             ChatAction::ToggleVoice
         );
+    }
+
+    #[test]
+    fn capacity_wait_displays_a_countdown_and_escape_cancels_it() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.header_target = "localhost".into();
+        chat.header_profile = "codex".into();
+        chat.set_session_activity(crate::usage_format::SessionActivity {
+            capacity_retry: Some(hel::hel_worker::CapacityRetry {
+                attempt: 1,
+                retry_at_ms: 120000,
+                command_id: "capacity-retry-42".into(),
+                submitted: false,
+            }),
+            ..Default::default()
+        });
+        assert!(chat.clock_text(60).contains("retrying in 1m00s"));
+        assert!(matches!(
+            chat.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ChatAction::Cancel
+        ));
     }
 
     #[test]
