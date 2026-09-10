@@ -11,7 +11,7 @@ fn top_level_failure_is_written_to_a_private_per_run_log() {
     let storage = common::DaemonStorage::new(root, config.clone(), data.clone());
     let root_path = storage.path().to_path_buf();
     let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
-    command
+    common::own_test_daemons(&mut command)
         .args(["checkpoint", "--session", "definitely-missing"])
         .env("MJ_DATA_DIR", &data)
         .env("MJ_CONFIG_DIR", config);
@@ -83,10 +83,12 @@ fn a_panicking_checkpoint_fixture_stops_its_daemon_before_removing_storage() {
     let config = root.path().join("config");
     let storage = common::DaemonStorage::new(root, config.clone(), data.clone());
     let output = hel::hel_subprocess::run_with_input(
-        Command::new(env!("CARGO_BIN_EXE_mj"))
-            .args(["checkpoint", "--session", "definitely-missing"])
-            .env("MJ_DATA_DIR", &data)
-            .env("MJ_CONFIG_DIR", &config),
+        common::own_test_daemons(
+            Command::new(env!("CARGO_BIN_EXE_mj"))
+                .args(["checkpoint", "--session", "definitely-missing"])
+                .env("MJ_DATA_DIR", &data)
+                .env("MJ_CONFIG_DIR", &config),
+        ),
         &[],
     )
     .unwrap();

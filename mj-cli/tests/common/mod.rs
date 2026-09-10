@@ -8,6 +8,15 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
+/// Make any daemon started by `command` own its lifetime against this test.
+///
+/// Fixture teardown cannot run when the test process is killed without
+/// unwinding, so every test daemon also watches this process and exits with
+/// it. The environment is inherited by the daemon a client spawns.
+pub fn own_test_daemons(command: &mut Command) -> &mut Command {
+    command.env("MJ_DAEMON_OWNER_PID", std::process::id().to_string())
+}
+
 /// Own an implicitly started daemon until its temporary store can be removed.
 pub struct DaemonStorage {
     directory: Option<tempfile::TempDir>,
@@ -32,10 +41,12 @@ impl DaemonStorage {
         let metadata = self.data.join("daemon.json");
         if metadata.exists() {
             let output = hel::hel_subprocess::run_with_input(
-                Command::new(env!("CARGO_BIN_EXE_mj"))
-                    .args(["daemon", "stop"])
-                    .env("MJ_CONFIG_DIR", &self.config)
-                    .env("MJ_DATA_DIR", &self.data),
+                own_test_daemons(
+                    Command::new(env!("CARGO_BIN_EXE_mj"))
+                        .args(["daemon", "stop"])
+                        .env("MJ_CONFIG_DIR", &self.config)
+                        .env("MJ_DATA_DIR", &self.data),
+                ),
                 &[],
             )?;
             // An idle daemon can finish exiting while the stop client connects.

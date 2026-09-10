@@ -3731,11 +3731,34 @@ pub(crate) fn maintain_attachment(
     })
 }
 
+/// PID of the process this daemon must not outlive, if one was requested.
+///
+/// Tests start daemons that no client ever attaches to, so idle exit cannot
+/// retire them, and a test process that dies without unwinding never runs its
+/// teardown. Naming an owner makes the daemon responsible for its own lifetime.
+fn owner_pid_to_watch() -> Result<Option<u32>> {
+    let Some(value) = hel::hel_config::env_override("DAEMON_OWNER_PID") else {
+        return Ok(None);
+    };
+    let pid: u32 = value
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("MJ_DAEMON_OWNER_PID must be a process id, but it is {value:?}"))?;
+    ensure!(
+        process_is_alive(pid),
+        "MJ_DAEMON_OWNER_PID names process {pid}, which is not running"
+    );
+    Ok(Some(pid))
+}
+
 pub(crate) async fn run_daemon_process() -> Result<()> {
+    // Checked before the store is locked so a bad value fails fast and leaves
+    // no daemon state behind.
+    let owner_pid = owner_pid_to_watch()?;
     let guard = ControllerStoreGuard::acquire()?;
     let database_writer = guard.start_database_writer()?;
     let epilogue_started = AtomicBool::new(false);
-    let mut outcome = run_daemon_runtime(&epilogue_started).await;
+    let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid).await;
     if !epilogue_started.load(Ordering::Acquire) {
         // Initialization failed before the runtime-owned epilogue existed.
         // The same process-level bound still applies to closing the writer.
@@ -3749,7 +3772,7 @@ pub(crate) async fn run_daemon_process() -> Result<()> {
     outcome
 }
 
-async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
+async fn run_daemon_runtime(epilogue_started: &AtomicBool, owner_pid: Option<u32>) -> Result<()> {
     // Freeze worker sources before any session can be created or upgraded.
     // Copying binaries belongs on a blocking task, never the runtime event loop.
     tokio::task::spawn_blocking(mj_controller::hel_controller::pin_worker_binary_sources)
@@ -3830,6 +3853,8 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
     let exit_when_idle = hel::hel_config::env_override_os("DAEMON_EXIT_WHEN_IDLE").is_some();
     let mut idle_tick = tokio::time::interval(Duration::from_millis(100));
     idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut owner_tick = tokio::time::interval(Duration::from_millis(500));
+    owner_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut recovery_tick = tokio::time::interval(Duration::from_millis(250));
     recovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (interrupted_close_tx, mut interrupted_close_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3893,6 +3918,14 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool) -> Result<()> {
                 _ = idle_tick.tick(), if exit_when_idle && state.ever_attached.load(Ordering::Acquire) => {
                     state.prune_dead_clients();
                     if state.attachments().is_empty() {
+                        break;
+                    }
+                }
+                _ = owner_tick.tick(), if owner_pid.is_some() => {
+                    if let Some(owner) = owner_pid
+                        && !process_is_alive(owner)
+                    {
+                        tracing::info!(owner_pid = owner, "daemon owner process exited; shutting down");
                         break;
                     }
                 }
