@@ -18,9 +18,10 @@ Publish the work merged after v2.5.0 and summarize it for users. Version 2.6.0 a
 - [x] Commit candidate `2da5697f3955b6cb74e36e053eafe1879ec881c5`, pass clean-commit formatting, Clippy, the full serialized Cargo suite, host build, packaging, version checks, and the provisioned reliability scenario with zero leaks, then push master for CI run `34405066583`.
 - [x] (2026-09-10) Confirm the earlier candidate was never tagged or published; v2.5.0 remains the remote latest release. Merge origin/master into the current branch to include the overnight tool summaries, Kimi shells, Muse quota and daemon cleanup changes.
 - [x] Diagnose upstream CI 34435674885: the macOS startup PTY test expected a failed provisional session to remain. Check exactly one newly created session independently of earlier rollback. Expand release notes.
-- [ ] Validate the integrated candidate and commit the release completion changes.
-- [ ] Push the integrated candidate, confirm exact-commit CI passes, create and push the annotated version tag, and monitor all publishing workflows.
-- [ ] Verify release archives, registry versions, and Homebrew availability; publish notes and record completion.
+- [x] (2026-09-10) Commit integrated candidate `7683dc60ef193c0bbf9035f8c758abf12568f176`. Pass formatting, Clippy, 2,940 Rust tests (17 ignored), host and portable-worker release builds, licenses and fresh notice comparisons, npm/web tests, documentation checks/build, nine source packages and reliability smoke with zero leaks. Read back all nine crates.io publisher configurations successfully.
+- [x] (2026-09-10) Push master, pass all seven jobs of exact-commit CI `34447513145`, and create/push annotated tag `v2.6.0` at `7683dc60ef193c0bbf9035f8c758abf12568f176`.
+- [x] (2026-09-10) GitHub Release `34449385294`, crates.io `34452062615`, and npm `34452074042` all completed successfully.
+- [x] (2026-09-10) Verify all three archives against published SHA-256 sidecars, required bundle contents, Linux controller/worker versions and two-architecture macOS binaries. Confirm all nine non-yanked Rust crates and all four npm latest tags at 2.6.0. Publish the prepared notes and push Homebrew formula commit `ceeeb82` to BrokkAi/homebrew-tap main.
 
 ## Surprises & Discoveries
 
@@ -47,7 +48,9 @@ Run the full Cargo suite with one test thread because the preceding Kimi validat
 ## Outcomes & Retrospective
 
 
-The earlier candidate passed CI but was never tagged. Publication resumed on September 10 with the latest upstream code merged normally into master. The new candidate is being validated. No v2.6.0 tag or package has been published yet.
+Mjolnir v2.6.0 is fully published at `7683dc60ef193c0bbf9035f8c758abf12568f176`. Both master and the annotated tag are remote. All seven CI jobs passed, then the GitHub Release, crates.io and npm workflows succeeded. The GitHub release is public and latest, with three verified archives and their checksums. Nine Rust crates expose non-yanked 2.6.0 versions; all four npm packages have latest=2.6.0. The Homebrew formula is pushed and verified remotely at 2.6.0. Release notes describe all shipped work since v2.5.0.
+
+The upstream macOS failure was a test assumption about asynchronous cleanup, not a product regression. The corrected fixture passed locally and in macOS CI. Publication used the existing trusted publishers without changing settings. Completing the release required waiting for the actual artifact and registry workflows, not merely committing release metadata or pushing a tag.
 
 ## Context and Orientation
 
@@ -107,3 +110,7 @@ Use Rust 1.96.0, Node 24, cargo-about 0.9.1, and cargo-deny 0.20.2. Do not add p
 Revision 2026-09-09: record scope, synchronized metadata, initial checks, publisher verification, and remaining publication steps.
 
 Revision 2026-09-10: resume the authorized remote publication, include the overnight upstream changes, correct the macOS PTY fixture race, and replace the untagged candidate with a newly validated release commit.
+
+Revision 2026-09-10: record successful validation, exact-commit CI, fresh publisher read-back, and the pushed release tag; monitor artifact and package publication before marking the release complete.
+
+Revision 2026-09-10: record completed GitHub, crates.io, npm and Homebrew publication, verified public artifacts and registry state, and final release commit.
