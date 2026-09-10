@@ -14,7 +14,8 @@ Issue #984 records GNU binaries that cannot start on Debian 12 and Amazon Linux 
 - [x] Add CI runtime checks and documentation; actionlint and shell checks pass.
 - [x] Cross-build ARM64: maximum GLIBC 2.28; validate tmux harness on Debian with diagnostic CLI.
 - [x] Validate both ELF binaries and x86-64 tmux runtime on all three distributions.
-- [ ] Commit changes and push authorized upstream; observe native ARM CI.
+- [x] Commit implementation as d2799e15, preserve upstream publication notes through merge 10ef3cfb, and push origin/master.
+- [x] Observe both native architecture compatibility CI jobs pass.
 
 ## Surprises & Discoveries
 
@@ -26,7 +27,7 @@ Use cargo-zigbuild 0.23.3 and Zig 0.15.2 with GNU target suffix .2.28, matching 
 
 ## Outcomes & Retrospective
 
-Both release builds pass the ELF contract with maximum GLIBC 2.28. The x86-64 CLI reports mj 2.6.1, renders the dashboard in tmux, and exits with status zero on Rocky Linux 8 (glibc 2.28), Debian 12 (2.36), and Amazon Linux 2023 (2.34). All 14 installer/ELF regression tests and 13 npm tests pass; actionlint, Bash parsing and diff checks pass. Native ARM runtime checks run in CI. No release tag is authorized or needed; existing published archives remain unchanged until a release.
+Both release builds pass the ELF contract with maximum GLIBC 2.28. The x86-64 CLI reports mj 2.6.1, renders the dashboard in tmux, and exits with status zero on Rocky Linux 8 (glibc 2.28), Debian 12 (2.36), and Amazon Linux 2023 (2.34). All 14 installer/ELF regression tests and 13 npm tests pass; actionlint, Bash parsing and diff checks pass. Both native architecture compatibility jobs passed in CI run 34508602078: https://github.com/BrokkAi/mjolnir/actions/runs/34508602078. This verifies the build, ELF contract, regression tests, and all three distro tmux cases on x86-64 and ARM64. The broader macOS, Windows and Linux test jobs were still running when this validation record was written. No release tag is authorized or needed; existing published archives remain unchanged until a release.
 
 ## Context and Orientation
 
@@ -61,3 +62,5 @@ Plan recorded 2026-09-10; initial implementation and installer test outcomes inc
 Updated during validation: recorded ARM64 success, 14 passing regressions, and the local compiler-wrapper interference; x86-64 validation continues with unwrapped Cargo.
 
 Updated after local validation: both ELF checks and all three x86-64 runtime cases passed. Delivery and native ARM CI observation remain.
+
+Final update: all implementation, compatibility validation, commit and push work is complete. The upstream publication-note commit arrived during local validation; it was merged without rewriting history. Final agent-documentation bookkeeping does not change the tested implementation.
