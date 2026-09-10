@@ -166,9 +166,12 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         HarnessKind::Kimi => hel::hel_worker::BackgroundWorkPolicy::KimiTasks,
         _ => hel::hel_worker::BackgroundWorkPolicy::HostedTerminals,
     });
-    let resume_session = select_resume_session(&config, &durable_relay);
+    let resume_session = select_resume_session(&config, &durable_relay)?;
     let project_memory = ProjectMemoryEndpoint::new(config.project_memory.clone());
     if resume_session.is_none()
+        // Recreating an unused native thread keeps this relay's original
+        // startup context, which may already belong to a pending prompt.
+        && durable_relay.operational_state().native_session_id.is_none()
         && config.harness != HarnessKind::Claude
         && let Some(memory) = &config.project_memory
     {
@@ -1394,11 +1397,15 @@ fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandRequest> {
 pub(super) fn select_resume_session(
     config: &WorkerLaunchConfig,
     relay: &DurableRelay,
-) -> Option<String> {
-    config
-        .native_session_id
-        .clone()
-        .or_else(|| relay.operational_state().native_session_id)
+) -> Result<Option<String>> {
+    let recorded = relay.operational_state().native_session_id;
+    if config.harness == HarnessKind::Codex && relay.native_session_is_pristine()? {
+        tracing::info!(native_session_id = ?recorded, "recreating unused Codex thread after worker restart");
+        return Ok(None);
+    }
+    // The launch config can still name the original unused thread after a
+    // replacement. Once opened, the journal owns the current native identity.
+    Ok(recorded.or_else(|| config.native_session_id.clone()))
 }
 
 pub(super) async fn read_bounded_line(

@@ -850,10 +850,11 @@ pub async fn run(
 struct OpenedSession {
     native_session_id: String,
     started_at: tokio::time::Instant,
+    resume_required: Arc<AtomicBool>,
 }
 
 struct BridgeRestart {
-    native_session_id: String,
+    resume_session: Option<String>,
     unexpected: bool,
     session_age: Duration,
     message: &'static str,
@@ -897,7 +898,7 @@ async fn run_inner(
                     },
                 )
                 .await?;
-                spec.resume_session = Some(restart.native_session_id);
+                spec.resume_session = restart.resume_session;
                 replacing_previous_bridge = true;
             }
         }
@@ -1038,7 +1039,7 @@ async fn run_bridge(
     match result {
         Ok(None) => Ok(None),
         Ok(Some(native_session_id)) => Ok(Some(BridgeRestart {
-            native_session_id,
+            resume_session: Some(native_session_id),
             unexpected: false,
             session_age: opened_now
                 .map(|opened| opened.started_at.elapsed())
@@ -1048,10 +1049,17 @@ async fn run_bridge(
         Err(error) => match opened_now {
             None => Err(error),
             Some(opened) => Ok(Some(BridgeRestart {
-                native_session_id: opened.native_session_id,
+                resume_session: opened
+                    .resume_required
+                    .load(Ordering::Acquire)
+                    .then_some(opened.native_session_id),
                 unexpected: true,
                 session_age: opened.started_at.elapsed(),
-                message: ACP_BRIDGE_LOST_WARNING,
+                message: if opened.resume_required.load(Ordering::Acquire) {
+                    ACP_BRIDGE_LOST_WARNING
+                } else {
+                    "The agent stopped before its first prompt; restarting with a new empty thread."
+                },
             })),
         },
     }
@@ -1405,6 +1413,10 @@ where
     let notification_step_clock = spec.step_clock.clone();
     let session_update_count = Arc::new(AtomicU64::new(0));
     let notification_session_update_count = session_update_count.clone();
+    let resume_required = Arc::new(AtomicBool::new(
+        spec.resume_session.is_some() || spec.harness != HarnessKind::Codex,
+    ));
+    let notification_resume_required = resume_required.clone();
     // A provider may replay the native transcript as `session/update`
     // notifications while answering `session/load`. Hel already owns that
     // history in its durable relay, so accepting the replay would duplicate
@@ -1501,6 +1513,9 @@ where
                 notification_step_clock.observe(&update);
                 if !notification_session_updates_enabled.load(Ordering::Acquire) {
                     return Ok(());
+                }
+                if session_update_has_native_history(&update) {
+                    notification_resume_required.store(true, Ordering::Release);
                 }
                 if !session_update_is_relay_visible(
                     &update,
@@ -2110,6 +2125,7 @@ where
                 opened,
                 session_update_count,
                 session_updates_enabled,
+                resume_required,
                 replacing_previous_bridge,
             )
             .await
@@ -2166,6 +2182,17 @@ fn prompt_returned_without_updates(
     *stop_reason != StopReason::Cancelled && updates_before == updates_after
 }
 
+/// Only catalogue and selector announcements can prove a thread is unused.
+/// Treat all other updates, including future ACP variants, as native history.
+pub(crate) fn session_update_has_native_history(update: &SessionUpdate) -> bool {
+    !matches!(
+        update,
+        SessionUpdate::AvailableCommandsUpdate(_)
+            | SessionUpdate::ConfigOptionUpdate(_)
+            | SessionUpdate::CurrentModeUpdate(_)
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_connection(
     connection: ConnectionTo<Agent>,
@@ -2178,6 +2205,7 @@ async fn drive_connection(
     opened: Arc<Mutex<Option<OpenedSession>>>,
     session_update_count: Arc<AtomicU64>,
     session_updates_enabled: Arc<AtomicBool>,
+    resume_required: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
 ) -> Result<Option<String>> {
     // Terminals belong to the connection. However the session ends — closed,
@@ -2194,6 +2222,7 @@ async fn drive_connection(
         opened,
         &session_update_count,
         &session_updates_enabled,
+        resume_required,
         replacing_previous_bridge,
     )
     .await;
@@ -2441,6 +2470,7 @@ async fn serve_session(
     opened: Arc<Mutex<Option<OpenedSession>>>,
     session_update_count: &AtomicU64,
     session_updates_enabled: &AtomicBool,
+    resume_required: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
 ) -> Result<Option<String>> {
     let mut meta = serde_json::Map::new();
@@ -2614,6 +2644,7 @@ async fn serve_session(
     *opened.lock().expect("opened session lock poisoned") = Some(OpenedSession {
         native_session_id: session_id.to_string(),
         started_at: tokio::time::Instant::now(),
+        resume_required,
     });
     // Drop anything the worker queued for the bridge this one replaced. The
     // worker dispatches only while it believes the session is configured; it
@@ -2706,6 +2737,15 @@ async fn serve_session(
                     continue;
                 }
                 let mut updates_before = session_update_count.load(Ordering::Acquire);
+                // Mark before sending: even a failed reply cannot prove the
+                // agent did not receive and persist this prompt.
+                if let Some(opened) = opened
+                    .lock()
+                    .expect("opened session lock poisoned")
+                    .as_mut()
+                {
+                    opened.resume_required.store(true, Ordering::Release);
+                }
                 spec.step_clock.begin_turn();
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
