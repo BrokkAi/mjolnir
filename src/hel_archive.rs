@@ -226,6 +226,11 @@ pub enum CanonicalTranscriptBody {
         /// a later content update dropped.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         terminal_refs: Vec<String>,
+        /// Cached compact label data. This is a sidecar rather than ACP
+        /// metadata so legacy transcript conversions preserve their summary
+        /// without changing the provider-owned tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<crate::hel_transcript::ToolCallPresentation>,
     },
     /// Terminal output no tool call refers to.
     TerminalOutput {
@@ -1961,6 +1966,7 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
                 call,
                 terminal_outputs,
                 terminal_refs,
+                ..
             } => {
                 serde_json::from_value::<agent_client_protocol::schema::v1::ToolCall>(call.clone())
                     .with_context(|| {

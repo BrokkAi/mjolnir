@@ -3634,6 +3634,11 @@ mod tests {
             execution: Some(hel::hel_worker::RelayExecutionState::Running),
             ..Default::default()
         });
+        let tool = |seq, title: &str, summary: &str, status| {
+            let mut entry = ChatEntry::tool(seq, title, None, status);
+            entry.tool_summary = Some(summary.to_owned());
+            entry
+        };
         chat.entries = vec![
             ChatEntry::plain(
                 1,
@@ -3645,24 +3650,34 @@ mod tests {
                 ChatRole::Agent,
                 "I’m bringing the interface together around a midnight palette, clear hierarchy, and the original animated activity indicators.\n\n### A little more room to think\n\n- Focus follows a soft teal border\n- **Your conversation stays readable** while tools work\n- Code and keyboard shortcuts have their own quiet surfaces",
             ),
-            ChatEntry::tool(
+            tool(
                 3,
+                "cd dir && python x.py | cat | wc ; print ok",
+                "cd && python | cat | wc ; print",
+                hel::hel_transcript::ToolStatus::Completed,
+            ),
+            tool(
+                4,
                 "cargo test -p brokk-mj-chat",
-                None,
+                "cargo test",
                 hel::hel_transcript::ToolStatus::Completed,
             ),
             ChatEntry::plain(
-                4,
+                5,
                 ChatRole::Agent,
                 "The shared theme is in place. Here’s the panel style used throughout the app:\n\n```rust\nlet panel = theme::panel(focused)\n    .title(\" Conversation \");\n```\n\nI’m checking the narrow layouts and selection behavior now.",
             ),
-            ChatEntry::tool(
-                5,
+            tool(
+                6,
                 "cargo clippy --all-targets -- -D warnings",
-                None,
+                "cargo clippy",
                 hel::hel_transcript::ToolStatus::Running,
             ),
         ];
+        // Keep the capture representative of the in-place tool expansion:
+        // the first completed call opens to its provider title and splits the
+        // surrounding completed streak.
+        chat.expanded_tool_calls.insert(3);
         let mut terminal = Terminal::new(TestBackend::new(columns, rows)).expect("terminal");
         terminal
             .draw(|frame| render_full_frame(frame, &mut chat, false))

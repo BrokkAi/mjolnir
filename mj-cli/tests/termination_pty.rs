@@ -313,6 +313,7 @@ image = "ubuntu:24.04"
     );
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    common::own_test_daemons(&mut command);
     if let Some(workspace) = &seeded_workspace {
         command.args(["--workspace", workspace]);
     }

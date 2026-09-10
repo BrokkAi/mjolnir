@@ -254,10 +254,11 @@ async fn refresh_profile(
         }),
         HarnessKind::Muse => crate::muse_usage::query(&source_home, &environment)
             .await
-            .map(|windows| ProfileQuota {
+            .map(|report| ProfileQuota {
                 profile_id: profile_id.clone(),
                 harness,
-                windows: windows
+                windows: report
+                    .windows
                     .into_iter()
                     .map(|window| QuotaWindow {
                         label: window.label,
@@ -268,7 +269,7 @@ async fn refresh_profile(
                         resets_at_epoch_seconds: window.resets_at,
                     })
                     .collect(),
-                extra: None,
+                extra: report.note,
                 error: None,
                 refreshed_at_epoch_seconds,
             }),

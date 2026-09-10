@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BrowserTranscript {
     pub latest_seq: u64,
+    /// Opaque Rich-presentation topology key. A browser sends the key it last
+    /// rendered with its next delta request; a mismatch means an append-only
+    /// feed may contain rows the current presentation has removed.
+    pub presentation_key: String,
     /// Cursor boundary below which a client must replace its feed. Usually
     /// this is the oldest retained entry, but presentation coalescing may
     /// advance it so an append-only client drops a marker hidden by a newer

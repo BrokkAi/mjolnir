@@ -29,7 +29,7 @@ use crate::hel_state::{
     TerminalOutputRecord, TranscriptBody, TranscriptItem, config_command_text,
     normalize_session_title, provisional_session_title,
 };
-use crate::hel_transcript::{ChatEntry, ChatRole, PlanStatus, ToolStatus};
+use crate::hel_transcript::{ChatEntry, ChatRole, PlanStatus, ToolStatus, tool_call_presentation};
 use crate::hel_worker::{
     RELAY_EVENT_GENESIS_DIGEST, RelayCommand, RelayCommandKind, RelayEvent, RelayObservation,
     SequencedEvent, WorkerEvent, WorkerPhase, validate_relay_event,
@@ -970,13 +970,19 @@ fn project_session_update(
                 .get(&stable_id)
                 .map(|item| TranscriptItem::clone(item))
             {
-                let TranscriptBody::Tool { call: existing, .. } = &mut item.body else {
+                let TranscriptBody::Tool {
+                    call: existing,
+                    presentation,
+                    ..
+                } = &mut item.body
+                else {
                     bail!(
                         "ACP tool call {} conflicts with transcript item {stable_id}",
                         call.tool_call_id
                     );
                 };
                 *existing = serde_json::to_value(call)?;
+                *presentation = Some(Box::new(tool_call_presentation(call)));
                 item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
                 attach_terminal_outputs(current, index, mutation, &mut item);
                 consume_fallback_terminal_tools(index, mutation, &mut item, false)?;
@@ -993,6 +999,7 @@ fn project_session_update(
                         call: serde_json::to_value(call)?,
                         terminal_outputs: Vec::new(),
                         terminal_refs: Vec::new(),
+                        presentation: Some(Box::new(tool_call_presentation(call))),
                     },
                 };
                 attach_terminal_outputs(current, index, mutation, &mut item);
@@ -1022,7 +1029,10 @@ fn project_session_update(
                 return Ok(());
             };
             close_streams(index, mutation, event.recorded_at_ms);
-            let TranscriptBody::Tool { call, .. } = &mut item.body else {
+            let TranscriptBody::Tool {
+                call, presentation, ..
+            } = &mut item.body
+            else {
                 bail!(
                     "ACP tool call {} conflicts with transcript item {stable_id}",
                     update.tool_call_id
@@ -1034,6 +1044,9 @@ fn project_session_update(
                 })?;
             materialized_call.update(update.fields.clone());
             *call = serde_json::to_value(materialized_call)?;
+            let current_call: ToolCall = serde_json::from_value(call.clone())
+                .context("parse updated ACP tool call for presentation")?;
+            *presentation = Some(Box::new(tool_call_presentation(&current_call)));
             item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
             attach_terminal_outputs(current, index, mutation, &mut item);
             consume_fallback_terminal_tools(index, mutation, &mut item, false)?;
@@ -1355,6 +1368,7 @@ fn consume_fallback_terminal_tools(
         call,
         terminal_outputs,
         terminal_refs,
+        ..
     } = &mut item.body
     else {
         return Ok(());
@@ -1379,6 +1393,7 @@ fn consume_fallback_terminal_tools(
             call: fallback_call,
             terminal_outputs: fallback_outputs,
             terminal_refs: fallback_refs,
+            ..
         } = &fallback.body
         else {
             continue;
@@ -1480,6 +1495,7 @@ fn attach_terminal_outputs(
         call,
         terminal_outputs,
         terminal_refs,
+        ..
     } = &mut item.body
     else {
         return;
@@ -1721,11 +1737,17 @@ pub fn materialized_session_from_entries(
                             "legacyLocations": entry.tool_locations,
                         }));
                     }
+                    let presentation = entry
+                        .tool_presentation
+                        .clone()
+                        .or_else(|| Some(tool_call_presentation(&call)))
+                        .map(Box::new);
                     TranscriptBody::Tool {
                         call: serde_json::to_value(call)
                             .expect("ACP tool call serialization cannot fail"),
                         terminal_outputs: Vec::new(),
                         terminal_refs: Vec::new(),
+                        presentation,
                     }
                 }
                 ChatRole::Plan => TranscriptBody::Plan {
@@ -1907,6 +1929,7 @@ pub fn canonical_session_from_materialized(
                     call,
                     terminal_outputs,
                     terminal_refs,
+                    presentation,
                 } => CanonicalTranscriptBody::Tool {
                     call: call.clone(),
                     terminal_outputs: terminal_outputs
@@ -1914,6 +1937,7 @@ pub fn canonical_session_from_materialized(
                         .map(canonical_terminal_output)
                         .collect(),
                     terminal_refs: terminal_refs.clone(),
+                    presentation: presentation.as_deref().cloned(),
                 },
                 TranscriptBody::TerminalOutput { record } => {
                     CanonicalTranscriptBody::TerminalOutput {
@@ -2005,6 +2029,7 @@ pub fn materialized_session_from_canonical(
                     call,
                     terminal_outputs,
                     terminal_refs,
+                    presentation,
                 } => TranscriptBody::Tool {
                     call: call.clone(),
                     terminal_outputs: terminal_outputs
@@ -2012,6 +2037,7 @@ pub fn materialized_session_from_canonical(
                         .map(materialized_terminal_output)
                         .collect(),
                     terminal_refs: terminal_refs.clone(),
+                    presentation: presentation.clone().map(Box::new),
                 },
                 CanonicalTranscriptBody::TerminalOutput { record } => {
                     TranscriptBody::TerminalOutput {
@@ -3989,6 +4015,13 @@ mod tests {
                 // "term-3" is a reference the call no longer carries, so only
                 // the remembered list can survive the archive round trip.
                 terminal_refs: vec!["term-1".into(), "term-3".into()],
+                presentation: Some(Box::new(crate::hel_transcript::ToolCallPresentation {
+                    summary: "Read".into(),
+                    source: "Read file".into(),
+                    source_kind: crate::hel_transcript::ToolSummarySourceKind::Title,
+                    tool_kind: agent_client_protocol::schema::v1::ToolKind::Read,
+                    summary_version: crate::hel_transcript::TOOL_SUMMARY_VERSION,
+                })),
             },
         }));
         session.transcript.push(Arc::new(TranscriptItem {

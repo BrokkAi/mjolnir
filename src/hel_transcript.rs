@@ -14,11 +14,13 @@ use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, EmbeddedResourceResource, PlanEntryStatus, SessionUpdate, ToolCall,
-    ToolCallContent, ToolCallLocation, ToolCallStatus,
+    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind,
 };
 #[cfg(feature = "controller")]
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tree_sitter::{Node, Parser};
 
 use crate::hel_acp::RuntimeEvent;
 
@@ -27,6 +29,32 @@ pub const SESSION_RESTART_ITEM_PREFIX: &str = "system:session-restarted:";
 /// Marks the point where the harness resumed work with no prompt in flight.
 pub const HARNESS_TURN_TEXT: &str = "Agent continued on its own";
 pub const HARNESS_TURN_ITEM_PREFIX: &str = "harness-turn:";
+
+const TOOL_SUMMARY_SOURCE_BYTES: usize = 64 * 1024;
+/// Parser-rule version stored with cached tool summaries.
+pub const TOOL_SUMMARY_VERSION: u8 = 1;
+
+/// Where a tool's compact presentation source came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSummarySourceKind {
+    RawInput,
+    RawOutput,
+    Title,
+}
+
+/// Bounded presentation metadata derived from an ACP tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallPresentation {
+    pub summary: String,
+    pub source: String,
+    pub source_kind: ToolSummarySourceKind,
+    pub tool_kind: ToolKind,
+    /// Version of the parser rules that produced `summary`. A missing value
+    /// identifies presentation metadata written before parser versioning.
+    #[serde(default)]
+    pub summary_version: u8,
+}
 
 /// The current value of one logical transcript item. ACP structures whose
 /// schemas can grow are kept as JSON values, while logical item identity and
@@ -65,6 +93,10 @@ pub enum TranscriptBody {
         /// where a terminal's output belongs.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         terminal_refs: Vec<String>,
+        /// Cached label data used by Rich and browser projections. Older
+        /// transcript items omit this and derive it from `call` when read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<Box<ToolCallPresentation>>,
     },
     /// Terminal output that no tool call refers to yet. It becomes a
     /// `Tool` item's `terminal_outputs` entry as soon as a call naming the
@@ -257,6 +289,7 @@ pub fn compact_tool_call_for_retention(body: &mut TranscriptBody) -> bool {
         call,
         terminal_outputs,
         terminal_refs,
+        ..
     } = body
     else {
         return false;
@@ -348,6 +381,14 @@ pub struct ChatEntry {
     pub message_id: Option<String>,
     pub tool_call_id: Option<String>,
     pub tool_status: Option<ToolStatus>,
+    /// Compact label used by Rich and browser projections. `text` remains the
+    /// original provider title for Raw mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_summary: Option<String>,
+    /// Selected bounded source retained so partial ACP updates can preserve a
+    /// raw-command-derived summary without retaining arbitrary raw JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_presentation: Option<ToolCallPresentation>,
     pub tool_content: Vec<String>,
     pub tool_diffstats: Vec<String>,
     pub tool_locations: Vec<String>,
@@ -415,6 +456,8 @@ impl ChatEntry {
             message_id: None,
             tool_call_id: None,
             tool_status: None,
+            tool_summary: None,
+            tool_presentation: None,
             tool_content: Vec::new(),
             tool_diffstats: Vec::new(),
             tool_locations: Vec::new(),
@@ -457,6 +500,13 @@ impl ChatEntry {
                 truncate_string_start(value, DETAIL_BYTES);
             }
         }
+        if let Some(summary) = &mut self.tool_summary {
+            truncate_string_start(summary, DETAIL_BYTES);
+        }
+        if let Some(presentation) = &mut self.tool_presentation {
+            truncate_string_start(&mut presentation.summary, DETAIL_BYTES);
+            truncate_string_start(&mut presentation.source, TEXT_BYTES);
+        }
         self.plan.truncate(DETAIL_COUNT);
         for line in &mut self.plan {
             truncate_string_start(&mut line.text, DETAIL_BYTES);
@@ -483,6 +533,8 @@ impl ChatEntry {
             message_id: None,
             tool_call_id: None,
             tool_status: None,
+            tool_summary: None,
+            tool_presentation: None,
             tool_content: Vec::new(),
             tool_diffstats: Vec::new(),
             tool_locations: Vec::new(),
@@ -509,6 +561,8 @@ impl ChatEntry {
             message_id: None,
             tool_call_id,
             tool_status: Some(tool_status),
+            tool_summary: None,
+            tool_presentation: None,
             tool_content: Vec::new(),
             tool_diffstats: Vec::new(),
             tool_locations: Vec::new(),
@@ -518,6 +572,820 @@ impl ChatEntry {
             source: TranscriptSource::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolSummarySource {
+    Shell(String),
+    Argv {
+        executable: String,
+        arguments: Vec<String>,
+    },
+}
+
+/// Compute the stable presentation metadata for one complete ACP call.
+pub fn tool_call_presentation(call: &ToolCall) -> ToolCallPresentation {
+    let kind = call.kind;
+    if kind == ToolKind::Execute {
+        if let Some(source) = command_source(call.raw_input.as_ref()) {
+            return presentation_from_source(
+                source,
+                ToolSummarySourceKind::RawInput,
+                kind,
+                &call.title,
+            );
+        }
+        if let Some(source) = command_source(call.raw_output.as_ref()) {
+            return presentation_from_source(
+                source,
+                ToolSummarySourceKind::RawOutput,
+                kind,
+                &call.title,
+            );
+        }
+    }
+    presentation_from_title(&call.title, kind)
+}
+
+/// Use cached presentation data when it was produced by current parser rules,
+/// otherwise rebuild it from the complete stored call. This lets parser fixes
+/// repair existing transcripts while current summaries remain cheap to load.
+pub fn materialized_tool_call_presentation(
+    stored: Option<&ToolCallPresentation>,
+    call: &ToolCall,
+) -> ToolCallPresentation {
+    stored
+        .filter(|presentation| presentation.summary_version >= TOOL_SUMMARY_VERSION)
+        .cloned()
+        .unwrap_or_else(|| tool_call_presentation(call))
+}
+
+/// Apply the presentation-relevant portion of a partial ACP update to cached
+/// metadata. ACP updates replace only fields that are present, so a title
+/// update must not erase a summary selected from an earlier raw command.
+pub fn update_tool_call_presentation(
+    previous: Option<&ToolCallPresentation>,
+    title: &str,
+    kind: Option<ToolKind>,
+    raw_input: Option<&Value>,
+    raw_output: Option<&Value>,
+) -> ToolCallPresentation {
+    let next_kind = kind.unwrap_or_else(|| {
+        previous
+            .map(|presentation| presentation.tool_kind)
+            .unwrap_or_default()
+    });
+
+    if next_kind == ToolKind::Execute {
+        if let Some(source) = raw_input.and_then(|value| command_source(Some(value))) {
+            return presentation_from_source(
+                source,
+                ToolSummarySourceKind::RawInput,
+                next_kind,
+                title,
+            );
+        }
+        if let Some(source) = raw_output.and_then(|value| command_source(Some(value)))
+            && (raw_input.is_some()
+                || !previous.is_some_and(|previous| {
+                    previous.source_kind == ToolSummarySourceKind::RawInput
+                }))
+        {
+            return presentation_from_source(
+                source,
+                ToolSummarySourceKind::RawOutput,
+                next_kind,
+                title,
+            );
+        }
+        if let Some(previous) = previous
+            && previous.tool_kind == ToolKind::Execute
+            && ((raw_input.is_none() && previous.source_kind == ToolSummarySourceKind::RawInput)
+                || (raw_input.is_none()
+                    && raw_output.is_none()
+                    && previous.source_kind == ToolSummarySourceKind::RawOutput))
+        {
+            return ToolCallPresentation {
+                tool_kind: next_kind,
+                ..previous.clone()
+            };
+        }
+    }
+
+    presentation_from_title(title, next_kind)
+}
+
+fn command_source(raw: Option<&Value>) -> Option<ToolSummarySource> {
+    let command = raw?.get("command")?;
+    match command {
+        Value::String(command) if !command.trim().is_empty() => {
+            Some(ToolSummarySource::Shell(command.clone()))
+        }
+        Value::Array(argv) => {
+            let argv = argv.iter().map(Value::as_str).collect::<Option<Vec<_>>>()?;
+            let first = argv.first()?.trim();
+            if first.is_empty() {
+                return None;
+            }
+            if is_shell_interpreter(first)
+                && let Some(script) = shell_script_argument(&argv[1..])
+            {
+                return Some(ToolSummarySource::Shell(script.to_owned()));
+            }
+            Some(ToolSummarySource::Argv {
+                executable: first.to_owned(),
+                arguments: argv[1..]
+                    .iter()
+                    .map(|argument| (*argument).to_owned())
+                    .collect(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn is_shell_interpreter(value: &str) -> bool {
+    let executable = value.rsplit('/').next().unwrap_or(value);
+    matches!(executable, "sh" | "bash" | "dash" | "zsh")
+}
+
+fn shell_script_argument<'a>(arguments: &'a [&'a str]) -> Option<&'a str> {
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index];
+        if argument == "--" {
+            return None;
+        }
+        if argument == "-c" || argument == "--command" {
+            return arguments.get(index + 1).copied();
+        }
+        if argument.starts_with('-') && !argument.starts_with("--") && argument[1..].contains('c') {
+            return arguments.get(index + 1).copied();
+        }
+        index += 1;
+    }
+    None
+}
+
+fn presentation_from_source(
+    source: ToolSummarySource,
+    source_kind: ToolSummarySourceKind,
+    tool_kind: ToolKind,
+    title: &str,
+) -> ToolCallPresentation {
+    let (source, summary) = match source {
+        ToolSummarySource::Shell(source) => {
+            let bounded = bound_summary_source(&source);
+            let summary = summarize_shell(&bounded)
+                .or_else(|| first_meaningful_token(title))
+                .unwrap_or_else(|| "tool".to_owned());
+            (bounded, summary)
+        }
+        ToolSummarySource::Argv {
+            executable,
+            arguments,
+        } => {
+            let source = std::iter::once(executable.as_str())
+                .chain(arguments.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let bounded = bound_summary_source(&source);
+            let summary = summarize_invocation(&executable, &arguments)
+                .or_else(|| first_meaningful_token(title))
+                .unwrap_or_else(|| "tool".to_owned());
+            (bounded, summary)
+        }
+    };
+    ToolCallPresentation {
+        summary,
+        source,
+        source_kind,
+        tool_kind,
+        summary_version: TOOL_SUMMARY_VERSION,
+    }
+}
+
+fn presentation_from_title(title: &str, tool_kind: ToolKind) -> ToolCallPresentation {
+    let source = title_source(title);
+    let bounded = bound_summary_source(&source);
+    let summary = if tool_kind == ToolKind::Execute {
+        summarize_shell(&bounded)
+            .or_else(|| first_meaningful_token(&bounded))
+            .unwrap_or_else(|| "tool".to_owned())
+    } else {
+        first_meaningful_token(&bounded).unwrap_or_else(|| "tool".to_owned())
+    };
+    ToolCallPresentation {
+        summary,
+        source: bounded,
+        source_kind: ToolSummarySourceKind::Title,
+        tool_kind,
+        summary_version: TOOL_SUMMARY_VERSION,
+    }
+}
+
+fn title_source(title: &str) -> String {
+    let title = title.trim();
+    let title = title
+        .strip_prefix("Running:")
+        .or_else(|| title.strip_prefix("Starting background:"))
+        .map(str::trim)
+        .unwrap_or(title);
+    if let Some(inner) = title
+        .strip_prefix("Execute `")
+        .and_then(|value| value.strip_suffix('`'))
+    {
+        return inner.to_owned();
+    }
+    title.to_owned()
+}
+
+fn first_meaningful_token(value: &str) -> Option<String> {
+    let token = value
+        .split_whitespace()
+        .next()?
+        .trim_matches(|character: char| {
+            !character.is_alphanumeric() && character != '/' && character != '.' && character != '_'
+        });
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.trim_matches(['\'', '"', '`']).to_owned())
+    }
+}
+
+fn bound_summary_source(source: &str) -> String {
+    if source.len() <= TOOL_SUMMARY_SOURCE_BYTES {
+        return source.to_owned();
+    }
+    let mut end = TOOL_SUMMARY_SOURCE_BYTES;
+    while !source.is_char_boundary(end) {
+        end -= 1;
+    }
+    source[..end].to_owned()
+}
+
+fn summarize_shell(source: &str) -> Option<String> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+
+    let mut commands = Vec::new();
+    let mut operators = Vec::new();
+    let mut subshells = Vec::new();
+    if !collect_shell_tokens(root, source, &mut commands, &mut operators, &mut subshells) {
+        return None;
+    }
+    if commands.is_empty() {
+        return None;
+    }
+    commands.sort_by_key(|command| command.start);
+    operators.sort_by_key(|operator| operator.start);
+    subshells.sort_by_key(|subshell| subshell.start);
+
+    let mut tokens = Vec::new();
+    for (index, command) in commands.iter().enumerate() {
+        if index > 0 {
+            let previous = &commands[index - 1];
+            let separator = shell_separator_between(previous, command, &operators);
+            tokens.push(ShellToken {
+                start: separator.start,
+                text: separator.kind,
+                order: 1,
+            });
+        }
+        tokens.push(ShellToken {
+            start: command.start,
+            text: command.summary.clone(),
+            order: 2,
+        });
+    }
+
+    // Parentheses are meaningful only for subshells that contain a command we
+    // retained. Other punctuation, such as case arms and group delimiters,
+    // is structural and must not leak into the compact summary.
+    for subshell in subshells {
+        if !commands
+            .iter()
+            .any(|command| command.start >= subshell.start && command.end <= subshell.end)
+        {
+            continue;
+        }
+        let close = subshell.end.saturating_sub(1);
+        tokens.push(ShellToken {
+            start: subshell.start,
+            text: "(".to_owned(),
+            order: 0,
+        });
+        tokens.push(ShellToken {
+            start: close,
+            text: ")".to_owned(),
+            order: 3,
+        });
+    }
+
+    tokens.sort_by_key(|token| (token.start, token.order));
+    Some(join_shell_tokens(
+        tokens.into_iter().map(|token| token.text).collect(),
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct ShellCommandToken {
+    start: usize,
+    end: usize,
+    summary: String,
+}
+
+#[derive(Debug, Clone)]
+struct ShellOperatorToken {
+    start: usize,
+    kind: String,
+}
+
+#[derive(Debug, Clone)]
+struct ShellSubshell {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ShellToken {
+    start: usize,
+    text: String,
+    order: u8,
+}
+
+fn collect_shell_tokens(
+    node: Node<'_>,
+    source: &str,
+    commands: &mut Vec<ShellCommandToken>,
+    operators: &mut Vec<ShellOperatorToken>,
+    subshells: &mut Vec<ShellSubshell>,
+) -> bool {
+    let kind = node.kind();
+    if matches!(kind, "command_substitution" | "process_substitution") {
+        return true;
+    }
+    if kind == "command" {
+        if let Some(summary) = summarize_command_node(node, source) {
+            commands.push(ShellCommandToken {
+                start: node.start_byte(),
+                end: node.end_byte(),
+                summary,
+            });
+            return true;
+        }
+        return false;
+    }
+    if is_shell_operator(node) {
+        operators.push(ShellOperatorToken {
+            start: node.start_byte(),
+            kind: kind.to_owned(),
+        });
+        return true;
+    }
+
+    if kind == "subshell" {
+        subshells.push(ShellSubshell {
+            start: node.start_byte(),
+            end: node.end_byte(),
+        });
+    }
+
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .all(|child| collect_shell_tokens(child, source, commands, operators, subshells))
+}
+
+fn shell_separator_between(
+    previous: &ShellCommandToken,
+    next: &ShellCommandToken,
+    operators: &[ShellOperatorToken],
+) -> ShellOperatorToken {
+    let mut candidates = operators
+        .iter()
+        .filter(|operator| operator.start >= previous.end && operator.start < next.start);
+    let structural = candidates.clone().find(|operator| operator.kind != ";");
+    if let Some(operator) = structural {
+        return operator.clone();
+    }
+    if let Some(operator) = candidates.find(|operator| operator.kind == ";") {
+        return operator.clone();
+    }
+    ShellOperatorToken {
+        start: previous.end,
+        kind: ";".to_owned(),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct InvocationArgument {
+    value: String,
+    literal: bool,
+}
+
+fn summarize_command_node(node: Node<'_>, source: &str) -> Option<String> {
+    let name = node.child_by_field_name("name")?;
+    let executable = shell_command_name(name, source)?;
+    let mut cursor = node.walk();
+    let arguments = node
+        .children_by_field_name("argument", &mut cursor)
+        .map(|argument| {
+            let value = shell_argument_value(argument, source);
+            InvocationArgument {
+                value: value.clone().unwrap_or_default(),
+                literal: value.is_some(),
+            }
+        })
+        .collect::<Vec<_>>();
+    summarize_invocation_with_literals(&executable, &arguments)
+}
+
+fn shell_command_name(node: Node<'_>, source: &str) -> Option<String> {
+    if contains_dynamic_shell_node(node) {
+        return None;
+    }
+    normalize_command_name(&source[node.byte_range()])
+}
+
+fn shell_argument_value(node: Node<'_>, source: &str) -> Option<String> {
+    if contains_dynamic_shell_node(node) {
+        return None;
+    }
+    let text = source[node.byte_range()].trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(strip_matching_quotes(text).to_owned())
+}
+
+fn contains_dynamic_shell_node(node: Node<'_>) -> bool {
+    if matches!(
+        node.kind(),
+        "expansion"
+            | "simple_expansion"
+            | "command_substitution"
+            | "process_substitution"
+            | "arithmetic_expansion"
+    ) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor).any(contains_dynamic_shell_node)
+}
+
+fn summarize_invocation(executable: &str, arguments: &[String]) -> Option<String> {
+    summarize_invocation_with_literals(
+        executable,
+        &arguments
+            .iter()
+            .map(|value| InvocationArgument {
+                value: strip_matching_quotes(value).to_owned(),
+                literal: true,
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn summarize_invocation_with_literals(
+    executable: &str,
+    arguments: &[InvocationArgument],
+) -> Option<String> {
+    let executable = normalize_command_name(executable)?;
+    let basename = executable
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&executable)
+        .to_owned();
+    let mut words = vec![executable];
+    if !is_summary_executable(&basename) {
+        return Some(words.remove(0));
+    }
+    let mut index = 0;
+
+    if basename == "cargo"
+        && arguments.first().is_some_and(|argument| {
+            argument.literal && argument.value.starts_with('+') && argument.value.len() > 1
+        })
+    {
+        index += 1;
+    }
+
+    let first_verb = loop {
+        let Some(argument) = arguments.get(index) else {
+            return Some(words.remove(0));
+        };
+        if !argument.literal {
+            return Some(words.remove(0));
+        }
+        if argument.value == "--" || argument.value.starts_with('-') {
+            if let Some(consumed) = known_leading_option_arguments(&basename, arguments, index) {
+                index += consumed;
+                continue;
+            }
+            return Some(words.remove(0));
+        }
+        break argument.value.clone();
+    };
+    words.push(first_verb.clone());
+
+    if allows_second_verb(&basename, &first_verb) {
+        let first = index + 1;
+        if let Some(argument) = arguments.get(first)
+            && argument.literal
+            && !argument.value.starts_with('-')
+            && argument.value != "--"
+        {
+            words.push(argument.value.clone());
+        }
+    }
+    Some(words.join(" "))
+}
+
+fn is_summary_executable(basename: &str) -> bool {
+    matches!(
+        basename,
+        "git"
+            | "gh"
+            | "cargo"
+            | "rustup"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "bun"
+            | "uv"
+            | "pip"
+            | "pip3"
+            | "docker"
+            | "podman"
+            | "nice"
+    )
+}
+
+fn allows_second_verb(basename: &str, first_verb: &str) -> bool {
+    match basename {
+        "gh" => matches!(
+            first_verb,
+            "alias"
+                | "auth"
+                | "cache"
+                | "codespace"
+                | "config"
+                | "extension"
+                | "gist"
+                | "gpg-key"
+                | "issue"
+                | "label"
+                | "org"
+                | "pr"
+                | "project"
+                | "release"
+                | "repo"
+                | "ruleset"
+                | "run"
+                | "search"
+                | "secret"
+                | "ssh-key"
+                | "variable"
+                | "workflow"
+        ),
+        "docker" => matches!(
+            first_verb,
+            "buildx"
+                | "compose"
+                | "config"
+                | "context"
+                | "container"
+                | "image"
+                | "manifest"
+                | "network"
+                | "node"
+                | "plugin"
+                | "secret"
+                | "service"
+                | "stack"
+                | "swarm"
+                | "system"
+                | "trust"
+                | "volume"
+        ),
+        "podman" => matches!(
+            first_verb,
+            "artifact"
+                | "container"
+                | "farm"
+                | "generate"
+                | "image"
+                | "machine"
+                | "manifest"
+                | "network"
+                | "play"
+                | "pod"
+                | "secret"
+                | "system"
+                | "volume"
+        ),
+        "uv" => matches!(first_verb, "cache" | "pip" | "python" | "tool"),
+        "rustup" => matches!(
+            first_verb,
+            "component" | "override" | "target" | "toolchain"
+        ),
+        _ => false,
+    }
+}
+
+fn known_leading_option_arguments(
+    basename: &str,
+    arguments: &[InvocationArgument],
+    index: usize,
+) -> Option<usize> {
+    let option = arguments.get(index)?.value.as_str();
+    if option == "--" {
+        if basename == "nice" {
+            return Some(1);
+        }
+        return None;
+    }
+    let (option_name, attached_value) = option
+        .split_once('=')
+        .map_or((option, false), |(name, _)| (name, true));
+    if basename == "nice"
+        && option.starts_with('-')
+        && option.len() > 1
+        && option[1..].parse::<i32>().is_ok()
+    {
+        return Some(1);
+    }
+    if basename == "nice"
+        && option
+            .strip_prefix("-n")
+            .is_some_and(|value| !value.is_empty() && value.parse::<i32>().is_ok())
+    {
+        return Some(1);
+    }
+    let attached_short_value = match basename {
+        "git" => option.starts_with("-C") || option.starts_with("-c"),
+        "gh" => option.starts_with("-R"),
+        "docker" | "podman" => option.starts_with("-H"),
+        _ => false,
+    } && option.len() > 2;
+    let takes_value = match basename {
+        "git" => matches!(
+            option_name,
+            "-C" | "-c"
+                | "--config-env"
+                | "--exec-path"
+                | "--git-dir"
+                | "--namespace"
+                | "--super-prefix"
+                | "--work-tree"
+        ),
+        "gh" => matches!(
+            option_name,
+            "-R" | "--hostname" | "--repo" | "--jq" | "--template"
+        ),
+        "cargo" => matches!(
+            option_name,
+            "--manifest-path" | "--target-dir" | "--config" | "--color"
+        ),
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            matches!(
+                option_name,
+                "--cwd" | "--dir" | "--prefix" | "--registry" | "--userconfig"
+            )
+        }
+        "uv" => matches!(option_name, "--directory" | "--project" | "--python"),
+        "rustup" => matches!(option_name, "--toolchain"),
+        "nice" => {
+            matches!(option_name, "-n" | "--adjustment")
+        }
+        "docker" | "podman" => matches!(
+            option_name,
+            "-H" | "--config" | "--connection" | "--context" | "--host" | "--log-level"
+        ),
+        _ => false,
+    };
+    if attached_short_value {
+        return Some(1);
+    }
+    if attached_value {
+        return takes_value.then_some(1);
+    }
+    if takes_value {
+        return arguments
+            .get(index + 1)
+            .filter(|argument| argument.literal)
+            .map(|_| 2);
+    }
+    let known_flag = match basename {
+        "git" => matches!(
+            option_name,
+            "-p" | "--paginate"
+                | "-P"
+                | "--no-pager"
+                | "--bare"
+                | "--literal-pathspecs"
+                | "--glob-pathspecs"
+                | "--noglob-pathspecs"
+                | "--icase-pathspecs"
+                | "--no-optional-locks"
+                | "--no-advice"
+        ),
+        "gh" => false,
+        "cargo" => matches!(
+            option_name,
+            "-q" | "--quiet" | "-v" | "--verbose" | "--locked" | "--offline" | "--frozen"
+        ),
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            matches!(option_name, "-g" | "--global" | "--silent")
+        }
+        "uv" => matches!(
+            option_name,
+            "-q" | "--quiet" | "-v" | "--verbose" | "--offline"
+        ),
+        "rustup" => matches!(option_name, "-q" | "--quiet" | "-v" | "--verbose"),
+        "docker" | "podman" => matches!(option_name, "-D" | "--debug" | "--tls"),
+        "nice" => false,
+        _ => false,
+    };
+    known_flag.then_some(1)
+}
+
+fn strip_matching_quotes(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(value)
+}
+
+fn is_shell_operator(node: Node<'_>) -> bool {
+    match node.kind() {
+        ";" => true,
+        "&&" | "||" => node.parent().is_some_and(|parent| parent.kind() == "list"),
+        "|" | "|&" => node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "pipeline"),
+        "&" => node.parent().is_none_or(|parent| {
+            !matches!(
+                parent.kind(),
+                "binary_expression" | "unary_expression" | "postfix_expression"
+            )
+        }),
+        _ => false,
+    }
+}
+
+fn normalize_command_name(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.contains('$') || text.contains('`') {
+        return None;
+    }
+    let text = text
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            text.strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(text);
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+fn join_shell_tokens(tokens: Vec<String>) -> String {
+    let mut output = String::new();
+    for token in tokens {
+        match token.as_str() {
+            "(" => {
+                if !output.is_empty() && !output.ends_with(' ') {
+                    output.push(' ');
+                }
+                output.push('(');
+            }
+            ")" => {
+                output = output.trim_end().to_owned();
+                output.push(')');
+            }
+            _ => {
+                if !output.is_empty() && !output.ends_with(' ') && !output.ends_with('(') {
+                    output.push(' ');
+                }
+                output.push_str(&token);
+            }
+        }
+    }
+    output
 }
 
 pub(crate) fn is_false(value: &bool) -> bool {
@@ -722,12 +1590,15 @@ pub fn apply_session_update_to_entries(
         // user chunks would duplicate it during replay.
         SessionUpdate::UserMessageChunk(_) => {}
         SessionUpdate::ToolCall(call) => {
+            let presentation = tool_call_presentation(&call);
             let mut entry = ChatEntry::tool(
                 seq,
                 call.title,
                 Some(call.tool_call_id.to_string()),
                 tool_status(&call.status),
             );
+            entry.tool_summary = Some(presentation.summary.clone());
+            entry.tool_presentation = Some(presentation);
             entry.tool_content = tool_content_details(&call.content, &[], call.raw_output.as_ref());
             entry.tool_diffstats = tool_diff_paths(&call.content);
             entry.tool_locations = tool_location_details(&call.locations);
@@ -740,6 +1611,9 @@ pub fn apply_session_update_to_entries(
                     && entry.tool_call_id.as_deref() == Some(tool_call_id.as_str())
             })?;
             entry.touch(seq);
+            let kind = update.fields.kind;
+            let raw_input = update.fields.raw_input.clone();
+            let raw_output = update.fields.raw_output.clone();
             if let Some(title) = update.fields.title {
                 entry.text = sanitize_terminal_text(&title);
             }
@@ -754,6 +1628,15 @@ pub fn apply_session_update_to_entries(
             if let Some(locations) = update.fields.locations {
                 entry.tool_locations = tool_location_details(&locations);
             }
+            let presentation = update_tool_call_presentation(
+                entry.tool_presentation.as_ref(),
+                &entry.text,
+                kind,
+                raw_input.as_ref(),
+                raw_output.as_ref(),
+            );
+            entry.tool_summary = Some(presentation.summary.clone());
+            entry.tool_presentation = Some(presentation);
         }
         SessionUpdate::Plan(plan) => {
             let lines = plan
@@ -1054,6 +1937,8 @@ pub struct PlanLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v1::ToolCall;
+    use serde_json::json;
 
     #[test]
     fn acp_new_file_diff_counts_each_inserted_line() {
@@ -1094,5 +1979,439 @@ mod tests {
         let mut silent = record(None, Some("SIGTERM"), false);
         silent.output.clear();
         assert_eq!(terminal_output_detail(&silent), "killed by SIGTERM");
+    }
+
+    #[test]
+    fn execute_shell_summary_keeps_commands_and_control_operators() {
+        let call = ToolCall::new("call-1", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": "cd dir && python x.py | cat | wc ; print ok"
+            }));
+
+        let presentation = tool_call_presentation(&call);
+        assert_eq!(presentation.summary, "cd && python | cat | wc ; print");
+        assert_eq!(presentation.source_kind, ToolSummarySourceKind::RawInput);
+    }
+
+    #[test]
+    fn execute_sources_handle_shell_argv_and_ordinary_argv() {
+        let shell = ToolCall::new("shell", "Terminal")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": ["bash", "-lc", "cd dir && python x.py | cat"]
+            }));
+        assert_eq!(tool_call_presentation(&shell).summary, "cd && python | cat");
+
+        let argv = ToolCall::new("argv", "Execute")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": ["python", "-c", "print(1)"]}));
+        assert_eq!(tool_call_presentation(&argv).summary, "python");
+    }
+
+    fn execute_summary(command: serde_json::Value) -> String {
+        let call = ToolCall::new("argv", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(command);
+        tool_call_presentation(&call).summary
+    }
+
+    #[test]
+    fn argv_summary_keeps_registered_command_verbs() {
+        assert_eq!(
+            execute_summary(json!({
+                "command": ["git", "--no-pager", "status", "--short"]
+            })),
+            "git status"
+        );
+        assert_eq!(
+            execute_summary(json!({
+                "command": ["cargo", "+nightly", "test", "--package", "hel"]
+            })),
+            "cargo test"
+        );
+        assert_eq!(
+            execute_summary(json!({
+                "command": ["gh", "--hostname", "github.example", "pr", "list"]
+            })),
+            "gh pr list"
+        );
+        assert_eq!(
+            execute_summary(json!({
+                "command": ["docker", "--context", "work", "compose", "up"]
+            })),
+            "docker compose up"
+        );
+        assert_eq!(
+            execute_summary(json!({
+                "command": ["podman", "machine", "list"]
+            })),
+            "podman machine list"
+        );
+        assert_eq!(
+            execute_summary(json!({
+                "command": ["uv", "--project", "app", "pip", "install", "ruff"]
+            })),
+            "uv pip install"
+        );
+        assert_eq!(
+            execute_summary(json!({
+                "command": ["rustup", "toolchain", "list"]
+            })),
+            "rustup toolchain list"
+        );
+        assert_eq!(
+            execute_summary(json!({
+                "command": ["npm", "--prefix", "web", "run", "build"]
+            })),
+            "npm run"
+        );
+    }
+
+    #[test]
+    fn string_shell_and_argv_summaries_have_the_same_invocation_depth() {
+        let string = ToolCall::new("string", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "git --no-pager status --short"}));
+        let argv = ToolCall::new("argv", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": ["git", "--no-pager", "status", "--short"]}));
+        assert_eq!(
+            tool_call_presentation(&string).summary,
+            tool_call_presentation(&argv).summary
+        );
+    }
+
+    #[test]
+    fn unknown_leading_options_make_verb_position_ambiguous() {
+        assert_eq!(
+            execute_summary(json!({"command": ["git", "--mystery", "status"]})),
+            "git"
+        );
+        assert_eq!(
+            execute_summary(json!({"command": ["cargo", "--mystery", "test"]})),
+            "cargo"
+        );
+    }
+
+    #[test]
+    fn non_whitelisted_commands_keep_only_the_executable() {
+        assert_eq!(
+            execute_summary(json!({"command": ["mytool", "build", "src"]})),
+            "mytool"
+        );
+        assert_eq!(
+            execute_summary(json!({"command": ["mytool", "./script.sh"]})),
+            "mytool"
+        );
+        assert_eq!(
+            execute_summary(json!({"command": ["python", "script.py"]})),
+            "python"
+        );
+    }
+
+    #[test]
+    fn quoted_and_dynamic_shell_verbs_are_distinguished() {
+        let quoted = ToolCall::new("quoted", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "git \"status\""}));
+        assert_eq!(tool_call_presentation(&quoted).summary, "git status");
+
+        let dynamic = ToolCall::new("dynamic", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "git \"$verb\""}));
+        assert_eq!(tool_call_presentation(&dynamic).summary, "git");
+
+        let dynamic_name = ToolCall::new("dynamic-name", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "$command status"}));
+        assert_eq!(tool_call_presentation(&dynamic_name).summary, "Bash");
+    }
+
+    #[test]
+    fn wrappers_remain_direct_invocations() {
+        assert_eq!(
+            tool_call_presentation(
+                &ToolCall::new("sudo", "Bash")
+                    .kind(ToolKind::Execute)
+                    .raw_input(json!({"command": "sudo -n git status"}))
+            )
+            .summary,
+            "sudo"
+        );
+        assert_eq!(
+            tool_call_presentation(
+                &ToolCall::new("env", "Bash")
+                    .kind(ToolKind::Execute)
+                    .raw_input(json!({"command": "env FOO=bar git status"}))
+            )
+            .summary,
+            "env"
+        );
+        assert_eq!(
+            tool_call_presentation(
+                &ToolCall::new("command", "Bash")
+                    .kind(ToolKind::Execute)
+                    .raw_input(json!({"command": "command git status"}))
+            )
+            .summary,
+            "command"
+        );
+    }
+
+    #[test]
+    fn second_verbs_require_a_registered_namespace() {
+        assert_eq!(
+            execute_summary(json!({"command": ["gh", "api", "graphql"]})),
+            "gh api"
+        );
+        assert_eq!(
+            execute_summary(json!({"command": ["docker", "run", "ubuntu"]})),
+            "docker run"
+        );
+        assert_eq!(
+            execute_summary(json!({"command": ["git", "future-verb"]})),
+            "git future-verb"
+        );
+    }
+
+    #[test]
+    fn known_attached_and_short_global_options_are_skipped() {
+        assert_eq!(
+            execute_summary(json!({"command": ["/usr/bin/git", "-Crepo", "status"]})),
+            "/usr/bin/git status"
+        );
+        assert_eq!(
+            execute_summary(json!({"command": ["git", "-c", "core.pager=cat", "status"]})),
+            "git status"
+        );
+        assert_eq!(
+            execute_summary(json!({"command": ["gh", "-Rorg/repo", "pr", "list"]})),
+            "gh pr list"
+        );
+        assert_eq!(
+            execute_summary(json!({"command": ["cargo", "--color=always", "test"]})),
+            "cargo test"
+        );
+        assert_eq!(
+            execute_summary(json!({"command": ["cargo", "--config", "build.jobs=2", "test"]})),
+            "cargo test"
+        );
+    }
+
+    #[test]
+    fn shell_summary_skips_assignments_arguments_and_nested_substitutions() {
+        let call = ToolCall::new("call", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": "FOO=bar env -i bash -c \"echo $(printf hi)\""
+            }));
+        assert_eq!(tool_call_presentation(&call).summary, "env");
+
+        let subshell = ToolCall::new("subshell", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": "(cd dir && python x.py) | cat"
+            }));
+        assert_eq!(
+            tool_call_presentation(&subshell).summary,
+            "(cd && python) | cat"
+        );
+    }
+
+    #[test]
+    fn shell_summary_keeps_list_pipeline_and_background_operators() {
+        let call = ToolCall::new("operators", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": "'printf' '%s' hi >out |& sed s/hi/bye/ || echo failed & wait; cat <in"
+            }));
+
+        assert_eq!(
+            tool_call_presentation(&call).summary,
+            "printf |& sed || echo & wait ; cat"
+        );
+    }
+
+    #[test]
+    fn shell_summary_removes_structural_loop_and_group_separators() {
+        let call = ToolCall::new("compound", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": "for file in a b; do rm \"$file\"; done; mkdir -p out; nice -n 10 python3 script.py"
+            }));
+
+        assert_eq!(
+            tool_call_presentation(&call).summary,
+            "rm ; mkdir ; nice python3"
+        );
+
+        let conditional = ToolCall::new("conditional", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": "if test -f foo; then rm foo; fi; { mkdir bar; echo done; }"
+            }));
+        assert_eq!(
+            tool_call_presentation(&conditional).summary,
+            "test ; rm ; mkdir ; echo"
+        );
+
+        let case_statement = ToolCall::new("case", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": "echo start; case x in a|b) echo branch;; esac; echo done"
+            }));
+        assert_eq!(
+            tool_call_presentation(&case_statement).summary,
+            "echo ; echo ; echo"
+        );
+    }
+
+    #[test]
+    fn shell_summary_handles_a_loop_with_a_leading_pipeline_and_nice() {
+        let call = ToolCall::new("live-loop-shape", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": "cd /tmp && for spec in a b; do set -- $spec; rm \"$spec\"; mkdir -p \"$spec\"; nice -n 10 ./bin/bifrost \"$spec\"; echo \"$spec\"; done; python3 script.py"
+            }));
+
+        assert_eq!(
+            tool_call_presentation(&call).summary,
+            "cd && set ; rm ; mkdir ; nice ./bin/bifrost ; echo ; python3"
+        );
+    }
+
+    #[test]
+    fn shell_summary_inserts_a_separator_after_a_heredoc() {
+        let call = ToolCall::new("heredoc", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": "python3 <<'PYEOF'\nprint(\"x\")\nPYEOF\ngrep -n x file | head"
+            }));
+
+        assert_eq!(
+            tool_call_presentation(&call).summary,
+            "python3 ; grep | head"
+        );
+    }
+
+    #[test]
+    fn materialized_summary_from_an_older_parser_is_repaired() {
+        let source = "python3 <<'PYEOF'\nprint(\"x\")\nPYEOF\ngrep -n x file | head";
+        let call = ToolCall::new("heredoc", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({ "command": source }));
+        let stale = ToolCallPresentation {
+            summary: "python3 grep | head".into(),
+            source: source.into(),
+            source_kind: ToolSummarySourceKind::RawInput,
+            tool_kind: ToolKind::Execute,
+            summary_version: 0,
+        };
+
+        let repaired = materialized_tool_call_presentation(Some(&stale), &call);
+        assert_eq!(repaired.summary, "python3 ; grep | head");
+        assert_eq!(repaired.summary_version, TOOL_SUMMARY_VERSION);
+
+        let mut current = repaired;
+        current.summary = "stored current summary".into();
+        assert_eq!(
+            materialized_tool_call_presentation(Some(&current), &call).summary,
+            "stored current summary"
+        );
+    }
+
+    #[test]
+    fn nice_summary_skips_its_known_adjustment_options() {
+        for command in [
+            vec!["nice", "-n", "10", "python3", "script.py"],
+            vec!["nice", "--adjustment", "10", "python3", "script.py"],
+            vec!["nice", "--adjustment=10", "python3", "script.py"],
+            vec!["nice", "-10", "python3", "script.py"],
+            vec!["nice", "-n10", "python3", "script.py"],
+            vec!["nice", "--", "python3", "script.py"],
+        ] {
+            assert_eq!(execute_summary(json!({"command": command})), "nice python3");
+        }
+
+        let string = ToolCall::new("nice-string", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "nice -n 10 python3 script.py"}));
+        assert_eq!(tool_call_presentation(&string).summary, "nice python3");
+    }
+
+    #[test]
+    fn execute_summary_bounds_the_retained_source_before_parsing() {
+        let command = format!("echo {}", "argument".repeat(TOOL_SUMMARY_SOURCE_BYTES));
+        let call = ToolCall::new("bounded", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({ "command": command }));
+
+        let presentation = tool_call_presentation(&call);
+        assert_eq!(presentation.source.len(), TOOL_SUMMARY_SOURCE_BYTES);
+        assert_eq!(presentation.summary, "echo");
+    }
+
+    #[test]
+    fn non_execute_titles_use_the_first_meaningful_token() {
+        let call = ToolCall::new("read", "Read src/lib.rs").kind(ToolKind::Read);
+        let presentation = tool_call_presentation(&call);
+        assert_eq!(presentation.summary, "Read");
+        assert_eq!(presentation.source_kind, ToolSummarySourceKind::Title);
+    }
+
+    #[test]
+    fn title_wrappers_and_malformed_shell_fall_back_safely() {
+        let wrapped = ToolCall::new("wrapped", "Running: ls -la").kind(ToolKind::Execute);
+        assert_eq!(tool_call_presentation(&wrapped).summary, "ls");
+
+        let malformed = ToolCall::new("bad", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "cd && ("}));
+        assert_eq!(tool_call_presentation(&malformed).summary, "Bash");
+    }
+
+    #[test]
+    fn explicit_empty_raw_input_drops_a_stale_raw_summary() {
+        let initial = ToolCall::new("call", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "python script.py"}));
+        let previous = tool_call_presentation(&initial);
+        let empty_input = json!({"command": null});
+        let updated = update_tool_call_presentation(
+            Some(&previous),
+            "Running: ls -la",
+            None,
+            Some(&empty_input),
+            None,
+        );
+        assert_eq!(updated.summary, "ls");
+        assert_eq!(updated.source_kind, ToolSummarySourceKind::Title);
+
+        let output = json!({"command": "cat result.txt"});
+        let updated = update_tool_call_presentation(
+            Some(&previous),
+            "Running: ls -la",
+            None,
+            Some(&empty_input),
+            Some(&output),
+        );
+        assert_eq!(updated.summary, "cat");
+        assert_eq!(updated.source_kind, ToolSummarySourceKind::RawOutput);
+
+        let output_initial = ToolCall::new("output", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_output(json!({"command": "python result.py"}));
+        let output_previous = tool_call_presentation(&output_initial);
+        let empty_output = json!({"command": null});
+        let updated = update_tool_call_presentation(
+            Some(&output_previous),
+            "Running: ls -la",
+            None,
+            None,
+            Some(&empty_output),
+        );
+        assert_eq!(updated.summary, "ls");
+        assert_eq!(updated.source_kind, ToolSummarySourceKind::Title);
     }
 }

@@ -14,6 +14,7 @@ Running Mj's tests must not leave detached controller processes behind or delete
 - [x] (2026-09-08) Focused logging (normal and panic cleanup), concurrent-start/store-divergence, and PTY tests pass.
 - [x] (2026-09-08) Complete tests and Clippy pass, including bounded stop acknowledgement; final focused tests cover real PTY panic unwinding. Three repeated runs of each panic regression pass.
 - [x] (2026-09-08) Commit cleanup as 63b2ec37, merge upstream, and push separately to origin/master.
+- [x] (2026-09-09) Add an owner-process backstop after finding 44 more stale test daemons: `MJ_DAEMON_OWNER_PID` makes `daemon-run` watch the test process and shut down when it disappears, and every test site that starts a daemon now sets it.
 
 ## Surprises & Discoveries
 
@@ -28,6 +29,25 @@ Use the existing `ManagementClient::stop_and_wait` for the CLI stop command, and
 Use one integration-test storage guard for fixtures that can implicitly start daemons. Its destructor stops and waits before dropping the TempDir. A cleanup failure retains the directory and fails the test without causing a second panic during unwinding. Stop PTY children before their storage guard runs, and clean every fixture rather than relying on idle shutdown. Explicit daemon children in store-divergence tests already have child reaping and should retain that ownership.
 
 Do not increase host task limits or change normal runtime worker counts to hide leaked ownership. Validation commands may bound their own concurrency with CARGO_BUILD_JOBS=4, RUST_TEST_THREADS=4, and TOKIO_WORKER_THREADS=4.
+
+Fixture `Drop` reaping only works when teardown actually runs. A test process
+killed without unwinding -- Ctrl-C on `cargo test`, a harness timeout, an
+out-of-memory kill, an abort -- runs no destructor, so its daemon survives with
+nothing left to stop it. Idle exit does not retire those daemons either,
+because it is gated on `ever_attached` and many test daemons are never attached
+to. The daemon must therefore own its own lifetime.
+
+Add `MJ_DAEMON_OWNER_PID`. When it is set, `daemon-run` polls that process
+every 500 ms with the existing `process_is_alive` helper and, when the owner is
+gone, breaks out of the main loop exactly as cancellation does, so the normal
+shutdown runs: metadata removed, store lock released, workers stopped. A value
+that does not parse, or that names a process already dead at startup, is a
+startup error raised before the store is locked. The check is independent of
+`MJ_DAEMON_EXIT_WHEN_IDLE`. `connect_or_start` inherits the client environment
+into the spawned daemon, so setting the variable on an `mj` client is enough.
+Tests set it through one helper, `common::own_test_daemons`, at every site that
+runs `mj` against a temporary store. Fixture `Drop` reaping stays; the owner
+watch is the backstop for when `Drop` never runs, not a replacement for it.
 
 ## Context and Orientation
 

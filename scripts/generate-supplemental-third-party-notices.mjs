@@ -40,6 +40,11 @@ const auditedLinksPackages = new Set([
   // script does not link or ship a native library.
   "rayon-core",
   "ring",
+  // tree-sitter compiles its MIT-licensed C runtime from the Cargo package;
+  // tree-sitter-language uses `links` only to enforce one language ABI and
+  // emits wasm source metadata without linking another native payload.
+  "tree-sitter",
+  "tree-sitter-language",
   "wasm-bindgen-shared",
   // Vendored zstd has its own BSD-3-Clause license, included below.
   "zstd-sys",

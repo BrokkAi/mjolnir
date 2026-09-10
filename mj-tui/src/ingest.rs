@@ -2112,6 +2112,7 @@ mod tests {
                 }),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
+                presentation: None,
             },
         });
         let first = PreparedMaterializedSessionDetail::from_materialized(
@@ -2132,7 +2133,7 @@ mod tests {
         assert_eq!(second.projection.tool_diffstats.len(), 1);
         assert_eq!(
             second.transcript.browser_transcript(None).entries[0].lines,
-            ["Edit src/lib.rs", "/workspace/src/lib.rs  +1 −0"]
+            ["Edit", "/workspace/src/lib.rs  +1 −0"]
         );
     }
 
@@ -2254,6 +2255,7 @@ mod tests {
                 }),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
+                presentation: None,
             },
         ));
         apply_materialized_transcript(&mut dashboard, transcript.clone());

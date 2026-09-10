@@ -1986,6 +1986,7 @@ async fn create_bundle(
 #[derive(Debug, Deserialize)]
 struct ConversationQuery {
     after_seq: Option<u64>,
+    presentation_key: Option<String>,
 }
 
 async fn conversation(
@@ -2009,11 +2010,20 @@ async fn conversation(
         .get(&session_id)
         .ok_or_else(|| ApiError::not_found("conversation unavailable"))?;
     let mut response = transcript.clone();
+    // Presentation grouping can remove or reorder rows without moving the
+    // relay cursor. A client carrying a key from the previous Rich topology
+    // must replace its append-only DOM when that topology changed.
+    let presentation_mismatch = query
+        .presentation_key
+        .as_deref()
+        .is_some_and(|key| key != transcript.presentation_key);
     if let Some(after) = query.after_seq {
-        response.reset = after < response.window_start_seq;
+        response.reset = presentation_mismatch || after < response.window_start_seq;
         if !response.reset {
             response.entries.retain(|entry| entry.updated_seq > after);
         }
+    } else if presentation_mismatch {
+        response.reset = true;
     }
     Ok(Json(response))
 }
@@ -6825,6 +6835,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
     async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
         let transcript = BrowserTranscript {
             latest_seq: 8,
+            presentation_key: "key-1".into(),
             window_start_seq: 3,
             reset: false,
             entries: vec![
@@ -6858,9 +6869,10 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
             app_with_conversations(BTreeMap::from([("session-1".into(), transcript)]));
         let cookie = login_cookie(&app).await;
         let response = app
+            .clone()
             .oneshot(
                 Request::get("/api/conversations/session-1?after_seq=3")
-                    .header(COOKIE, cookie)
+                    .header(COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -6873,12 +6885,29 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         assert_eq!(body["reset"], false);
         assert_eq!(body["entries"].as_array().unwrap().len(), 1);
         assert_eq!(body["entries"][0]["lines"][0], "live");
+
+        let response = app
+            .oneshot(
+                Request::get("/api/conversations/session-1?after_seq=8&presentation_key=stale-key")
+                    .header(COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["reset"], true);
+        assert_eq!(body["presentation_key"], "key-1");
+        assert_eq!(body["entries"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
         let transcript = BrowserTranscript {
             latest_seq: 1,
+            presentation_key: "key-1".into(),
             window_start_seq: 1,
             reset: false,
             entries: vec![BrowserTranscriptEntry {

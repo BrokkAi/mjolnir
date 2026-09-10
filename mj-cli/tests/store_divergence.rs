@@ -70,7 +70,7 @@ fn daemon_exits_when_its_store_is_migrated_underneath_it() {
     // No MJ_DAEMON_EXIT_WHEN_IDLE: an idle exit would end this process for a
     // reason that has nothing to do with the store.
     let mut daemon = ReapChild(Some(
-        Command::new(env!("CARGO_BIN_EXE_mj"))
+        common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
             .arg("daemon-run")
             .env("MJ_CONFIG_DIR", &config_directory)
             .env("MJ_DATA_DIR", &data_directory)
@@ -100,7 +100,7 @@ fn daemon_exits_when_its_store_is_migrated_underneath_it() {
     }
     assert!(metadata.exists(), "the daemon never published its endpoint");
     let mut readiness = ReapChild(Some(
-        Command::new(env!("CARGO_BIN_EXE_mj"))
+        common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
             .args(["daemon", "status"])
             .env("MJ_CONFIG_DIR", &config_directory)
             .env("MJ_DATA_DIR", &data_directory)
@@ -181,7 +181,7 @@ fn post_publication_error_runs_the_daemon_epilogue() {
         .expect("create invalid test hook directory");
     let metadata = data_directory.join("daemon.json");
     let mut daemon = ReapChild(Some(
-        Command::new(env!("CARGO_BIN_EXE_mj"))
+        common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
             .arg("daemon-run")
             .env("MJ_CONFIG_DIR", &config_directory)
             .env("MJ_DATA_DIR", &data_directory)
@@ -234,7 +234,7 @@ fn concurrent_starts_wait_for_controller_ownership_before_launching() {
     let mut clients = (0..2)
         .map(|_| {
             ReapChild(Some(
-                Command::new(env!("CARGO_BIN_EXE_mj"))
+                common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
                     .args(["daemon", "restart"])
                     .env("MJ_CONFIG_DIR", &config_directory)
                     .env("MJ_DATA_DIR", &data_directory)
@@ -284,5 +284,102 @@ fn concurrent_starts_wait_for_controller_ownership_before_launching() {
     assert!(
         !log.contains("another Mjolnir controller is already using"),
         "{log}"
+    );
+}
+
+/// Fixture teardown cannot run when a test process dies without unwinding, so
+/// a daemon started for a test must leave when the process it belongs to does.
+#[test]
+fn daemon_exits_when_its_owner_process_exits() {
+    let (_storage, config_directory, data_directory) = configured_storage();
+
+    let mut owner = ReapChild(Some(
+        Command::new("sleep")
+            .arg("300")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the owner process"),
+    ));
+    let owner_pid = owner.child_mut().id();
+
+    let mut daemon = ReapChild(Some(
+        Command::new(env!("CARGO_BIN_EXE_mj"))
+            .arg("daemon-run")
+            .env("MJ_CONFIG_DIR", &config_directory)
+            .env("MJ_DATA_DIR", &data_directory)
+            .env("MJ_DAEMON_OWNER_PID", owner_pid.to_string())
+            .env_remove("MJ_DAEMON_EXIT_WHEN_IDLE")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the Mjolnir daemon"),
+    ));
+
+    let metadata = data_directory.join("daemon.json");
+    let deadline = Instant::now() + METADATA_WAIT;
+    while Instant::now() < deadline && !metadata.exists() {
+        assert!(
+            daemon
+                .child_mut()
+                .try_wait()
+                .expect("poll the daemon")
+                .is_none(),
+            "the daemon exited before it was ready"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(metadata.exists(), "the daemon never published its endpoint");
+
+    owner.child_mut().kill().expect("kill the owner process");
+    owner.child_mut().wait().expect("reap the owner process");
+
+    let deadline = Instant::now() + EXIT_WAIT;
+    let status = loop {
+        if let Some(status) = daemon.child_mut().try_wait().expect("poll the daemon") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the daemon outlived the process that owned it"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        status.success(),
+        "owner-triggered shutdown failed: {status}"
+    );
+    assert!(
+        !metadata.exists(),
+        "owner-triggered shutdown left daemon metadata behind"
+    );
+}
+
+#[test]
+fn an_unusable_owner_pid_is_a_startup_error() {
+    let (_storage, config_directory, data_directory) = configured_storage();
+
+    let output = hel::hel_subprocess::run_with_input(
+        Command::new(env!("CARGO_BIN_EXE_mj"))
+            .arg("daemon-run")
+            .env("MJ_CONFIG_DIR", &config_directory)
+            .env("MJ_DATA_DIR", &data_directory)
+            .env("MJ_DAEMON_OWNER_PID", "notanumber")
+            .env_remove("MJ_DAEMON_EXIT_WHEN_IDLE"),
+        &[],
+    )
+    .expect("run the daemon with a bad owner pid");
+
+    assert!(!output.status.success(), "a bad owner pid started a daemon");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("MJ_DAEMON_OWNER_PID"),
+        "the failure did not name the variable: {stderr}"
+    );
+    assert!(
+        !data_directory.join("daemon.json").exists(),
+        "the rejected daemon still published its endpoint"
     );
 }
