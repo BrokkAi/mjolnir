@@ -432,10 +432,9 @@ impl ViewerSnapshot {
             })
             .collect();
         let profiles = config
-            .profiles
-            .iter()
+            .enabled_profiles()
             .map(|(id, profile)| ViewerProfile {
-                id: id.clone(),
+                id: id.to_owned(),
                 harness_kind: profile.kind.id().into(),
                 quota: None,
             })
@@ -1423,6 +1422,7 @@ pub struct PreflightRequest {
     pub bundle_id: String,
     pub target_id: String,
     pub project_directory: Option<PathBuf>,
+    pub remote_repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
     pub reply: tokio::sync::oneshot::Sender<Result<PreflightNew, PreflightFailure>>,
 }
 
@@ -1471,6 +1471,8 @@ pub struct PreflightRepository {
 pub struct PreflightNew {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub remote_repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
     #[serde(default)]
     pub dirty_repositories: Vec<String>,
     #[serde(default)]
@@ -2144,6 +2146,8 @@ async fn stop_background_task(
 #[serde(deny_unknown_fields)]
 struct PreflightNewRequest {
     #[serde(default)]
+    remote_repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+    #[serde(default)]
     workspace_id: String,
     profile_id: String,
     bundle_id: String,
@@ -2179,6 +2183,7 @@ async fn preflight_new(
             bundle_id: request.bundle_id,
             target_id: request.target_id,
             project_directory: request.project_directory,
+            remote_repairs: request.remote_repairs,
             reply,
         })
         .await
@@ -3685,6 +3690,7 @@ mod tests {
             profiles: BTreeMap::from([(
                 "codex-1".into(),
                 HarnessProfile {
+                    enabled: true,
                     context_window_bytes: None,
                     kind: HarnessKind::Codex,
                     home: "/highly/secret/codex".into(),
@@ -4539,6 +4545,18 @@ mod tests {
         assert!(!json.contains("secret.registry"));
         assert!(!json.contains("native-secret-id"));
         assert!(json.contains("\"has_error\":true"));
+    }
+
+    #[test]
+    fn public_snapshot_keeps_running_sessions_but_omits_disabled_profiles() {
+        let (mut config, state) = sample_config_state();
+        config.profiles.get_mut("codex-1").unwrap().enabled = false;
+
+        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
+
+        assert!(snapshot.profiles.is_empty());
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].profile_id, "codex-1");
     }
 
     #[test]
@@ -5458,6 +5476,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
             .reply
             .send(Ok(PreflightNew {
                 project_directory: Some("/remote/project".into()),
+                remote_repairs: Vec::new(),
                 dirty_repositories: Vec::new(),
                 remote_repositories: Vec::new(),
                 local_changes_excluded: false,
@@ -5555,6 +5574,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
             .reply
             .send(Ok(PreflightNew {
                 project_directory: None,
+                remote_repairs: Vec::new(),
                 dirty_repositories: Vec::new(),
                 remote_repositories: vec![PreflightRepository {
                     id: "hel".into(),
@@ -6529,6 +6549,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         config.profiles.insert(
             "claude-1".into(),
             HarnessProfile {
+                enabled: true,
                 context_window_bytes: None,
                 kind: HarnessKind::Claude,
                 home: "/secret/claude".into(),

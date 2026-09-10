@@ -72,7 +72,7 @@ fn generate_documentation_screenshots() {
     capture(
         &output.join("setup.svg"),
         "Mjolnir Setup",
-        "The compact Setup modal with Interface, Advanced, new session defaults, agent accounts, runtimes, projects, review, and web settings.",
+        "The compact Setup modal with Interface, Advanced, New Session Defaults, Agent Profiles, Machines and Runtimes, Projects, Code Review, and Web Access settings.",
         &mut setup,
     );
 
@@ -104,6 +104,7 @@ fn documentation_dashboard() -> DashboardState {
     config.profiles.insert(
         "kimi-1".into(),
         HarnessProfile {
+            enabled: true,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
             environment: BTreeMap::new(),

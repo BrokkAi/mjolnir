@@ -31,7 +31,7 @@ Mjolnir appends `config.toml` to it.
 Every current file starts with the required schema version:
 
 ```toml
-version = 7
+version = 8
 ```
 
 The only accepted top-level keys are:
@@ -55,7 +55,7 @@ The terminal Setup screen groups `sessions_side`, `spinner`, and `theme` under
 **Interface**. This is only a presentation grouping; the fields remain at the
 top level in `config.toml`.
 
-A missing or empty file is treated as an empty version 7 configuration. Older
+A missing or empty file is treated as an empty version 8 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -190,6 +190,7 @@ Each profile names one harness installation or account on the controller:
 [profiles.codex-work]
 kind = "codex"
 home = "/home/me/.codex-work"
+# enabled = false
 # context_window_bytes = 131072
 
 [profiles.codex-work.environment]
@@ -199,6 +200,7 @@ home = "/home/me/.codex-work"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
 | `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `deepseek`, or `muse`. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
 | `environment` | table of strings | no | empty | Environment passed to harness/profile commands. Keys cannot be blank or contain `=`. |
@@ -497,7 +499,7 @@ This example contains the sections most installations need. Add other target
 kinds from the examples above rather than mixing fields between variants.
 
 ```toml
-version = 7
+version = 8
 
 [phone]
 enabled = true

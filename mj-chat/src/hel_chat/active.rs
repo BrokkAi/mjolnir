@@ -1174,10 +1174,9 @@ impl ActiveChat {
         };
         context
             .config
-            .profiles
-            .iter()
+            .enabled_profiles()
             .map(|(id, profile)| ReviewerProfileChoice {
-                id: id.clone(),
+                id: id.to_owned(),
                 harness: profile.kind.id().to_owned(),
             })
             .collect()
@@ -1861,7 +1860,7 @@ impl ActiveChat {
         // waterfall reopens only when starting it that way fails.
         let remembered = defaults
             .profile(&workspace_id)
-            .filter(|id| context.config.profiles.contains_key(*id))
+            .filter(|id| context.config.enabled_profile(id).is_some())
             .map(|profile_id| ReviewerSelection {
                 profile_id: profile_id.to_owned(),
                 model: remembered_value(defaults.model(&workspace_id, profile_id)),
@@ -4462,6 +4461,7 @@ mod tests {
                     (
                         (*id).to_owned(),
                         hel::hel_config::HarnessProfile {
+                            enabled: true,
                             kind: *kind,
                             home: std::path::PathBuf::from("/profiles").join(id),
                             environment: BTreeMap::new(),
@@ -4491,20 +4491,22 @@ mod tests {
     /// holds. A chat opened without that context offers nothing, which leaves
     /// `/review` and the second opinion with no harness to run.
     #[tokio::test]
-    async fn reviewer_profiles_lists_the_context_profiles_for_the_waterfall() {
+    async fn reviewer_profiles_lists_only_enabled_context_profiles_for_the_waterfall() {
         use hel::hel_config::HarnessKind;
 
         let fixture = mj_client::session::replacement_session_test_fixture("session-profiles", 80);
+        let mut context = chat_context(
+            "session-profiles",
+            &[
+                ("codex-1", HarnessKind::Codex),
+                ("claude-1", HarnessKind::Claude),
+            ],
+        );
+        context.config.profiles.get_mut("claude-1").unwrap().enabled = false;
         let chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
-            Some(chat_context(
-                "session-profiles",
-                &[
-                    ("codex-1", HarnessKind::Codex),
-                    ("claude-1", HarnessKind::Claude),
-                ],
-            )),
+            Some(context),
             fixture.control,
             SessionHeaderIdentity::default(),
             String::new(),
@@ -4517,13 +4519,7 @@ mod tests {
             .map(|choice| (choice.id, choice.harness))
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            offered,
-            vec![
-                ("claude-1".to_owned(), "claude".to_owned()),
-                ("codex-1".to_owned(), "codex".to_owned()),
-            ]
-        );
+        assert_eq!(offered, vec![("codex-1".to_owned(), "codex".to_owned())]);
     }
 
     #[tokio::test]

@@ -161,6 +161,7 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             hel::hel_config::HarnessProfile {
+                enabled: true,
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: directory.join("codex"),
                 environment: Default::default(),

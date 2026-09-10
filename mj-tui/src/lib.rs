@@ -128,6 +128,11 @@ pub enum DashboardAction {
     PreflightCreateSession {
         launch: Box<DashboardAction>,
     },
+    RepairRepositoryRemotes {
+        bundle_id: String,
+        repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+        retry: Box<DashboardAction>,
+    },
     CompleteMountSource {
         target_template_id: String,
         prefix: String,
@@ -2007,6 +2012,7 @@ impl DashboardState {
         self.config
             .profiles
             .iter()
+            .filter(|(_, profile)| profile.enabled)
             .map(|(id, profile)| (id, profile.kind))
             .collect()
     }
@@ -2042,7 +2048,7 @@ impl DashboardState {
     }
 
     pub(crate) fn config_is_empty(&self) -> bool {
-        self.config.profiles.is_empty() || self.config.targets.is_empty()
+        self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty()
     }
 
     /// Identity for supervised launch checks; cancellation invalidates late replies.
@@ -2078,7 +2084,7 @@ impl DashboardState {
         match focus {
             Focus::Sessions => self.visible_session_indices().len(),
             Focus::Targets => self.capacity_details.len(),
-            Focus::Quota => self.config.profiles.len(),
+            Focus::Quota => self.config.enabled_profiles().count(),
             Focus::Workspaces | Focus::Prompt => 0,
         }
     }
@@ -2190,7 +2196,7 @@ impl DashboardState {
             .retain(|key| project_keys.contains(key));
         self.quota_index = self
             .quota_index
-            .min(self.config.profiles.len().saturating_sub(1));
+            .min(self.config.enabled_profiles().count().saturating_sub(1));
         self.capacity_index = self
             .capacity_index
             .min(self.capacity_details.len().saturating_sub(1));
@@ -2244,6 +2250,14 @@ pub(crate) fn nth_key<T>(map: &BTreeMap<String, T>, index: usize) -> String {
         .nth(index)
         .cloned()
         .expect("wizard is only opened for non-empty configuration")
+}
+
+pub(crate) fn nth_enabled_profile(config: &HelConfig, index: usize) -> String {
+    config
+        .enabled_profiles()
+        .nth(index)
+        .map(|(id, _)| id.to_owned())
+        .expect("wizard is only opened with an enabled profile")
 }
 
 fn is_paste_shortcut(key: KeyEvent) -> bool {

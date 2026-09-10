@@ -1227,6 +1227,7 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             HarnessProfile {
+                enabled: true,
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/dev/.codex"),
                 environment: BTreeMap::new(),

@@ -1377,6 +1377,7 @@ mod tests {
     #[test]
     fn login_commands_match_each_harness_cli() {
         let profile = |kind: HarnessKind| HarnessProfile {
+            enabled: true,
             kind,
             home: PathBuf::from("/home/user/.config"),
             environment: Default::default(),

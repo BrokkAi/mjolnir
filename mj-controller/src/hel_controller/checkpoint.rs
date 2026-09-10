@@ -3999,6 +3999,7 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             HarnessProfile {
+                enabled: true,
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: profile_home,
                 environment: BTreeMap::new(),

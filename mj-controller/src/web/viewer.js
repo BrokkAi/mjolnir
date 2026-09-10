@@ -1394,18 +1394,30 @@ async function preflightNew() {
   pendingNewPreflightController = controller;
   renderNewForm();
   try {
-    const answer = await request('/api/preflight/new', {
-      method: 'POST',
-      signal: controller.signal,
-      body: JSON.stringify({
-        workspace_id: selectedWorkspaceId(),
-        profile_id: draft.profileId,
-        bundle_id: draft.bundleId,
-        target_id: draft.targetId,
-        project_directory: bare ? draft.projectDirectory : null,
-      }),
-    });
-    if (controller.signal.aborted || newDraft !== draft) return false;
+    let remoteRepairs = [];
+    let answer;
+    while (true) {
+      answer = await request('/api/preflight/new', {
+        method: 'POST',
+        signal: controller.signal,
+        body: JSON.stringify({
+          workspace_id: selectedWorkspaceId(),
+          profile_id: draft.profileId,
+          bundle_id: draft.bundleId,
+          target_id: draft.targetId,
+          project_directory: bare ? draft.projectDirectory : null,
+          remote_repairs: remoteRepairs,
+        }),
+      });
+      if (controller.signal.aborted || newDraft !== draft) return false;
+      remoteRepairs = answer.remote_repairs || [];
+      if (!remoteRepairs.length) break;
+      const details = remoteRepairs.map(repair =>
+        `${repair.path}: branch ${repair.branch} tracks missing remote ${repair.missing_remote}.\nSet its tracking remote to ${repair.replacement_remote}.\nFetch: ${repair.fetch_url}\nPush: ${repair.push_urls.join(', ')}`
+      ).join('\n\n');
+      if (!confirm(`Repair Git tracking and continue?\n\n${details}`)) return false;
+      if (controller.signal.aborted || newDraft !== draft) return false;
+    }
     if (bare && answer.project_directory) {
       draft.projectDirectory = answer.project_directory;
       draft.projectDirectories[draft.targetId] = answer.project_directory;

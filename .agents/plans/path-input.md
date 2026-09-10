@@ -57,3 +57,7 @@ Use existing crates only. Shared interpretation accepts `&Path` and an explicit 
 Revision: completed widget integration, remote cancellation, completion preservation, and account/mount/web regression coverage. Recorded the unrelated transient subprocess test failure before repeating validation.
 
 Revision: recorded successful validation and the required upstream integration. No host mounts or build storage were changed.
+
+Revision: feature checkpoint eb9a1406 is committed. Merging origin/master preserves agent-profile enablement and the Git-remote repair preflight loop; conflicts combine the new resolved project_directory response with upstream remote_repairs. Integration validation remains pending.
+
+Validation after merging 6be22ae4: all 2,962 active Rust tests passed with one test thread, strict Clippy passed, and all 26 standalone web tests passed. The longer core run waited for an ext4 journal write; NFS TEST_STATEID stayed at 19. Master advanced again during validation, so the next step is to inspect and integrate its latest commits before publication.

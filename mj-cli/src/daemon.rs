@@ -3581,14 +3581,14 @@ pub(crate) async fn connect_or_start() -> Result<DaemonClient> {
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExecutableFileIdentity {
     device: u64,
     inode: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn executable_file_identity(path: &Path) -> std::io::Result<ExecutableFileIdentity> {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -3619,20 +3619,57 @@ fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
     Ok(Some(current == daemon))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
+    let process_id = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[process_id]),
+        true,
+        sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+    );
+    let Some(process) = system.process(process_id) else {
+        return Ok(None);
+    };
+    let Some(path) = process.exe() else {
+        return Ok(None);
+    };
+    let current = std::env::current_exe().context("find development client executable")?;
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(false)),
+        Err(error) => return Err(error).context("inspect daemon executable"),
+    };
+    // macOS reports a pathname, not Linux's reference to the running inode.
+    // A newer file at that same pathname also means the daemon is stale.
+    let modified = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    Ok(Some(
+        executable_file_identity(&current)? == executable_file_identity(path)?
+            && modified <= process.start_time(),
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 static DEVELOPMENT_DAEMON_REFRESH: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 async fn maybe_replace_stale_development_daemon() -> Result<()> {
     if std::env::var_os(DEV_RESTART_STALE_DAEMON_ENV).is_none() {
         return Ok(());
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     DEVELOPMENT_DAEMON_REFRESH
         .get_or_try_init(|| async {
             let Ok(metadata) = read_metadata_any() else {
                 return Ok(());
             };
-            if daemon_uses_current_executable(metadata.pid)? != Some(false) {
+            let pid = metadata.pid;
+            let current = tokio::task::spawn_blocking(move || daemon_uses_current_executable(pid))
+                .await
+                .context("inspect development daemon task failed")??;
+            if current != Some(false) {
                 return Ok(());
             }
             eprintln!(
@@ -5131,7 +5168,7 @@ mod tests {
         drop(replacement);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn executable_identity_detects_an_nfs_style_replaced_binary() {
         let directory = tempfile::tempdir().unwrap();
@@ -5156,7 +5193,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn current_process_is_running_the_current_executable() {
         assert_eq!(

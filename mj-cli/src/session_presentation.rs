@@ -114,6 +114,7 @@ mod tests {
         config.profiles.insert(
             "profile-1".into(),
             HarnessProfile {
+                enabled: true,
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/profiles/profile-1"),
                 environment: BTreeMap::new(),

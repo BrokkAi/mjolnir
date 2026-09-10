@@ -450,7 +450,7 @@ fn render_combined_themed(
             SupportPane::Quota,
             PaneDimensions {
                 minimized: SUMMARY_ROW,
-                full: table_height(dashboard.config.profiles.len()),
+                full: table_height(dashboard.config.enabled_profiles().count()),
                 standard_cap: area.height / 4,
             },
         ),

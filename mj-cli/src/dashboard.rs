@@ -2531,13 +2531,17 @@ impl DashboardContext {
             resume_profile_placeholders(
                 self.controller
                     .config
-                    .profiles
-                    .iter()
-                    .map(|(id, profile)| (id.clone(), profile.kind)),
+                    .enabled_profiles()
+                    .map(|(id, profile)| (id.to_owned(), profile.kind)),
             ),
         );
         let discovery_id = self.import_discovery_id;
-        for (profile_id, profile) in self.controller.config.profiles.clone() {
+        for (profile_id, profile) in self
+            .controller
+            .config
+            .enabled_profiles()
+            .map(|(id, profile)| (id.to_owned(), profile.clone()))
+        {
             let updates = self.import_updates_tx.clone();
             tokio::task::spawn_blocking(move || {
                 let completed = crate::import::discover_import_profile(
@@ -3125,6 +3129,7 @@ mod tests {
             config.profiles.insert(
                 id.into(),
                 hel::hel_config::HarnessProfile {
+                    enabled: true,
                     context_window_bytes: None,
                     kind,
                     home: std::path::PathBuf::from("/profiles").join(id),

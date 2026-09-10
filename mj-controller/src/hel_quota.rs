@@ -62,6 +62,8 @@ impl QuotaManager {
             .iter()
             .map(|request| request.profile_id.clone())
             .collect::<BTreeSet<_>>();
+        self.reports
+            .retain(|profile_id, _| batch.contains(profile_id));
         let mut tasks = tokio::task::JoinSet::new();
         for request in requests {
             let client = self.codex_clients.remove(&request.profile_id);

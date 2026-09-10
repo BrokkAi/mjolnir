@@ -18,7 +18,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
         }
         "profiles" if path.len() == 2 => {
-            json!({"kind":"codex","home":"","environment":{},"context_window_bytes":null})
+            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null})
         }
         "targets" if path.len() == 2 => {
             target_defaults(value["kind"].as_str().unwrap_or("local-bare"))
@@ -96,7 +96,7 @@ pub(super) fn expand(value: &mut Value, path: &mut Vec<String>) {
 
 pub(super) fn label(key: &str) -> String {
     match key {
-        "startup" => "New session defaults",
+        "startup" => "New Session Defaults",
         "interface" => "Interface",
         "sessions_side" => "Session sidebar position",
         "spinner" => "Activity animation",
@@ -104,14 +104,14 @@ pub(super) fn label(key: &str) -> String {
         "detailed_activity_clocks" => "Detailed activity clocks",
         "show_stopped_sessions" => "Show stopped sessions",
         "theme" => "Theme",
-        "phone" => "Web access",
-        "review" => "Code review",
-        "profiles" => "Agent accounts",
-        "targets" => "Machines and runtimes",
+        "phone" => "Web Access",
+        "review" => "Code Review",
+        "profiles" => "Agent Profiles",
+        "targets" => "Machines and Runtimes",
         "bundles" => "Projects",
         "enabled" => "Enabled",
         "prompt" => "Focus prompt after creating",
-        "profile" => "Agent account",
+        "profile" => "Agent profile",
         "target" => "Machine / runtime",
         "kind" => "Type",
         "home" => "Account directory",
@@ -261,7 +261,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "startup" => {
             "Quick New uses these defaults. Automatic chooses Codex, then usable Podman, Docker, or a local worktree."
         }
-        "profiles" => "Add an agent account or use Detect machine to find your installed accounts.",
+        "profiles" => "Add an agent profile or use Detect machine to find your installed profiles.",
         "home" => {
             "The agent's existing account directory, such as ~/.codex. ~ expands to your home when you apply. Sign in using the agent's own login command."
         }
@@ -279,7 +279,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Set either a local repository directory or a GitHub source for each repository."
         }
         "review" => {
-            "Choose an agent account for reviews. Model and effort can use the account defaults."
+            "Choose an agent profile for reviews. Model and effort can use the profile defaults."
         }
         "memory" => "Examples: 8g or 4096m. Leave blank for no limit.",
         "context_window_bytes" => {

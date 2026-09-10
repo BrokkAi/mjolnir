@@ -242,6 +242,11 @@ pub(crate) struct RepositoryOriginDialog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Confirmation {
+    RepairRepositoryRemotes {
+        action: Box<DashboardAction>,
+        repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+        previous: Box<Mode>,
+    },
     LaunchFailed {
         error: String,
         retry: Option<Box<DashboardAction>>,
@@ -412,6 +417,7 @@ fn clear_dialog_form_geometry(form: &mut Form<DialogControl>) {
 /// rendering.
 pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
     match confirmation {
+        Confirmation::RepairRepositoryRemotes { .. } => &["Cancel", "Repair and continue"],
         Confirmation::LaunchFailed { retry: Some(_), .. } => &["Dismiss", "Retry launch"],
         Confirmation::LaunchFailed { .. } => &["Dismiss"],
         Confirmation::Dismiss {
@@ -1174,6 +1180,28 @@ pub(crate) fn render_repository_origin(
 /// rendering a frame and reading cells back.
 fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'static>>) {
     match confirmation {
+        Confirmation::RepairRepositoryRemotes { repairs, .. } => (
+            "Repair Git tracking?",
+            repairs
+                .iter()
+                .flat_map(|repair| {
+                    vec![
+                        Line::from(repair.path.display().to_string()),
+                        Line::from(format!(
+                            "Branch {} tracks missing remote {}.",
+                            repair.branch, repair.missing_remote
+                        )),
+                        Line::from(format!(
+                            "Set its tracking remote to {}.",
+                            repair.replacement_remote
+                        )),
+                        Line::from(format!("Fetch: {}", repair.fetch_url)),
+                        Line::from(format!("Push: {}", repair.push_urls.join(", "))),
+                        Line::from(""),
+                    ]
+                })
+                .collect(),
+        ),
         Confirmation::LaunchFailed { error, retry, .. } => {
             let mut lines = vec![
                 Line::raw("The session could not start. This message stays until you dismiss it."),
@@ -1358,7 +1386,7 @@ pub(crate) fn render_confirmation(
     let confirmation = &dialog.confirmation;
     // Minimum height per dialog; `popup_height` grows it to fit wrapped content.
     let nominal: u16 = match confirmation {
-        Confirmation::LaunchFailed { .. } => 16,
+        Confirmation::LaunchFailed { .. } | Confirmation::RepairRepositoryRemotes { .. } => 16,
         Confirmation::Dismiss { .. } => 8,
         Confirmation::DirtyLocal { .. } => 11,
         Confirmation::CloseFailed { .. } => 12,
@@ -1624,7 +1652,12 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_profile_rename(&mut self) {
-        let Some(old_id) = self.config.profiles.keys().nth(self.quota_index).cloned() else {
+        let Some(old_id) = self
+            .config
+            .enabled_profiles()
+            .nth(self.quota_index)
+            .map(|(id, _)| id.to_owned())
+        else {
             self.notices.set("No profile is selected.");
             return;
         };
@@ -1949,6 +1982,26 @@ impl DashboardState {
         self.mark_render_changed();
     }
 
+    pub fn show_remote_repair_confirmation(
+        &mut self,
+        bundle_id: String,
+        repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+        retry: DashboardAction,
+    ) {
+        let previous = Box::new(self.mode.clone());
+        let action = Box::new(DashboardAction::RepairRepositoryRemotes {
+            bundle_id,
+            repairs: repairs.clone(),
+            retry: Box::new(retry),
+        });
+        self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::RepairRepositoryRemotes {
+            action,
+            repairs,
+            previous,
+        }));
+        self.mark_render_changed();
+    }
+
     /// Show the recovery choices after a checkpointed close could not finish.
     pub fn show_close_failure(&mut self, session_id: String, error: impl Into<String>) {
         self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::CloseFailed {
@@ -2199,8 +2252,10 @@ impl DashboardState {
                 _ => {}
             }
         }
-        if matches!(dialog.confirmation, Confirmation::LaunchFailed { .. })
-            && let Event::Key(key) = &event
+        if matches!(
+            dialog.confirmation,
+            Confirmation::LaunchFailed { .. } | Confirmation::RepairRepositoryRemotes { .. }
+        ) && let Event::Key(key) = &event
             && key.kind != crossterm::event::KeyEventKind::Release
         {
             match key.code {
@@ -2236,6 +2291,7 @@ impl DashboardState {
         match interaction {
             Some(Interaction::Cancel) => match dialog.confirmation {
                 Confirmation::Dismiss { mode, .. }
+                | Confirmation::RepairRepositoryRemotes { previous: mode, .. }
                 | Confirmation::LaunchFailed { previous: mode, .. } => {
                     self.restore_dismissed_mode(mode);
                 }
@@ -2259,6 +2315,19 @@ impl DashboardState {
         index: usize,
     ) -> DashboardAction {
         match (confirmation, index) {
+            (
+                Confirmation::RepairRepositoryRemotes {
+                    action, previous, ..
+                },
+                index,
+            ) => {
+                self.restore_dismissed_mode(previous);
+                if index == 1 {
+                    *action
+                } else {
+                    DashboardAction::None
+                }
+            }
             (
                 Confirmation::LaunchFailed {
                     retry, previous, ..
@@ -2370,6 +2439,63 @@ mod tests {
 
     use crate::render::render;
     use crate::{DashboardAction, DashboardState, Mode};
+
+    #[test]
+    fn remote_repair_requires_confirmation_and_restores_the_previous_screen() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.show_close_failure("session-1".into(), "prior dialog");
+        let previous = dashboard.mode.clone();
+        let repair = hel::hel_local_git::LocalRemoteRepair {
+            path: "/project".into(),
+            branch: "main".into(),
+            missing_remote: "upstream".into(),
+            replacement_remote: "origin".into(),
+            fetch_url: "https://example.com/repo.git".into(),
+            push_urls: vec!["ssh://git@example.com/repo.git".into()],
+        };
+        let retry = DashboardAction::CreateStartupSession {
+            profile_id: "codex".into(),
+            target_template_id: Some("docker".into()),
+            project_directory: "/project".into(),
+        };
+        dashboard.show_remote_repair_confirmation(
+            "repo".into(),
+            vec![repair.clone()],
+            retry.clone(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Repair Git tracking?"));
+        assert!(text.contains("ssh://git@example.com/repo.git"));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::None
+        );
+        assert_eq!(dashboard.mode, previous);
+        dashboard.show_remote_repair_confirmation(
+            "repo".into(),
+            vec![repair.clone()],
+            retry.clone(),
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::RepairRepositoryRemotes {
+                bundle_id: "repo".into(),
+                repairs: vec![repair],
+                retry: Box::new(retry),
+            }
+        );
+        assert_eq!(dashboard.mode, previous);
+    }
 
     #[test]
     fn launch_failure_survives_notices_and_retries_original_settings_once() {

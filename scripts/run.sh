@@ -20,10 +20,10 @@
 # A `--release` anywhere in the arguments builds the worker in release too, so
 # the profiles the daemon compares still match.
 #
-# On Linux, a daemon already running this exact host executable stays attached.
+# On Linux and macOS, a daemon running this host build stays attached.
 # If Cargo replaced the executable since the daemon started, the first daemon
 # connection gracefully replaces it; detached session workers remain active and
-# reconnect. Other hosts retain the existing protocol-version replacement.
+# reconnect.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -64,7 +64,5 @@ case "$(uname -s)" in
     ;;
 esac
 
-if [ -e /proc/self/exe ]; then
-  export MJ_DEV_RESTART_STALE_DAEMON=1
-fi
+export MJ_DEV_RESTART_STALE_DAEMON=1
 exec cargo run -p brokk-mjolnir --bin mj "$@"

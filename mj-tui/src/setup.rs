@@ -171,6 +171,13 @@ fn value_summary(path: &[String], key: &str, value: &Value, draft: &Value) -> St
     let summary = match value {
         Value::Object(entries) => format!("{} settings  ›", entries.len()),
         Value::Array(entries) => format!("{} entries  ›", entries.len()),
+        Value::Bool(value)
+            if path.first().is_some_and(|section| section == "profiles")
+                && path.len() == 2
+                && key == "enabled" =>
+        {
+            if *value { "☑" } else { "☐" }.to_owned()
+        }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
         Value::Null => "Automatic / default".to_owned(),
         _ => schema::choice_label(value),
@@ -406,7 +413,17 @@ impl SetupDialog {
             self.path = path;
             self.selected = 0;
         } else if let Some(value) = value.as_bool() {
-            *self.draft.pointer_mut(&pointer(&path)).unwrap() = Value::Bool(!value);
+            let enabled = !value;
+            *self.draft.pointer_mut(&pointer(&path)).unwrap() = Value::Bool(enabled);
+            if let [section, profile_id, field] = path.as_slice()
+                && section == "profiles"
+                && field == "enabled"
+            {
+                self.invalidate_review_validation_for(Some(profile_id));
+                if !enabled {
+                    self.clear_disabled_profile_references(profile_id);
+                }
+            }
         } else {
             let choices = schema::choices(&storage_path(&path), &self.draft);
             let selected = choices
@@ -438,6 +455,27 @@ impl SetupDialog {
             });
         }
         self.form = RefCell::new(Form::default());
+    }
+
+    fn clear_disabled_profile_references(&mut self, profile_id: &str) {
+        let mut cleared = Vec::new();
+        if self.draft["startup"]["profile"].as_str() == Some(profile_id) {
+            self.draft["startup"]["profile"] = Value::Null;
+            cleared.push("New Session Defaults");
+        }
+        if self.draft["review"]["profile"].as_str() == Some(profile_id) {
+            self.draft["review"]["profile"] = Value::Null;
+            self.draft["review"]["enabled"] = Value::Bool(false);
+            cleared.push("Code Review and turned off automatic review");
+        }
+        self.notice = Some(if cleared.is_empty() {
+            format!("Disabled profile {profile_id:?}.")
+        } else {
+            format!(
+                "Disabled profile {profile_id:?}. Cleared it from {}.",
+                cleared.join(" and ")
+            )
+        });
     }
 
     fn back(&mut self) -> bool {
@@ -694,7 +732,7 @@ impl SetupDialog {
             Ok(config) => config,
             Err(error) => {
                 self.notice = Some(format!(
-                    "Fix the invalid setup draft before opening Code review: {error}"
+                    "Fix the invalid setup draft before opening Code Review: {error}"
                 ));
                 self.form = RefCell::new(Form::default());
                 self.prepare();
@@ -993,7 +1031,7 @@ impl DashboardState {
             }
             Some(Interaction::Activate(Detect)) if !dialog.discovering => {
                 dialog.discovering = true;
-                dialog.notice = Some("Detecting agent accounts and usable local runtimes…".into());
+                dialog.notice = Some("Detecting agent profiles and usable local runtimes…".into());
                 self.mark_render_changed();
                 action = DashboardAction::DiscoverSetup {
                     generation: dialog.generation,
@@ -1526,6 +1564,16 @@ mod tests {
         let text = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(text.contains("Interface"), "{text}");
         assert!(text.contains("Advanced"), "{text}");
+        for section in [
+            "New Session Defaults",
+            "Agent Profiles",
+            "Machines and Runtimes",
+            "Projects",
+            "Code Review",
+            "Web Access",
+        ] {
+            assert!(text.contains(section), "missing {section:?} in {text}");
+        }
         assert!(!text.contains("Session sidebar position"), "{text}");
         assert!(!text.contains("Activity animation"), "{text}");
         assert!(!text.contains("Theme"), "{text}");
@@ -1784,7 +1832,47 @@ mod tests {
             .draw(|frame| crate::render::render(frame, &mut dashboard))
             .unwrap();
         let nested = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(nested.contains("Setup › New session defaults"), "{nested}");
+        assert!(nested.contains("Setup › New Session Defaults"), "{nested}");
+    }
+
+    #[test]
+    fn disabling_a_profile_clears_references_and_reports_the_cleanup() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.config.startup.profile = Some("codex-1".into());
+        dashboard.config.review.enabled = true;
+        dashboard.config.review.profile = Some("codex-1".into());
+        dashboard.config.review.model = Some("review-model".into());
+        dashboard.config.review.effort = Some("high".into());
+        dashboard.begin_setup();
+        choose(&mut dashboard, "profiles");
+        choose(&mut dashboard, "codex-1");
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let enabled = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(enabled.contains('☑'), "{enabled}");
+
+        choose(&mut dashboard, "enabled");
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup");
+        };
+        assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], false);
+        assert!(dialog.draft["startup"]["profile"].is_null());
+        assert!(dialog.draft["review"]["profile"].is_null());
+        assert_eq!(dialog.draft["review"]["enabled"], false);
+        assert_eq!(dialog.draft["review"]["model"], "review-model");
+        assert_eq!(dialog.draft["review"]["effort"], "high");
+        let notice = dialog.notice.as_deref().unwrap();
+        assert!(notice.contains("New Session Defaults"), "{notice}");
+        assert!(notice.contains("Code Review"), "{notice}");
+
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let disabled = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(disabled.contains('☐'), "{disabled}");
     }
 
     #[test]

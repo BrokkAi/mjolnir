@@ -927,6 +927,7 @@ fn raw_localhost_warns_for_harnesses_without_guardian_approvals() {
         config.profiles = BTreeMap::from([(
             "profile".into(),
             HarnessProfile {
+                enabled: true,
                 context_window_bytes: None,
                 kind,
                 home: PathBuf::from("/profiles/harness"),
@@ -972,6 +973,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     config.profiles = BTreeMap::from([(
         "kimi".into(),
         HarnessProfile {
+            enabled: true,
             context_window_bytes: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),

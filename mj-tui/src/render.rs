@@ -244,7 +244,10 @@ pub(crate) fn render_terminal_too_small(
 
 fn render_onboarding(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
     let missing = [
-        (dashboard.config.profiles.is_empty(), "a harness profile"),
+        (
+            dashboard.config.enabled_profiles().next().is_none(),
+            "an enabled agent profile",
+        ),
         (dashboard.config.targets.is_empty(), "a target template"),
     ]
     .into_iter()
@@ -1934,8 +1937,7 @@ pub(crate) fn minimized_quota_line(
 ) -> Line<'static> {
     let readings = dashboard
         .config
-        .profiles
-        .iter()
+        .enabled_profiles()
         .filter_map(|(id, profile)| {
             let quota = dashboard.quotas.get(id);
             // The report says for itself that it is usage-priced. Before the
@@ -1950,7 +1952,7 @@ pub(crate) fn minimized_quota_line(
             }
             if dashboard.quota_refreshing.contains(id) {
                 return Some(SummaryReading {
-                    name: id.clone(),
+                    name: id.to_owned(),
                     value: "refreshing…".into(),
                     color: None,
                 });
@@ -1961,7 +1963,7 @@ pub(crate) fn minimized_quota_line(
                 .and_then(quota_remaining_percent)
             else {
                 return Some(SummaryReading {
-                    name: id.clone(),
+                    name: id.to_owned(),
                     value: "unavailable".into(),
                     color: None,
                 });
@@ -1977,7 +1979,7 @@ pub(crate) fn minimized_quota_line(
                 None => format!("{weekly}%"),
             };
             Some(SummaryReading {
-                name: id.clone(),
+                name: id.to_owned(),
                 value,
                 color: Some(headroom_color(
                     five_hour.map_or(weekly, |five_hour| weekly.min(five_hour)),
@@ -2270,8 +2272,7 @@ fn quota_column_width(
 fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<QuotaTableRow> {
     dashboard
         .config
-        .profiles
-        .iter()
+        .enabled_profiles()
         .map(|(id, profile)| {
             let (weekly, weekly_reset, five_hour, five_hour_reset, weekly_chart, five_hour_chart) =
                 if profile.kind == HarnessKind::Deepseek {
@@ -2328,7 +2329,7 @@ fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<QuotaTableRow> 
                     }
                 };
             QuotaTableRow {
-                profile: id.clone(),
+                profile: id.to_owned(),
                 harness: profile.kind.display_name().into(),
                 weekly: quota_chart(weekly, weekly_chart),
                 weekly_reset,
@@ -2455,7 +2456,7 @@ pub(crate) fn render_quotas(
         .block(block);
     let mut offset = dashboard.quota_scroll.get();
     if let Some(direction) = take_scroll_lookahead(dashboard, Focus::Quota) {
-        let row_heights = vec![1; dashboard.config.profiles.len()];
+        let row_heights = vec![1; dashboard.config.enabled_profiles().count()];
         offset = offset_with_directional_lookahead(
             offset,
             dashboard.quota_index,
@@ -2464,15 +2465,20 @@ pub(crate) fn render_quotas(
             usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
         );
     }
-    let mut state = TableState::default()
-        .with_offset(offset)
-        .with_selected((!dashboard.config.profiles.is_empty()).then_some(dashboard.quota_index));
+    let mut state = TableState::default().with_offset(offset).with_selected(
+        dashboard
+            .config
+            .enabled_profiles()
+            .next()
+            .is_some()
+            .then_some(dashboard.quota_index),
+    );
     frame.render_stateful_widget(table, area, &mut state);
     dashboard.quota_scroll.set(state.offset());
     render_session_scrollbar(
         frame,
         area,
-        dashboard.config.profiles.len(),
+        dashboard.config.enabled_profiles().count(),
         state.offset(),
         usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
     );
@@ -4463,6 +4469,7 @@ mod tests {
         dashboard.config.profiles.insert(
             "deepseek".into(),
             hel::hel_config::HarnessProfile {
+                enabled: true,
                 context_window_bytes: None,
                 kind: HarnessKind::Deepseek,
                 home: std::path::PathBuf::from("/profiles/deepseek"),

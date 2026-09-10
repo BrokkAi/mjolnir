@@ -126,15 +126,20 @@ impl ReviewConfig {
     /// Arming review without naming a reviewer is a configuration mistake with
     /// no sensible default -- Mjolnir will not pick a profile on the user's behalf,
     /// because which agent reviews is the most consequential review setting.
-    /// Naming a profile while disabled is valid: it is what a one-off `/review`
-    /// needs.
+    /// Naming a disabled profile is invalid because neither automatic nor
+    /// one-off reviews may start new work with it.
     fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
-        if let Some(profile) = self.profile.as_ref().and_then(|id| profiles.get(id))
-            && !profile.kind.supports_injected_mcp()
+        if let Some(profile_id) = self.profile.as_ref()
+            && let Some(profile) = profiles.get(profile_id)
         {
-            bail!(
-                "Muse Code cannot be a reviewer because muse-acp does not accept the required MCP tools"
-            );
+            if !profile.enabled {
+                bail!("[review] profile {profile_id:?} is disabled");
+            }
+            if !profile.kind.supports_injected_mcp() {
+                bail!(
+                    "Muse Code cannot be a reviewer because muse-acp does not accept the required MCP tools"
+                );
+            }
         }
         if self.enabled && self.profile.is_none() {
             bail!(
@@ -156,7 +161,7 @@ impl ReviewConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 7;
+pub const CONFIG_VERSION: u32 = 8;
 pub const PRODUCT_DIR: &str = "mjolnir";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -479,6 +484,9 @@ impl std::str::FromStr for HarnessKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessProfile {
+    /// Whether Mjolnir may select this profile for new work or probe it.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     pub kind: HarnessKind,
     /// Controller-side source home. A fresh copy is made for each target.
     pub home: PathBuf,
@@ -1027,6 +1035,13 @@ impl StartupConfig {
         {
             bail!("startup profile {profile:?} is not configured");
         }
+        if let Some(profile) = &self.profile
+            && profiles
+                .get(profile)
+                .is_some_and(|profile| !profile.enabled)
+        {
+            bail!("startup profile {profile:?} is disabled");
+        }
         if let Some(target) = &self.target
             && !targets.contains_key(target)
         {
@@ -1247,6 +1262,19 @@ impl HelConfig {
         self.profiles.is_empty() && self.bundles.is_empty() && self.targets.is_empty()
     }
 
+    /// Profiles available for new work, user-facing selectors, and probes.
+    pub fn enabled_profiles(&self) -> impl Iterator<Item = (&str, &HarnessProfile)> {
+        self.profiles
+            .iter()
+            .filter(|(_, profile)| profile.enabled)
+            .map(|(id, profile)| (id.as_str(), profile))
+    }
+
+    /// One profile when it exists and is available for new work.
+    pub fn enabled_profile(&self, id: &str) -> Option<&HarnessProfile> {
+        self.profiles.get(id).filter(|profile| profile.enabled)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.version != CONFIG_VERSION {
             bail!(
@@ -1310,9 +1338,10 @@ impl HelConfig {
         // spinner preference; version 4 adds stopped-session visibility;
         // version 5 adds the terminal theme preference; version 6 adds
         // optional advanced settings; version 7 restores stopped-session
-        // visibility as an advanced setting. Earlier configs acquire defaults
-        // in memory and upgrade on the next ordinary save.
-        if matches!(config.version, 1..=6) {
+        // visibility as an advanced setting; version 8 lets profiles be
+        // disabled. Earlier configs acquire defaults in memory and upgrade on
+        // the next ordinary save.
+        if matches!(config.version, 1..=7) {
             config.version = CONFIG_VERSION;
         }
         config.validate()?;
@@ -1947,6 +1976,7 @@ mod tests {
             profiles: BTreeMap::from([(
                 "codex-1".into(),
                 HarnessProfile {
+                    enabled: true,
                     context_window_bytes: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/home/test/.codex-one"),
@@ -2834,6 +2864,58 @@ mod tests {
         assert!(config.phone.enabled);
         assert!(config.phone.tailscale_detect);
         assert_eq!(config.phone.bind, "127.0.0.1:4765");
+    }
+
+    #[test]
+    fn version_seven_profiles_upgrade_enabled_and_disabled_round_trips_explicitly() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "version = 7\n[profiles.work]\nkind = \"codex\"\nhome = \"/profiles/work\"\n",
+        )
+        .unwrap();
+
+        let mut config = HelConfig::load_from(&path).unwrap();
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert!(config.profiles["work"].enabled);
+        assert_eq!(
+            config
+                .enabled_profiles()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec!["work"]
+        );
+
+        config.save_to(&path).unwrap();
+        let enabled = fs::read_to_string(&path).unwrap();
+        assert!(enabled.starts_with("version = 8"), "{enabled}");
+        assert!(!enabled.contains("enabled = true"), "{enabled}");
+
+        config.profiles.get_mut("work").unwrap().enabled = false;
+        config.save_to(&path).unwrap();
+        let disabled = fs::read_to_string(&path).unwrap();
+        assert!(disabled.contains("enabled = false"), "{disabled}");
+        assert!(!HelConfig::load_from(&path).unwrap().profiles["work"].enabled);
+    }
+
+    #[test]
+    fn startup_and_review_reject_disabled_profile_references() {
+        let profile =
+            "[profiles.work]\nenabled = false\nkind = \"claude\"\nhome = \"/profiles/work\"\n";
+        for reference in [
+            "[startup]\nprofile = \"work\"\n",
+            "[review]\nprofile = \"work\"\n",
+        ] {
+            let error = toml::from_str::<HelConfig>(&format!(
+                "version = {CONFIG_VERSION}\n{reference}{profile}"
+            ))
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("disabled"), "{error}");
+        }
     }
 
     /// A profile that exists, so a `[review]` section has something to name.

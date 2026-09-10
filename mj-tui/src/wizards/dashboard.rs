@@ -10,7 +10,7 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
             form.declare_with_enabled(
                 WizardControl::ProfileList,
                 ControlKind::ChoiceList {
-                    len: dashboard.config.profiles.len(),
+                    len: dashboard.config.enabled_profiles().count(),
                     selected: wizard.profile,
                 },
                 true,
@@ -1241,7 +1241,7 @@ impl DashboardState {
             return DashboardAction::None;
         }
         let len = match wizard.step {
-            WizardStep::Profile => self.config.profiles.len(),
+            WizardStep::Profile => self.config.enabled_profiles().count(),
             WizardStep::Bundle => self.config.bundles.len() + 1,
             WizardStep::Target => self.config.targets.len(),
             WizardStep::ProjectDirectory => {
@@ -1703,7 +1703,7 @@ impl DashboardState {
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
             workspace_id: wizard.workspace_id.clone(),
-            profile_id: nth_key(&self.config.profiles, wizard.profile),
+            profile_id: nth_enabled_profile(&self.config, wizard.profile),
             bundle_id: if raw_project {
                 raw_project_context_id(&wizard.project_directory)
             } else {
@@ -2959,25 +2959,28 @@ impl DashboardState {
         &mut self,
         project_directory: std::path::PathBuf,
     ) -> Result<DashboardAction, String> {
-        let profile_id = self
-            .config
-            .startup
-            .profile
-            .as_ref()
-            .or_else(|| {
-                self.config
-                    .profiles
-                    .iter()
-                    .find(|(_, profile)| profile.kind == hel::hel_config::HarnessKind::Codex)
-                    .map(|(id, _)| id)
-            })
-            .or_else(|| self.config.profiles.keys().next())
-            .ok_or("No agent account is configured. Press F7 to add one in Setup.")?;
-        if !self.config.profiles.contains_key(profile_id) {
-            return Err(format!("Startup profile {profile_id:?} is not configured."));
-        }
+        let profile_id = if let Some(profile_id) = self.config.startup.profile.as_deref() {
+            let profile = self
+                .config
+                .profiles
+                .get(profile_id)
+                .ok_or_else(|| format!("Startup profile {profile_id:?} is not configured."))?;
+            if !profile.enabled {
+                return Err(format!("Startup profile {profile_id:?} is disabled."));
+            }
+            profile_id.to_owned()
+        } else {
+            self.config
+                .enabled_profiles()
+                .find(|(_, profile)| profile.kind == hel::hel_config::HarnessKind::Codex)
+                .or_else(|| self.config.enabled_profiles().next())
+                .map(|(id, _)| id.to_owned())
+                .ok_or(
+                    "No enabled agent profile is configured. Press F7 to enable or add one in Setup.",
+                )?
+        };
         let action = DashboardAction::CreateStartupSession {
-            profile_id: profile_id.clone(),
+            profile_id,
             target_template_id: self.config.startup.target.clone(),
             project_directory,
         };
@@ -2986,7 +2989,7 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_new(&mut self) -> DashboardAction {
-        if self.config.profiles.is_empty() || self.config.targets.is_empty() {
+        if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
             self.notices
                 .set("Configure at least one profile and target first.");
             return DashboardAction::None;
@@ -2995,9 +2998,8 @@ impl DashboardState {
         let profile = recent
             .and_then(|session| {
                 self.config
-                    .profiles
-                    .keys()
-                    .position(|id| id == &session.last_profile)
+                    .enabled_profiles()
+                    .position(|(id, _)| id == session.last_profile)
             })
             .unwrap_or(0);
         let bundle = recent

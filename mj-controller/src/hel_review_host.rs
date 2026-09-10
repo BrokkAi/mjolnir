@@ -222,9 +222,14 @@ impl ReviewEnvironment for ControllerEnvironment {
     fn check(&self, session_id: &str, profile: &str) -> Result<(), String> {
         let controller =
             crate::hel_controller::Controller::load().map_err(|error| format!("{error:#}"))?;
-        if !controller.config.profiles.contains_key(profile) {
+        let Some(reviewer) = controller.config.profiles.get(profile) else {
             return Err(format!(
                 "turn review needs a reviewer: [review] profile {profile:?} is not a profile in config.toml"
+            ));
+        };
+        if !reviewer.enabled {
+            return Err(format!(
+                "turn review needs an enabled reviewer: [review] profile {profile:?} is disabled"
             ));
         }
         validate_reviewer_assignment(
