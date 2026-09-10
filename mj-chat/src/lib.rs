@@ -12,3 +12,5 @@ pub mod hel_clipboard;
 pub mod hel_modal;
 pub mod hel_selection;
 pub mod hel_text_input;
+
+pub mod hel_path_input;

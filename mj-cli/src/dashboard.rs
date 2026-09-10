@@ -379,6 +379,7 @@ pub(crate) struct DashboardContext {
     pub(crate) target_test_cancel: Option<Arc<AtomicBool>>,
     /// The active global review choice discovery. New profile/model
     /// selections cancel the old request before starting another one.
+    pub(crate) path_input_job: Option<(String, Arc<AtomicBool>)>,
     pub(crate) review_discovery_cancel: Option<Arc<AtomicBool>>,
     /// The cancellable worker resolving an isolated session's network clone
     /// plan, keyed by the TUI generation that requested it.
@@ -1073,6 +1074,7 @@ impl DashboardContext {
             quota: Feed::new(quota_updates_rx),
             manual_quota_refresh_generation: None,
             target_test_cancel: None,
+            path_input_job: None,
             review_discovery_cancel: None,
             session_preflight_cancel: None,
             worker_targets_tx,
@@ -1926,6 +1928,26 @@ impl DashboardContext {
 
     /// Tells every operation still in flight to stop. Cancellation is
     /// cooperative, so this only requests it.
+    pub(crate) fn track_path_input(&mut self, cancelled: Arc<AtomicBool>) {
+        if let Some((_, previous)) = self
+            .path_input_job
+            .replace((self.dashboard.path_input_context(), cancelled))
+        {
+            previous.store(true, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn cancel_stale_path_input(&mut self) {
+        if self
+            .path_input_job
+            .as_ref()
+            .is_some_and(|(context, _)| *context != self.dashboard.path_input_context())
+            && let Some((_, cancelled)) = self.path_input_job.take()
+        {
+            cancelled.store(true, Ordering::Release);
+        }
+    }
+
     fn cancel_background_work(&mut self) {
         self.cancel_chat_open();
         self.critical_operations.cancel_all();
@@ -1944,6 +1966,7 @@ impl DashboardContext {
     /// Takes every message queued behind the one that woke the loop, feed by
     /// feed, in the order the UI depends on.
     fn drain_feeds(&mut self) {
+        self.cancel_stale_path_input();
         self.drain_quota_updates();
         self.drain_runtime_state();
         self.drain_worker_updates();

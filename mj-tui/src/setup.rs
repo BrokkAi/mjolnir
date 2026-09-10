@@ -11,10 +11,12 @@ use crate::{
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use hel::hel_config::HelConfig;
+use mj_chat::components::PathField;
 use mj_chat::components::{
     ButtonRow, ChoiceList, ComboBox, ComboBoxState, ControlKind, Form, Interaction, PopupSide,
     TextField,
 };
+use mj_chat::hel_path_input::PathInput;
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
 use mj_chat::theme;
@@ -26,6 +28,7 @@ use ratatui::{
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetupControl {
@@ -43,9 +46,37 @@ pub(crate) enum SetupControl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum EditorInput {
+    Text(TextInput),
+    Path(PathInput),
+}
+impl Deref for EditorInput {
+    type Target = TextInput;
+    fn deref(&self) -> &TextInput {
+        match self {
+            Self::Text(input) => input,
+            Self::Path(input) => input,
+        }
+    }
+}
+impl DerefMut for EditorInput {
+    fn deref_mut(&mut self) -> &mut TextInput {
+        match self {
+            Self::Text(input) => input,
+            Self::Path(input) => input,
+        }
+    }
+}
+impl std::fmt::Display for EditorInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.deref().fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Editor {
     path: Vec<String>,
-    input: TextInput,
+    input: EditorInput,
     choices: Vec<Value>,
     selected: usize,
     combo: ComboBoxState<SetupControl>,
@@ -387,15 +418,19 @@ impl SetupDialog {
                 combo.open(SetupControl::Choices, selected);
             }
             self.editor = Some(Editor {
-                path,
-                input: TextInput::from(if value.is_null() {
-                    String::new()
+                input: if schema::path_kind(&path).is_some() {
+                    EditorInput::Path(PathInput::from(value.as_str().unwrap_or_default()))
                 } else {
-                    value
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| value.to_string())
-                }),
+                    EditorInput::Text(TextInput::from(if value.is_null() {
+                        String::new()
+                    } else {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string())
+                    }))
+                },
+                path,
                 choices,
                 selected,
                 combo,
@@ -436,7 +471,7 @@ impl SetupDialog {
         } else {
             self.editor = Some(Editor {
                 path: self.path.clone(),
-                input: TextInput::new(),
+                input: EditorInput::Text(TextInput::new()),
                 choices: Vec::new(),
                 selected: 0,
                 combo: ComboBoxState::default(),
@@ -444,6 +479,41 @@ impl SetupDialog {
             });
             self.form = RefCell::new(Form::default());
         }
+    }
+
+    pub(crate) fn path_input_context(&self) -> String {
+        format!(
+            "setup:{}:{}:{:?}",
+            self.generation,
+            self.draft,
+            self.editor
+                .as_ref()
+                .map(|editor| (&editor.path, editor.input.value()))
+        )
+    }
+
+    fn resolve_path_action(&mut self) -> Result<Option<DashboardAction>, String> {
+        let Some(editor) = &self.editor else {
+            return Ok(None);
+        };
+        if editor.adding
+            || schema::path_kind(&editor.path) != Some(schema::PathKind::Target)
+            || !hel::hel_path_input::needs_home(std::path::Path::new(editor.input.value()))
+                .map_err(|e| e.to_string())?
+        {
+            return Ok(None);
+        }
+        let target: hel::hel_config::TargetTemplate =
+            serde_json::from_value(self.draft["targets"][&editor.path[1]].clone())
+                .map_err(|e| e.to_string())?;
+        self.notice = Some("Resolving path…".into());
+        Ok(Some(DashboardAction::ResolveSetupPath {
+            generation: self.generation,
+            draft: self.draft.clone(),
+            path: editor.path.clone(),
+            value: editor.input.value().to_owned(),
+            target: Box::new(target),
+        }))
     }
 
     fn apply_editor(&mut self, clear: bool) -> Result<(), String> {
@@ -481,6 +551,26 @@ impl SetupDialog {
             self.selected = self.keys().iter().position(|key| key == name).unwrap();
             self.open_selected();
             return Ok(());
+        }
+        let mut editor = editor;
+        if !clear && !editor.input.is_empty() {
+            match schema::path_kind(&editor.path) {
+                Some(schema::PathKind::Local) => {
+                    let EditorInput::Path(input) = &mut editor.input else {
+                        unreachable!("schema path has a path editor");
+                    };
+                    input.apply_local().map_err(|error| error.to_string())?;
+                }
+                Some(schema::PathKind::RelativeDestination) => {
+                    let path = std::path::Path::new(editor.input.value());
+                    hel::hel_config::validate_relative_destination(path)
+                        .map_err(|error| error.to_string())?;
+                    if hel::hel_path_input::needs_home(path).map_err(|error| error.to_string())? {
+                        return Err("Repository destinations must be safe relative paths; ~ is not supported.".into());
+                    }
+                }
+                _ => {}
+            }
         }
         let old = self.draft.pointer(&pointer(&editor.path)).unwrap();
         let value = if clear {
@@ -864,7 +954,11 @@ impl DashboardState {
                 self.mark_render_changed();
             }
             Some(Interaction::Activate(Field | Apply)) => {
-                dialog.notice = dialog.apply_editor(false).err();
+                match dialog.resolve_path_action() {
+                    Ok(Some(resolve)) => action = resolve,
+                    Ok(None) => dialog.notice = dialog.apply_editor(false).err(),
+                    Err(error) => dialog.notice = Some(error),
+                }
                 self.mark_render_changed();
             }
             Some(Interaction::Activate(Clear)) => {
@@ -910,6 +1004,38 @@ impl DashboardState {
         dialog.prepare();
         self.mode = Mode::Setup(dialog);
         action
+    }
+
+    pub fn setup_path_resolved(
+        &mut self,
+        generation: u64,
+        draft: &Value,
+        path: &[String],
+        value: &str,
+        result: Result<std::path::PathBuf, String>,
+    ) {
+        let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
+            return;
+        };
+        if dialog.generation != generation || &dialog.draft != draft {
+            return;
+        }
+        let Some(editor) = &mut dialog.editor else {
+            return;
+        };
+        if editor.path != path || editor.input.value() != value {
+            return;
+        }
+        match result {
+            Ok(resolved) => {
+                editor
+                    .input
+                    .set_value(resolved.to_string_lossy().into_owned());
+                dialog.notice = dialog.apply_editor(false).err();
+            }
+            Err(error) => dialog.notice = Some(error),
+        }
+        self.mark_render_changed();
     }
 
     pub fn setup_saved(&mut self, generation: u64, result: Result<HelConfig, String>) {
@@ -1080,13 +1206,11 @@ pub(crate) fn render_setup(
             Paragraph::new(label),
             Rect::new(body.x, body.y, body.width, 1),
         );
-        TextField::render(
-            frame,
-            Rect::new(body.x, body.y + 1, body.width, 1),
-            &editor.input,
-            &mut form,
-            Field,
-        );
+        let area = Rect::new(body.x, body.y + 1, body.width, 1);
+        match &editor.input {
+            EditorInput::Text(input) => TextField::render(frame, area, input, &mut form, Field),
+            EditorInput::Path(input) => PathField::render(frame, area, input, &mut form, Field),
+        }
         initial = Field;
         ButtonRow::render(
             frame,
@@ -1301,6 +1425,94 @@ mod tests {
             })
         );
         assert!(buffer.content.iter().any(|cell| cell.fg == colors.accent));
+    }
+
+    #[test]
+    fn account_path_apply_expands_home_before_config_and_quota_use() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        choose(&mut dashboard, "profiles");
+        choose(&mut dashboard, "codex-1");
+        choose(&mut dashboard, "home");
+        let Mode::Setup(dialog) = &mut dashboard.mode else {
+            panic!("setup");
+        };
+        let editor = dialog.editor.as_mut().unwrap();
+        assert!(matches!(editor.input, EditorInput::Path(_)));
+        editor.input.clear();
+        dashboard.handle_paste("~/.codex4");
+        dashboard.handle_key(key(KeyCode::Enter));
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup");
+        };
+        assert!(dialog.editor.is_none(), "{:?}", dialog.notice);
+        let config: HelConfig = serde_json::from_value(dialog.draft.clone()).unwrap();
+        let expected =
+            hel::hel_path_input::expand_local(std::path::Path::new("~/.codex4")).unwrap();
+        let profile = &config.profiles["codex-1"];
+        assert_eq!(profile.home, expected);
+        let mut environment = profile.environment.clone();
+        profile
+            .kind
+            .configure_home_environment(&profile.home, &mut environment);
+        assert_eq!(environment["CODEX_HOME"], expected.to_string_lossy());
+    }
+
+    #[test]
+    fn remote_path_apply_preserves_failed_and_newer_drafts() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.config.targets.insert(
+            "remote-path".into(),
+            serde_json::from_value(
+                json!({"kind":"ssh-bare","host":"builder","permissions":"guardian"}),
+            )
+            .unwrap(),
+        );
+        dashboard.begin_setup();
+        choose(&mut dashboard, "targets");
+        choose(&mut dashboard, "remote-path");
+        choose(&mut dashboard, "workspace_prefix");
+        let Mode::Setup(dialog) = &mut dashboard.mode else {
+            panic!("setup");
+        };
+        dialog.editor.as_mut().unwrap().input.set_value("~/work");
+        let DashboardAction::ResolveSetupPath {
+            generation,
+            draft,
+            path,
+            value,
+            ..
+        } = dashboard.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("resolve path");
+        };
+        dashboard.setup_path_resolved(
+            generation,
+            &draft,
+            &path,
+            &value,
+            Err("SSH unavailable".into()),
+        );
+        let Mode::Setup(dialog) = &mut dashboard.mode else {
+            panic!("setup");
+        };
+        assert_eq!(dialog.editor.as_ref().unwrap().input.value(), "~/work");
+        assert_eq!(dialog.notice.as_deref(), Some("SSH unavailable"));
+        dialog.editor.as_mut().unwrap().input.set_value("~/newer");
+        dashboard.setup_path_resolved(generation, &draft, &path, &value, Ok("/remote/work".into()));
+        let Mode::Setup(dialog) = &mut dashboard.mode else {
+            panic!("setup");
+        };
+        assert_eq!(dialog.editor.as_ref().unwrap().input.value(), "~/newer");
+        dialog.editor.as_mut().unwrap().input.set_value(&value);
+        dashboard.setup_path_resolved(generation, &draft, &path, &value, Ok("/remote/work".into()));
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup");
+        };
+        assert_eq!(
+            dialog.draft["targets"]["remote-path"]["workspace_prefix"],
+            "/remote/work"
+        );
     }
 
     #[test]

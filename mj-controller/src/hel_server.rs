@@ -1469,6 +1469,8 @@ pub struct PreflightRepository {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreflightNew {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_directory: Option<PathBuf>,
     #[serde(default)]
     pub dirty_repositories: Vec<String>,
     #[serde(default)]
@@ -2881,7 +2883,7 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
                 ));
             }
             if let Some(directory) = project_directory
-                && (!directory.is_absolute()
+                && (hel::hel_path_input::validate_absolute_input(directory).is_err()
                     || directory
                         .components()
                         .any(|component| component == Component::ParentDir))
@@ -4819,6 +4821,34 @@ mod tests {
     }
 
     #[test]
+    fn web_preflight_applies_resolved_path_and_ignores_cancelled_reply() {
+        let source = viewer_source(
+            "async function preflightNew()",
+            "async function advanceNew()",
+        );
+        let setup = r#"
+let newDraft = { targetId: 'remote', profileId: 'codex', bundleId: 'bundle', projectDirectory: '~/project', projectDirectories: {} };
+let pendingNewPreflight = null, pendingNewPreflightController = null;
+function targetIsBare() { return true; }
+function renderNewForm() {}
+function selectedWorkspaceId() { return 'workspace'; }
+let resolveRequest;
+function request() { return new Promise(resolve => { resolveRequest = resolve; }); }
+"#;
+        let checks = r#"
+let pending = preflightNew();
+resolveRequest({ project_directory: '/remote/project' });
+if (!await pending || newDraft.projectDirectory !== '/remote/project' || newDraft.projectDirectories.remote !== '/remote/project') throw Error('resolved path was not applied');
+newDraft.projectDirectory = '~/newer';
+pending = preflightNew();
+pendingNewPreflightController.abort();
+resolveRequest({ project_directory: '/remote/stale' });
+if (await pending || newDraft.projectDirectory !== '~/newer') throw Error('cancelled reply replaced draft');
+"#;
+        run_viewer_script("path-preflight", &format!("{setup}\n{source}\n{checks}"));
+    }
+
+    #[test]
     fn embedded_viewer_lists_current_workspace_histories_and_retained_move_recovery() {
         let source = viewer_source("function isResumeSession(", "const resumeDrafts =");
         let setup = r#"
@@ -5416,20 +5446,18 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
                     .header(COOKIE, cookie())
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"raw","project_directory":"/work/project"}"#,
+                        r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"raw","project_directory":"~/project"}"#,
                     ))
                     .unwrap(),
             ));
         let request = preflights.recv().await.expect("the controller was asked");
         assert_eq!(request.bundle_id, "hel");
         assert_eq!(request.target_id, "raw");
-        assert_eq!(
-            request.project_directory,
-            Some(PathBuf::from("/work/project"))
-        );
+        assert_eq!(request.project_directory, Some(PathBuf::from("~/project")));
         request
             .reply
             .send(Ok(PreflightNew {
+                project_directory: Some("/remote/project".into()),
                 dirty_repositories: Vec::new(),
                 remote_repositories: Vec::new(),
                 local_changes_excluded: false,
@@ -5440,6 +5468,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let answer: PreflightNew = serde_json::from_slice(&body).unwrap();
         assert!(answer.dirty_repositories.is_empty());
+        assert_eq!(answer.project_directory, Some("/remote/project".into()));
     }
 
     #[tokio::test]
@@ -5525,6 +5554,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         request
             .reply
             .send(Ok(PreflightNew {
+                project_directory: None,
                 dirty_repositories: Vec::new(),
                 remote_repositories: vec![PreflightRepository {
                     id: "hel".into(),

@@ -405,7 +405,8 @@ impl Controller {
 fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectRepository> {
     let replacement = replacement.trim();
     ensure!(!replacement.is_empty(), "enter the repository's new origin");
-    let path = Path::new(replacement);
+    let expanded = hel::hel_path_input::expand_local(Path::new(replacement))?;
+    let path = expanded.as_path();
     let (github, local) = if path.is_absolute() {
         ensure!(
             path.is_dir(),

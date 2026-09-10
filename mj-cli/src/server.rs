@@ -2099,9 +2099,10 @@ fn run_new_preflight_with_executor(
     if target_is_bare {
         let directory =
             project_directory.context("project directory is required for a bare target")?;
-        config_only_controller(config)
-            .validate_project_directory(&target_id, &directory, executor)?;
+        let directory = config_only_controller(config)
+            .resolve_project_directory(&target_id, &directory, executor)?;
         return Ok(mj_controller::hel_server::PreflightNew {
+            project_directory: Some(directory),
             dirty_repositories: Vec::new(),
             remote_repositories: Vec::new(),
             local_changes_excluded: false,
@@ -2133,6 +2134,7 @@ fn run_new_preflight_with_executor(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(mj_controller::hel_server::PreflightNew {
+        project_directory: None,
         dirty_repositories: Vec::new(),
         remote_repositories,
         local_changes_excluded: true,
@@ -3598,11 +3600,12 @@ mod tests {
             bare_preflight_config(),
             "hel".into(),
             "raw".into(),
-            Some(directory),
+            Some(directory.clone()),
         )
         .expect("the repository running the test has a valid Git HEAD");
 
         assert!(answer.dirty_repositories.is_empty());
+        assert_eq!(answer.project_directory, Some(directory));
     }
 
     #[test]

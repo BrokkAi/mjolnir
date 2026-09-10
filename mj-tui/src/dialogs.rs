@@ -28,6 +28,7 @@ use mj_chat::components::{
 };
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
+use mj_chat::{components::PathField, hel_path_input::PathInput};
 
 use crate::widgets::{
     centered_modal, centered_modal_fixed, dismissible_modal_title, modal_area, popup_height,
@@ -233,7 +234,7 @@ pub(crate) struct RepositoryOriginDialog {
     pub(crate) missing_commit: String,
     pub(crate) archived_origin: String,
     pub(crate) configured_origin: String,
-    pub(crate) replacement: TextInput,
+    pub(crate) replacement: PathInput,
     pub(crate) error: Option<String>,
     pub(crate) form: RefCell<Form<DialogControl>>,
     pub(crate) launch: Box<DashboardAction>,
@@ -1148,7 +1149,7 @@ pub(crate) fn render_repository_origin(
         true,
     );
     frame.render_widget(theme::modal().title(title), popup);
-    TextField::render(
+    PathField::render(
         frame,
         field,
         &dialog.replacement,
@@ -1847,7 +1848,7 @@ impl DashboardState {
             repository_id,
             missing_commit,
             archived_origin,
-            replacement: TextInput::new(),
+            replacement: PathInput::new(),
             configured_origin,
             error: None,
             form: dialog_form(
@@ -1899,7 +1900,7 @@ impl DashboardState {
                 self.cancel_modal();
             }
             Some(Interaction::Edit(DialogControl::Field, edit)) => {
-                if TextField::apply(&mut dialog.replacement, edit) == Outcome::Changed {
+                if PathField::apply(&mut dialog.replacement, edit) == Outcome::Changed {
                     dialog.error = None;
                     crate::mark_render_changed_cells(
                         &self.render_changed,

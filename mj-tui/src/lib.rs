@@ -141,6 +141,17 @@ pub enum DashboardAction {
         mounts: Vec<AdditionalMount>,
         launch: Box<DashboardAction>,
     },
+    ResolveContainerPath {
+        session_id: String,
+        source: String,
+    },
+    ResolveSetupPath {
+        generation: u64,
+        draft: serde_json::Value,
+        path: Vec<String>,
+        value: String,
+        target: Box<hel::hel_config::TargetTemplate>,
+    },
     ValidateProjectDirectory {
         target_template_id: String,
         directory: String,

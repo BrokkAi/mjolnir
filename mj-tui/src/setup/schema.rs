@@ -263,7 +263,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "profiles" => "Add an agent account or use Detect machine to find your installed accounts.",
         "home" => {
-            "The agent's existing account directory, such as /home/you/.codex. Sign in using the agent's own login command."
+            "The agent's existing account directory, such as ~/.codex. ~ expands to your home when you apply. Sign in using the agent's own login command."
         }
         "targets" => "Add a machine or runtime. Choose its Type to see the settings it needs.",
         "phone" => {
@@ -286,5 +286,29 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Optional positive byte limit for transcript compaction. Leave blank for the default."
         }
         _ => "Enter opens or edits a setting. Changes stay in this draft until you save.",
+    }
+}
+
+/// Path ownership is explicit: a similarly named environment key is still text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PathKind {
+    Local,
+    Target,
+    RelativeDestination,
+}
+
+pub(super) fn path_kind(path: &[String]) -> Option<PathKind> {
+    use PathKind::*;
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["profiles", _, "home"]
+        | ["phone", "tls_cert" | "tls_key"]
+        | ["targets", _, "identity_file"]
+        | ["bundles", _, "repositories", _, "local"] => Some(Local),
+        ["targets", _, "workspace_prefix"] | ["targets", _, "workspace_storage", "root"] => {
+            Some(Target)
+        }
+        ["bundles", _, "repositories", _, "destination"] => Some(RelativeDestination),
+        _ => None,
     }
 }

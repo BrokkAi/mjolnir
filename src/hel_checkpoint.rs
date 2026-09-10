@@ -2702,9 +2702,7 @@ fn resolve_target_path(path: &Path) -> Result<PathBuf> {
         .is_some_and(|part| part.as_os_str() == "~")
     {
         let home = std::env::var_os("HOME").context("HOME is required to expand target path")?;
-        let mut expanded = PathBuf::from(home);
-        expanded.extend(components);
-        return Ok(expanded);
+        return crate::hel_path_input::expand_home(path, Some(Path::new(&home)));
     }
     ensure!(false, "target path must be absolute or start with '~'");
     unreachable!()
