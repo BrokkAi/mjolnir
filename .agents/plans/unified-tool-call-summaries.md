@@ -20,7 +20,7 @@ A follow-up enriches direct invocations of common developer CLIs with their sema
 - [x] (2026-09-10 00:02Z) Settled the developer-core whitelist, semantic-depth rules, direct-wrapper behavior, raw-argv handling, and no-retrofit compatibility policy.
 - [x] (2026-09-10 00:31Z) Added shared subcommand extraction for Bash command nodes and ordinary raw argv.
 - [x] (2026-09-10 00:31Z) Proved TUI, browser, grouping, and persisted-summary behavior and recaptured the terminal evidence.
-- [ ] Finish validation against the merged v2.6.0 upstream, review, commit, and push the follow-up.
+- [x] (2026-09-10 00:52Z) Merged current upstream, passed final validation on v2.6.0, reviewed the result, and prepared it for push.
 
 ## Surprises & Discoveries
 
@@ -38,8 +38,8 @@ A follow-up enriches direct invocations of common developer CLIs with their sema
   Evidence: `cargo check --workspace --all-targets` stopped at missing `libsoup-3.0`, Pango, GLib, GDK, and Cairo system packages. The required default workspace test and clippy commands do not select that unavailable desktop host configuration and passed.
 - Observation: Before the follow-up, ordinary raw argv lost every element after the executable, while shell-interpreter argv already unwrapped its script for tree-sitter.
   Evidence: The old `command_source` returned `ToolSummarySource::Executable(first)` for `['git', 'add', '.']`; it now retains the vector and shares invocation parsing with Bash command nodes.
-- Observation: The upstream branch gained the v2.6.0 release commit while this follow-up was in progress.
-  Evidence: `origin/master` points at `2da5697f`, one commit beyond this branch's original base, and changes only release plans, workspace versions, the lockfile, and generated license versions.
+- Observation: The upstream branch gained the v2.6.0 release and a Kimi detached-shell fix while this follow-up was in progress.
+  Evidence: `origin/master` advanced through `2da5697f` and `492a4bdf`; both merged cleanly before final validation.
 - Observation: The first full follow-up test run reached one transient `ETXTBSY` failure while spawning a copied controller test executable.
   Evidence: `npm_upgrade_restarts_after_the_running_package_is_removed` passed immediately when rerun alone; no tool-summary assertion failed.
 
@@ -77,7 +77,7 @@ The follow-up now enriches direct developer CLI invocations in both string comma
 
 Validation passed: focused core/chat/controller/TUI behavior tests; 13 Node viewer tests; the complete `cargo test` workspace suite; `cargo clippy --all-targets -- -D warnings`; `cargo deny` license checks; generated Cargo About and supplemental notices; formatting and diff checks. A 120×42 terminal-cell capture at `/tmp/unified-tool-call-summaries-tui.json` showed `cd && python | cat | wc ; print, cargo` as one completed group and `cargo` immediately for a running call. The only unavailable supplemental check was the optional desktop all-target build described above.
 
-For the follow-up, 18 focused core parser tests and 106 focused chat/TUI/browser transcript tests pass, as does clippy with warnings denied. The 120×42 terminal-cell capture at `/tmp/tool-subcommand-summaries-tui.json` shows `cd && python | cat | wc ; print, cargo test` in one completed group and `cargo clippy` immediately for a running call. Final workspace validation will be repeated after merging the upstream release commit.
+For the follow-up, 18 focused core parser tests and 106 focused chat/TUI/browser transcript tests pass. After merging current upstream, the complete workspace suite and clippy with warnings denied passed on v2.6.0. The Cargo About output exactly matches the committed license report, `cargo deny` passed with its pre-existing unmatched-exception warning, supplemental notices regenerated without a diff, and all 13 browser viewer tests passed. The 120×42 terminal-cell capture at `/tmp/tool-subcommand-summaries-tui.json` shows `cd && python | cat | wc ; print, cargo test` in one completed group and `cargo clippy` immediately for a running call.
 
 ## Context and Orientation
 
@@ -164,3 +164,5 @@ The core crate uses `tree-sitter` 0.25 with `tree-sitter-bash` 0.25.1. `Transcri
 Revision note (2026-09-09): Created the initial implementation-ready plan after repository exploration and two independent flow/parser reviews. It records the user-selected status, grouping, thought, and Raw-mode behavior and the topology-key solution for browser deltas.
 
 Revision note (2026-09-09): Recorded the implemented parser, cross-surface grouping, browser reset protocol, validation results, terminal capture, and the optional desktop dependency limitation before final review and commit.
+
+Revision note (2026-09-10): Added the developer-core CLI subcommand follow-up, raw-argv parity, compatibility policy, final v2.6.0 validation, and push preparation.
