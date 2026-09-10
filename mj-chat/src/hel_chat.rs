@@ -80,7 +80,7 @@ use rendering::{TranscriptRenderMode, sanitize_terminal_text};
 use second_opinion::{SecondOpinion, SecondOpinionIntent};
 use transcript::{
     ToolDiffstatRequest, TranscriptAnchor, TranscriptRenderCache, TranscriptScrollbarState,
-    TranscriptSelectionSpace, materialized_chat_entries_reusing,
+    TranscriptSelectionSpace, TranscriptToolClickTarget, materialized_chat_entries_reusing,
 };
 use turn_review::{TurnReview, TurnReviewIntent};
 
@@ -574,6 +574,11 @@ pub struct ChatState {
     render_mode: TranscriptRenderMode,
     render_cache: TranscriptRenderCache,
     transcript_scrollbar: TranscriptScrollbarState,
+    /// Completed tool calls the user has opened in the Rich transcript.
+    /// Presentation state is local to this chat and keyed by durable entry.
+    expanded_tool_calls: BTreeSet<u64>,
+    /// Screen-coordinate targets rebuilt with every transcript frame.
+    transcript_tool_click_targets: Vec<TranscriptToolClickTarget>,
     notices: Notices,
     /// Whether Codex OAuth credentials and the voice helper are available. The runtime
     /// owns discovering this asynchronously; the chat starts disabled until
@@ -717,6 +722,8 @@ impl ChatState {
             render_mode: TranscriptRenderMode::Rich,
             render_cache: TranscriptRenderCache::default(),
             transcript_scrollbar: TranscriptScrollbarState::default(),
+            expanded_tool_calls: BTreeSet::new(),
+            transcript_tool_click_targets: Vec::new(),
             notices: Notices::default(),
             voice_available: false,
             voice_active: false,
@@ -3143,6 +3150,15 @@ impl ChatState {
             return if handled { action } else { ChatAction::None };
         }
         if self.handle_transcript_scrollbar_mouse(mouse) {
+            return ChatAction::None;
+        }
+        // A plain transcript click reaches here only after the selection
+        // router has confirmed that the press never became a drag. Keeping
+        // this after scrollbar hit testing prevents a thumb click from
+        // toggling a tool underneath it.
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.toggle_tool_at(mouse.column, mouse.row)
+        {
             return ChatAction::None;
         }
         // Hover decides which transcript scrolls while the split is up, so a

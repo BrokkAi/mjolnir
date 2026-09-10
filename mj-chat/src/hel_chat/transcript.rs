@@ -2,8 +2,8 @@
 //! session, the render cache and collapse rules behind them, the scrollable
 //! viewport, and the rows every surface draws.
 
-use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::components::{ScrollbarGeometry, render_scrollbar, scrollbar_geometry};
@@ -11,7 +11,7 @@ use crate::theme;
 use agent_client_protocol::schema::v1::{Plan, ToolCall, ToolCallContent, ToolCallStatus};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph, Widget};
@@ -20,8 +20,11 @@ use sha2::{Digest, Sha256};
 
 use crate::hel_selection::{ContentPos, SelectionRange, SurfaceFrame, SurfaceId};
 use hel::hel_state::{MaterializedSession, TerminalOutputRecord, TranscriptBody, TranscriptItem};
+#[cfg(test)]
+use hel::hel_transcript::tool_call_presentation;
 use hel::hel_transcript::{
-    ChatEntry, ChatRole, PlanLine, PlanStatus, ToolStatus, TranscriptSource, tool_call_presentation,
+    ChatEntry, ChatRole, PlanLine, PlanStatus, ToolStatus, TranscriptSource,
+    materialized_tool_call_presentation,
 };
 use mj_client::web::{BrowserDiffStat, BrowserTranscript, BrowserTranscriptEntry};
 // The transcript text helpers live in `hel_transcript`, which sits below every
@@ -34,8 +37,8 @@ pub(super) use hel::hel_transcript::{
 
 use super::ChatState;
 use super::rendering::{
-    LogicalLine, TranscriptRenderMode, append_trimmed_ellipsis, markdown_lines, raw_lines,
-    sanitize_terminal_text, truncate_line_to_width, wrap_styled_line,
+    LogicalLine, TranscriptRenderMode, append_trimmed_ellipsis, display_width, markdown_lines,
+    raw_lines, sanitize_terminal_text, truncate_line_to_width, wrap_styled_line,
 };
 
 #[derive(Debug, Clone)]
@@ -100,11 +103,23 @@ pub(super) struct TranscriptRenderCache {
     collapse_input_fingerprint: u64,
 }
 
+/// A frame-local target for toggling one completed tool's presentation. The
+/// target is rebuilt with the rows so a click can never address a call that
+/// moved after scrolling or wrapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TranscriptToolClickTarget {
+    pub rect: Rect,
+    pub start_seq: u64,
+}
+
 /// Whether an entry renders on its own, renders nothing, or heads a collapsed
 /// streak of completed tools and thoughts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryCollapse {
     None,
+    /// A completed tool the user explicitly opened. It is a streak boundary
+    /// and renders its provider title plus all available details in Rich mode.
+    Expanded,
     /// Member of a collapsed run whose summary renders on the run head.
     Hidden,
     /// Detail the decluttered feed leaves out.
@@ -189,6 +204,7 @@ impl TranscriptSnapshot {
             &mut self.render_cache,
             width,
             TranscriptRenderMode::Rich,
+            &BTreeSet::new(),
         );
         let wanted = maximum_lines.saturating_add(scroll);
         let mut collected: VecDeque<Line<'static>> = VecDeque::new();
@@ -210,7 +226,8 @@ impl TranscriptSnapshot {
     pub fn browser_transcript(&self, after_seq: Option<u64>) -> BrowserTranscript {
         let collapsed_restarts =
             collapsed_session_restart_states(&self.entries, TranscriptRenderMode::Rich);
-        let collapse = entry_collapse_states(&self.entries, TranscriptRenderMode::Rich);
+        let collapse =
+            entry_collapse_states(&self.entries, TranscriptRenderMode::Rich, &BTreeSet::new());
         let restart_collapse_window_start = restart_collapse_window_start_seq(
             &self.entries,
             &collapsed_restarts,
@@ -545,10 +562,8 @@ fn materialized_chat_entry_with_diffstats(
                     .map_or(ToolStatus::Pending, |call| tool_status(&call.status)),
             );
             if let Some(call) = call {
-                let presentation = presentation
-                    .as_deref()
-                    .cloned()
-                    .unwrap_or_else(|| tool_call_presentation(&call));
+                let presentation =
+                    materialized_tool_call_presentation(presentation.as_deref(), &call);
                 entry.tool_summary = Some(presentation.summary.clone());
                 entry.tool_presentation = Some(presentation);
                 let fallback_terminal = hel::hel_acp::is_fallback_terminal_tool_call(&call);
@@ -725,6 +740,13 @@ fn browser_projection_entries(
                 }
                 index += 1;
             }
+            EntryCollapse::Expanded => {
+                let entry = &entries[index];
+                if entry.start_seq > last_compaction_seq && !entry.raw_only {
+                    projected.push(entry.clone());
+                }
+                index += 1;
+            }
             EntryCollapse::Omitted | EntryCollapse::Hidden => index += 1,
             EntryCollapse::Summary { end, .. } => {
                 let members = entries[index..end]
@@ -796,7 +818,7 @@ fn rich_presentation_key(
                 digest.update(entries[index].start_seq.to_le_bytes());
                 index += 1;
             }
-            EntryCollapse::None => index += 1,
+            EntryCollapse::None | EntryCollapse::Expanded => index += 1,
         }
     }
     format!("{:x}", digest.finalize())
@@ -963,6 +985,7 @@ fn prepare_render_cache(
     cache: &mut TranscriptRenderCache,
     width: u16,
     mode: TranscriptRenderMode,
+    expanded_tool_calls: &BTreeSet<u64>,
 ) {
     let mode_changed = cache.mode != mode;
     let collapse_input_fingerprint = collapse_revision_fingerprint(entries);
@@ -979,7 +1002,7 @@ fn prepare_render_cache(
     {
         return;
     }
-    let collapse = entry_collapse_states(entries, mode);
+    let collapse = entry_collapse_states(entries, mode, expanded_tool_calls);
     for (index, state) in collapse.iter().enumerate() {
         if cache.collapse.get(index) != Some(state) {
             cache.entries[index] = None;
@@ -1067,12 +1090,18 @@ fn restart_collapse_window_start_seq(
 /// rather than breaking it, since nothing of it is on screen to separate the
 /// surrounding entries. Raw mode does not tool-collapse or omit entries, but
 /// it still coalesces adjacent restart markers as a presentation rule.
-fn entry_collapse_states(entries: &[ChatEntry], mode: TranscriptRenderMode) -> Vec<EntryCollapse> {
+fn entry_collapse_states(
+    entries: &[ChatEntry],
+    mode: TranscriptRenderMode,
+    expanded_tool_calls: &BTreeSet<u64>,
+) -> Vec<EntryCollapse> {
     let mut states = vec![EntryCollapse::None; entries.len()];
     if mode == TranscriptRenderMode::Rich {
         for (index, entry) in entries.iter().enumerate() {
             if entry.raw_only {
                 states[index] = EntryCollapse::Omitted;
+            } else if is_completed_tool(entry) && expanded_tool_calls.contains(&entry.start_seq) {
+                states[index] = EntryCollapse::Expanded;
             }
         }
     }
@@ -1088,7 +1117,9 @@ fn entry_collapse_states(entries: &[ChatEntry], mode: TranscriptRenderMode) -> V
         return states;
     }
     let streak_member = |index: usize| {
-        entries[index].role == ChatRole::Thought || is_completed_tool(&entries[index])
+        entries[index].role == ChatRole::Thought
+            || (is_completed_tool(&entries[index])
+                && !expanded_tool_calls.contains(&entries[index].start_seq))
     };
     let mut start = 0;
     while start < entries.len() {
@@ -1246,6 +1277,7 @@ fn cached_entry_lines<'cache>(
         let lines = match collapse {
             EntryCollapse::None => render_transcript_entry(entry, width, cache.mode),
             EntryCollapse::Hidden | EntryCollapse::Omitted => Vec::new(),
+            EntryCollapse::Expanded => render_transcript_entry_expanded(entry, width),
             EntryCollapse::Summary { end, .. } => {
                 collapsed_streak_lines(&entries[index..end], width, cache.mode)
             }
@@ -1595,6 +1627,7 @@ impl ChatState {
             &mut self.render_cache,
             width,
             self.render_mode,
+            &self.expanded_tool_calls,
         );
         let top = AnchorRow { entry: 0, row: 0 };
         if self.entries.is_empty() && trailing.is_empty() {
@@ -1775,6 +1808,7 @@ impl ChatState {
             &mut self.render_cache,
             width,
             self.render_mode,
+            &self.expanded_tool_calls,
         );
     }
 
@@ -1956,6 +1990,123 @@ impl ChatState {
         ));
     }
 
+    /// Rebuild the frame-local tool hitboxes from the same cached rows that
+    /// were just painted. Keeping these targets transient avoids stale
+    /// coordinates after wrapping, scrolling, or a collapse change.
+    pub(super) fn rebuild_transcript_tool_click_targets(
+        &mut self,
+        inner: Rect,
+        top: AnchorRow,
+        visible_rows: usize,
+    ) {
+        self.transcript_tool_click_targets.clear();
+        if self.render_mode != TranscriptRenderMode::Rich
+            || visible_rows == 0
+            || inner.width == 0
+            || top.entry >= self.entries.len()
+        {
+            return;
+        }
+
+        let width = usize::from(inner.width);
+        let mut screen_offset = 0usize;
+        let mut skip = top.row;
+        let entries = &self.entries;
+        let cache = &mut self.render_cache;
+        let targets = &mut self.transcript_tool_click_targets;
+        for index in top.entry..entries.len() {
+            if screen_offset >= visible_rows {
+                break;
+            }
+            let collapse = cache.collapse[index];
+            let lines = cached_entry_lines(entries, cache, index);
+            let entry_start = screen_offset;
+            let visible_line_count = lines
+                .len()
+                .saturating_sub(skip)
+                .min(visible_rows.saturating_sub(screen_offset));
+            if visible_line_count == 0 {
+                skip = 0;
+                continue;
+            }
+            match collapse {
+                EntryCollapse::Expanded => {
+                    add_whole_tool_rows(
+                        targets,
+                        inner,
+                        entry_start,
+                        skip,
+                        lines,
+                        entries[index].start_seq,
+                    );
+                }
+                EntryCollapse::None if is_completed_tool(&entries[index]) => {
+                    add_whole_tool_rows(
+                        targets,
+                        inner,
+                        entry_start,
+                        skip,
+                        lines,
+                        entries[index].start_seq,
+                    );
+                }
+                EntryCollapse::Summary { end, .. } => {
+                    add_summary_tool_rows(
+                        targets,
+                        inner,
+                        entry_start,
+                        skip,
+                        width,
+                        &entries[index..end],
+                        lines,
+                    );
+                }
+                _ => {}
+            }
+            screen_offset = screen_offset.saturating_add(visible_line_count);
+            skip = 0;
+        }
+    }
+
+    /// Toggle an expanded completed tool at a frame-local screen coordinate.
+    /// The selection router calls this only for a synthetic click, so ordinary
+    /// mouse-down events remain owned by drag selection.
+    pub(super) fn toggle_tool_at(&mut self, column: u16, row: u16) -> bool {
+        let Some(target) = self
+            .transcript_tool_click_targets
+            .iter()
+            .find(|target| target.rect.contains(Position::new(column, row)))
+            .copied()
+        else {
+            return false;
+        };
+        if !self.expanded_tool_calls.insert(target.start_seq) {
+            self.expanded_tool_calls.remove(&target.start_seq);
+        }
+
+        // Keep a useful durable anchor when the toggle changes row counts.
+        // A tail stays a tail; a row inside the affected call starts at its
+        // header after the new layout is materialized.
+        if let TranscriptAnchor::Row { entry, .. } = self.anchor
+            && self
+                .entries
+                .get(entry)
+                .is_some_and(|entry| entry.start_seq == target.start_seq)
+            && let Some(entry) = self
+                .entries
+                .iter()
+                .position(|entry| entry.start_seq == target.start_seq)
+        {
+            self.anchor = TranscriptAnchor::Row { entry, row: 0 };
+        }
+        self.invalidate_render_cache();
+        self.transcript_selection = None;
+        self.transcript_selection_invalid = true;
+        self.transcript_tool_click_targets.clear();
+        self.mark_visible_changed();
+        true
+    }
+
     /// Restarts the row space at the viewport top, and reports the content row
     /// that top now sits at.
     fn pin_transcript_selection(&mut self, top: AnchorRow, layout: TranscriptRowLayout) -> usize {
@@ -2133,6 +2284,148 @@ fn row_text(line: &Line<'_>) -> String {
         .to_owned()
 }
 
+fn add_whole_tool_rows(
+    targets: &mut Vec<TranscriptToolClickTarget>,
+    inner: Rect,
+    screen_start: usize,
+    skip: usize,
+    lines: &[Line<'static>],
+    start_seq: u64,
+) {
+    for line_index in skip..lines.len() {
+        let row = inner
+            .y
+            .saturating_add(u16::try_from(screen_start + line_index - skip).unwrap_or(u16::MAX));
+        if row >= inner.bottom() {
+            break;
+        }
+        targets.push(TranscriptToolClickTarget {
+            rect: Rect::new(inner.x, row, inner.width, 1),
+            start_seq,
+        });
+    }
+}
+
+fn add_summary_tool_rows(
+    targets: &mut Vec<TranscriptToolClickTarget>,
+    inner: Rect,
+    screen_start: usize,
+    skip: usize,
+    width: usize,
+    members: &[ChatEntry],
+    lines: &[Line<'static>],
+) {
+    let tools = members
+        .iter()
+        .filter(|entry| is_completed_tool(entry))
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        return;
+    }
+    let newest_thought = members
+        .iter()
+        .rev()
+        .find(|entry| entry.role == ChatRole::Thought);
+    let thought_lines = newest_thought.map_or(0, |thought| {
+        render_transcript_entry(thought, width, TranscriptRenderMode::Rich).len()
+    });
+    if tools.len() == 1 {
+        let tool_lines = render_transcript_entry(tools[0], width, TranscriptRenderMode::Rich);
+        let tool_start = thought_lines;
+        for line_index in tool_start..tool_start.saturating_add(tool_lines.len()) {
+            if line_index < skip || line_index >= lines.len() {
+                continue;
+            }
+            let Some(row) = inner
+                .y
+                .checked_add(u16::try_from(screen_start + line_index - skip).unwrap_or(u16::MAX))
+            else {
+                continue;
+            };
+            if row >= inner.bottom() {
+                continue;
+            }
+            targets.push(TranscriptToolClickTarget {
+                rect: Rect::new(inner.x, row, inner.width, 1),
+                start_seq: tools[0].start_seq,
+            });
+        }
+        return;
+    }
+
+    let synthetic = collapsed_tool_entry(members);
+    let body = entry_body_rows(&synthetic, width, TranscriptRenderMode::Rich);
+    let synthetic_lines = render_transcript_entry(&synthetic, width, TranscriptRenderMode::Rich);
+    let synthetic_body_start = synthetic_lines
+        .len()
+        .saturating_sub(body.len().saturating_add(1));
+    let source = tools
+        .iter()
+        .map(|tool| tool.tool_summary.as_deref().unwrap_or(&tool.text))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut member_ranges = Vec::with_capacity(tools.len());
+    let mut source_offset = 0usize;
+    for (index, tool) in tools.iter().enumerate() {
+        let end =
+            source_offset.saturating_add(tool.tool_summary.as_deref().unwrap_or(&tool.text).len());
+        member_ranges.push((source_offset, end, tool.start_seq));
+        source_offset = end.saturating_add(if index + 1 < tools.len() { 2 } else { 0 });
+    }
+
+    let mut search_from = 0usize;
+    for (body_index, line) in body.iter().enumerate() {
+        let line_index = synthetic_body_start.saturating_add(body_index);
+        if line_index < skip || line_index >= lines.len() {
+            continue;
+        }
+        let line_text = row_text(line);
+        let content = line_text
+            .strip_prefix(ROLE_GUTTER)
+            .unwrap_or(&line_text)
+            .trim_end();
+        let content = content.trim_start();
+        if content.is_empty() {
+            continue;
+        }
+        let Some(match_start) = source[search_from..]
+            .find(content)
+            .map(|offset| search_from + offset)
+        else {
+            continue;
+        };
+        let match_end = match_start.saturating_add(content.len());
+        search_from = match_end;
+        let row = inner
+            .y
+            .saturating_add(u16::try_from(screen_start + line_index - skip).unwrap_or(u16::MAX));
+        if row >= inner.bottom() {
+            continue;
+        }
+        for (member_start, member_end, start_seq) in &member_ranges {
+            let overlap_start = (*member_start).max(match_start);
+            let overlap_end = (*member_end).min(match_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let left = display_width(&content[..overlap_start - match_start]);
+            let right = display_width(&content[..overlap_end - match_start]);
+            let left = u16::try_from(left).unwrap_or(u16::MAX);
+            let width = u16::try_from(right.saturating_sub(usize::from(left)))
+                .unwrap_or(u16::MAX)
+                .max(1);
+            let x = inner
+                .x
+                .saturating_add(u16::try_from(ROLE_GUTTER_WIDTH).unwrap_or(0))
+                .saturating_add(left);
+            targets.push(TranscriptToolClickTarget {
+                rect: Rect::new(x, row, width, 1),
+                start_seq: *start_seq,
+            });
+        }
+    }
+}
+
 /// One cached transcript row cut to `first..=last`.
 ///
 /// The row is drawn the way the transcript draws it, so the engine slices the
@@ -2246,6 +2539,7 @@ pub(super) fn render_transcript(
         Paragraph::new(visible).style(Style::default().fg(theme::palette().text)),
         inner,
     );
+    chat.rebuild_transcript_tool_click_targets(inner, top, visible_rows);
     chat.register_transcript_surface(inner, top, visible_rows, at_tail, gesture_active);
     let track = Rect::new(
         inner.right(),
@@ -2390,6 +2684,7 @@ pub(super) fn transcript_lines(chat: &mut ChatState, width: u16) -> Vec<Line<'st
         &mut chat.render_cache,
         width,
         chat.render_mode,
+        &chat.expanded_tool_calls,
     );
     let mut lines = Vec::new();
     for index in 0..chat.entries.len() {
@@ -2452,6 +2747,22 @@ fn render_transcript_entry(
     width: usize,
     mode: TranscriptRenderMode,
 ) -> Vec<Line<'static>> {
+    render_transcript_entry_with_options(entry, width, mode, false)
+}
+
+/// Render a completed tool after the user opens it from a compact Rich row.
+/// The header keeps the active transcript mode, while the body uses the full
+/// provider title and attached details just like Raw mode.
+fn render_transcript_entry_expanded(entry: &ChatEntry, width: usize) -> Vec<Line<'static>> {
+    render_transcript_entry_with_options(entry, width, TranscriptRenderMode::Rich, true)
+}
+
+fn render_transcript_entry_with_options(
+    entry: &ChatEntry,
+    width: usize,
+    mode: TranscriptRenderMode,
+    expanded_tool: bool,
+) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let visual = entry_visual(entry);
     let time = match entry.role {
@@ -2478,7 +2789,12 @@ fn render_transcript_entry(
         width,
         ROLE_GUTTER_WIDTH,
     ));
-    out.extend(entry_body_rows(entry, width, mode));
+    out.extend(entry_body_rows_with_options(
+        entry,
+        width,
+        mode,
+        expanded_tool,
+    ));
     out.push(Line::from(""));
     out
 }
@@ -2490,9 +2806,18 @@ fn entry_body_rows(
     width: usize,
     mode: TranscriptRenderMode,
 ) -> Vec<Line<'static>> {
+    entry_body_rows_with_options(entry, width, mode, false)
+}
+
+fn entry_body_rows_with_options(
+    entry: &ChatEntry,
+    width: usize,
+    mode: TranscriptRenderMode,
+    expanded_tool: bool,
+) -> Vec<Line<'static>> {
     let visual = entry_visual(entry);
     let content_width = width.saturating_sub(ROLE_GUTTER_WIDTH).max(1);
-    entry_logical_lines(entry, mode, &visual, content_width)
+    entry_logical_lines(entry, mode, &visual, content_width, expanded_tool)
         .into_iter()
         .flat_map(|logical| {
             wrap_styled_line(logical.line, content_width, logical.continuation_indent)
@@ -2515,6 +2840,7 @@ fn entry_logical_lines(
     mode: TranscriptRenderMode,
     visual: &EntryVisual,
     width: usize,
+    expanded_tool: bool,
 ) -> Vec<LogicalLine> {
     if entry.role == ChatRole::Plan {
         return entry
@@ -2545,6 +2871,13 @@ fn entry_logical_lines(
         .cloned()
         .collect::<Vec<_>>();
     let mut source = match mode {
+        TranscriptRenderMode::Rich if expanded_tool && entry.role == ChatRole::Tool => {
+            if details.is_empty() {
+                entry.text.clone()
+            } else {
+                format!("{}\n{}", entry.text, details.join("\n"))
+            }
+        }
         TranscriptRenderMode::Raw if !details.is_empty() => {
             format!("{}\n{}", entry.text, details.join("\n"))
         }
@@ -2618,11 +2951,17 @@ fn entry_visual(entry: &ChatEntry) -> EntryVisual {
         ChatRole::Tool => {
             let status = entry.tool_status.unwrap_or(ToolStatus::Pending);
             let (glyph, label, style) = tool_presentation(status);
+            let body_style = match status {
+                ToolStatus::Pending | ToolStatus::Completed => {
+                    Style::default().fg(theme::palette().muted)
+                }
+                ToolStatus::Running | ToolStatus::Failed => Style::default(),
+            };
             EntryVisual {
                 glyph,
                 label: format!("Tool · {label}"),
                 header_style: style,
-                body_style: Style::default(),
+                body_style,
                 rail_style: Style::default().fg(theme::palette().border),
             }
         }
@@ -2667,7 +3006,7 @@ fn tool_presentation(status: ToolStatus) -> (&'static str, &'static str, Style) 
             "running",
             Style::default().fg(theme::palette().warning),
         ),
-        ToolStatus::Completed => ("✓", "done", Style::default().fg(theme::palette().success)),
+        ToolStatus::Completed => ("✓", "done", Style::default().fg(theme::palette().muted)),
         ToolStatus::Failed => ("×", "failed", Style::default().fg(theme::palette().error)),
     }
 }

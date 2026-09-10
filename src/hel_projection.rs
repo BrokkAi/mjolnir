@@ -4020,6 +4020,7 @@ mod tests {
                     source: "Read file".into(),
                     source_kind: crate::hel_transcript::ToolSummarySourceKind::Title,
                     tool_kind: agent_client_protocol::schema::v1::ToolKind::Read,
+                    summary_version: crate::hel_transcript::TOOL_SUMMARY_VERSION,
                 })),
             },
         }));
