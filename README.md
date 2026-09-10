@@ -1,13 +1,16 @@
 # Mjolnir
 
-Mjolnir (`mj`) is a session manager for coding agents that provisions their
-execution environments and lets you continue work across harnesses, accounts,
-and machines.
+Mjolnir (`mj`) is a a meta-harness for managing all your coding agents in one place.
 
-Start a task with Claude Code locally, continue with Codex in a remote container,
-and restore the session on another host. Choose the harness account and execution
-target independently; Mjolnir handles provisioning, credential synchronization,
-checkpointing, and the handoff.
+If you only ever use a single subscription in a single harness on a single machine, you don't need mjolnir.
+
+But if you expand beyond that, Mjolnir offers flexibility across all three:
+
+1. Move sessions between subscriptions (personal codex to work codex)
+2. Move sessions across harnesses (codex to claude code)
+3. Move sessions across machines or containers (local workstation to ec2)
+
+... while integrating a privacy-first, no-setup web ui via Tailscale for when you're not at your desk.
 
 [Documentation](https://mjolnir.brokk.ai/) ·
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
@@ -15,31 +18,27 @@ checkpointing, and the handoff.
 
 ## Screenshots
 
-Targets + Quota minimized to show more Sessions details:
-<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/e444edcd-e9d7-4349-ba70-1ed3dc36d21e" />
+<table>
+  <tr>
+    <td align="center" valign="top">
+      <img width="400" alt="Targets and Quota minimized" src="https://github.com/user-attachments/assets/e444edcd-e9d7-4349-ba70-1ed3dc36d21e" />
+      <br>
+      <em>Targets + Quota minimized to show more Sessions details</em>
+    </td>
+    <td align="center" valign="top">
+      <img width="400" alt="Sessions minimized" src="https://github.com/user-attachments/assets/84ece206-f3c9-4489-85b6-5d7cf42a08c1" />
+      <br>
+      <em>Sessions minimized, Targets + Quota showing details</em>
+    </td>
+    <td align="center" valign="top">
+      <img width="400" alt="Larger screen" src="https://github.com/user-attachments/assets/bd31352c-a961-4bfc-9874-3dc71175937e" />
+      <br>
+      <em>On a larger screen, Sessions + Quota both showing details</em>
+    </td>
+  </tr>
+</table>
 
-Sessions minimized, Targets + Quota showing details:
-<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/84ece206-f3c9-4489-85b6-5d7cf42a08c1" />
-
-On a larger screen, Sessions + Quota both showing details:
-<img width="3768" height="4320" alt="image" src="https://github.com/user-attachments/assets/bd31352c-a961-4bfc-9874-3dc71175937e" />
-
-## Why Mjolnir
-
-- **Provision the environment with the session.** Launch disposable Docker or
-  Podman containers locally or over SSH, or EC2 instances from your launch
-  templates. Mjolnir uploads session workers to remote hosts without requiring a
-  resident Mjolnir daemon on each host. Multi-repository bundles give each session
-  the complete project layout.
-- **Choose the harness, account, and machine independently.** Keep multiple
-  profiles for the same harness, adopt existing native sessions, and move work to
-  another account or target. When switching harnesses, Mjolnir preserves repository
-  state and the visible conversation and gives the new harness a condensed
-  handoff. Same-harness resume restores native session state.
-- **Keep credentials and project knowledge available.** Mjolnir continuously
-  synchronizes whitelisted credentials into live targets and shares project memory
-  across sessions and harnesses. The dashboard brings profile quota and target
-  capacity together; independent adversarial review can check completed work.
+## Alternatives
 
 The comparison below covers product capabilities. **—** means no first-class
 capability; manual scripts, host setup, and filesystem access are described where
