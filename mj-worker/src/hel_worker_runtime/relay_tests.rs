@@ -790,7 +790,12 @@ fn launch_wires_require_the_new_baseline_shape() {
         ExecutionPolicy::Unconstrained
     );
     assert!(!legacy_policy.environment.contains_key("INITIAL_AGENT_MODE"));
-    super::enforce_execution_policy(&mut legacy_policy);
+    super::enforce_execution_policy(&mut legacy_policy).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&legacy_policy.environment["CODEX_CONFIG"])
+            .unwrap()["default_permissions"],
+        ":danger-full-access"
+    );
     assert_eq!(
         legacy_policy
             .environment

@@ -737,7 +737,7 @@ impl ReviewerRole {
         );
         config
             .harness
-            .configure_execution_environment(config.execution_policy, &mut environment);
+            .configure_execution_environment(config.execution_policy, &mut environment)?;
         let managed_harness = super::harness::resolve(
             self.placement.harness_runtime,
             config.harness,
