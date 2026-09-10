@@ -217,7 +217,21 @@ impl Controller {
         if session.state != SessionState::Provisioning {
             bail!("session {session_id} is not provisioning");
         }
-        let created_worktree = match self.prepare_managed_raw_worktree(session_id, executor) {
+        let preparation = (|| {
+            let template = self
+                .config
+                .targets
+                .get(&session.target_template_id)
+                .context("target template disappeared during provisioning")?;
+            let profile = self
+                .config
+                .profiles
+                .get(&session.last_profile)
+                .context("harness profile disappeared during provisioning")?;
+            super::worker_binary::preflight_harness(template, profile, executor)?;
+            self.prepare_managed_raw_worktree(session_id, executor)
+        })();
+        let created_worktree = match preparation {
             Ok(created) => created,
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
                 return Err(self.fail_new_session_with_cleanup(session_id, error, executor)?);
@@ -1535,6 +1549,100 @@ mod tests {
         assert!(
             !reloaded.state.sessions.contains_key(&session_id),
             "failed SSH Docker launch left a durable provisioning row"
+        );
+    }
+
+    #[test]
+    fn failed_node_preflight_discards_session_before_provisioning() {
+        if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let test = "failed_node_preflight_discards_session_before_provisioning";
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    &format!("hel_controller::provisioning::tests::{test}"),
+                    "--nocapture",
+                ])
+                .env(SSH_DOCKER_FAILURE_CHILD, "1")
+                .env("MJ_DATA_DIR", directory.path())
+                .env("MJ_CONFIG_DIR", directory.path());
+            let output = hel::hel_subprocess::run_with_input(&mut command, &[]).unwrap();
+            assert!(
+                output.status.success(),
+                "isolated {test} failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let _writer = hel::hel_database::install_isolated_test_writer();
+        let mut config = ssh_docker_registration_config();
+        config.targets.insert(
+            "docker".into(),
+            TargetTemplate::SshBare {
+                ssh: SshConnection {
+                    host: "builder".into(),
+                    user: Some("agent".into()),
+                    identity_file: None,
+                    extra_args: Vec::new(),
+                },
+                permissions: hel::hel_config::PermissionMode::Guardian,
+                workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
+            },
+        );
+        config.save().unwrap();
+        let mut controller = Controller {
+            config,
+            state: HelState::default(),
+        };
+        let session_id = controller
+            .register_session_with_resources(
+                "codex",
+                "project",
+                "docker",
+                "missing Node",
+                SessionLaunchOptions {
+                    initial_prompt: None,
+                    workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                    additional_mounts: Vec::new(),
+                    allow_dirty_local: false,
+                    resource_allocation: None,
+                    project_directory: Some("/srv/project".into()),
+                    session_title_override: None,
+                },
+            )
+            .unwrap();
+        assert!(
+            hel::hel_database::load_state()
+                .unwrap()
+                .sessions
+                .contains_key(&session_id)
+        );
+
+        let executor = RecordingExecutor::failing("preflight managed harness Node.js and npm");
+        let error =
+            futures::executor::block_on(controller.provision_session_with_failure_disposition(
+                &session_id,
+                &executor,
+                None,
+                ProvisioningFailureDisposition::Discard,
+            ))
+            .unwrap_err();
+        let reported = format!("{error:#}");
+        assert!(reported.contains("Node.js 22+ and npm"), "{reported}");
+        assert_eq!(
+            executor.commands().len(),
+            1,
+            "preflight must fail before provisioning"
+        );
+        assert!(!controller.state.sessions.contains_key(&session_id));
+
+        let reloaded = Controller::load().unwrap();
+        assert!(
+            !reloaded.state.sessions.contains_key(&session_id),
+            "failed Node preflight left a durable provisioning row"
         );
     }
 
