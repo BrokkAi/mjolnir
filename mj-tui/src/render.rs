@@ -154,6 +154,7 @@ pub(crate) fn render_onboarding_surface(frame: &mut Frame, dashboard: &mut Dashb
 /// The registry moves out for the call because the modal renderers read the
 /// rest of the dashboard while they register their own surfaces.
 pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut DashboardState) {
+    dashboard.prepare_dialog_state();
     let mut surfaces = std::mem::take(&mut dashboard.frame_surfaces);
     match &dashboard.mode {
         Mode::New(wizard) => render_new_wizard(frame, area, dashboard, wizard, &mut surfaces),
@@ -188,6 +189,7 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
         Mode::Setup(dialog) => crate::setup::render_setup(frame, area, dialog, &mut surfaces),
         Mode::Dashboard => {}
     }
+    dashboard.render_dialog_confirmation(frame, area, &mut surfaces);
     dashboard.frame_surfaces = surfaces;
 }
 

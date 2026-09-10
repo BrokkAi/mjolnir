@@ -70,9 +70,9 @@ def palette_viewport(tmux, evidence):
     tmux.wait_until(lambda: "▐" not in popup_text(), "filtered palette fits without scrollbar")
     record(tmux, evidence, "palette-filter-small", "Shift-Tab; type open setup", "filtered settings entry fits in the short palette")
     tmux.send_key("Enter")
-    tmux.wait_for("╭ Setup")
+    tmux.wait_for("× Setup")
     click(tmux, "  Cancel  ")
-    absent(tmux, "╭ Setup")
+    absent(tmux, "× Setup")
     tmux.resize(140, 40)
 
 
@@ -89,18 +89,22 @@ def save_review_settings(lab, tmux, evidence):
     open_review_settings(tmux)
     # The fixture starts disabled, so changing tier can be saved independently
     # of target discovery. Validate persistence and disappearance separately.
-    click(tmux, "Quick")
-    tmux.wait_for("One general reviewer; a validator checks any findings.")
+    click(tmux, "Extended" if original["tier"].lower() == "extended" else "Quick")
+    tmux.send_key("Home")
+    tmux.send_key("Enter")
+    tmux.wait_for("One general reviewer;")
     click(tmux, "  Save Setup  ")
-    absent(tmux, "╭ Setup")
+    absent(tmux, "× Setup")
     lab.wait_snapshot(lambda value: value["review_config"]["tier"].lower() == "quick", "review tier persisted")
     record(tmux, evidence, "review-save-dismissed", "choose Quick and click Save", "settings close and persisted tier changes")
     open_review_settings(tmux)
-    click(tmux, "Extended" if original["tier"].lower() == "extended" else "Quick")
+    click(tmux, "Quick")
+    tmux.send_key("End" if original["tier"].lower() == "extended" else "Home")
+    tmux.send_key("Enter")
     if original["tier"].lower() == "extended":
-        tmux.wait_for("A supervisor selects specialist reviewers for deeper coverage.")
+        tmux.wait_for("A supervisor selects specialist reviewers")
     click(tmux, "  Save Setup  ")
-    absent(tmux, "╭ Setup")
+    absent(tmux, "× Setup")
     lab.wait_snapshot(lambda value: value["review_config"] == original, "original review settings restored")
 
 
@@ -149,13 +153,13 @@ def save_container_settings(lab, tmux, evidence):
     absent(tmux, "Edit container")
 
 
-def stop_and_resume(lab, tmux, evidence, session_id):
+def stop_and_resume(lab, tmux, evidence, session_id, dialogs_only=False):
     tmux.send_key("F2")
     tmux.wait_for("Commands")
     tmux.send_text("stop session")
     tmux.wait_for(" 1 commands ")
     tmux.wait_for("Stop session")
-    click(tmux, "  Close  ")
+    tmux.send_key("Escape")
     absent(tmux, " Commands ")
     if not any(row["id"] == session_id and row["state"] == "running" for row in lab.snapshot()["sessions"]):
         raise ScenarioFailure("Closing the palette stopped the session")
@@ -169,7 +173,8 @@ def stop_and_resume(lab, tmux, evidence, session_id):
     lab.wait_snapshot(lambda value: any(row["id"] == session_id and row["state"] == "stopped" for row in value["sessions"]), "session stopped with recovery copy")
     record(tmux, evidence, "stop-command-dismissed", "Close palette then reopen and Run Stop", "Close retains the session; Run stops it and closes the palette")
     from tui_review_discovery import exercise_offline_save
-    exercise_offline_save(lab, tmux, evidence)
+    if not dialogs_only:
+        exercise_offline_save(lab, tmux, evidence)
     tmux.send_key("M-s")
     tmux.wait_for("Resume a session")
     tmux.send_key("Enter")
@@ -229,7 +234,7 @@ def create_through_dialog(lab, tmux, evidence):
     tmux.wait_for("Project directory cannot be empty")
     tmux.send_text("relative")
     tmux.send_key("Enter")
-    tmux.wait_for("Project directory must be an absolute")
+    tmux.wait_for("Enter an absolute path or a path starting with ~/")
     record(tmux, evidence, "new-invalid-project", "submit empty and relative paths", "validation stays in the editable project step")
     tmux.send_key("C-u")
     tmux.send_raw("\x1b[200~" + str(lab.project) + "\x1b[201~")

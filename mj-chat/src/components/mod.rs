@@ -1,6 +1,8 @@
 //! Reusable controls and focus-aware form routing for Hel TUIs.
 
 mod controls;
+mod dialog;
+pub use dialog::{ActionRole, Dialog, DialogAction, DialogLayout, DialogShell};
 mod layout;
 mod scope;
 pub mod scrollbar;
@@ -14,7 +16,10 @@ pub use layout::{
     form_columns, form_rows,
 };
 pub use rat_event::{ConsumedEvent, Outcome};
-pub use scope::{ControlKind, EventResult, FieldEdit, Form, Interaction, apply_field_edit};
+pub use scope::{
+    ControlKind, DOUBLE_CLICK_INTERVAL, EventResult, FieldEdit, Form, Interaction, ListActivation,
+    apply_field_edit,
+};
 pub use scrollbar::{ScrollbarGeometry, render_scrollbar, scrollbar_geometry};
 
 /// A path field with the standard readline editing and cursor behavior.
