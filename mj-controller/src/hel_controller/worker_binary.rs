@@ -1402,6 +1402,49 @@ pub(super) fn bridge_launch(
     }
 }
 
+pub(super) fn preflight_harness(
+    template: &hel::hel_config::TargetTemplate,
+    profile: &HarnessProfile,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    use hel::hel_config::TargetTemplate;
+    if !matches!(
+        profile.kind,
+        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Deepseek
+    ) {
+        return Ok(());
+    }
+    if !matches!(
+        template,
+        TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
+    ) {
+        return Ok(());
+    }
+    let script = "if ! command -v node >/dev/null 2>&1; then echo 'Node.js is missing from PATH; install Node.js 22 or newer in the target environment' >&2; exit 127; fi; if ! node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)'; then echo 'Node.js 22 or newer is required in the target environment' >&2; exit 1; fi; if ! command -v npm >/dev/null 2>&1 || ! npm --version >/dev/null; then echo 'npm is missing or unusable; install npm in the target environment' >&2; exit 127; fi";
+    let mut args = if profile.environment.contains_key("PATH") {
+        vec![
+            "-c".to_owned(),
+            format!("export PATH=\"$1\"; {script}"),
+            "mj-node-preflight".into(),
+            profile.environment["PATH"].clone(),
+        ]
+    } else {
+        vec!["-lc".to_owned(), script.to_owned()]
+    };
+    let (command, destination) = match template {
+        TargetTemplate::LocalBare => (CommandSpec::new("sh", args), "local host".to_owned()),
+        TargetTemplate::SshBare { ssh, .. } => {
+            let ssh = super::backend_ssh(ssh);
+            args.insert(0, "sh".into());
+            (ssh_command_spec(&ssh, args), ssh.destination)
+        }
+        _ => unreachable!(),
+    };
+    execute_checked(executor, command.purpose("preflight managed harness Node.js and npm"))
+        .with_context(|| format!("{} launch preflight failed on {destination}; Node.js 22+ and npm must be available on the target PATH", profile.kind.display_name()))?;
+    Ok(())
+}
+
 fn ensure_node_script() -> &'static str {
     "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi"
 }
@@ -2827,6 +2870,41 @@ mod tests {
     use std::collections::BTreeMap;
 
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: directory.path().into(),
+            environment: std::collections::BTreeMap::from([(
+                "PATH".into(),
+                directory.path().to_string_lossy().into_owned(),
+            )]),
+            context_window_bytes: None,
+        };
+        let check = || {
+            preflight_harness(
+                &hel::hel_config::TargetTemplate::LocalBare,
+                &profile,
+                &ProcessExecutor,
+            )
+        };
+        let write_tool = |name: &str, body: &str| {
+            let path = directory.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        assert!(format!("{:#}", check().unwrap_err()).contains("Node.js is missing"));
+        write_tool("node", "exit 1");
+        assert!(format!("{:#}", check().unwrap_err()).contains("Node.js 22 or newer is required"));
+        write_tool("node", "exit 0");
+        assert!(format!("{:#}", check().unwrap_err()).contains("npm is missing or unusable"));
+        write_tool("npm", "exit 0");
+        check().unwrap();
+    }
 
     #[test]
     fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() {
