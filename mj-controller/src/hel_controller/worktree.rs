@@ -19,6 +19,19 @@ pub use mj_client::target::{ResumePlan, resume_compatibility};
 use super::{Controller, backend_ssh, execute_checked, now, ssh_command_spec};
 
 impl Controller {
+    /// Resolve first so validation, review, and launch use the same path.
+    pub fn resolve_project_directory(
+        &self,
+        target_id: &str,
+        directory: &Path,
+        executor: &impl CommandExecutor,
+    ) -> Result<PathBuf> {
+        hel::hel_path_input::validate_absolute_input(directory)?;
+        let directory = self.resolve_input_path(target_id, directory, executor)?;
+        self.validate_project_directory(target_id, &directory, executor)?;
+        Ok(directory)
+    }
+
     /// Verify a bare project before leaving the project-directory dialog.
     pub fn validate_project_directory(
         &self,

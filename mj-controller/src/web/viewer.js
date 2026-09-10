@@ -1234,7 +1234,7 @@ function renderNewForm() {
           body.append(recentList);
         }
         body.append(
-          textField(
+          pathField(
             'Project directory',
             'new-project-directory',
             newDraft.projectDirectory,
@@ -1264,7 +1264,7 @@ function renderNewForm() {
         };
         body.append(create);
         if (newDraft.showBundleSource || !snapshot.bundles.length) {
-          body.append(textField('Repository source', 'new-bundle-source', newDraft.bundleSource, value => { newDraft.bundleSource = value; }));
+          body.append(pathField('Repository source', 'new-bundle-source', newDraft.bundleSource, value => { newDraft.bundleSource = value; }));
           body.append(el('p', 'dim', 'Use a GitHub owner/repository or URL, or an existing repository path with a network remote. The isolated session starts from the remote default branch and excludes local unpublished changes.'));
           const save = el('button', '', newDraft.creatingBundle ? 'Creating bundle…' : 'Save bundle');
           save.type = 'button';
@@ -1376,6 +1376,15 @@ function textField(label, id, value, onInput) {
 
 /// Ask the daemon whether this combination would launch, and what to warn
 /// about, before the person commits to it.
+function pathField(label, id, value, onInput) {
+  const field = textField(label, id, value, onInput);
+  const input = field.querySelector('input');
+  input.spellcheck = false;
+  input.autocapitalize = 'none';
+  input.setAttribute('aria-description', '~ expands on apply using the home directory on the selected machine.');
+  return field;
+}
+
 async function preflightNew() {
   const draft = newDraft;
   if (pendingNewPreflight === draft) return false;
@@ -1408,6 +1417,10 @@ async function preflightNew() {
       ).join('\n\n');
       if (!confirm(`Repair Git tracking and continue?\n\n${details}`)) return false;
       if (controller.signal.aborted || newDraft !== draft) return false;
+    }
+    if (bare && answer.project_directory) {
+      draft.projectDirectory = answer.project_directory;
+      draft.projectDirectories[draft.targetId] = answer.project_directory;
     }
     draft.remoteRepositories = answer.remote_repositories || [];
     draft.localChangesExcluded = answer.local_changes_excluded === true;

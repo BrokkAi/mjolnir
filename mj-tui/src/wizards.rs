@@ -1,4 +1,5 @@
 //! New-session and resume wizards, including their mount and review steps.
+use mj_chat::hel_path_input::PathInput;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -20,12 +21,12 @@ use hel::hel_state::{
     SessionRecord, SessionResourceAllocation, SessionState, allocation_cpus, allocation_memory,
 };
 use hel::hel_targets::{AdditionalMount, default_mount_destination, path_completion};
+use mj_chat::components::PathField;
 use mj_chat::components::{
     ButtonRow, Checkbox, ChoiceList, ConsumedEvent, ControlKind, FieldEdit, Form, FormViewport,
-    Interaction, Outcome, TextField,
+    Interaction, Outcome,
 };
 use mj_chat::hel_selection::FrameSurfaces;
-use mj_chat::hel_text_input::TextInput;
 
 use crate::widgets::{centered_modal, dismissible_modal_title, format_resource_bytes};
 use crate::{
@@ -93,9 +94,9 @@ pub(crate) struct NewWizard {
     pub(crate) new_bundle_focus: NewBundleFocus,
     pub(crate) new_bundle_selected: usize,
     pub(crate) new_bundle_repositories: Vec<String>,
-    pub(crate) new_bundle_source: TextInput,
+    pub(crate) new_bundle_source: PathInput,
     pub(crate) bundle_creation_in_flight: bool,
-    pub(crate) project_directory: TextInput,
+    pub(crate) project_directory: PathInput,
     pub(crate) project_directory_error: Option<String>,
     project_history: Vec<std::path::PathBuf>,
     project_history_index: usize,
@@ -182,8 +183,8 @@ enum ReviewFocus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MountWizard {
-    pub(crate) source: TextInput,
-    pub(crate) destination: TextInput,
+    pub(crate) source: PathInput,
+    pub(crate) destination: PathInput,
     pub(crate) focus: MountFocus,
     pub(crate) read_only: bool,
     pub(crate) mounts: Vec<AdditionalMount>,
@@ -202,8 +203,8 @@ pub(crate) struct MountWizard {
 impl MountWizard {
     pub(crate) fn new(history: Vec<std::path::PathBuf>) -> Self {
         Self {
-            source: TextInput::new(),
-            destination: TextInput::new(),
+            source: PathInput::new(),
+            destination: PathInput::new(),
             focus: MountFocus::Source,
             read_only: false,
             mounts: Vec::new(),
@@ -470,12 +471,17 @@ fn edit_selected_resume_mount(wizard: &mut ResumeWizard) {
 }
 
 fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
+    if let Err(error) =
+        hel::hel_path_input::validate_absolute_input(std::path::Path::new(mounts.source.trim()))
+    {
+        return Some(error.to_string());
+    }
     let mount = AdditionalMount {
         source: mounts.source.to_string().into(),
         destination: mounts.destination.to_string().into(),
         read_only: mounts.read_only,
     };
-    if let Err(error) = hel::hel_targets::validate_additional_mounts(std::slice::from_ref(&mount)) {
+    if let Err(error) = hel::hel_targets::validate_mount_destination(&mount.destination) {
         return Some(error.to_string());
     }
     let duplicate = mounts.mounts.iter().enumerate().any(|(index, existing)| {
@@ -1029,7 +1035,7 @@ pub(crate) fn render_new_wizard(
                 button_y.saturating_sub(field_y.saturating_add(1)),
             ),
         );
-        TextField::render(
+        PathField::render(
             frame,
             Rect::new(content.x, field_y, content.width, 1.min(content.height)),
             &wizard.project_directory,
@@ -1144,7 +1150,7 @@ pub(crate) fn render_new_wizard(
                 1.min(content.height),
             ),
         );
-        TextField::render(
+        PathField::render(
             frame,
             Rect::new(
                 content.x,
@@ -1828,7 +1834,7 @@ fn render_mount_wizard(
             source_row.height,
         ),
     );
-    TextField::render(
+    PathField::render(
         frame,
         Rect::new(
             source_row.x.saturating_add(10),
@@ -1850,7 +1856,7 @@ fn render_mount_wizard(
             destination_row.height,
         ),
     );
-    TextField::render(
+    PathField::render(
         frame,
         Rect::new(
             destination_row.x.saturating_add(10),

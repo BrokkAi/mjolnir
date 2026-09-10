@@ -685,7 +685,7 @@ impl DashboardState {
                     wizard.focus = WizardFocus::Content;
                     return true;
                 }
-                let changed = TextField::apply(&mut wizard.project_directory, FieldEdit::Key(key))
+                let changed = PathField::apply(&mut wizard.project_directory, FieldEdit::Key(key))
                     == Outcome::Changed;
                 if changed {
                     wizard.project_directory_error = None;
@@ -703,7 +703,7 @@ impl DashboardState {
                     wizard.focus = WizardFocus::Content;
                     return true;
                 }
-                let changed = TextField::apply(&mut wizard.new_bundle_source, FieldEdit::Key(key))
+                let changed = PathField::apply(&mut wizard.new_bundle_source, FieldEdit::Key(key))
                     == Outcome::Changed;
                 if changed {
                     self.record_visible_event_change();
@@ -757,7 +757,7 @@ impl DashboardState {
                         .into();
                     return true;
                 }
-                let changed = TextField::apply(&mut wizard.mounts.source, FieldEdit::Key(key))
+                let changed = PathField::apply(&mut wizard.mounts.source, FieldEdit::Key(key))
                     == Outcome::Changed;
                 if changed {
                     wizard.mounts.completion_candidates.clear();
@@ -767,7 +767,7 @@ impl DashboardState {
                 return changed;
             }
             if id == WizardControl::MountDestination {
-                let changed = TextField::apply(&mut wizard.mounts.destination, FieldEdit::Key(key))
+                let changed = PathField::apply(&mut wizard.mounts.destination, FieldEdit::Key(key))
                     == Outcome::Changed;
                 if changed {
                     wizard.mounts.error = None;
@@ -783,7 +783,7 @@ impl DashboardState {
             WizardControl::MountDestination => &mut wizard.mounts.destination,
             _ => return false,
         };
-        let changed = TextField::apply(input, edit) == Outcome::Changed;
+        let changed = PathField::apply(input, edit) == Outcome::Changed;
         if changed {
             wizard.project_directory_error = None;
             wizard.mounts.error = None;
@@ -852,7 +852,7 @@ impl DashboardState {
                 WizardControl::MountDestination => &mut wizard.mounts.destination,
                 _ => return,
             };
-            if TextField::apply(input, FieldEdit::Key(key)) == Outcome::Changed {
+            if PathField::apply(input, FieldEdit::Key(key)) == Outcome::Changed {
                 wizard.mounts.completion_candidates.clear();
                 wizard.mounts.error = None;
                 self.record_visible_event_change();
@@ -864,7 +864,7 @@ impl DashboardState {
             WizardControl::MountDestination => &mut wizard.mounts.destination,
             _ => return,
         };
-        if TextField::apply(input, edit) == Outcome::Changed {
+        if PathField::apply(input, edit) == Outcome::Changed {
             wizard.mounts.completion_candidates.clear();
             wizard.mounts.error = None;
             self.record_visible_event_change();
@@ -1169,17 +1169,8 @@ impl DashboardState {
                 }
                 KeyCode::Enter => {
                     let path = std::path::Path::new(wizard.project_directory.trim());
-                    if !path.is_absolute() {
-                        wizard.project_directory_error =
-                            Some("Project directory must be an absolute remote path.".into());
-                        self.mode = Mode::New(wizard);
-                        DashboardAction::None
-                    } else if path
-                        .components()
-                        .any(|part| part == std::path::Component::ParentDir)
-                    {
-                        wizard.project_directory_error =
-                            Some("Project directory must not contain '..'.".into());
+                    if let Err(error) = hel::hel_path_input::validate_absolute_input(path) {
+                        wizard.project_directory_error = Some(error.to_string());
                         self.mode = Mode::New(wizard);
                         DashboardAction::None
                     } else {
@@ -2076,6 +2067,88 @@ impl DashboardState {
         DashboardAction::None
     }
 
+    pub fn apply_resolved_project_directory(
+        &mut self,
+        context: &str,
+        directory: &str,
+        result: Result<std::path::PathBuf, String>,
+    ) {
+        if self.path_input_context() != context {
+            return;
+        }
+        match result {
+            Ok(resolved) => {
+                let value = resolved.to_string_lossy().into_owned();
+                if let Mode::New(wizard) = &mut self.mode {
+                    wizard.project_directory.set_value(&value);
+                }
+                self.apply_project_directory_validation(&value, Ok(()));
+            }
+            Err(error) => self.apply_project_directory_validation(directory, Err(error)),
+        }
+    }
+
+    pub fn apply_resolved_mount_source(
+        &mut self,
+        context: &str,
+        source: &str,
+        result: Result<(std::path::PathBuf, Option<String>), String>,
+    ) -> DashboardAction {
+        if self.path_input_context() != context {
+            return DashboardAction::None;
+        }
+        match result {
+            Ok((resolved, forced)) => {
+                let value = resolved.to_string_lossy().into_owned();
+                match &mut self.mode {
+                    Mode::New(wizard) => wizard.mounts.source.set_value(&value),
+                    Mode::Resume(wizard) => wizard.mounts.source.set_value(&value),
+                    _ => return DashboardAction::None,
+                }
+                self.apply_mount_source_validation(&value, Ok(forced))
+            }
+            Err(error) => self.apply_mount_source_validation(source, Err(error)),
+        }
+    }
+
+    /// Identifies the draft a background path operation is allowed to update.
+    pub fn path_input_context(&self) -> String {
+        let draft = match &self.mode {
+            Mode::New(w) => format!(
+                "new:{:?}:{:?}:{:?}:{:?}:{:?}:{}",
+                self.config.targets.iter().nth(w.target),
+                w.step,
+                w.project_directory.value(),
+                w.mounts.source.value(),
+                w.mounts.destination.value(),
+                w.mounts.read_only
+            ),
+            Mode::Resume(w) => format!(
+                "resume:{}:{:?}:{:?}:{:?}:{:?}:{}",
+                w.session_id,
+                self.config.targets.iter().nth(w.target),
+                w.step,
+                w.mounts.source.value(),
+                w.mounts.destination.value(),
+                w.mounts.read_only
+            ),
+            Mode::Setup(dialog) => dialog.path_input_context(),
+            Mode::EditContainer(e) => format!(
+                "container:{}:{:?}:{:?}:{:?}:{}",
+                e.session_id,
+                self.state
+                    .sessions
+                    .get(&e.session_id)
+                    .and_then(|session| self.config.targets.get(&session.target_template_id)),
+                e.source.value(),
+                e.destination.value(),
+                e.read_only
+            ),
+            _ => String::new(),
+        };
+        format!("{}:{draft}", self.session_preflight_generation())
+    }
+
     pub fn apply_project_directory_validation(
         &mut self,
         directory: &str,
@@ -2956,9 +3029,9 @@ impl DashboardState {
             new_bundle_focus: NewBundleFocus::Source,
             new_bundle_selected: 0,
             new_bundle_repositories: Vec::new(),
-            new_bundle_source: mj_chat::hel_text_input::TextInput::new(),
+            new_bundle_source: mj_chat::hel_path_input::PathInput::new(),
             bundle_creation_in_flight: false,
-            project_directory: mj_chat::hel_text_input::TextInput::new(),
+            project_directory: mj_chat::hel_path_input::PathInput::new(),
             project_directory_error: None,
             project_history: Vec::new(),
             project_history_index: 0,

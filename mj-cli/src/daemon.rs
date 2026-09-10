@@ -1519,8 +1519,22 @@ impl RuntimeState {
         control: CreateSessionControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
     ) -> Result<RegisteredSession> {
+        let path_cancelled = control.cancelled.clone();
         let registered = blocking(move || {
             let mut controller = Controller::load()?;
+            let path_executor = hel::hel_targets::CancellableProcessExecutor::new(path_cancelled)
+                .with_deadline(Duration::from_secs(30));
+            let project_directory = request
+                .project_directory
+                .as_deref()
+                .map(|path| {
+                    controller.resolve_project_directory(
+                        &request.target_template_id,
+                        path,
+                        &path_executor,
+                    )
+                })
+                .transpose()?;
             let session_id = controller.register_session_with_resources(
                 &request.profile_id,
                 &request.bundle_id,
@@ -1532,7 +1546,7 @@ impl RuntimeState {
                     additional_mounts: request.additional_mounts,
                     allow_dirty_local: request.allow_dirty_local,
                     resource_allocation: request.resource_allocation,
-                    project_directory: request.project_directory,
+                    project_directory,
                     session_title_override: request.session_title_override,
                 },
             )?;

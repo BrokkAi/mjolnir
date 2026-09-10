@@ -36,6 +36,7 @@ pub(crate) async fn apply_dashboard_action(
     context: &mut DashboardContext,
     action: DashboardAction,
 ) -> Result<()> {
+    context.cancel_stale_path_input();
     match action {
         DashboardAction::None => {}
         DashboardAction::SaveSpinnerStyle { style } => {
@@ -108,6 +109,68 @@ pub(crate) async fn apply_dashboard_action(
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
+        }
+        DashboardAction::ResolveContainerPath { session_id, source } => {
+            let input_context = context.dashboard.path_input_context();
+            let controller = config_only_controller(context.controller.config.clone());
+            let target_id = context
+                .controller
+                .state
+                .sessions
+                .get(&session_id)
+                .context("Session no longer exists")?
+                .target_template_id
+                .clone();
+            let (cancelled, _) = spawn_cancellable_io_with_token(
+                context.critical_operations.clone(),
+                "resolving attached directory",
+                context.dashboard_io_tx.clone(),
+                move |cancelled| {
+                    let executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(std::time::Duration::from_secs(30));
+                    controller.resolve_input_path(
+                        &target_id,
+                        std::path::Path::new(&source),
+                        &executor,
+                    )
+                },
+                move |result| DashboardIoUpdate::ContainerPathResolved {
+                    context: input_context,
+                    result,
+                },
+            );
+            context.track_path_input(cancelled);
+        }
+        DashboardAction::ResolveSetupPath {
+            generation,
+            draft,
+            path,
+            value,
+            target,
+        } => {
+            let requested = value.clone();
+            let (cancelled, _) = spawn_cancellable_io_with_token(
+                context.critical_operations.clone(),
+                "resolving setup path",
+                context.dashboard_io_tx.clone(),
+                move |cancelled| {
+                    let executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(std::time::Duration::from_secs(30));
+                    mj_controller::hel_controller::resolve_target_input_path(
+                        &target,
+                        std::path::Path::new(&requested),
+                        &executor,
+                    )
+                },
+                move |result| DashboardIoUpdate::SetupPathResolved {
+                    generation,
+                    draft,
+                    path,
+                    value,
+                    result,
+                },
+            );
+            context.track_path_input(cancelled);
         }
         DashboardAction::SaveSetup {
             generation,
@@ -356,22 +419,34 @@ pub(crate) async fn apply_dashboard_action(
             target_template_id,
             source,
         } => {
+            let input_context = context.dashboard.path_input_context();
+            context.dashboard.set_notice("Checking attached directory…");
             let config = context.controller.config.clone();
             let requested = source.clone();
-            spawn_cancellable_io(
+            let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 "validating attached directory",
                 context.dashboard_io_tx.clone(),
                 move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled);
-                    config_only_controller(config).validate_mount_source(
+                    let executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(std::time::Duration::from_secs(30));
+                    let controller = config_only_controller(config);
+                    let path = controller.resolve_input_path(
                         &target_template_id,
                         std::path::Path::new(&requested),
                         &executor,
-                    )
+                    )?;
+                    let forced =
+                        controller.validate_mount_source(&target_template_id, &path, &executor)?;
+                    Ok((path, forced))
                 },
-                move |result| DashboardIoUpdate::MountValidation { source, result },
+                move |result| DashboardIoUpdate::MountValidation {
+                    context: input_context,
+                    source,
+                    result,
+                },
             );
+            context.track_path_input(cancelled);
         }
         DashboardAction::ValidateSessionMounts {
             target_template_id,
@@ -453,22 +528,30 @@ pub(crate) async fn apply_dashboard_action(
             target_template_id,
             directory,
         } => {
+            let input_context = context.dashboard.path_input_context();
+            context.dashboard.set_notice("Checking project directory…");
             let config = context.controller.config.clone();
             let requested = directory.clone();
-            spawn_cancellable_io(
+            let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 "validating project directory",
                 context.dashboard_io_tx.clone(),
                 move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled);
-                    config_only_controller(config).validate_project_directory(
+                    let executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(std::time::Duration::from_secs(30));
+                    config_only_controller(config).resolve_project_directory(
                         &target_template_id,
                         std::path::Path::new(&requested),
                         &executor,
                     )
                 },
-                move |result| DashboardIoUpdate::ProjectValidation { directory, result },
+                move |result| DashboardIoUpdate::ProjectValidation {
+                    context: input_context,
+                    directory,
+                    result,
+                },
             );
+            context.track_path_input(cancelled);
         }
         DashboardAction::PreflightCreateSession { launch } => {
             start_create_session_preflight(context, *launch);

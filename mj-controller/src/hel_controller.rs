@@ -370,7 +370,8 @@ fn interpret_repository_source(source: &str) -> Result<InterpretedRepositorySour
     if source.is_empty() {
         bail!("repository source cannot be empty");
     }
-    let candidate = Path::new(source);
+    let expanded = hel::hel_path_input::expand_local(Path::new(source))?;
+    let candidate = expanded.as_path();
     if candidate.exists() {
         let root = hel::hel_local_git::canonical_repository(candidate)?;
         let name = root
@@ -518,7 +519,22 @@ impl Controller {
         )
     }
 
-    /// Complete a mount source at the same host that will run the container.
+    /// Resolve an entered path on its owning host. Call only from background work.
+    pub fn resolve_input_path(
+        &self,
+        target_id: &str,
+        path: &Path,
+        executor: &impl CommandExecutor,
+    ) -> Result<PathBuf> {
+        let target = self
+            .config
+            .targets
+            .get(target_id)
+            .context("Unknown path target")?;
+        resolve_target_input_path(target, path, executor)
+    }
+
+    /// Complete a mount source on the container engine host, preserving ~/ while editing.
     pub fn complete_mount_source(
         &self,
         target_id: &str,
@@ -530,18 +546,45 @@ impl Controller {
             .targets
             .get(target_id)
             .with_context(|| format!("unknown target template {target_id:?}"))?;
-        match target {
+        let home = if hel::hel_path_input::needs_home(Path::new(prefix))? {
+            Some(resolve_target_input_path(target, Path::new("~"), executor)?)
+        } else {
+            None
+        };
+        let expanded = hel::hel_path_input::expand_home(Path::new(prefix), home.as_deref())?;
+        let mut lookup = expanded.to_string_lossy().into_owned();
+        // Completion is a text protocol: a trailing separator requests children.
+        if prefix.ends_with('/') && !lookup.ends_with('/') {
+            lookup.push('/');
+        }
+        let candidates = match target {
             TargetTemplate::LocalPodman { .. }
             | TargetTemplate::LocalDocker { .. }
             | TargetTemplate::AppleContainer { .. }
-            | TargetTemplate::AwsEc2 { .. } => Ok(hel_targets::local_directory_completions(prefix)),
+            | TargetTemplate::AwsEc2 { .. } => hel_targets::local_directory_completions(&lookup),
             TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
-                hel_targets::ssh_directory_completions(&backend_ssh(ssh), prefix, executor)
+                hel_targets::ssh_directory_completions(&backend_ssh(ssh), &lookup, executor)?
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
                 bail!("resource path completion is unsupported for bare targets")
             }
-        }
+        };
+        candidates
+            .into_iter()
+            .map(|candidate| {
+                let Some(home) = &home else {
+                    return Ok(candidate);
+                };
+                let suffix = Path::new(&candidate)
+                    .strip_prefix(home)
+                    .context("Completed path is outside the requested home")?;
+                let mut value = Path::new("~").join(suffix).to_string_lossy().into_owned();
+                if candidate.ends_with('/') && !value.ends_with('/') {
+                    value.push('/');
+                }
+                Ok(value)
+            })
+            .collect()
     }
 
     /// Verify a mount source on the host where Mjolnir will consume it, and report
@@ -1160,6 +1203,42 @@ fn target_profile_home(
     }
 }
 
+/// Resolve the login home on the machine that owns an editable path.
+pub fn resolve_target_input_path(
+    target: &TargetTemplate,
+    path: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<PathBuf> {
+    if !hel::hel_path_input::needs_home(path)? {
+        return Ok(path.to_path_buf());
+    }
+    match target {
+        TargetTemplate::SshBare { ssh, .. }
+        | TargetTemplate::SshPodman { ssh, .. }
+        | TargetTemplate::SshDocker { ssh, .. } => {
+            let mut ssh = ssh.clone();
+            ssh.identity_file = ssh
+                .identity_file
+                .as_deref()
+                .map(hel::hel_path_input::expand_local)
+                .transpose()?;
+            let command =
+                ssh_command_spec(&backend_ssh(&ssh), ["sh", "-c", "printf '%s' \"$HOME\""])
+                    .purpose("resolve remote home directory");
+            let output = executor.execute(&command)?;
+            anyhow::ensure!(
+                output.status == 0,
+                "Could not resolve remote home: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            let home =
+                String::from_utf8(output.stdout).context("Remote home is not valid UTF-8")?;
+            hel::hel_path_input::expand_home(path, Some(Path::new(&home)))
+        }
+        _ => hel::hel_path_input::expand_local(path),
+    }
+}
+
 pub(crate) fn backend_ssh(ssh: &SshConnection) -> SshTarget {
     let destination = match &ssh.user {
         Some(user) => format!("{user}@{}", ssh.host),
@@ -1352,6 +1431,117 @@ mod tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn remote_completion_preserves_home_shorthand_and_trailing_separator() {
+        struct CompletionExecutor;
+        impl CommandExecutor for CompletionExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<hel_targets::CommandOutput> {
+                let script = command.args.last().unwrap();
+                let stdout = if script.contains("$HOME") {
+                    b"/remote".to_vec()
+                } else {
+                    assert!(script.contains("'/remote/cache/'"), "{script}");
+                    b"/remote/cache/alpha/\n/remote/cache/alpine/\n".to_vec()
+                };
+                Ok(hel_targets::CommandOutput {
+                    status: 0,
+                    stdout,
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let target: TargetTemplate =
+            serde_json::from_str(r#"{"kind":"ssh-podman","host":"builder","image":"test"}"#)
+                .unwrap();
+        let mut config = HelConfig::default();
+        config.targets.insert("remote".into(), target);
+        let controller = Controller {
+            config,
+            state: HelState::default(),
+        };
+        let candidates = controller
+            .complete_mount_source("remote", "~/cache/", &CompletionExecutor)
+            .unwrap();
+        assert_eq!(candidates, ["~/cache/alpha/", "~/cache/alpine/"]);
+        assert_eq!(
+            hel_targets::path_completion("~/cache/", &candidates).as_deref(),
+            Some("~/cache/alp")
+        );
+    }
+
+    #[test]
+    fn remote_path_resolution_uses_login_home_without_evaluating_suffix() {
+        struct HomeExecutor {
+            status: i32,
+            home: &'static str,
+        }
+        impl CommandExecutor for HomeExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<hel_targets::CommandOutput> {
+                assert_eq!(command.program, "ssh");
+                let script = command.args.last().unwrap();
+                assert!(!script.contains("touch"));
+                assert!(script.contains("$HOME"));
+                Ok(hel_targets::CommandOutput {
+                    status: self.status,
+                    stdout: self.home.as_bytes().to_vec(),
+                    stderr: b"home lookup failed".to_vec(),
+                })
+            }
+        }
+        let target: TargetTemplate = serde_json::from_str(
+            r#"{"kind":"ssh-bare","host":"builder","permissions":"guardian"}"#,
+        )
+        .unwrap();
+        let path = Path::new("~/資料/$(touch nope)");
+        assert_eq!(
+            resolve_target_input_path(
+                &target,
+                path,
+                &HomeExecutor {
+                    status: 0,
+                    home: "/remote user"
+                }
+            )
+            .unwrap(),
+            Path::new("/remote user/資料/$(touch nope)")
+        );
+        assert!(
+            resolve_target_input_path(
+                &target,
+                path,
+                &HomeExecutor {
+                    status: 1,
+                    home: "/remote"
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("home lookup failed")
+        );
+        assert!(
+            resolve_target_input_path(
+                &target,
+                path,
+                &HomeExecutor {
+                    status: 0,
+                    home: ""
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_target_input_path(
+                &target,
+                path,
+                &HomeExecutor {
+                    status: 0,
+                    home: "relative"
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

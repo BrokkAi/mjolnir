@@ -1,4 +1,5 @@
 //! Container settings composed from reusable terminal controls.
+use mj_chat::hel_path_input::PathInput;
 
 use std::cell::{Cell, RefCell};
 
@@ -19,8 +20,8 @@ pub(crate) struct ContainerEditor {
     pub(crate) memory: TextInput,
     pub(crate) mounts: Vec<AdditionalMount>,
     pub(crate) suggestions: Vec<PathBuf>,
-    pub(crate) source: TextInput,
-    pub(crate) destination: TextInput,
+    pub(crate) source: PathInput,
+    pub(crate) destination: PathInput,
     pub(crate) read_only: bool,
     pub(crate) form: RefCell<Form<ContainerEditFocus>>,
     pub(crate) mount_index: usize,
@@ -353,18 +354,29 @@ pub(crate) fn render_container_editor(
                         Rect::new(rect.x, rect.y, label_width, rect.height),
                     );
                 }
-                TextField::render(
-                    frame,
-                    Rect::new(
-                        rect.x.saturating_add(label_width),
-                        rect.y,
-                        rect.width.saturating_sub(label_width),
-                        rect.height,
-                    ),
-                    input,
-                    &mut form,
-                    id,
+                let field_area = Rect::new(
+                    rect.x.saturating_add(label_width),
+                    rect.y,
+                    rect.width.saturating_sub(label_width),
+                    rect.height,
                 );
+                match id {
+                    ContainerEditFocus::Source => mj_chat::components::PathField::render(
+                        frame,
+                        field_area,
+                        &editor.source,
+                        &mut form,
+                        id,
+                    ),
+                    ContainerEditFocus::Destination => mj_chat::components::PathField::render(
+                        frame,
+                        field_area,
+                        &editor.destination,
+                        &mut form,
+                        id,
+                    ),
+                    _ => TextField::render(frame, field_area, input, &mut form, id),
+                }
             }
             Row::Check => Checkbox::render(
                 frame,
@@ -430,8 +442,8 @@ impl DashboardState {
             memory: session.container_memory.clone().unwrap_or_default().into(),
             mounts: session.additional_mounts.clone(),
             suggestions,
-            source: TextInput::new(),
-            destination: TextInput::new(),
+            source: PathInput::new(),
+            destination: PathInput::new(),
             read_only: false,
             form: RefCell::new(Form::default()),
             mount_index: 0,
@@ -441,6 +453,28 @@ impl DashboardState {
         };
         editor.prepare();
         self.mode = Mode::EditContainer(editor);
+    }
+
+    pub fn container_path_resolved(&mut self, context: &str, result: Result<PathBuf, String>) {
+        if self.path_input_context() != context {
+            return;
+        }
+        let Mode::EditContainer(editor) = &mut self.mode else {
+            return;
+        };
+        match result {
+            Ok(path) => {
+                let draft = editor.source.clone();
+                editor.source.set_value(path.to_string_lossy().into_owned());
+                editor.error = editor.add_mount();
+                if editor.error.is_some() {
+                    editor.source = draft;
+                }
+                editor.prepare();
+            }
+            Err(error) => editor.error = Some(error),
+        }
+        self.mark_render_changed();
     }
 
     pub(crate) fn handle_container_edit_event(
@@ -493,6 +527,25 @@ impl DashboardState {
                 editor.error = None;
             }
             Some(Interaction::Activate(Source | Destination)) => {
+                match hel::hel_path_input::needs_home(std::path::Path::new(editor.source.trim())) {
+                    Ok(true) => {
+                        let action = DashboardAction::ResolveContainerPath {
+                            session_id: editor.session_id.clone(),
+                            source: editor.source.to_string(),
+                        };
+                        editor.error = Some("Resolving attached directory…".into());
+                        self.mode = Mode::EditContainer(editor);
+                        self.mark_render_changed();
+                        return action;
+                    }
+                    Err(error) => {
+                        editor.error = Some(error.to_string());
+                        self.mode = Mode::EditContainer(editor);
+                        self.mark_render_changed();
+                        return DashboardAction::None;
+                    }
+                    Ok(false) => {}
+                }
                 editor.error = editor.add_mount();
                 changed_structure = true;
             }
@@ -549,6 +602,38 @@ mod tests {
             row: point.1,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    #[test]
+    fn container_path_apply_waits_for_resolution_and_preserves_failure() {
+        let mut dashboard = open();
+        let Mode::EditContainer(editor) = &mut dashboard.mode else {
+            panic!("container editor");
+        };
+        editor.source.set_value("~/cache");
+        editor.destination.set_value("/mnt/cache");
+        editor.form.get_mut().focus(ContainerEditFocus::Source);
+        let original = editor.mounts.len();
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::ResolveContainerPath { .. }
+        ));
+        let context = dashboard.path_input_context();
+        dashboard.container_path_resolved(&context, Err("SSH failed".into()));
+        let Mode::EditContainer(editor) = &dashboard.mode else {
+            panic!("container editor");
+        };
+        assert_eq!(editor.source, "~/cache");
+        assert_eq!(editor.mounts.len(), original);
+        dashboard.container_path_resolved(&context, Ok("/remote/cache".into()));
+        let Mode::EditContainer(editor) = &dashboard.mode else {
+            panic!("container editor");
+        };
+        assert_eq!(
+            editor.mounts.last().unwrap().source,
+            PathBuf::from("/remote/cache")
+        );
+        assert!(editor.source.is_empty());
     }
 
     #[test]

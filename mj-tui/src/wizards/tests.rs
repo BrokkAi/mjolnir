@@ -2643,3 +2643,40 @@ fn resume_target_next_mouse_release_advances_to_review() {
     };
     assert_eq!(wizard.step, WizardStep::Review);
 }
+
+#[test]
+fn home_mount_apply_uses_resolved_source_and_ignores_changed_destination() {
+    let mut dashboard = dashboard_at_mount_editor("~/cache");
+    assert!(validate_mount_entry(wizard_mounts(&dashboard)).is_none());
+    let context = dashboard.path_input_context();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard");
+    };
+    wizard.mounts.destination.set_value("/mnt/newer");
+    dashboard.apply_resolved_mount_source(&context, "~/cache", Ok(("/remote/cache".into(), None)));
+    assert!(wizard_mounts(&dashboard).mounts.is_empty());
+    let context = dashboard.path_input_context();
+    dashboard.apply_resolved_mount_source(&context, "~/cache", Ok(("/remote/cache".into(), None)));
+    assert_eq!(
+        wizard_mounts(&dashboard).mounts[0].source,
+        PathBuf::from("/remote/cache")
+    );
+    assert_eq!(
+        wizard_mounts(&dashboard).mounts[0].destination,
+        PathBuf::from("/mnt/newer")
+    );
+}
+
+#[test]
+fn container_destination_rejects_home_shorthand() {
+    let mut dashboard = dashboard_at_mount_editor("~/cache");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard");
+    };
+    wizard.mounts.destination.set_value("~/cache");
+    assert!(
+        validate_mount_entry(&wizard.mounts)
+            .unwrap()
+            .contains("container path")
+    );
+}

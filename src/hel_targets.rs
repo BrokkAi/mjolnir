@@ -324,21 +324,25 @@ pub fn probe_filesystem_types(
     Ok(types)
 }
 
+/// Container destinations cannot use the controller or login user's home.
+pub fn validate_mount_destination(path: &Path) -> Result<()> {
+    ensure!(
+        path.is_absolute()
+            && !path
+                .components()
+                .any(|part| part == std::path::Component::ParentDir),
+        "additional mount destination must be a safe absolute container path; ~ is not supported"
+    );
+    Ok(())
+}
+
 pub fn validate_additional_mounts(mounts: &[AdditionalMount]) -> Result<()> {
     let mut destinations = BTreeSet::new();
     for mount in mounts {
         if !mount.source.is_absolute() || mount.source.as_os_str().is_empty() {
             bail!("additional mount source must be an absolute directory path");
         }
-        if !mount.destination.is_absolute()
-            || mount.destination.as_os_str().is_empty()
-            || mount
-                .destination
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
-            bail!("additional mount destination must be a safe absolute container path");
-        }
+        validate_mount_destination(&mount.destination)?;
         if !destinations.insert(mount.destination.clone()) {
             bail!(
                 "additional mount destination {:?} is configured more than once",

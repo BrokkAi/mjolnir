@@ -192,8 +192,9 @@ pub(crate) enum DashboardIoUpdate {
         result: std::result::Result<Vec<String>, String>,
     },
     MountValidation {
+        context: String,
         source: String,
-        result: std::result::Result<Option<String>, String>,
+        result: std::result::Result<(std::path::PathBuf, Option<String>), String>,
     },
     SessionMountValidation {
         generation: u64,
@@ -206,9 +207,21 @@ pub(crate) enum DashboardIoUpdate {
         submitted_repository_id: Option<String>,
         result: Box<std::result::Result<ResumeRepositoryPreflightApply, String>>,
     },
+    ContainerPathResolved {
+        context: String,
+        result: std::result::Result<std::path::PathBuf, String>,
+    },
+    SetupPathResolved {
+        generation: u64,
+        draft: serde_json::Value,
+        path: Vec<String>,
+        value: String,
+        result: std::result::Result<std::path::PathBuf, String>,
+    },
     ProjectValidation {
+        context: String,
         directory: String,
-        result: std::result::Result<(), String>,
+        result: std::result::Result<std::path::PathBuf, String>,
     },
     /// Clipboard providers may use a blocking desktop IPC call. The result
     /// is delivered here after that work finishes on a blocking task.
@@ -2164,10 +2177,14 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Path completion failed: {error}")),
             },
-            DashboardIoUpdate::MountValidation { source, result } => {
+            DashboardIoUpdate::MountValidation {
+                context,
+                source,
+                result,
+            } => {
                 let action = self
                     .dashboard
-                    .apply_mount_source_validation(&source, result);
+                    .apply_resolved_mount_source(&context, &source, result);
                 super::actions::start_move_preparation(self, action);
             }
             DashboardIoUpdate::SessionMountValidation {
@@ -2271,9 +2288,25 @@ impl DashboardContext {
                     }
                 }
             }
-            DashboardIoUpdate::ProjectValidation { directory, result } => self
+            DashboardIoUpdate::ContainerPathResolved { context, result } => {
+                self.dashboard.container_path_resolved(&context, result)
+            }
+            DashboardIoUpdate::SetupPathResolved {
+                generation,
+                draft,
+                path,
+                value,
+                result,
+            } => self
                 .dashboard
-                .apply_project_directory_validation(&directory, result),
+                .setup_path_resolved(generation, &draft, &path, &value, result),
+            DashboardIoUpdate::ProjectValidation {
+                context,
+                directory,
+                result,
+            } => self
+                .dashboard
+                .apply_resolved_project_directory(&context, &directory, result),
         }
     }
 
