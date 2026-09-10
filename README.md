@@ -12,6 +12,8 @@ But if you expand beyond that, Mjolnir offers flexibility across all three:
 
 ... while handling details like cross-harness memory sync and integrating a privacy-first, no-setup web ui via Tailscale for when you're not at your desk.
 
+Mjolnir is free and open source from the engineers at [Brokk AI]([url](https://brokk.ai/)). We're not trying to make money off of mj; we built it because we wanted to use it.
+
 [Documentation](https://mjolnir.brokk.ai/) ·
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
 [Releases](https://github.com/BrokkAi/mjolnir/releases)
