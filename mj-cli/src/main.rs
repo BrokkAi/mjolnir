@@ -19,7 +19,7 @@ use std::io::{self, Write};
 #[cfg(test)]
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::event::{
@@ -1022,25 +1022,29 @@ fn extract_setup_token(stdout: &str) -> Option<String> {
 
 fn profile_ids(config: &HelConfig) -> String {
     config
-        .profiles
-        .keys()
-        .cloned()
+        .enabled_profiles()
+        .map(|(id, _)| id.to_owned())
         .collect::<Vec<_>>()
         .join(", ")
 }
 
 fn resolve_login_profile(config: &HelConfig, requested: Option<&str>) -> Result<String> {
     if let Some(profile) = requested {
+        let configured = config
+            .profiles
+            .get(profile)
+            .with_context(|| format!("unknown profile {profile:?}"))?;
+        ensure!(configured.enabled, "profile {profile:?} is disabled");
         return Ok(profile.to_owned());
     }
-    let mut profiles = config.profiles.keys();
+    let mut profiles = config.enabled_profiles().map(|(id, _)| id);
     match (profiles.next(), profiles.next()) {
-        (Some(only), None) => Ok(only.clone()),
+        (Some(only), None) => Ok(only.to_owned()),
         (Some(_), Some(_)) => bail!(
             "several profiles are configured; pass --profile with one of: {}",
             profile_ids(config)
         ),
-        (None, _) => bail!("no harness profiles are configured; run `mj setup` first"),
+        (None, _) => bail!("no enabled agent profiles are configured; run `mj setup` first"),
     }
 }
 
@@ -1305,6 +1309,7 @@ mod tests {
         config.profiles.insert(
             "work".into(),
             hel::hel_config::HarnessProfile {
+                enabled: true,
                 kind: hel::hel_config::HarnessKind::Claude,
                 home: PathBuf::from("/home/user/.claude"),
                 environment: Default::default(),
@@ -1324,6 +1329,20 @@ mod tests {
             resolve_login_profile(&config, Some("personal")).unwrap(),
             "personal"
         );
+
+        config.profiles.get_mut("personal").unwrap().enabled = false;
+        assert_eq!(resolve_login_profile(&config, None).unwrap(), "work");
+        assert_eq!(profile_ids(&config), "work");
+        let error = resolve_login_profile(&config, Some("personal"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("disabled"), "{error}");
+
+        config.profiles.get_mut("work").unwrap().enabled = false;
+        let error = resolve_login_profile(&config, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no enabled agent profiles"), "{error}");
     }
 
     #[test]

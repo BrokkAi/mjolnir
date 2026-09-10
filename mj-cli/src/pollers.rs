@@ -341,15 +341,14 @@ pub(crate) fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefres
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     controller
         .config
-        .profiles
-        .iter()
+        .enabled_profiles()
         .map(|(id, profile)| {
             let mut environment = profile.environment.clone();
             profile
                 .kind
                 .configure_home_environment(&profile.home, &mut environment);
             QuotaRefreshRequest {
-                profile_id: id.clone(),
+                profile_id: id.to_owned(),
                 harness: profile.kind,
                 source_home: profile.home.clone(),
                 environment,
@@ -2363,6 +2362,7 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             hel::hel_config::HarnessProfile {
+                enabled: true,
                 kind: hel::hel_config::HarnessKind::Codex,
                 home: PathBuf::from("/home/dev/.codex"),
                 environment: Default::default(),
@@ -2603,6 +2603,27 @@ mod tests {
         assert!(complete_manual_quota_refresh(&mut pending, 43));
         assert_eq!(pending, None);
         quotas.shutdown().await;
+    }
+
+    #[test]
+    fn quota_refresh_requests_exclude_disabled_profiles() {
+        let mut controller = podman_controller(SessionState::Stopped);
+        let mut disabled = controller.config.profiles["codex"].clone();
+        disabled.enabled = false;
+        controller
+            .config
+            .profiles
+            .insert("reserve".into(), disabled);
+
+        let requests = quota_refresh_profiles(&controller);
+
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            ["codex"]
+        );
     }
 
     #[test]

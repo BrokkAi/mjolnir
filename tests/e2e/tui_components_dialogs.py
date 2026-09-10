@@ -251,7 +251,7 @@ def probe_review_settings(lab: Any, tmux: Any, evidence: Any) -> None:
     x, y = locate_text(screen, "  Save Setup  ")
     tmux.mouse_click(x + 3, y)
     time.sleep(0.3)
-    _wait(tmux, "Setup › Code review")
+    _wait(tmux, "Setup › Code Review")
     if lab.snapshot()["review_config"] != before:
         raise AssertionError("disabled Save persisted an invalid review draft")
     _record(evidence, tmux, "review-disabled-save", "enable without a reviewer; click disabled Save", "invalid draft stays open and persisted settings are unchanged")

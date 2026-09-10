@@ -3904,6 +3904,7 @@ mod tests {
     #[test]
     fn readiness_stage_names_only_install_capable_default_harnesses() {
         let profile = |kind| hel::hel_config::HarnessProfile {
+            enabled: true,
             kind,
             home: PathBuf::from("/profiles/test"),
             environment: BTreeMap::new(),
@@ -4166,6 +4167,7 @@ mod tests {
         std::fs::write(home.path().join("sessions/session_search.sqlite"), "x").unwrap();
         let staged = tempfile::tempdir().unwrap();
         let profile = hel::hel_config::HarnessProfile {
+            enabled: true,
             kind: hel::hel_config::HarnessKind::Grok,
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
@@ -4195,6 +4197,7 @@ mod tests {
         std::fs::write(home.path().join(".claude.json"), identity).unwrap();
         let staged = tempfile::tempdir().unwrap();
         let profile = hel::hel_config::HarnessProfile {
+            enabled: true,
             kind: hel::hel_config::HarnessKind::Claude,
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
@@ -4221,6 +4224,7 @@ mod tests {
         .unwrap();
         let staged = tempfile::tempdir().unwrap();
         let profile = hel::hel_config::HarnessProfile {
+            enabled: true,
             kind: hel::hel_config::HarnessKind::Kimi,
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
@@ -4251,6 +4255,7 @@ mod tests {
         std::fs::write(home.path().join("mcp.json"), &original_body).unwrap();
         let staged = tempfile::tempdir().unwrap();
         let profile = hel::hel_config::HarnessProfile {
+            enabled: true,
             kind: hel::hel_config::HarnessKind::Kimi,
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
@@ -4346,6 +4351,7 @@ mod tests {
         std::fs::create_dir(home.path().join("profiles")).unwrap();
         let staged = tempfile::tempdir().unwrap();
         let profile = hel::hel_config::HarnessProfile {
+            enabled: true,
             kind: hel::hel_config::HarnessKind::Deepseek,
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
@@ -4379,6 +4385,7 @@ mod tests {
             std::fs::write(&source_instructions, original).unwrap();
             let staged = tempfile::tempdir().unwrap();
             let profile = hel::hel_config::HarnessProfile {
+                enabled: true,
                 kind,
                 home: home.path().to_path_buf(),
                 environment: std::collections::BTreeMap::new(),
@@ -4410,6 +4417,7 @@ mod tests {
         std::fs::write(home.path().join("SYSTEM.md"), system_override).unwrap();
         let staged = tempfile::tempdir().unwrap();
         let profile = hel::hel_config::HarnessProfile {
+            enabled: true,
             kind: hel::hel_config::HarnessKind::Kimi,
             home: home.path().to_path_buf(),
             environment: std::collections::BTreeMap::new(),

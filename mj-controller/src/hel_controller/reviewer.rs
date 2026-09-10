@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use super::worker_binary::{bridge_launch, stage_profile};
 use super::{Controller, execute_checked, scp_command_spec, ssh_command_spec};
@@ -113,6 +113,10 @@ impl Controller {
             .profiles
             .get(profile_id)
             .with_context(|| format!("unknown profile {profile_id:?}"))?;
+        ensure!(
+            profile.enabled,
+            "reviewer profile {profile_id:?} is disabled"
+        );
         if !profile.kind.supports_injected_mcp() {
             bail!(
                 "Muse Code cannot be a reviewer: muse-acp does not accept the required MCP tools. Select another reviewer profile."
@@ -521,6 +525,7 @@ mod tests {
             config.profiles.insert(
                 id.to_owned(),
                 HarnessProfile {
+                    enabled: true,
                     kind,
                     home,
                     environment: BTreeMap::from([("EXTRA".into(), "1".into())]),

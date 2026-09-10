@@ -317,7 +317,7 @@ fn profiles_present(dashboard: &DashboardState) -> Availability {
     if dashboard.pane_size(crate::SupportPane::Quota) == crate::PaneSize::Minimized {
         return Availability::Hidden;
     }
-    if dashboard.config.profiles.is_empty() {
+    if dashboard.config.enabled_profiles().next().is_none() {
         Availability::Hidden
     } else {
         Availability::Ready

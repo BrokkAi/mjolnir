@@ -432,10 +432,9 @@ impl ViewerSnapshot {
             })
             .collect();
         let profiles = config
-            .profiles
-            .iter()
+            .enabled_profiles()
             .map(|(id, profile)| ViewerProfile {
-                id: id.clone(),
+                id: id.to_owned(),
                 harness_kind: profile.kind.id().into(),
                 quota: None,
             })
@@ -3683,6 +3682,7 @@ mod tests {
             profiles: BTreeMap::from([(
                 "codex-1".into(),
                 HarnessProfile {
+                    enabled: true,
                     context_window_bytes: None,
                     kind: HarnessKind::Codex,
                     home: "/highly/secret/codex".into(),
@@ -4537,6 +4537,18 @@ mod tests {
         assert!(!json.contains("secret.registry"));
         assert!(!json.contains("native-secret-id"));
         assert!(json.contains("\"has_error\":true"));
+    }
+
+    #[test]
+    fn public_snapshot_keeps_running_sessions_but_omits_disabled_profiles() {
+        let (mut config, state) = sample_config_state();
+        config.profiles.get_mut("codex-1").unwrap().enabled = false;
+
+        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
+
+        assert!(snapshot.profiles.is_empty());
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].profile_id, "codex-1");
     }
 
     #[test]
@@ -6499,6 +6511,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         config.profiles.insert(
             "claude-1".into(),
             HarnessProfile {
+                enabled: true,
                 context_window_bytes: None,
                 kind: HarnessKind::Claude,
                 home: "/secret/claude".into(),

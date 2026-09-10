@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1288" height="784" viewBox="0 0 1288 784" role="img" aria-labelledby="title description">
   <title id="title">Mjolnir Setup</title>
-  <desc id="description">The compact Setup modal with Interface, Advanced, new session defaults, agent accounts, runtimes, projects, review, and web settings.</desc>
+  <desc id="description">The compact Setup modal with Interface, Advanced, New Session Defaults, Agent Profiles, Machines and Runtimes, Projects, Code Review, and Web Access settings.</desc>
   <rect width="100%" height="100%" rx="8" fill="#0b1220"/>
   <g font-family="Source Code Pro, JetBrains Mono, Menlo, Consolas, monospace" font-size="15" font-variant-ligatures="none">
     <rect x="14" y="14" width="1260" height="18" fill="#111d2d"/>
@@ -664,13 +664,13 @@
     <text x="383" y="334" fill="#dfebf4">e</text>
     <text x="392" y="334" fill="#dfebf4">n</text>
     <text x="401" y="334" fill="#dfebf4">t</text>
-    <text x="419" y="334" fill="#dfebf4">a</text>
-    <text x="428" y="334" fill="#dfebf4">c</text>
-    <text x="437" y="334" fill="#dfebf4">c</text>
-    <text x="446" y="334" fill="#dfebf4">o</text>
-    <text x="455" y="334" fill="#dfebf4">u</text>
-    <text x="464" y="334" fill="#dfebf4">n</text>
-    <text x="473" y="334" fill="#dfebf4">t</text>
+    <text x="419" y="334" fill="#dfebf4">P</text>
+    <text x="428" y="334" fill="#dfebf4">r</text>
+    <text x="437" y="334" fill="#dfebf4">o</text>
+    <text x="446" y="334" fill="#dfebf4">f</text>
+    <text x="455" y="334" fill="#dfebf4">i</text>
+    <text x="464" y="334" fill="#dfebf4">l</text>
+    <text x="473" y="334" fill="#dfebf4">e</text>
     <text x="482" y="334" fill="#dfebf4">s</text>
     <text x="671" y="334" fill="#dfebf4">4</text>
     <text x="689" y="334" fill="#dfebf4">s</text>
@@ -729,7 +729,7 @@
     <text x="446" y="370" fill="#dfebf4">a</text>
     <text x="455" y="370" fill="#dfebf4">n</text>
     <text x="464" y="370" fill="#dfebf4">d</text>
-    <text x="482" y="370" fill="#dfebf4">r</text>
+    <text x="482" y="370" fill="#dfebf4">R</text>
     <text x="491" y="370" fill="#dfebf4">u</text>
     <text x="500" y="370" fill="#dfebf4">n</text>
     <text x="509" y="370" fill="#dfebf4">t</text>
@@ -759,14 +759,14 @@
     <text x="365" y="388" fill="#dfebf4">N</text>
     <text x="374" y="388" fill="#dfebf4">e</text>
     <text x="383" y="388" fill="#dfebf4">w</text>
-    <text x="401" y="388" fill="#dfebf4">s</text>
+    <text x="401" y="388" fill="#dfebf4">S</text>
     <text x="410" y="388" fill="#dfebf4">e</text>
     <text x="419" y="388" fill="#dfebf4">s</text>
     <text x="428" y="388" fill="#dfebf4">s</text>
     <text x="437" y="388" fill="#dfebf4">i</text>
     <text x="446" y="388" fill="#dfebf4">o</text>
     <text x="455" y="388" fill="#dfebf4">n</text>
-    <text x="473" y="388" fill="#dfebf4">d</text>
+    <text x="473" y="388" fill="#dfebf4">D</text>
     <text x="482" y="388" fill="#dfebf4">e</text>
     <text x="491" y="388" fill="#dfebf4">f</text>
     <text x="500" y="388" fill="#dfebf4">a</text>
@@ -796,7 +796,7 @@
     <text x="365" y="406" fill="#dfebf4">W</text>
     <text x="374" y="406" fill="#dfebf4">e</text>
     <text x="383" y="406" fill="#dfebf4">b</text>
-    <text x="401" y="406" fill="#dfebf4">a</text>
+    <text x="401" y="406" fill="#dfebf4">A</text>
     <text x="410" y="406" fill="#dfebf4">c</text>
     <text x="419" y="406" fill="#dfebf4">c</text>
     <text x="428" y="406" fill="#dfebf4">e</text>
@@ -825,7 +825,7 @@
     <text x="374" y="424" fill="#dfebf4">o</text>
     <text x="383" y="424" fill="#dfebf4">d</text>
     <text x="392" y="424" fill="#dfebf4">e</text>
-    <text x="410" y="424" fill="#dfebf4">r</text>
+    <text x="410" y="424" fill="#dfebf4">R</text>
     <text x="419" y="424" fill="#dfebf4">e</text>
     <text x="428" y="424" fill="#dfebf4">v</text>
     <text x="437" y="424" fill="#dfebf4">i</text>

@@ -178,6 +178,7 @@ fn configure_local_startup(config: &mut HelConfig, codex_home: PathBuf) {
     config.profiles.insert(
         "codex".into(),
         HarnessProfile {
+            enabled: true,
             kind: HarnessKind::Codex,
             home: codex_home,
             environment: BTreeMap::new(),
@@ -569,6 +570,7 @@ fn build_config_with_runtimes(
         config.profiles.insert(
             id,
             HarnessProfile {
+                enabled: true,
                 kind: home.kind,
                 home: home.path.clone(),
                 environment: BTreeMap::new(),

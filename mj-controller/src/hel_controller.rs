@@ -680,6 +680,7 @@ impl Controller {
             .profiles
             .get(profile_id)
             .with_context(|| format!("unknown profile {profile_id:?}"))?;
+        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
         let template = self
             .config
             .targets
@@ -1316,6 +1317,7 @@ mod tests {
         config.profiles.insert(
             "codex".into(),
             HarnessProfile {
+                enabled: true,
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/dev/.codex"),
                 environment: BTreeMap::new(),
@@ -1507,6 +1509,29 @@ mod tests {
             project_directory: None,
             session_title_override: None,
         }
+    }
+
+    #[test]
+    fn registration_rejects_a_disabled_profile_before_persisting() {
+        let mut config = registration_config();
+        config.profiles.get_mut("codex").unwrap().enabled = false;
+        let mut controller = Controller {
+            config,
+            state: HelState::default(),
+        };
+
+        let error = controller
+            .register_session_with_resources(
+                "codex",
+                "project",
+                "podman",
+                "disabled",
+                launch_options(Vec::new()),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("disabled"));
+        assert!(controller.state.sessions.is_empty());
     }
 
     #[test]

@@ -88,14 +88,14 @@ impl UtilityLlmRuntime {
         config: &HelConfig,
         cancel: &CancellationToken,
     ) -> Result<Vec<UtilityCandidate>> {
+        self.retain_enabled(config).await;
         let supported = config
-            .profiles
-            .iter()
+            .enabled_profiles()
             .filter(|(_, profile)| utility_precedence(profile.kind).is_some())
             .collect::<Vec<_>>();
         if supported.is_empty() {
             bail!(
-                "no utility model is configured; add a Codex, Muse, Grok, Kimi, or DeepSeek profile"
+                "no enabled utility model is configured; enable or add a Codex, Muse, Grok, Kimi, or DeepSeek profile"
             )
         }
         let quotas = self.quotas(config, &supported).await;
@@ -146,7 +146,7 @@ impl UtilityLlmRuntime {
                 .any(|preset| preset.effort == "low")
                 .then(|| "low".to_string());
             candidates.push(UtilityCandidate {
-                profile_id: profile_id.clone(),
+                profile_id: profile_id.to_owned(),
                 harness: profile.kind,
                 model: metadata.id.clone(),
                 quota_class,
@@ -187,7 +187,7 @@ impl UtilityLlmRuntime {
     async fn quotas(
         &self,
         config: &HelConfig,
-        profiles: &[(&String, &HarnessProfile)],
+        profiles: &[(&str, &HarnessProfile)],
     ) -> BTreeMap<String, ProfileQuota> {
         let now = now_seconds();
         let stale = {
@@ -209,14 +209,23 @@ impl UtilityLlmRuntime {
             manager.shutdown().await;
             self.quota_cache.lock().await.extend(refreshed);
         }
-        let configured = config.profiles.keys().collect::<BTreeSet<_>>();
+        self.retain_enabled(config).await;
+        self.quota_cache.lock().await.clone()
+    }
+
+    async fn retain_enabled(&self, config: &HelConfig) {
+        let enabled = config
+            .enabled_profiles()
+            .map(|(id, _)| id.to_owned())
+            .collect::<BTreeSet<_>>();
         self.backend_cache
             .lock()
             .await
-            .retain(|id, _| configured.contains(id));
-        let mut cache = self.quota_cache.lock().await;
-        cache.retain(|id, _| configured.contains(id));
-        cache.clone()
+            .retain(|id, _| enabled.contains(id));
+        self.quota_cache
+            .lock()
+            .await
+            .retain(|id, _| enabled.contains(id));
     }
 }
 
@@ -618,6 +627,30 @@ mod tests {
         ));
         assert!(!family_matches(HarnessKind::Muse, "muse-spark-1.3-image"));
         assert!(!family_matches(HarnessKind::Muse, "muse-spark-1.3-voice"));
+    }
+
+    #[tokio::test]
+    async fn disabled_profiles_are_ineligible_for_utility_work() {
+        let mut config = HelConfig::default();
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile {
+                enabled: false,
+                kind: HarnessKind::Codex,
+                home: PathBuf::from("/profiles/codex"),
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+            },
+        );
+        let runtime = UtilityLlmRuntime::default();
+
+        let error = runtime
+            .resolve(&config, &CancellationToken::new())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("no enabled utility model"), "{error}");
     }
 
     #[test]

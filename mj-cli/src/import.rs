@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, Subcommand};
 use hel::hel_archive::verify_archive_streaming;
 use hel::hel_config::{HarnessKind, HelConfig, sessions_dir};
@@ -739,6 +739,7 @@ fn import_session_from_profile(
         .get(profile_id)
         .with_context(|| format!("unknown profile {profile_id:?}"))?
         .clone();
+    ensure!(profile.enabled, "profile {profile_id:?} is disabled");
     let source = locate_native_session(
         profile.kind,
         &profile.home,

@@ -518,6 +518,10 @@ impl DashboardState {
             return;
         }
         self.invalidate_review_settings_choices_for_config(&config);
+        self.quotas
+            .retain(|id, _| config.enabled_profile(id).is_some());
+        self.quota_refreshing
+            .retain(|id| config.enabled_profile(id).is_some());
         self.config = config;
         // A background refresh must not dismiss a newer interaction. Forms
         // retain their drafts; command availability reads the current config.

@@ -30,7 +30,7 @@ use mj_chat::hel_text_input::TextInput;
 use crate::widgets::{centered_modal, dismissible_modal_title, format_resource_bytes};
 use crate::{
     DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, cycle_control, move_index,
-    nth_key,
+    nth_enabled_profile, nth_key,
 };
 
 const BASELINE_CPUS: u64 = 8;
@@ -896,7 +896,7 @@ pub(crate) fn render_new_wizard(
             area,
             dashboard,
             ReviewWizardView {
-                profile_id: &nth_key(&dashboard.config.profiles, wizard.profile),
+                profile_id: &nth_enabled_profile(&dashboard.config, wizard.profile),
                 project_label: if raw_project {
                     "Project directory"
                 } else {
@@ -1228,8 +1228,7 @@ pub(crate) fn render_new_wizard(
             " New session · 1/4 profile ",
             dashboard
                 .config
-                .profiles
-                .iter()
+                .enabled_profiles()
                 .map(|(id, profile)| dashboard.profile_choice(id, profile.kind))
                 .collect(),
             wizard.profile,
@@ -2139,7 +2138,7 @@ fn most_recent_configured_session<'a>(
         .sessions
         .values()
         .filter(|session| {
-            config.profiles.contains_key(&session.last_profile)
+            config.enabled_profile(&session.last_profile).is_some()
                 && config.bundles.contains_key(&session.bundle_id)
                 && config.targets.contains_key(&session.target_template_id)
         })

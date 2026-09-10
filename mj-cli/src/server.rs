@@ -1650,7 +1650,7 @@ pub(crate) async fn run_server(
                             continue;
                         }
                         ControllerAction::RefreshQuota { profile_id } => {
-                            let known = controller.config.profiles.contains_key(profile_id);
+                            let known = controller.config.enabled_profile(profile_id).is_some();
                             if known {
                                 // The refresher works from a generation-stamped
                                 // batch, so a new generation is how one is asked
@@ -1881,6 +1881,7 @@ pub(crate) async fn run_server(
                                 }
                             }
                             controller = reloaded;
+                            quotas.retain(|id, _| controller.config.enabled_profile(id).is_some());
                             worker_targets_tx.send_replace(dashboard_worker_targets(&controller));
                             publish_capacity_targets(
                                 &controller,
@@ -3927,6 +3928,7 @@ mod tests {
                         (
                             (*id).to_owned(),
                             HarnessProfile {
+                                enabled: true,
                                 context_window_bytes: None,
                                 kind: HarnessKind::Codex,
                                 home: PathBuf::from("/home/agent").join(id),
