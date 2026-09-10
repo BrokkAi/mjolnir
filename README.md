@@ -10,7 +10,7 @@ But if you expand beyond that, Mjolnir offers flexibility across all three:
 2. Move sessions across harnesses (codex to claude code)
 3. Move sessions across machines or containers (local workstation to ec2)
 
-... while integrating a privacy-first, no-setup web ui via Tailscale for when you're not at your desk.
+... while handling details like cross-harness memory sync and integrating a privacy-first, no-setup web ui via Tailscale for when you're not at your desk.
 
 [Documentation](https://mjolnir.brokk.ai/) ·
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
