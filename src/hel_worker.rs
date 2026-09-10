@@ -103,6 +103,14 @@ fn background_task_id(kind: &str, provider_id: &str) -> String {
     format!("{kind}:{provider_id}")
 }
 
+/// A Kimi native task together with the ACP launcher call it came from, so a
+/// hosted terminal bound to that call is not listed as a second job.
+#[derive(Debug, Clone)]
+struct KimiTaskEntry {
+    command: BackgroundCommand,
+    parent_tool_call_id: Option<String>,
+}
+
 /// `_meta` key the Claude adapter puts on the `usage_update` that settles a
 /// turn. Its value is an object with a `kind` naming the origin.
 const CLAUDE_ORIGIN_META_KEY: &str = "_claude/origin";
@@ -357,8 +365,8 @@ pub struct DurableRelay {
     background_exec_cards: BTreeMap<String, BackgroundCommand>,
     /// Claude's process-local background-task level, replaced on every update.
     claude_background_tasks: BTreeMap<String, BackgroundCommand>,
-    /// Kimi detached agents confirmed by its native main-agent journal.
-    kimi_background_tasks: BTreeMap<String, BackgroundCommand>,
+    /// Kimi detached agents and processes confirmed by its native journal.
+    kimi_background_tasks: BTreeMap<String, KimiTaskEntry>,
     /// Positive ACP launch evidence retained until the native journal
     /// correlates it through `parentToolCallId`.
     kimi_provisional_tasks: BTreeMap<String, BackgroundCommand>,
@@ -374,6 +382,10 @@ pub struct DurableRelay {
     /// A short-lived guard against a fast child reporting close before the
     /// create handler publishes its started event on the shared channel.
     closed_agent_terminals: BTreeSet<String>,
+    /// Hosted terminal each agent tool call embedded, keyed by the native tool
+    /// call id. Kimi runs a detached shell in one of our terminals, so this is
+    /// what ties its native task record to the terminal doing the work.
+    agent_terminal_tool_calls: BTreeMap<String, String>,
     /// Benchmark aid: stage and persist a snapshot on every append, the way
     /// the relay did before transcript appends were amortized, so both
     /// policies can be timed in one process.
@@ -555,6 +567,7 @@ impl DurableRelay {
             claude_stoppable_tasks: BTreeSet::new(),
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
+            agent_terminal_tool_calls: BTreeMap::new(),
             #[cfg(test)]
             stage_snapshot_every_append: false,
         };
@@ -723,25 +736,31 @@ impl DurableRelay {
     /// then it is the turn's own work, not something left behind. A Codex exec
     /// card counts from the moment its result arrives with a null exit code,
     /// because Codex starts these during a turn and never mentions them again.
+    ///
+    /// Kimi is the exception to the in-flight rule: it detaches a shell into
+    /// one of our terminals and keeps working, so a terminal its native journal
+    /// calls detached is listed mid-turn. That terminal then represents the
+    /// job, and the Kimi task entry behind it is left out.
     fn background_commands(&self) -> Vec<BackgroundCommand> {
+        let turn_in_flight =
+            self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some();
+        let detached_terminals = self.detached_agent_terminals();
         let mut commands: Vec<BackgroundCommand> = match self.background_work {
             BackgroundWorkPolicy::HostedTerminals
             | BackgroundWorkPolicy::ClaudeTasks
-            | BackgroundWorkPolicy::KimiTasks => {
-                if self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some() {
-                    Vec::new()
-                } else {
-                    self.active_agent_terminals
-                        .values()
-                        .map(|terminal| BackgroundCommand {
-                            id: background_task_id("terminal", &terminal.terminal_id),
-                            started_at_ms: terminal.started_at_ms,
-                            command: terminal.command.clone(),
-                            can_stop: true,
-                        })
-                        .collect()
-                }
-            }
+            | BackgroundWorkPolicy::KimiTasks => self
+                .active_agent_terminals
+                .values()
+                .filter(|terminal| {
+                    !turn_in_flight || detached_terminals.contains(terminal.terminal_id.as_str())
+                })
+                .map(|terminal| BackgroundCommand {
+                    id: background_task_id("terminal", &terminal.terminal_id),
+                    started_at_ms: terminal.started_at_ms,
+                    command: terminal.command.clone(),
+                    can_stop: true,
+                })
+                .collect(),
             BackgroundWorkPolicy::CodexExecCards => {
                 self.background_exec_cards.values().cloned().collect()
             }
@@ -758,8 +777,23 @@ impl DurableRelay {
             );
         }
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
-            commands.extend(self.kimi_background_tasks.values().cloned());
-            commands.extend(self.kimi_provisional_tasks.values().cloned());
+            commands.extend(
+                self.kimi_background_tasks
+                    .values()
+                    .filter(|entry| {
+                        self.bound_agent_terminal(entry.parent_tool_call_id.as_deref())
+                            .is_none()
+                    })
+                    .map(|entry| entry.command.clone()),
+            );
+            commands.extend(
+                self.kimi_provisional_tasks
+                    .iter()
+                    .filter(|(tool_call_id, _)| {
+                        self.bound_agent_terminal(Some(tool_call_id)).is_none()
+                    })
+                    .map(|(_, command)| command.clone()),
+            );
         }
         commands.sort_by(|left, right| {
             left.started_at_ms
@@ -767,6 +801,31 @@ impl DurableRelay {
                 .then_with(|| left.command.cmp(&right.command))
         });
         commands
+    }
+
+    /// The live hosted terminal an ACP launcher tool call embedded, if any.
+    fn bound_agent_terminal(&self, tool_call_id: Option<&str>) -> Option<&str> {
+        let tool_call_id = tool_call_id?;
+        let terminal_id = self
+            .agent_terminal_tool_calls
+            .get(kimi_native_tool_call_id(tool_call_id))?;
+        self.active_agent_terminals
+            .contains_key(terminal_id)
+            .then_some(terminal_id.as_str())
+    }
+
+    /// Terminals the agent explicitly detached, which stay listed mid-turn.
+    /// Only Kimi reports this; every other policy yields an empty set.
+    fn detached_agent_terminals(&self) -> BTreeSet<&str> {
+        if self.background_work != BackgroundWorkPolicy::KimiTasks {
+            return BTreeSet::new();
+        }
+        self.kimi_background_tasks
+            .values()
+            .filter_map(|entry| entry.parent_tool_call_id.as_deref())
+            .chain(self.kimi_provisional_tasks.keys().map(String::as_str))
+            .filter_map(|tool_call_id| self.bound_agent_terminal(Some(tool_call_id)))
+            .collect()
     }
 
     /// Replace Claude's background-task level without opening a foreground
@@ -830,11 +889,14 @@ impl DurableRelay {
             .map(|task| {
                 (
                     task.task_id.clone(),
-                    BackgroundCommand {
-                        id: background_task_id("kimi", &task.task_id),
-                        started_at_ms: task.started_at_ms,
-                        command: task.description,
-                        can_stop: false,
+                    KimiTaskEntry {
+                        command: BackgroundCommand {
+                            id: background_task_id("kimi", &task.task_id),
+                            started_at_ms: task.started_at_ms,
+                            command: task.description,
+                            can_stop: false,
+                        },
+                        parent_tool_call_id: task.parent_tool_call_id,
                     },
                 )
             })
@@ -932,6 +994,7 @@ impl DurableRelay {
         self.claude_background_tasks.clear();
         self.kimi_background_tasks.clear();
         self.kimi_provisional_tasks.clear();
+        self.agent_terminal_tool_calls.clear();
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             self.background_work_known = Some(false);
         }
@@ -2029,6 +2092,7 @@ impl DurableRelay {
             self.claude_background_tasks.clear();
             self.kimi_background_tasks.clear();
             self.kimi_provisional_tasks.clear();
+            self.agent_terminal_tool_calls.clear();
             if self.background_work == BackgroundWorkPolicy::KimiTasks {
                 self.background_work_known = Some(false);
             }
@@ -2073,6 +2137,7 @@ impl DurableRelay {
             self.track_codex_exec_card(&update);
         }
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
+            self.track_agent_terminal_tool_call(&update);
             self.track_kimi_background_agent(&update);
         }
         let ordinal = self.record_observation(RelayObservation::SessionUpdate {
@@ -2217,6 +2282,33 @@ impl DurableRelay {
                 command,
                 can_stop: false,
             });
+    }
+
+    /// Remember which hosted terminal a tool call embedded. Kimi launches a
+    /// detached shell through a terminal of ours and reports the terminal id
+    /// on the launcher card, which is the only link between the ACP card and
+    /// the process its native journal later names.
+    fn track_agent_terminal_tool_call(&mut self, update: &SessionUpdate) {
+        use agent_client_protocol::schema::v1::ToolCallContent;
+
+        let (tool_call_id, content) = match update {
+            SessionUpdate::ToolCall(call) => (call.tool_call_id.0.as_ref(), Some(&call.content)),
+            SessionUpdate::ToolCallUpdate(call) => {
+                (call.tool_call_id.0.as_ref(), call.fields.content.as_ref())
+            }
+            _ => return,
+        };
+        let Some(content) = content else {
+            return;
+        };
+        for item in content {
+            if let ToolCallContent::Terminal(terminal) = item {
+                self.agent_terminal_tool_calls.insert(
+                    kimi_native_tool_call_id(tool_call_id).to_owned(),
+                    terminal.terminal_id.0.to_string(),
+                );
+            }
+        }
     }
 
     /// Keep positive ACP evidence until Kimi's native journal proves which
@@ -4668,6 +4760,142 @@ mod tests {
             "task_id: agent-task-only\nstatus: running".into(),
         ));
         SessionUpdate::ToolCall(call)
+    }
+
+    /// Kimi's `Bash` launcher card with `run_in_background`, optionally
+    /// embedding the hosted terminal the detached shell runs in.
+    fn kimi_background_shell_card(
+        tool_call_id: &'static str,
+        terminal_id: Option<&str>,
+    ) -> SessionUpdate {
+        use agent_client_protocol::schema::v1::{
+            Terminal, ToolCall, ToolCallContent, ToolCallStatus,
+        };
+
+        let mut call = ToolCall::new(tool_call_id, "Bash");
+        call.status = ToolCallStatus::Completed;
+        call.raw_input = Some(serde_json::json!({
+            "command": "cargo build --release",
+            "description": "Build release runner",
+            "run_in_background": true
+        }));
+        if let Some(terminal_id) = terminal_id {
+            call.content = vec![ToolCallContent::Terminal(Terminal::new(
+                terminal_id.to_owned(),
+            ))];
+        }
+        SessionUpdate::ToolCall(call)
+    }
+
+    fn kimi_process_task(parent_tool_call_id: &str) -> crate::hel_acp::KimiBackgroundTask {
+        crate::hel_acp::KimiBackgroundTask {
+            task_id: "bash-r5ae".into(),
+            description: "Build release runner".into(),
+            started_at_ms: 2_000,
+            parent_tool_call_id: Some(parent_tool_call_id.into()),
+        }
+    }
+
+    /// Put a prompt of ours in flight so the turn-scoped terminal rule applies.
+    fn kimi_relay_with_prompt_in_flight(root: &Path) -> DurableRelay {
+        let mut relay = DurableRelay::open(root, SESSION, "1.0.0").unwrap();
+        relay.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        submit_relay(&mut relay, "parent-command", prompt("build it"));
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+        relay
+    }
+
+    #[test]
+    fn kimi_detached_shell_is_listed_once_as_its_hosted_terminal_during_the_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = kimi_relay_with_prompt_in_flight(temp.path());
+        relay
+            .record_session_update(kimi_background_shell_card("3:tool_bash", Some("term-60")))
+            .unwrap();
+        relay
+            .agent_terminal_started(ActiveAgentTerminal {
+                terminal_id: "term-60".into(),
+                command: "cargo build --release".into(),
+                started_at_ms: 2_000,
+            })
+            .unwrap();
+        relay
+            .kimi_background_tasks_changed(
+                vec![kimi_process_task("tool_bash")],
+                BTreeSet::from(["tool_bash".into()]),
+            )
+            .unwrap();
+
+        let commands = relay.operational_state().background_commands;
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.id.as_str())
+                .collect::<Vec<_>>(),
+            ["terminal:term-60"],
+            "the detached shell is one job, stoppable through its terminal"
+        );
+
+        relay.agent_terminal_closed("term-60").unwrap();
+        relay
+            .kimi_background_tasks_changed(Vec::new(), BTreeSet::from(["tool_bash".into()]))
+            .unwrap();
+        assert!(
+            relay.operational_state().background_commands.is_empty(),
+            "the shell exited, so nothing is left running"
+        );
+    }
+
+    #[test]
+    fn kimi_detached_shell_without_a_bound_terminal_is_listed_as_a_native_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = kimi_relay_with_prompt_in_flight(temp.path());
+        relay
+            .kimi_background_tasks_changed(
+                vec![kimi_process_task("tool_bash")],
+                BTreeSet::from(["tool_bash".into()]),
+            )
+            .unwrap();
+
+        let commands = relay.operational_state().background_commands;
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.id.as_str())
+                .collect::<Vec<_>>(),
+            ["kimi:bash-r5ae"],
+            "without ACP evidence the native record is all there is"
+        );
+    }
+
+    #[test]
+    fn a_kimi_hosted_terminal_with_no_detachment_evidence_stays_hidden_during_the_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = kimi_relay_with_prompt_in_flight(temp.path());
+        relay
+            .record_session_update(kimi_background_shell_card("3:tool_wait", None))
+            .unwrap();
+        relay
+            .agent_terminal_started(ActiveAgentTerminal {
+                terminal_id: "term-61".into(),
+                command: "cargo test".into(),
+                started_at_ms: 2_000,
+            })
+            .unwrap();
+
+        assert!(
+            !relay
+                .operational_state()
+                .background_commands
+                .iter()
+                .any(|command| command.id == "terminal:term-61"),
+            "a terminal the turn may still be waiting on is the turn's own work"
+        );
     }
 
     #[test]
