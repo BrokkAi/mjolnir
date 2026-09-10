@@ -3659,7 +3659,7 @@ mod tests {
             tool(
                 4,
                 "cargo test -p brokk-mj-chat",
-                "cargo",
+                "cargo test",
                 hel::hel_transcript::ToolStatus::Completed,
             ),
             ChatEntry::plain(
@@ -3670,7 +3670,7 @@ mod tests {
             tool(
                 6,
                 "cargo clippy --all-targets -- -D warnings",
-                "cargo",
+                "cargo clippy",
                 hel::hel_transcript::ToolStatus::Running,
             ),
         ];

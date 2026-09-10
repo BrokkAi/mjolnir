@@ -1113,14 +1113,14 @@ fn execute_summary_is_immediate_stable_and_raw_keeps_the_provider_title() {
             "kind": "execute",
             "status": "pending",
             "rawInput": {
-                "command": "cd dir && python x.py | cat | wc ; print ok"
+                "command": "git add src && cargo test --workspace | cat"
             }
         }),
     );
 
     for (seq, status) in [(2, "in_progress"), (3, "completed")] {
         let rich = transcript_text(&mut chat, 100);
-        assert!(rich.contains(&"│ cd && python | cat | wc ; print".to_owned()));
+        assert!(rich.contains(&"│ git add && cargo test | cat".to_owned()));
         assert!(!rich.contains(&"│ Bash".to_owned()));
         chat.apply_session_update(
             seq,
@@ -1132,7 +1132,7 @@ fn execute_summary_is_immediate_stable_and_raw_keeps_the_provider_title() {
         );
     }
     let rich = transcript_text(&mut chat, 100);
-    assert!(rich.contains(&"│ cd && python | cat | wc ; print".to_owned()));
+    assert!(rich.contains(&"│ git add && cargo test | cat".to_owned()));
 
     chat.render_mode = TranscriptRenderMode::Raw;
     assert!(transcript_text(&mut chat, 100).contains(&"│ Bash".to_owned()));
@@ -1177,7 +1177,7 @@ fn kimi_shell_tool_run_collapses_to_command_names() {
         transcript_text(&mut chat, 80),
         [
             "✓ Tool · done",
-            "│ rg, cargo, npm",
+            "│ rg, cargo test, npm run",
             "",
             "❯ You",
             "│ continue",
@@ -2771,16 +2771,50 @@ fn browser_tool_entries_show_the_summary_and_diffstats_only() {
 }
 
 #[test]
+fn stored_tool_presentation_is_not_retrofitted() {
+    let mut session = MaterializedSession::empty("session-stored-tool-summary");
+    session.applied_event_ordinal = 1;
+    session.applied_event_digest = "a".repeat(64);
+    session.transcript = vec![Arc::new(TranscriptItem {
+        stable_id: "tool:git".into(),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 1,
+        last_changed_at_ms: 1,
+        body: TranscriptBody::Tool {
+            call: serde_json::to_value(
+                ToolCall::new("git", "Bash")
+                    .kind(ToolKind::Execute)
+                    .status(ToolCallStatus::Completed)
+                    .raw_input(serde_json::json!({ "command": "git add src/lib.rs" })),
+            )
+            .unwrap(),
+            terminal_outputs: Vec::new(),
+            terminal_refs: Vec::new(),
+            presentation: Some(Box::new(hel::hel_transcript::ToolCallPresentation {
+                summary: "git".into(),
+                source: "git add src/lib.rs".into(),
+                source_kind: hel::hel_transcript::ToolSummarySourceKind::RawInput,
+                tool_kind: ToolKind::Execute,
+            })),
+        },
+    })];
+
+    let browser = TranscriptSnapshot::from_materialized(&session).browser_transcript(None);
+    assert_eq!(browser.entries[0].lines, ["git"]);
+}
+
+#[test]
 fn browser_uses_rich_group_order_and_changes_its_topology_key() {
-    let first = completed_tool(1, "cd && python");
+    let first = completed_execute_tool(1, "Running: git add src/lib.rs");
     let initial = TranscriptSnapshot::from_entries(vec![first.clone()]).browser_transcript(None);
     assert_eq!(initial.entries.len(), 1);
-    assert_eq!(initial.entries[0].lines, ["cd && python"]);
+    assert_eq!(initial.entries[0].lines, ["git add"]);
 
     let grouped = TranscriptSnapshot::from_entries(vec![
         first,
         thought(2, "checking commands"),
-        completed_tool(3, "cat | wc"),
+        completed_execute_tool(3, "Running: gh pr create --draft"),
     ])
     .browser_transcript(None);
 
@@ -2791,7 +2825,7 @@ fn browser_uses_rich_group_order_and_changes_its_topology_key() {
     assert_eq!(grouped.entries[1].role, "tool");
     assert_eq!(grouped.entries[1].id, 1);
     assert_eq!(grouped.entries[1].updated_seq, 3);
-    assert_eq!(grouped.entries[1].lines, ["cd && python, cat | wc"]);
+    assert_eq!(grouped.entries[1].lines, ["git add, gh pr create"]);
 }
 
 #[test]
