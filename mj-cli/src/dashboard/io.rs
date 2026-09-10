@@ -217,6 +217,7 @@ pub(crate) enum DashboardIoUpdate {
 pub(crate) struct ActiveLifecycleOperation {
     pub(crate) cancelled: Arc<AtomicBool>,
     pub(crate) kind: SessionOperationKind,
+    pub(crate) retry_launch: Option<DashboardAction>,
 }
 
 pub(crate) struct WorkspaceManagementResult {
@@ -227,6 +228,7 @@ pub(crate) struct WorkspaceManagementResult {
 }
 
 pub(crate) struct RegisteredDashboardSession {
+    retry_launch: DashboardAction,
     session: SessionRecord,
     remembered_container_size: Option<(String, hel::hel_state::HostContainerSize)>,
     cancelled: Arc<AtomicBool>,
@@ -234,7 +236,10 @@ pub(crate) struct RegisteredDashboardSession {
 
 pub(crate) enum DashboardCreateSessionUpdate {
     Registered(Box<RegisteredDashboardSession>),
-    Failed { error: String },
+    Failed {
+        error: String,
+        retry_launch: Box<DashboardAction>,
+    },
 }
 
 pub(crate) struct ImportedDashboardSessionApply {
@@ -1390,6 +1395,7 @@ pub(crate) fn spawn_dashboard_create_session(
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = tracker.begin_cancellable("creating session", cancelled.clone());
     tokio::task::spawn_blocking(move || {
+        let retry_launch = action.clone();
         let prepared = match action {
             DashboardAction::CreateStartupSession {
                 profile_id,
@@ -1416,6 +1422,7 @@ pub(crate) fn spawn_dashboard_create_session(
             Err(error) => {
                 if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
                     DashboardCreateSessionUpdate::Failed {
+                        retry_launch: Box::new(retry_launch),
                         error: format!("{error:#}"),
                     },
                 ))) {
@@ -1424,6 +1431,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 return;
             }
         };
+        let retry_launch = action.clone();
         let DashboardAction::CreateSession {
             workspace_id,
             profile_id,
@@ -1485,6 +1493,7 @@ pub(crate) fn spawn_dashboard_create_session(
                     .await
             })?;
             Ok(Some(RegisteredDashboardSession {
+                retry_launch: retry_launch.clone(),
                 session: registered.session,
                 remembered_container_size: registered.remembered_container_size,
                 cancelled: cancelled.clone(),
@@ -1495,6 +1504,7 @@ pub(crate) fn spawn_dashboard_create_session(
             Err(error) => {
                 if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
                     DashboardCreateSessionUpdate::Failed {
+                        retry_launch: Box::new(retry_launch),
                         error: format!("{error:#}"),
                     },
                 ))) {
@@ -2214,12 +2224,16 @@ impl DashboardContext {
                     ActiveLifecycleOperation {
                         cancelled: registered.cancelled,
                         kind: SessionOperationKind::Launching,
+                        retry_launch: Some(registered.retry_launch),
                     },
                 );
             }
-            DashboardCreateSessionUpdate::Failed { error } => {
+            DashboardCreateSessionUpdate::Failed {
+                error,
+                retry_launch,
+            } => {
                 self.dashboard
-                    .set_failure_notice(format!("Could not create session: {error}"));
+                    .show_launch_failure(error, Some(*retry_launch));
             }
         }
     }
@@ -2317,6 +2331,14 @@ impl DashboardContext {
                     .is_some_and(|operation| operation.kind == SessionOperationKind::Stopping)
                 {
                     self.dashboard.show_close_failure(session_id.clone(), error);
+                } else if operation
+                    .as_ref()
+                    .is_some_and(|operation| operation.kind == SessionOperationKind::Launching)
+                {
+                    let retry = operation
+                        .and_then(|operation| operation.retry_launch)
+                        .filter(|_| !self.controller.state.sessions.contains_key(&session_id));
+                    self.dashboard.show_launch_failure(error, retry);
                 } else {
                     let label = operation
                         .as_ref()

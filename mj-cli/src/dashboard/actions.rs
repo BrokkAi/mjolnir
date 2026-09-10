@@ -1097,6 +1097,7 @@ impl DashboardContext {
             crate::dashboard::io::ActiveLifecycleOperation {
                 cancelled: cancelled.clone(),
                 kind,
+                retry_launch: None,
             },
         );
         LifecycleOperationRequest {

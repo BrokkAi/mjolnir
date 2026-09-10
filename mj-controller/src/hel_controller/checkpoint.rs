@@ -2788,6 +2788,7 @@ mod tests {
             vec![
                 "export target checkpoint".to_owned(),
                 "stage replacement Mjolnir worker".to_owned(),
+                "assign replacement worker to the worker user".to_owned(),
                 "replace installed Mjolnir worker".to_owned(),
                 "make replaced Mjolnir worker executable".to_owned(),
                 "export target checkpoint".to_owned(),
@@ -2876,6 +2877,7 @@ mod tests {
                 "upload checkpoint specification".to_owned(),
                 "export target checkpoint".to_owned(),
                 "stage replacement Mjolnir worker".to_owned(),
+                "assign replacement worker to the worker user".to_owned(),
                 "replace installed Mjolnir worker".to_owned(),
                 "make replaced Mjolnir worker executable".to_owned(),
                 "export target checkpoint".to_owned(),

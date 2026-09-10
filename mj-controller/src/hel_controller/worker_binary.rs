@@ -1582,6 +1582,30 @@ fn copy_profile_entry(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+// Container copies can create root-owned files even when exec defaults to a
+// non-root image user. The worker directory was created by that user, so use
+// its ownership for uploaded files before restricting their permissions.
+pub(super) fn container_upload_ownership_args(
+    container_id: &str,
+    worker_root: &str,
+    paths: &[&str],
+) -> Vec<String> {
+    let mut args = vec![
+        "exec".into(),
+        "--user".into(),
+        "0".into(),
+        container_id.into(),
+        "sh".into(),
+        "-c".into(),
+        // GNU and BusyBox stat both support this numeric ownership format.
+        r#"set -eu; owner=$(stat -c '%u:%g' -- "$1"); shift; chown -R "$owner" -- "$@""#.into(),
+        "sh".into(),
+        worker_root.into(),
+    ];
+    args.extend(paths.iter().map(|path| (*path).to_owned()));
+    args
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_worker_files(
     executor: &impl CommandExecutor,
@@ -1697,6 +1721,20 @@ fn install_worker_files(
                     ],
                 )
                 .purpose("upload harness profile allowlist"),
+                CommandSpec::new(
+                    engine,
+                    container_upload_ownership_args(
+                        container_id,
+                        worker_root,
+                        &[
+                            &format!("{worker_root}/hel"),
+                            &format!("{worker_root}/launch.json"),
+                            &format!("{worker_root}/ownership.json"),
+                            profile_home,
+                        ],
+                    ),
+                )
+                .purpose("assign uploaded files to the worker user"),
                 CommandSpec::new(
                     engine,
                     [
@@ -1839,6 +1877,18 @@ fn install_worker_files(
                     format!("{upload}/profile/."),
                     format!("{container_id}:{profile_home}"),
                 ],
+                std::iter::once(engine.to_owned())
+                    .chain(container_upload_ownership_args(
+                        container_id,
+                        worker_root,
+                        &[
+                            &format!("{worker_root}/hel"),
+                            &format!("{worker_root}/launch.json"),
+                            &format!("{worker_root}/ownership.json"),
+                            profile_home,
+                        ],
+                    ))
+                    .collect(),
                 vec![
                     engine.into(),
                     "exec".into(),
@@ -2146,6 +2196,11 @@ fn installed_worker_binary_replacement_plan(
                 .purpose("stage replacement Mjolnir worker"),
                 CommandSpec::new(
                     engine,
+                    container_upload_ownership_args(container_id, &worker_root, &[&staged]),
+                )
+                .purpose("assign replacement worker to the worker user"),
+                CommandSpec::new(
+                    engine,
                     [
                         "exec".into(),
                         container_id.clone(),
@@ -2198,6 +2253,15 @@ fn installed_worker_binary_replacement_plan(
                     [engine, "cp", &upload, &format!("{container_id}:{staged}")],
                 )
                 .purpose("stage replacement Mjolnir worker"),
+                ssh_command_spec(
+                    ssh,
+                    std::iter::once(engine.to_owned()).chain(container_upload_ownership_args(
+                        container_id,
+                        &worker_root,
+                        &[&staged],
+                    )),
+                )
+                .purpose("assign replacement worker to the worker user"),
                 ssh_command_spec(
                     ssh,
                     [
@@ -3827,6 +3891,78 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Docker and the locally installed agent-dev image"]
+    fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
+        let fixture = podman_install_fixture();
+        let session = hel::hel_state::new_session_id().unwrap();
+        let container_id = hel_targets::resource_name(&session).unwrap();
+        let locator = hel_targets::TargetLocator::LocalDocker {
+            container_id: container_id.clone(),
+        };
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                [
+                    "run",
+                    "--pull=never",
+                    "-d",
+                    "--name",
+                    &container_id,
+                    "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                    "sleep",
+                    "infinity",
+                ],
+            ),
+        )
+        .unwrap();
+        let result = (|| -> Result<()> {
+            let root = hel_targets::worker_root(&locator, &session)?;
+            let profile = format!("{root}/profile");
+            std::fs::write(fixture.profile_stage.join("credential"), "private")?;
+            install_worker_files(
+                &ProcessExecutor,
+                &locator,
+                &session,
+                &root,
+                &profile,
+                &fixture.worker_binary,
+                &fixture.launch_config,
+                &fixture.ownership,
+                &fixture.profile_stage,
+            )?;
+            replace_installed_worker_binary(
+                &ProcessExecutor,
+                &locator,
+                &session,
+                &fixture.worker_binary,
+            )?;
+            execute_checked(
+                &ProcessExecutor,
+                CommandSpec::new(
+                    "docker",
+                    [
+                        "exec",
+                        &container_id,
+                        "sh",
+                        "-c",
+                        "test \"$(id -u)\" != 0 && test -x \"$1/hel\" && test -r \"$1/launch.json\" && test -r \"$1/ownership.json\" && test -r \"$1/profile/credential\" && test -w \"$1/profile/credential\"",
+                        "sh",
+                        &root,
+                    ],
+                ),
+            )?;
+            Ok(())
+        })();
+        let cleanup = execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new("docker", ["rm", "-f", &container_id]),
+        );
+        result.unwrap();
+        cleanup.unwrap();
+    }
+
+    #[test]
     fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         struct RecordingExecutor {
             commands: RefCell<Vec<CommandSpec>>,
@@ -3854,7 +3990,11 @@ mod tests {
         replace_installed_worker_binary(&executor, &locator, session, Path::new("/controller/hel"))
             .unwrap();
 
-        let lines = rendered(&executor.commands.borrow());
+        let mut lines = rendered(&executor.commands.borrow());
+        let ownership = lines.remove(1);
+        assert!(ownership.starts_with(&format!("podman exec --user 0 {container_id} sh -c")));
+        assert!(ownership.contains("chown -R"));
+        assert!(ownership.ends_with(&format!("/var/lib/hel/workers/{session}/hel.next")));
         assert_eq!(
             lines,
             vec![

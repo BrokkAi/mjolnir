@@ -241,6 +241,11 @@ pub(crate) struct RepositoryOriginDialog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Confirmation {
+    LaunchFailed {
+        error: String,
+        retry: Option<Box<DashboardAction>>,
+        previous: Box<Mode>,
+    },
     /// A standard modal dismissal that may need to protect an in-memory draft
     /// or a running operation. The boxed mode is restored by the safe answer.
     Dismiss {
@@ -291,6 +296,8 @@ pub(crate) enum DismissalIntent {
 /// A confirmation dialog and its persistent standard-control state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfirmDialog {
+    scroll: u16,
+    max_scroll: std::cell::Cell<u16>,
     pub(crate) confirmation: Confirmation,
     pub(crate) form: RefCell<Form<DialogControl>>,
 }
@@ -298,6 +305,8 @@ pub(crate) struct ConfirmDialog {
 impl ConfirmDialog {
     pub(crate) fn new(confirmation: Confirmation) -> Self {
         Self {
+            scroll: 0,
+            max_scroll: std::cell::Cell::new(0),
             form: confirmation_form(&confirmation),
             confirmation,
         }
@@ -402,6 +411,8 @@ fn clear_dialog_form_geometry(form: &mut Form<DialogControl>) {
 /// rendering.
 pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
     match confirmation {
+        Confirmation::LaunchFailed { retry: Some(_), .. } => &["Dismiss", "Retry launch"],
+        Confirmation::LaunchFailed { .. } => &["Dismiss"],
         Confirmation::Dismiss {
             intent: DismissalIntent::DiscardSetup,
             ..
@@ -438,7 +449,10 @@ fn primary_button(labels: &[&str]) -> usize {
 }
 
 fn initial_confirmation_button(confirmation: &Confirmation, labels: &[&str]) -> usize {
-    if matches!(confirmation, Confirmation::Dismiss { .. }) {
+    if matches!(
+        confirmation,
+        Confirmation::Dismiss { .. } | Confirmation::LaunchFailed { .. }
+    ) {
         0
     } else {
         primary_button(labels)
@@ -1159,6 +1173,24 @@ pub(crate) fn render_repository_origin(
 /// rendering a frame and reading cells back.
 fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'static>>) {
     match confirmation {
+        Confirmation::LaunchFailed { error, retry, .. } => {
+            let mut lines = vec![
+                Line::raw("The session could not start. This message stays until you dismiss it."),
+                Line::raw(if retry.is_some() {
+                    "Resolve the problem below, then Retry launch with the same settings."
+                } else {
+                    "Cleanup did not complete. Dismiss, select the failed session and remove it before starting again."
+                }),
+                Line::raw("PgUp/PgDn scroll the full details. Esc dismisses."),
+                Line::raw(""),
+            ];
+            if error.contains("Operation not permitted") && error.contains("chmod") {
+                lines.push(Line::raw("The container user cannot change the uploaded worker's permissions. If using a custom image, try the standard Mjolnir agent image. Include the diagnostic below when reporting this problem."));
+                lines.push(Line::raw(""));
+            }
+            lines.extend(error.lines().map(|line| Line::raw(line.to_owned())));
+            (" Launch failed ", lines)
+        }
         Confirmation::Dismiss {
             intent: DismissalIntent::DiscardSetup,
             ..
@@ -1325,6 +1357,7 @@ pub(crate) fn render_confirmation(
     let confirmation = &dialog.confirmation;
     // Minimum height per dialog; `popup_height` grows it to fit wrapped content.
     let nominal: u16 = match confirmation {
+        Confirmation::LaunchFailed { .. } => 16,
         Confirmation::Dismiss { .. } => 8,
         Confirmation::DirtyLocal { .. } => 11,
         Confirmation::CloseFailed { .. } => 12,
@@ -1355,7 +1388,11 @@ pub(crate) fn render_confirmation(
         inner.width,
         inner.height.saturating_sub(controls_height),
     );
-    frame.render_widget(paragraph, body);
+    let max_scroll = u16::try_from(paragraph.line_count(body.width.max(1)))
+        .unwrap_or(u16::MAX)
+        .saturating_sub(body.height);
+    dialog.max_scroll.set(max_scroll);
+    frame.render_widget(paragraph.scroll((dialog.scroll.min(max_scroll), 0)), body);
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
     let title_line = dismissible_modal_title(
@@ -1896,6 +1933,21 @@ impl DashboardState {
         DashboardAction::None
     }
 
+    /// Keep launch errors independent of the transient shared status line.
+    pub fn show_launch_failure(
+        &mut self,
+        error: impl Into<String>,
+        retry: Option<DashboardAction>,
+    ) {
+        let previous = Box::new(self.mode.clone());
+        self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::LaunchFailed {
+            error: error.into(),
+            retry: retry.map(Box::new),
+            previous,
+        }));
+        self.mark_render_changed();
+    }
+
     /// Show the recovery choices after a checkpointed close could not finish.
     pub fn show_close_failure(&mut self, session_id: String, error: impl Into<String>) {
         self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::CloseFailed {
@@ -2146,6 +2198,32 @@ impl DashboardState {
                 _ => {}
             }
         }
+        if matches!(dialog.confirmation, Confirmation::LaunchFailed { .. })
+            && let Event::Key(key) = &event
+            && key.kind != crossterm::event::KeyEventKind::Release
+        {
+            match key.code {
+                crossterm::event::KeyCode::PageDown => {
+                    dialog.scroll = dialog.scroll.saturating_add(5).min(dialog.max_scroll.get())
+                }
+                crossterm::event::KeyCode::PageUp => {
+                    dialog.scroll = dialog.scroll.saturating_sub(5)
+                }
+                crossterm::event::KeyCode::Home => dialog.scroll = 0,
+                _ => return self.handle_confirmation_controls(dialog, event),
+            }
+            self.mode = Mode::Confirm(dialog);
+            self.mark_render_changed();
+            return DashboardAction::None;
+        }
+        self.handle_confirmation_controls(dialog, event)
+    }
+
+    fn handle_confirmation_controls(
+        &mut self,
+        mut dialog: ConfirmDialog,
+        event: Event,
+    ) -> DashboardAction {
         let result = dialog.form.get_mut().handle(&event);
         crate::record_form_outcome_cells(
             &self.last_event_outcome,
@@ -2156,7 +2234,8 @@ impl DashboardState {
         let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) => match dialog.confirmation {
-                Confirmation::Dismiss { mode, .. } => {
+                Confirmation::Dismiss { mode, .. }
+                | Confirmation::LaunchFailed { previous: mode, .. } => {
                     self.restore_dismissed_mode(mode);
                 }
                 Confirmation::DestroyStopped { reopen, .. } => {
@@ -2179,6 +2258,19 @@ impl DashboardState {
         index: usize,
     ) -> DashboardAction {
         match (confirmation, index) {
+            (
+                Confirmation::LaunchFailed {
+                    retry, previous, ..
+                },
+                index,
+            ) => {
+                self.restore_dismissed_mode(previous);
+                if index == 1 {
+                    retry.map(|action| *action).unwrap_or(DashboardAction::None)
+                } else {
+                    DashboardAction::None
+                }
+            }
             (Confirmation::Dismiss { mode, intent: _ }, 0) => self.restore_dismissed_mode(mode),
             (Confirmation::Dismiss { intent, .. }, 1) => {
                 self.cancel_modal();
@@ -2277,6 +2369,75 @@ mod tests {
 
     use crate::render::render;
     use crate::{DashboardAction, DashboardState, Mode};
+
+    #[test]
+    fn launch_failure_survives_notices_and_retries_original_settings_once() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let retry = DashboardAction::CreateSession {
+            workspace_id: "original-workspace".into(),
+            profile_id: "codex".into(),
+            bundle_id: "project".into(),
+            project_directory: None,
+            target_template_id: "docker".into(),
+            additional_mounts: Vec::new(),
+            allow_dirty_local: false,
+            resource_allocation: None,
+        };
+        dashboard.show_launch_failure("upload failed", Some(retry.clone()));
+        dashboard.set_notice("Quota refreshed");
+        let mut terminal = Terminal::new(TestBackend::new(90, 25)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Launch failed"));
+        assert!(text.contains("upload failed"));
+        assert!(text.contains("Retry launch"));
+        dashboard.handle_key(key(KeyCode::Right));
+        assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), retry);
+        assert!(!matches!(dashboard.mode, Mode::Confirm(_)));
+    }
+
+    #[test]
+    fn launch_failure_scrolls_long_details_and_restores_interrupted_dialog() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.show_close_failure("session-1".into(), "prior error");
+        let previous = dashboard.mode.clone();
+        let error = (0..60)
+            .map(|index| format!("diagnostic line {index}\n"))
+            .collect::<String>();
+        dashboard.show_launch_failure(error, None);
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+        for _ in 0..30 {
+            dashboard.handle_key(key(KeyCode::PageDown));
+        }
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("diagnostic line 59"), "{text}");
+        assert!(!text.contains("Retry launch"));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::None
+        );
+        assert_eq!(dashboard.mode, previous);
+    }
 
     #[test]
     fn web_qr_has_a_four_module_quiet_zone() {
