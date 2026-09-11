@@ -362,13 +362,22 @@ image = "ubuntu:24.04"
             Ok(())
         });
     }
-    let child = command.spawn().expect("spawn hel PTY helper");
+    let child = ReapChild(Some(command.spawn().expect("spawn hel PTY helper")));
+    // The dashboard starts its daemon in the background. Handing this fixture
+    // over before that daemon owns the store would let teardown finish first,
+    // and the daemon would then recreate the storage that teardown removed.
+    assert!(
+        storage
+            .wait_until_owned(Instant::now() + Duration::from_secs(30))
+            .expect("probe fixture store ownership"),
+        "daemon never took the fixture store"
+    );
     DashboardPty {
         _storage: storage,
         master,
         slave,
         original_termios,
-        child: ReapChild(Some(child)),
+        child,
     }
 }
 
@@ -393,6 +402,27 @@ fn panicking_dashboard_fixture_reaps_the_dashboard_before_removing_storage() {
     // The owned dashboard child must have been killed and reaped by its guard.
     assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
     assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+}
+
+#[test]
+fn fixture_teardown_before_the_dashboard_is_ready_removes_its_storage() {
+    // Tearing down as soon as the daemon owns the store can catch it before it
+    // publishes the metadata a stop request needs. Leaving it running there is
+    // what leaked one storage directory for every interrupted terminal test.
+    let fixture = spawn_dashboard_pty();
+    let root = fixture._storage.path().to_path_buf();
+    drop(fixture);
+    // Removal is not enough on its own: a daemon that outlives teardown
+    // recreates the tree it needs, which left storage behind even when
+    // teardown reported success.
+    for _ in 0..20 {
+        assert!(
+            !root.exists(),
+            "fixture storage survived or returned after teardown: {}",
+            root.display()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[test]
