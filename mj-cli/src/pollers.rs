@@ -2383,6 +2383,19 @@ mod tests {
                 },
             },
         );
+        config.bundles.insert(
+            "project".into(),
+            hel::hel_config::ProjectBundle {
+                primary_repo: "project".into(),
+                repositories: vec![hel::hel_config::ProjectRepository {
+                    id: "project".into(),
+                    github: Some("owner/project".into()),
+                    local: None,
+                    destination: "project".into(),
+                    git_ref: None,
+                }],
+            },
+        );
         let mut hel_state = HelState::default();
         hel_state.sessions.insert(
             session_id.into(),

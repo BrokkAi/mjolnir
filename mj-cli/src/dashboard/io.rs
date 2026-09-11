@@ -821,12 +821,20 @@ pub(crate) fn spawn_setup_save(
         tracker,
         "saving setup",
         updates,
-        move || save_setup_at(&hel::hel_config::config_path(), &original, &updated),
+        move || {
+            let state = HelState::load()?;
+            save_setup_at(&hel::hel_config::config_path(), &original, &updated, &state)
+        },
         move |result| DashboardIoUpdate::SetupSaved { generation, result },
     )
 }
 
-fn save_setup_at(path: &std::path::Path, original: &str, updated: &str) -> Result<HelConfig> {
+fn save_setup_at(
+    path: &std::path::Path,
+    original: &str,
+    updated: &str,
+    state: &HelState,
+) -> Result<HelConfig> {
     let original: serde_json::Value = serde_json::from_str(original)?;
     let updated_config: HelConfig = serde_json::from_str(updated)?;
     updated_config.validate()?;
@@ -835,7 +843,9 @@ fn save_setup_at(path: &std::path::Path, original: &str, updated: &str) -> Resul
         let current = serde_json::to_value(&*config)?;
         let merged = merge_setup_edit(Some(&original), Some(&updated), Some(&current), "Setup")?
             .context("setup cannot remove the configuration")?;
-        *config = serde_json::from_value(merged)?;
+        let next = serde_json::from_value(merged)?;
+        state.validate_setup_update(config, &next)?;
+        *config = next;
         Ok(())
     })
     .map(|(config, ())| config)
@@ -2517,6 +2527,45 @@ mod tests {
     use mj_controller::hel_controller::create_quick_bundle_in_config as create_quick_bundle;
 
     #[test]
+    fn setup_save_refuses_to_remove_an_active_sessions_target_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut original = HelConfig::default();
+        original
+            .targets
+            .insert("podman".into(), hel::hel_config::TargetTemplate::LocalBare);
+        original.save_to(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let session = lifecycle_session("session-1", "default", SessionState::Running);
+        let state = HelState {
+            sessions: BTreeMap::from([(session.id.clone(), session)]),
+            ..HelState::default()
+        };
+        let mut updated = original.clone();
+        updated.targets.clear();
+        let error = save_setup_at(
+            &path,
+            &serde_json::to_string(&original).unwrap(),
+            &serde_json::to_string(&updated).unwrap(),
+            &state,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("active session"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // An unrelated preference remains editable even while a session needs repair.
+        updated = original.clone();
+        updated.startup.prompt = false;
+        save_setup_at(
+            &path,
+            &serde_json::to_string(&original).unwrap(),
+            &serde_json::to_string(&updated).unwrap(),
+            &state,
+        )
+        .unwrap();
+        assert!(!HelConfig::load_from(&path).unwrap().startup.prompt);
+    }
+
+    #[test]
     fn setup_save_merges_unrelated_edits_and_refuses_conflicts_or_invalid_values() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -2535,6 +2584,7 @@ mod tests {
             &path,
             &original_json,
             &serde_json::to_string(&edited).unwrap(),
+            &HelState::default(),
         )
         .unwrap();
         assert_eq!(saved.sessions_side, hel::hel_config::SessionsSide::Right);
@@ -2554,7 +2604,8 @@ mod tests {
             save_setup_at(
                 &path,
                 &original_json,
-                &serde_json::to_string(&conflicting).unwrap()
+                &serde_json::to_string(&conflicting).unwrap(),
+                &HelState::default(),
             )
             .unwrap_err()
             .to_string()
@@ -2566,7 +2617,8 @@ mod tests {
             save_setup_at(
                 &path,
                 &original_json,
-                &serde_json::to_string(&invalid).unwrap()
+                &serde_json::to_string(&invalid).unwrap(),
+                &HelState::default(),
             )
             .is_err()
         );

@@ -42,7 +42,7 @@ mj setup instructions --platform linux
 mj setup instructions --platform macos
 ```
 
-`mj setup` runs the interactive discovery flow. It scans harness homes and credentials, the current repository's GitHub origin, local Podman, Docker, and Apple Container runtimes, AWS CLI configuration, and concrete hosts in `~/.ssh/config`. After confirmation it writes a complete configuration. Running setup against an existing configuration replaces it rather than merging individual tables, so retain any manual settings you intend to reapply.
+`mj setup` runs the interactive discovery flow. It scans harness homes and credentials, the current repository's GitHub origin, local Podman, Docker, and Apple Container runtimes, AWS CLI configuration, and concrete hosts in `~/.ssh/config`. Installed harness commands are detected even before their first login; setup reports the login needed to initialize their profile. After confirmation it adds newly discovered profiles, repository bundles, and targets while preserving existing entries and preferences. Repeated discovery reuses matching entries. When a target has different settings, setup offers to keep it or add a separate target; existing sessions keep their original configuration. A conflicting edit made while setup is open stops the write and asks you to rerun setup.
 
 `setup instructions` prints coding-agent-friendly preparation steps for a Linux or macOS host.
 

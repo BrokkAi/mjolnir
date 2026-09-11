@@ -8,15 +8,26 @@ prompt history, per-session resource choices, drafts, and read markers live in
 Mjolnir's state database instead; they are not fields in this file.
 
 Run `mj setup` to generate a starting configuration, then edit the file for
-additional profiles, bundles, or targets. `mj setup` replaces an existing file
-rather than merging it, so do not rerun it over hand-written configuration
-without keeping a copy. After a manual edit, restart the daemon and validate the
-result:
+additional profiles, bundles, or targets. Rerun `mj setup` after installing new
+software: it adds discoveries without removing existing entries or preferences.
+Conflicting target settings can be added under a separate name. The terminal
+setup editor also adds discoveries under separate names for review. It refuses
+to remove or rewrite configuration used by an active session; add an alternative
+entry or stop the session first. Global defaults and profile enablement remain
+editable. After a manual edit, restart the daemon and validate the result:
 
 ```console
 mj daemon restart
 mj doctor
 ```
+
+If an active session references a missing profile, bundle, or target, Mjolnir
+still opens and marks that session as needing configuration repair. Select it
+and press Enter for repair details, its retained transcript, or the setup editor.
+The web session menu also provides repair guidance. Restore the named entry in `config.toml` and retry. Setup can rediscover installations,
+but cannot reconstruct an arbitrary deleted bundle or custom target. Other
+sessions remain accessible, and configuration diagnostics do not change the
+affected session's stored lifecycle state.
 
 See [Profiles and harnesses](/profiles/), [Workspaces and bundles](/workspaces-bundles/),
 and [Targets](/targets/) for the concepts behind these fields.

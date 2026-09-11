@@ -3151,6 +3151,19 @@ mod tests {
                 },
             },
         );
+        config.bundles.insert(
+            "hel".into(),
+            hel::hel_config::ProjectBundle {
+                primary_repo: "project".into(),
+                repositories: vec![hel::hel_config::ProjectRepository {
+                    id: "project".into(),
+                    github: Some("owner/project".into()),
+                    local: None,
+                    destination: "project".into(),
+                    git_ref: None,
+                }],
+            },
+        );
         let mut state = HelState::default();
         for (id, title) in [("session-1", "First"), ("session-2", "Second")] {
             state.sessions.insert(

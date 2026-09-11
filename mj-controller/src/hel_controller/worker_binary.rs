@@ -69,6 +69,7 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
+        session.validate_configuration(&self.config)?;
         let profile = self
             .config
             .profiles
@@ -226,6 +227,7 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
+        session.validate_configuration(&self.config)?;
         let profile = self
             .config
             .profiles
@@ -258,6 +260,7 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
+        session.validate_configuration(&self.config)?;
         let locator = session
             .target
             .as_ref()

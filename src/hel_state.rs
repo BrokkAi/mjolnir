@@ -1037,6 +1037,43 @@ fn default_session_workspace_id() -> String {
 }
 
 impl SessionRecord {
+    /// Configuration drift belongs to this session, not the entire controller.
+    /// The diagnostic contains only public identifiers, so both UIs can show it.
+    pub fn configuration_issue(&self, config: &HelConfig) -> Option<String> {
+        if !self.state.is_active() {
+            return None;
+        }
+        let mut issues = Vec::new();
+        match config.profiles.get(&self.last_profile) {
+            None => issues.push(format!("missing profile {:?}", self.last_profile)),
+            Some(profile) if profile.kind != self.harness_kind => issues.push(format!(
+                "expects {:?}, but profile {:?} is {:?}",
+                self.harness_kind, self.last_profile, profile.kind
+            )),
+            Some(_) => {}
+        }
+        if self.project_directory.is_none() && !config.bundles.contains_key(&self.bundle_id) {
+            issues.push(format!("missing bundle {:?}", self.bundle_id));
+        }
+        if !config.targets.contains_key(&self.target_template_id) {
+            issues.push(format!(
+                "missing target template {:?}",
+                self.target_template_id
+            ));
+        }
+        (!issues.is_empty()).then(|| format!(
+            "Session {:?} needs configuration repair: {}. Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+            self.id, issues.join("; ")
+        ))
+    }
+
+    pub fn validate_configuration(&self, config: &HelConfig) -> Result<()> {
+        if let Some(issue) = self.configuration_issue(config) {
+            bail!("{issue}");
+        }
+        Ok(())
+    }
+
     /// User-visible session name, independent of the initial prompt stored in `title`.
     pub fn display_title(&self) -> &str {
         self.session_title_override
@@ -1447,48 +1484,56 @@ impl HelState {
             .expect("session checked above"))
     }
 
-    /// Validate persisted foreign keys without preventing config entries from
-    /// being renamed after a session is fully archived.
-    pub fn validate_against_config(&self, config: &HelConfig) -> Result<()> {
-        self.validate()?;
-        config.validate()?;
+    /// Setup may add replacements under new names, but must not rewrite
+    /// dependencies still owned by active sessions.
+    pub fn validate_setup_update(&self, before: &HelConfig, after: &HelConfig) -> Result<()> {
         for session in self
             .sessions
             .values()
             .filter(|session| session.state.is_active())
         {
-            let profile = config.profiles.get(&session.last_profile).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "active session {:?} references missing profile {:?}",
-                    session.id,
-                    session.last_profile
-                )
-            })?;
-            if profile.kind != session.harness_kind {
+            let protected = if let Some(profile) = before.profiles.get(&session.last_profile) {
+                let mut comparable = profile.clone();
+                if let Some(updated) = after.profiles.get(&session.last_profile) {
+                    comparable.enabled = updated.enabled;
+                }
+                // A mismatched harness is already broken; allow repairing it.
+                profile.kind == session.harness_kind
+                    && after.profiles.get(&session.last_profile) != Some(&comparable)
+            } else {
+                false
+            };
+            let bundle_changed = session.project_directory.is_none()
+                && before
+                    .bundles
+                    .get(&session.bundle_id)
+                    .is_some_and(|bundle| after.bundles.get(&session.bundle_id) != Some(bundle));
+            let target_changed =
+                before
+                    .targets
+                    .get(&session.target_template_id)
+                    .is_some_and(|target| {
+                        after.targets.get(&session.target_template_id) != Some(target)
+                    });
+            if protected || bundle_changed || target_changed {
                 bail!(
-                    "active session {:?} expects {:?}, but profile {:?} is {:?}",
+                    "Setup would change configuration used by active session {:?}. Keep its profile {:?}, bundle {:?}, and target {:?}; add a separate entry for new settings, or stop the session before editing its configuration.",
                     session.id,
-                    session.harness_kind,
                     session.last_profile,
-                    profile.kind
-                );
-            }
-            if session.project_directory.is_none()
-                && !config.bundles.contains_key(&session.bundle_id)
-            {
-                bail!(
-                    "active session {:?} references missing bundle {:?}",
-                    session.id,
-                    session.bundle_id
-                );
-            }
-            if !config.targets.contains_key(&session.target_template_id) {
-                bail!(
-                    "active session {:?} references missing target template {:?}",
-                    session.id,
+                    session.bundle_id,
                     session.target_template_id
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// Strict validation for callers that need all active references intact.
+    pub fn validate_against_config(&self, config: &HelConfig) -> Result<()> {
+        self.validate()?;
+        config.validate()?;
+        for session in self.sessions.values() {
+            session.validate_configuration(config)?;
         }
         Ok(())
     }
@@ -2454,6 +2499,80 @@ mod tests {
             state.project_directories("builder-b"),
             [PathBuf::from("/work/other")]
         );
+    }
+
+    #[test]
+    fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults() {
+        let state = sample_state();
+        let before = sample_config();
+        let session = state.sessions.values().next().unwrap();
+        for section in ["profile", "bundle", "target"] {
+            let mut after = before.clone();
+            match section {
+                "profile" => {
+                    after.profiles.remove(&session.last_profile);
+                }
+                "bundle" => {
+                    after.bundles.remove(&session.bundle_id);
+                }
+                _ => {
+                    after.targets.remove(&session.target_template_id);
+                }
+            }
+            assert!(
+                state
+                    .validate_setup_update(&before, &after)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("active session")
+            );
+            // Restoring a removed entry is always permitted.
+            state.validate_setup_update(&after, &before).unwrap();
+        }
+        let mut after = before.clone();
+        after.profiles.get_mut(&session.last_profile).unwrap().home = PathBuf::from("/new/home");
+        assert!(state.validate_setup_update(&before, &after).is_err());
+        let mut after = before.clone();
+        after
+            .profiles
+            .get_mut(&session.last_profile)
+            .unwrap()
+            .enabled = false;
+        after.startup.prompt = !before.startup.prompt;
+        after.targets.insert(
+            "alternative".into(),
+            crate::hel_config::TargetTemplate::LocalBare,
+        );
+        state.validate_setup_update(&before, &after).unwrap();
+        let mut stopped = state.clone();
+        stopped.sessions.values_mut().next().unwrap().state = SessionState::Stopped;
+        stopped
+            .validate_setup_update(&before, &HelConfig::default())
+            .unwrap();
+    }
+
+    #[test]
+    fn configuration_repair_reports_all_missing_entries_and_clears_after_restoration() {
+        let state = sample_state();
+        let session = state.sessions.values().next().unwrap();
+        let mut config = sample_config();
+        config.profiles.clear();
+        config.bundles.clear();
+        config.targets.clear();
+        let issue = session.configuration_issue(&config).unwrap();
+        assert!(issue.contains("missing profile"));
+        assert!(issue.contains("missing bundle"));
+        assert!(issue.contains("missing target template"));
+        assert!(issue.contains("config.toml"));
+        assert!(session.configuration_issue(&sample_config()).is_none());
+        let mut raw = session.clone();
+        raw.project_directory = Some(PathBuf::from("/project"));
+        let mut config = sample_config();
+        config.bundles.clear();
+        assert!(raw.configuration_issue(&config).is_none());
+        let mut stopped = session.clone();
+        stopped.state = SessionState::Stopped;
+        assert!(stopped.configuration_issue(&HelConfig::default()).is_none());
     }
 
     #[test]
