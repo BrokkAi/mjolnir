@@ -78,4 +78,4 @@ case "$(uname -s)" in
 esac
 
 export MJ_DEV_RESTART_STALE_DAEMON=1
-exec cargo run -p brokk-mjolnir --bin mj "$@"
+exec cargo run -p brokk-mjolnir --bin mj "$@" 2>/dev/null
