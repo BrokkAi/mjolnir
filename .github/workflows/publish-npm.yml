@@ -133,22 +133,27 @@ jobs:
           else
             dist_tag=latest
           fi
-          wait_for_version() {
+          # Read the registry's own version document rather than `npm view`,
+          # which can answer from a cached response.
+          readable() {
             local package="$1"
-            local published_version
-            for attempt in {1..12}; do
-              if published_version="$(npm view "$package" version --registry=https://registry.npmjs.org 2>/dev/null)" &&
-                [[ "$published_version" == "$version" ]]; then
-                printf '%s\n' "$published_version"
-                return 0
+            curl -fsS -o /dev/null \
+              "https://registry.npmjs.org/${package/\//%2F}/$version" 2>/dev/null
+          }
+          # A published version takes minutes to become readable, because these
+          # platform packages are tens of megabytes. Publishing is recorded the
+          # moment it succeeds, so a timeout here never needs a republish.
+          wait_until_readable() {
+            local package="$1"
+            local deadline=$((SECONDS + 600))
+            until readable "$package"; do
+              if ((SECONDS >= deadline)); then
+                echo "$package@$version was published but is still not readable after 10 minutes; rerunning this job is safe and republishes nothing" >&2
+                return 1
               fi
-              if [[ "$attempt" -lt 12 ]]; then
-                echo "waiting for $package to become available (attempt $attempt/12)" >&2
-                sleep 5
-              fi
+              echo "waiting for $package@$version to become readable" >&2
+              sleep 10
             done
-            echo "$package did not become available after 12 attempts" >&2
-            return 1
           }
           packages=(
             @brokkai/mjolnir-darwin-universal
@@ -161,14 +166,23 @@ jobs:
             brokkai-mjolnir-linux-arm64-gnu-$version.tgz
           )
           for index in "${!packages[@]}"; do
-            package="${packages[$index]}@$version"
-            if ! npm view "$package" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            package="${packages[$index]}"
+            if readable "$package"; then
+              echo "$package@$version is already published"
+            else
               npm publish "./npm-tarballs/${tarballs[$index]}" --access public --provenance --tag "$dist_tag"
             fi
-            wait_for_version "$package"
+          done
+          # Only the root wrapper needs the platform packages readable, because
+          # it resolves them as dependencies. Waiting once here, instead of after
+          # each publish, removes the waits that used to fail partway through.
+          for package in "${packages[@]}"; do
+            wait_until_readable "$package"
           done
           root=@brokkai/mjolnir
-          if ! npm view "$root@$version" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+          if readable "$root"; then
+            echo "$root@$version is already published"
+          else
             npm publish "./npm-tarballs/brokkai-mjolnir-$version.tgz" --access public --provenance --tag "$dist_tag"
           fi
-          wait_for_version "$root@$version"
+          wait_until_readable "$root"
