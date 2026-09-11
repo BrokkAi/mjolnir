@@ -585,8 +585,8 @@ pub struct ChatState {
     /// the host reports a successful probe.
     voice_available: bool,
     voice_active: bool,
-    /// The last frame's microphone button, which sits on the prompt's top
-    /// border rather than inside its selectable text surface.
+    /// The last frame's microphone button, which sits on the prompt's
+    /// upper-left border rather than inside its selectable text surface.
     voice_button_area: Option<Rect>,
     voice_form: Form<VoiceControl>,
     /// The embedded background-task control and its dialog.
@@ -4190,18 +4190,18 @@ mod tests {
     }
 
     #[test]
-    fn microphone_button_hitbox_uses_ratatui_display_width() {
+    fn microphone_button_hitbox_occupies_prompt_upper_left() {
         let prompt = Rect::new(4, 2, 30, 5);
-        let button = voice_button_area(prompt, 8).expect("button fits");
+        let button = voice_button_area(prompt).expect("button fits");
         assert_eq!(button.y, prompt.y);
-        assert_eq!(button.x, prompt.x + 1 + 8);
+        assert_eq!(button.x, prompt.x + 1);
         assert_eq!(button.width, 3);
-        assert!(voice_button_area(Rect::new(0, 0, 5, 3), 8).is_none());
-        assert!(voice_button_area(Rect::new(0, 0, 13, 3), 8).is_some());
+        assert!(voice_button_area(Rect::new(0, 0, 4, 3)).is_none());
+        assert!(voice_button_area(Rect::new(0, 0, 5, 3)).is_some());
     }
 
     #[test]
-    fn regular_prompt_draws_microphone_after_the_title_on_its_top_border() {
+    fn regular_prompt_draws_microphone_at_its_upper_left() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_voice_available(true);
         chat.mark_prompt_submitted("continue");
@@ -4218,6 +4218,7 @@ mod tests {
             rendering::display_width(&border[..mic_offset]),
             usize::from(button.x + 1)
         );
+        assert_eq!(button.x, 1);
         assert_eq!(
             button.y,
             chat.frame_surfaces()
