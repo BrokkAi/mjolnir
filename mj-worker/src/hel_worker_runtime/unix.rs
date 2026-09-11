@@ -2515,7 +2515,7 @@ fi
         }
     }
     environment.insert("BASH_ENV".into(), shell_environment_text);
-    configure_github_git_helpers(environment, &wrapper)?;
+    configure_git_config_file(root, environment, &wrapper)?;
 
     let inherited_token = std::env::var("GH_TOKEN")
         .ok()
@@ -2528,60 +2528,235 @@ fi
     Ok(())
 }
 
-fn configure_github_git_helpers(
+/// Give the harness process tree its Git settings through a worker-owned
+/// global configuration file named by `GIT_CONFIG_GLOBAL`.
+///
+/// The environment form those settings used to take cannot survive a harness
+/// that drops credential-shaped variable names. DeepSeek Harness spawns every
+/// tool with a parent environment scrubbed of names matching
+/// `KEY|PASSWORD|SECRET|TOKEN`, which removed `GIT_CONFIG_KEY_*` and kept
+/// `GIT_CONFIG_COUNT`, so each git command in the session failed with
+/// "missing config key GIT_CONFIG_KEY_0". One path variable carries no
+/// credential-shaped name, and a file cannot be partly delivered.
+fn configure_git_config_file(
+    root: &std::path::Path,
     environment: &mut BTreeMap<String, String>,
     wrapper: &std::path::Path,
 ) -> Result<()> {
-    // Environment config stays scoped to the harness process tree. The empty
-    // value clears image/user helpers before the absolute Hel helper is added.
+    use std::os::unix::fs::PermissionsExt;
+
+    const ORIGINAL_GIT_CONFIG_GLOBAL: &str = "MJ_ORIGINAL_GIT_CONFIG_GLOBAL";
+
+    let path = root.join("gitconfig");
+    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        bail!("Git configuration {} is a symbolic link", path.display());
+    }
+    let path_text = path.to_string_lossy().into_owned();
+
+    // This file replaces the global configuration Git would otherwise read, so
+    // it includes what it replaces. Remember a caller's own choice separately:
+    // after the first call `GIT_CONFIG_GLOBAL` names this file, and the
+    // original would otherwise be lost on the next call.
+    let original_global = environment
+        .get("GIT_CONFIG_GLOBAL")
+        .filter(|configured| configured.as_str() != path_text)
+        .cloned()
+        .or_else(|| environment.get(ORIGINAL_GIT_CONFIG_GLOBAL).cloned());
+    let mut entries = match &original_global {
+        Some(original) => {
+            environment.insert(ORIGINAL_GIT_CONFIG_GLOBAL.into(), original.clone());
+            vec![("include.path".to_owned(), original.clone())]
+        }
+        None => {
+            environment.remove(ORIGINAL_GIT_CONFIG_GLOBAL);
+            // Git's own order for the files this replaces: the XDG file first,
+            // then `~/.gitconfig`, which therefore wins. A missing include
+            // path is ignored, so both can be named unconditionally.
+            let xdg = match environment.get("XDG_CONFIG_HOME") {
+                Some(home) if !home.is_empty() => format!("{home}/git/config"),
+                _ => "~/.config/git/config".to_owned(),
+            };
+            vec![
+                ("include.path".to_owned(), xdg),
+                ("include.path".to_owned(), "~/.gitconfig".to_owned()),
+            ]
+        }
+    };
+    // Inherited entries get their own included file. Folding them into this
+    // one would lose them the next time it is written, because by then they
+    // are gone from the environment. A missing include is ignored, so the
+    // include is unconditional.
+    let inherited_path = root.join("gitconfig-inherited");
+    if std::fs::symlink_metadata(&inherited_path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        bail!(
+            "Git configuration {} is a symbolic link",
+            inherited_path.display()
+        );
+    }
+    let inherited = take_environment_git_config(environment);
+    if !inherited.is_empty() {
+        hel::hel_config::atomic_write_existing(
+            &inherited_path,
+            render_git_config(&inherited)?.as_bytes(),
+        )?;
+        std::fs::set_permissions(&inherited_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    entries.push((
+        "include.path".to_owned(),
+        inherited_path.to_string_lossy().into_owned(),
+    ));
+
+    // The empty value clears image and user helpers before the absolute Hel
+    // helper is added. Settings later in the file win, so these outrank every
+    // included file.
     let helper = format!(
         "!{} auth git-credential",
         hel::hel_targets::posix_quote(&wrapper.to_string_lossy())
     );
     for host in ["github.com", "gist.github.com"] {
         let key = format!("credential.https://{host}.helper");
-        append_git_config(environment, &key, "")?;
-        append_git_config(environment, &key, &helper)?;
+        entries.push((key.clone(), String::new()));
+        entries.push((key, helper.clone()));
     }
+
+    hel::hel_config::atomic_write_existing(&path, render_git_config(&entries)?.as_bytes())?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    environment.insert("GIT_CONFIG_GLOBAL".into(), path_text);
     Ok(())
 }
 
-fn append_git_config(
+/// Move inherited `GIT_CONFIG_COUNT` entries out of the environment and into
+/// configuration entries. They must not stay behind: a harness that drops only
+/// some of those variables would leave Git a count it cannot satisfy, which
+/// fails every git command rather than only losing a setting.
+fn take_environment_git_config(
     environment: &mut BTreeMap<String, String>,
-    key: &str,
-    value: &str,
-) -> Result<()> {
-    let count = environment
-        .get("GIT_CONFIG_COUNT")
-        .map(|count| {
-            count
-                .parse::<usize>()
-                .with_context(|| format!("invalid GIT_CONFIG_COUNT {count:?}"))
-        })
-        .transpose()?
-        .unwrap_or(0);
-    if (0..count).any(|index| {
-        environment
-            .get(&format!("GIT_CONFIG_KEY_{index}"))
-            .map(String::as_str)
-            == Some(key)
-            && environment
-                .get(&format!("GIT_CONFIG_VALUE_{index}"))
-                .map(String::as_str)
-                == Some(value)
-    }) {
-        return Ok(());
+) -> Vec<(String, String)> {
+    let count = match environment.remove("GIT_CONFIG_COUNT") {
+        Some(count) => match count.parse::<usize>() {
+            Ok(count) => count,
+            Err(error) => {
+                tracing::warn!(
+                    count,
+                    %error,
+                    "ignoring inherited Git configuration with an unparsable count"
+                );
+                0
+            }
+        },
+        None => 0,
+    };
+    let mut entries = Vec::with_capacity(count);
+    for index in 0..count {
+        let key_name = format!("GIT_CONFIG_KEY_{index}");
+        let value_name = format!("GIT_CONFIG_VALUE_{index}");
+        match (
+            environment.remove(&key_name),
+            environment.remove(&value_name),
+        ) {
+            (Some(key), Some(value)) => entries.push((key, value)),
+            // An incomplete pair cannot be recovered, and the session is more
+            // useful without it than refusing to start.
+            _ => tracing::warn!(
+                %key_name,
+                %value_name,
+                "ignoring an incomplete inherited Git configuration entry"
+            ),
+        }
     }
-    environment.insert(format!("GIT_CONFIG_KEY_{count}"), key.to_owned());
-    environment.insert(format!("GIT_CONFIG_VALUE_{count}"), value.to_owned());
-    environment.insert(
-        "GIT_CONFIG_COUNT".into(),
-        count
-            .checked_add(1)
-            .context("too many inherited Git configuration entries")?
-            .to_string(),
-    );
-    Ok(())
+    environment.retain(|name, _| {
+        !is_indexed_git_config_name(name, "KEY") && !is_indexed_git_config_name(name, "VALUE")
+    });
+    entries
+}
+
+fn is_indexed_git_config_name(name: &str, kind: &str) -> bool {
+    name.strip_prefix("GIT_CONFIG_")
+        .and_then(|rest| rest.strip_prefix(kind))
+        .and_then(|rest| rest.strip_prefix('_'))
+        .is_some_and(|index| !index.is_empty() && index.chars().all(|digit| digit.is_ascii_digit()))
+}
+
+/// Render entries as a Git configuration file. Keys arrive in the
+/// `section.subsection.key` form `GIT_CONFIG_KEY_*` and `git -c` accept.
+fn render_git_config(entries: &[(String, String)]) -> Result<String> {
+    let mut text = String::from("# Written by Mjolnir for this session; edits are overwritten.\n");
+    let mut open_section: Option<String> = None;
+    for (key, value) in entries {
+        let (section, name) = split_git_config_key(key)?;
+        if open_section.as_deref() != Some(section.as_str()) {
+            text.push_str(&section);
+            text.push('\n');
+            open_section = Some(section);
+        }
+        text.push('\t');
+        text.push_str(&name);
+        text.push_str(" = ");
+        text.push_str(&quote_git_config_value(value)?);
+        text.push('\n');
+    }
+    Ok(text)
+}
+
+/// Split a configuration key into its rendered section header and its name.
+fn split_git_config_key(key: &str) -> Result<(String, String)> {
+    let (section, rest) = key
+        .split_once('.')
+        .with_context(|| format!("Git configuration key {key:?} names no section"))?;
+    let (subsection, name) = match rest.rsplit_once('.') {
+        Some((subsection, name)) => (Some(subsection), name),
+        None => (None, rest),
+    };
+    for (part, label) in [(section, "section"), (name, "name")] {
+        if part.is_empty()
+            || !part
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            bail!("Git configuration key {key:?} has an unusable {label}");
+        }
+    }
+    let header = match subsection {
+        // A subsection name keeps its own quoting rules: only a backslash and
+        // a double quote are escapes, so no other character may be encoded.
+        Some(subsection) => {
+            if let Some(control) = subsection.chars().find(|character| character.is_control()) {
+                bail!(
+                    "Git configuration key {key:?} has a control character {control:?} in its subsection"
+                );
+            }
+            format!("[{section} \"{}\"]", escape_git_config_text(subsection))
+        }
+        None => format!("[{section}]"),
+    };
+    Ok((header, name.to_owned()))
+}
+
+fn quote_git_config_value(value: &str) -> Result<String> {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            '\u{8}' => quoted.push_str("\\b"),
+            // Git has no escape for any other control character.
+            control if control.is_control() => {
+                bail!("Git configuration value {value:?} has a control character {control:?}")
+            }
+            plain => quoted.push(plain),
+        }
+    }
+    quoted.push('"');
+    Ok(quoted)
+}
+
+fn escape_git_config_text(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 enum CheckpointChange {

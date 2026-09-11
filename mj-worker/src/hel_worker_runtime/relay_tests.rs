@@ -265,7 +265,7 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
 }
 
 #[test]
-fn github_cli_wrapper_survives_harness_login_shells_and_git_helpers() {
+fn git_helpers_survive_harness_login_shells_and_credential_shaped_name_scrubs() {
     use std::os::unix::fs::PermissionsExt;
 
     let worker = tempfile::tempdir().unwrap();
@@ -292,6 +292,13 @@ fi
 
     let original_bash_env = home.path().join("original-bash-env");
     std::fs::write(&original_bash_env, b"export ORIGINAL_BASH_ENV=preserved\n").unwrap();
+    // The session user's own global configuration must keep working, and its
+    // credential helper must lose to the worker's absolute wrapper.
+    std::fs::write(
+        home.path().join(".gitconfig"),
+        b"[user]\n\tname = Home User\n[credential \"https://github.com\"]\n\thelper = decoy\n",
+    )
+    .unwrap();
     std::fs::write(
         home.path().join(".bash_profile"),
         format!(
@@ -313,13 +320,28 @@ fi
             original_bash_env.to_string_lossy().into_owned(),
         ),
         ("GIT_CONFIG_COUNT".into(), "1".into()),
-        ("GIT_CONFIG_KEY_0".into(), "user.name".into()),
-        ("GIT_CONFIG_VALUE_0".into(), "Harness User".into()),
+        ("GIT_CONFIG_KEY_0".into(), "user.email".into()),
+        ("GIT_CONFIG_VALUE_0".into(), "harness@example.test".into()),
     ]);
     unix::configure_github_cli(worker.path(), &mut environment).unwrap();
     let configured_once = environment.clone();
     unix::configure_github_cli(worker.path(), &mut environment).unwrap();
     assert_eq!(environment, configured_once);
+
+    // Git settings reach the harness through one worker-owned file, not
+    // through a count whose credential-shaped key names a harness may drop.
+    let git_config_path = worker
+        .path()
+        .join("gitconfig")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(environment.get("GIT_CONFIG_GLOBAL"), Some(&git_config_path));
+    assert!(
+        !environment.keys().any(|name| name == "GIT_CONFIG_COUNT"
+            || name.starts_with("GIT_CONFIG_KEY_")
+            || name.starts_with("GIT_CONFIG_VALUE_")),
+        "{environment:?}"
+    );
     hel::hel_credentials::write_github_token(
         &worker.path().join("github-token"),
         b"synchronized-test-token",
@@ -348,24 +370,66 @@ fi
         )
     );
 
-    let mut git = std::process::Command::new("/bin/bash");
-    git.args([
-        "-lc",
-        "printf 'protocol=https\\nhost=github.com\\n\\n' | git credential fill",
-    ])
-    .env_clear()
-    .envs(&environment);
-    let output = hel::hel_subprocess::run_with_input(&mut git, &[]).unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    // Run outside any repository: repository-local settings would otherwise
+    // answer for the configuration under test.
+    let run_with = |environment: &BTreeMap<String, String>, script: &str| {
+        let mut command = std::process::Command::new("/bin/bash");
+        command
+            .args(["-lc", script])
+            .current_dir(home.path())
+            .env_clear()
+            .envs(environment);
+        let output = hel::hel_subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    const IDENTITY: &str =
+        "printf '%s|%s\\n' \"$(git config --get user.name)\" \"$(git config --get user.email)\"";
+    const CREDENTIALS: &str =
+        "printf 'protocol=https\\nhost=github.com\\n\\n' | git credential fill";
+
+    // The included home file supplies the name, the inherited entry supplies
+    // the email, and the worker's wrapper outranks the home helper.
+    assert_eq!(
+        run_with(&environment, IDENTITY),
+        "Home User|harness@example.test\n"
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("username=x-access-token\n"), "{stdout}");
+    let filled = run_with(&environment, CREDENTIALS);
+    assert!(filled.contains("username=x-access-token\n"), "{filled}");
     assert!(
-        stdout.contains("password=synchronized-test-token\n"),
-        "{stdout}"
+        filled.contains("password=synchronized-test-token\n"),
+        "{filled}"
+    );
+
+    // DeepSeek Harness spawns each tool with the parent environment scrubbed of
+    // every name matching `KEY|PASSWORD|SECRET|TOKEN`
+    // (`@deepseek-ai/dsh-subprocess`). That dropped `GIT_CONFIG_KEY_*`, kept
+    // `GIT_CONFIG_COUNT`, and left every git command in the session failing
+    // with "missing config key GIT_CONFIG_KEY_0".
+    let scrubbed: BTreeMap<String, String> = environment
+        .iter()
+        .filter(|(name, _)| {
+            let upper = name.to_ascii_uppercase();
+            !["KEY", "PASSWORD", "SECRET", "TOKEN"]
+                .iter()
+                .any(|shape| upper.contains(shape))
+                && !upper.starts_with("DSH_")
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    assert_eq!(
+        run_with(&scrubbed, IDENTITY),
+        "Home User|harness@example.test\n"
+    );
+    let filled = run_with(&scrubbed, CREDENTIALS);
+    assert!(filled.contains("username=x-access-token\n"), "{filled}");
+    assert!(
+        filled.contains("password=synchronized-test-token\n"),
+        "{filled}"
     );
 }
 
