@@ -1252,36 +1252,66 @@ impl DashboardState {
         wizard.remote_preflight_error = None;
     }
 
-    fn preflight_create_session_action(&mut self, wizard: NewWizard) -> DashboardAction {
-        let launch = self.create_session_action_without_closing(&wizard);
-        let target_id = nth_key(&self.config.targets, wizard.target);
-        let raw_target = is_bare_project_target(&self.config.targets[&target_id]);
-        if !raw_target && wizard.remote_preflight_in_flight {
+    /// Create launches an isolated session only from a completed prerequisite
+    /// check. Retry clears the failure so [`Self::take_prerequisite_check`]
+    /// starts the check again.
+    fn preflight_create_session_action(&mut self, mut wizard: NewWizard) -> DashboardAction {
+        let target_template_id = nth_key(&self.config.targets, wizard.target);
+        if !is_bare_project_target(&self.config.targets[&target_template_id]) {
+            if wizard.remote_repositories.is_some() && wizard.remote_preflight_error.is_none() {
+                return self.create_session_action(&wizard);
+            }
+            wizard.remote_preflight_error = None;
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         }
-        if !raw_target
-            && wizard.remote_repositories.is_some()
-            && wizard.remote_preflight_error.is_none()
-        {
+        if wizard.mounts.mounts.is_empty() {
             return self.create_session_action(&wizard);
         }
-        if wizard.mounts.mounts.is_empty() {
-            if raw_target {
-                return self.create_session_action(&wizard);
-            }
-            self.mode = Mode::New(wizard);
-            return DashboardAction::PreflightCreateSession {
-                launch: Box::new(launch),
-            };
-        }
         let action = DashboardAction::ValidateSessionMounts {
-            target_template_id: nth_key(&self.config.targets, wizard.target),
+            target_template_id,
             mounts: wizard.mounts.mounts.clone(),
-            launch: Box::new(launch),
+            launch: Box::new(self.create_session_action_without_closing(&wizard)),
         };
         self.mode = Mode::New(wizard);
         action
+    }
+
+    /// Starts the prerequisite check an isolated creation review needs before
+    /// Create is enabled: attached directories first, then network sources.
+    /// The dashboard loop asks after every event and background update, so a
+    /// review never waits on a check that nothing started, whichever path
+    /// opened it.
+    pub fn take_prerequisite_check(&mut self) -> Option<DashboardAction> {
+        let Mode::New(wizard) = &self.mode else {
+            return None;
+        };
+        if wizard.step != WizardStep::Review
+            || wizard.remote_preflight_in_flight
+            || wizard.remote_repositories.is_some()
+            || wizard.remote_preflight_error.is_some()
+        {
+            return None;
+        }
+        let target_template_id = nth_key(&self.config.targets, wizard.target);
+        if is_bare_project_target(&self.config.targets[&target_template_id]) {
+            return None;
+        }
+        let launch = Box::new(self.create_session_action_without_closing(wizard));
+        let check = if wizard.mounts.mounts.is_empty() {
+            DashboardAction::PreflightCreateSession { launch }
+        } else {
+            DashboardAction::ValidateSessionMounts {
+                target_template_id,
+                mounts: wizard.mounts.mounts.clone(),
+                launch,
+            }
+        };
+        if let Mode::New(wizard) = &mut self.mode {
+            wizard.remote_preflight_in_flight = true;
+        }
+        self.mark_render_changed();
+        Some(check)
     }
 
     fn create_session_action_without_closing(&self, wizard: &NewWizard) -> DashboardAction {
@@ -1590,6 +1620,8 @@ impl DashboardState {
         result: Result<Option<String>, String>,
     ) -> DashboardAction {
         let mut entered_move_review = false;
+        let mut entered_new_review = false;
+        let new_session = matches!(self.mode, Mode::New(_));
         let visible_changed;
         let (mounts, form, step, moving) = match &mut self.mode {
             Mode::New(wizard)
@@ -1629,6 +1661,7 @@ impl DashboardState {
                 form.focus(WizardControl::ReviewAttachments);
                 *step = WizardStep::Review;
                 entered_move_review = moving;
+                entered_new_review = new_session;
                 visible_changed = true;
             }
             Err(error) => {
@@ -1640,6 +1673,15 @@ impl DashboardState {
         }
         if visible_changed {
             self.mark_render_changed();
+        }
+        // A changed directory list needs a new prerequisite check, and a
+        // corrected directory must not leave its earlier failure on the review.
+        if entered_new_review {
+            let Mode::New(mut wizard) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
+                unreachable!("new-session mount validation entered review without a new wizard")
+            };
+            self.invalidate_new_remote_preflight(&mut wizard);
+            self.mode = Mode::New(wizard);
         }
         if entered_move_review {
             let Mode::Resume(wizard) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
@@ -2263,6 +2305,12 @@ impl DashboardState {
                     wizard.mounts.history_index = index;
                     prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
                 }
+                // The check has ended. Keeping its failure on the review means
+                // leaving the editor does not start the same failing check again.
+                changed |= wizard.remote_preflight_in_flight
+                    || wizard.remote_preflight_error.as_deref() != Some(error.as_str());
+                wizard.remote_preflight_in_flight = false;
+                wizard.remote_preflight_error = Some(error.clone());
                 changed |= wizard.mounts.error.as_deref() != Some(error.as_str());
                 wizard.mounts.error = Some(error);
             }

@@ -2232,9 +2232,12 @@ impl DashboardContext {
                         self.dashboard
                             .apply_session_mount_preflight_failure(&source, error);
                     }
-                    Err(error) => self
-                        .dashboard
-                        .set_notice(format!("Could not check attached directories: {error}")),
+                    Err(error) => {
+                        let error = format!("Could not check attached directories: {error}");
+                        self.dashboard
+                            .apply_remote_session_preflight(generation, Err(error.clone()));
+                        self.dashboard.set_notice(error);
+                    }
                 }
             }
             DashboardIoUpdate::ResumeRepositoryPreflight {

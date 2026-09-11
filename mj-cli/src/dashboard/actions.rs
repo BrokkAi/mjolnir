@@ -1019,15 +1019,14 @@ pub(crate) fn start_create_session_preflight(
         ..
     } = &launch
     else {
-        context
-            .dashboard
-            .set_failure_notice("invalid session preflight request".to_owned());
+        fail_create_session_preflight(context, "invalid session preflight request".to_owned());
         return;
     };
     let Some(target) = context.controller.config.targets.get(target_template_id) else {
-        context
-            .dashboard
-            .set_failure_notice(format!("unknown target template {target_template_id:?}"));
+        fail_create_session_preflight(
+            context,
+            format!("unknown target template {target_template_id:?}"),
+        );
         return;
     };
     if is_bare_project_target(target) {
@@ -1089,6 +1088,16 @@ pub(crate) fn start_create_session_preflight(
         },
     );
     context.session_preflight_cancel = Some((generation, cancelled));
+}
+
+/// Ends a creation check that could not start, so the review offers Retry
+/// instead of waiting on a check that is not running.
+fn fail_create_session_preflight(context: &mut DashboardContext, error: String) {
+    let generation = context.dashboard.session_preflight_generation();
+    context
+        .dashboard
+        .apply_remote_session_preflight(generation, Err(error.clone()));
+    context.dashboard.set_failure_notice(error);
 }
 
 pub(crate) fn start_session_launch(context: &mut DashboardContext, action: DashboardAction) {

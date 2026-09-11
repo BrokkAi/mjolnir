@@ -97,6 +97,8 @@ pub(crate) struct NewWizard {
     /// Network clone destinations returned by the asynchronous creation
     /// preflight. A nonempty value is concrete evidence the review is ready.
     pub(crate) remote_repositories: Option<Vec<RemoteRepositoryPreview>>,
+    /// Covers the whole prerequisite check: attached-directory validation,
+    /// then network source resolution.
     pub(crate) remote_preflight_in_flight: bool,
     pub(crate) remote_preflight_error: Option<String>,
     pub(crate) form: RefCell<Dialog<WizardControl>>,
@@ -1306,12 +1308,12 @@ fn render_review_wizard(
     }
     if remote_preflight_in_flight {
         lines.push(Line::styled(
-            "Resolving network repositories…",
+            "Checking prerequisites…",
             Style::default().fg(theme::palette().muted),
         ));
     } else if let Some(error) = remote_preflight_error {
         lines.push(Line::styled(
-            format!("Repository preflight failed: {error}"),
+            format!("Prerequisite check failed: {error}"),
             Style::default().fg(theme::palette().error),
         ));
     } else if let Some(repositories) = remote_repositories {

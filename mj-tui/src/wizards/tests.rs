@@ -312,8 +312,8 @@ fn new_session_wizard_returns_all_three_choices() {
         DashboardAction::None
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::PreflightCreateSession {
+        dashboard.take_prerequisite_check(),
+        Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
                 workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -327,26 +327,41 @@ fn new_session_wizard_returns_all_three_choices() {
                     memory_bytes: BASELINE_MEMORY_BYTES,
                 }),
             }),
-        }
+        })
     );
     assert!(matches!(dashboard.mode, Mode::New(_)));
 }
 
 #[test]
-fn isolated_creation_waits_for_and_reviews_network_sources() {
+fn isolated_creation_review_checks_prerequisites_before_enabling_create() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
-    let action = dashboard.handle_key(key(KeyCode::Enter));
     assert!(matches!(
-        action,
-        DashboardAction::PreflightCreateSession { .. }
+        dashboard.take_prerequisite_check(),
+        Some(DashboardAction::PreflightCreateSession { .. })
     ));
-    assert!(matches!(dashboard.mode, Mode::New(_)));
+
+    // Draw between inputs as the terminal does: Enter on a Create button that
+    // was drawn disabled must not act until a frame shows it enabled.
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw checking review");
+    assert!(
+        buffer_lines(terminal.backend().buffer())
+            .join("\n")
+            .contains("Checking prerequisites…")
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
 
     let generation = dashboard.session_preflight_generation();
+    dashboard.begin_remote_session_preflight(generation);
     dashboard.apply_remote_session_preflight(
         generation,
         Ok(vec![RemoteRepositoryPreview {
@@ -356,33 +371,45 @@ fn isolated_creation_waits_for_and_reviews_network_sources() {
             push_urls: vec!["https://github.com/example/hel.git".into()],
         }]),
     );
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw ready review");
     let action = dashboard.handle_key(key(KeyCode::Enter));
     assert!(matches!(action, DashboardAction::CreateSession { .. }));
     assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
-fn isolated_creation_blocks_duplicate_preflight_and_allows_retry_after_failure() {
+fn isolated_creation_runs_one_check_at_a_time_and_retries_after_failure() {
     let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
-    let original_action = dashboard.handle_key(key(KeyCode::Enter));
+    let original_check = dashboard
+        .take_prerequisite_check()
+        .expect("opening the review starts its prerequisite check");
     assert!(matches!(
-        original_action,
+        original_check,
         DashboardAction::PreflightCreateSession { .. }
     ));
-
-    let generation = dashboard.session_preflight_generation();
-    dashboard.begin_remote_session_preflight(generation);
+    assert_eq!(
+        dashboard.take_prerequisite_check(),
+        None,
+        "a running check must not start a second resolver worker"
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None,
-        "a second submit must not start a second resolver worker"
+        DashboardAction::None
     );
 
+    let generation = dashboard.session_preflight_generation();
     dashboard.apply_remote_session_preflight(generation, Err("remote unavailable".into()));
+    assert_eq!(
+        dashboard.take_prerequisite_check(),
+        None,
+        "a failed check waits for Retry"
+    );
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -394,8 +421,12 @@ fn isolated_creation_blocks_duplicate_preflight_and_allows_retry_after_failure()
     );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
-        original_action,
-        "a failed preflight must be retryable from the review button"
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.take_prerequisite_check(),
+        Some(original_check),
+        "Retry starts the same check again"
     );
 }
 
@@ -409,8 +440,9 @@ fn switching_workspaces_preserves_remote_preflight_in_its_original_workspace() {
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
-    let action_a = dashboard.handle_key(key(KeyCode::Enter));
-    let DashboardAction::PreflightCreateSession { launch: launch_a } = action_a else {
+    let Some(DashboardAction::PreflightCreateSession { launch: launch_a }) =
+        dashboard.take_prerequisite_check()
+    else {
         panic!("network creation should start a remote preflight");
     };
     assert!(matches!(
@@ -448,8 +480,9 @@ fn switching_workspaces_preserves_remote_preflight_in_its_original_workspace() {
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
-    let action_b = dashboard.handle_key(key(KeyCode::Enter));
-    let DashboardAction::PreflightCreateSession { launch: launch_b } = action_b else {
+    let Some(DashboardAction::PreflightCreateSession { launch: launch_b }) =
+        dashboard.take_prerequisite_check()
+    else {
         panic!("workspace B should start its own remote preflight");
     };
     assert!(matches!(
@@ -1059,8 +1092,8 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::PreflightCreateSession {
+        dashboard.take_prerequisite_check(),
+        Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
                 workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -1074,7 +1107,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
                     memory_bytes: BASELINE_MEMORY_BYTES,
                 }),
             }),
-        }
+        })
     );
 }
 
@@ -1300,11 +1333,10 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
         }
     );
     dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
-    dashboard.handle_key(key(KeyCode::BackTab));
 
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::ValidateSessionMounts {
+        dashboard.take_prerequisite_check(),
+        Some(DashboardAction::ValidateSessionMounts {
             target_template_id: "podman".into(),
             mounts: vec![AdditionalMount {
                 source: "/opt/cache".into(),
@@ -1328,7 +1360,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                     memory_bytes: BASELINE_MEMORY_BYTES,
                 }),
             }),
-        }
+        })
     );
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("mount validation should keep the new-session wizard open");
@@ -1343,10 +1375,9 @@ fn failed_submit_preflight_reopens_the_invalid_mount() {
     let mut dashboard = dashboard_at_mount_editor("/opt/cache");
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
-    dashboard.handle_key(key(KeyCode::BackTab));
     assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::ValidateSessionMounts { .. }
+        dashboard.take_prerequisite_check(),
+        Some(DashboardAction::ValidateSessionMounts { .. })
     ));
 
     dashboard.apply_session_mount_preflight_failure(
@@ -1363,6 +1394,14 @@ fn failed_submit_preflight_reopens_the_invalid_mount() {
         wizard.mounts.error.as_deref(),
         Some("source path /opt/cache does not exist or is not a directory")
     );
+
+    // The failed check is over, so correcting the directory starts a new one
+    // instead of leaving the review waiting.
+    dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
+    assert!(matches!(
+        dashboard.take_prerequisite_check(),
+        Some(DashboardAction::ValidateSessionMounts { .. })
+    ));
 }
 
 #[test]

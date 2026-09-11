@@ -744,6 +744,11 @@ pub(crate) async fn run_dashboard_for_workspace(
         if !context.shutdown_requested {
             context.apply_chat_outcome(chat_outcome).await;
             actions::apply_dashboard_action(&mut context, action).await?;
+            // Input or a background result can open an isolated creation
+            // review; either way its prerequisite check starts here.
+            if let Some(check) = context.dashboard.take_prerequisite_check() {
+                actions::apply_dashboard_action(&mut context, check).await?;
+            }
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
             context.follow_selected_session();
