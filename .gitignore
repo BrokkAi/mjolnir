@@ -32,6 +32,9 @@ target*/
 # Mjolnir linked worktrees
 .mjolnir/worktrees/
 
+# general worktrees
+.worktrees/
+
 # Claude worktrees
 .claude
 
