@@ -120,6 +120,8 @@ pub struct MaterializedProjectionCache {
     /// Exact stats for terminal tool items, keyed by logical identity and
     /// revision so unrelated transcript updates never repeat their diff.
     tool_diffstats: BTreeMap<(String, i64), Vec<String>>,
+    converted_entries: Arc<Vec<hel::hel_transcript::ChatEntry>>,
+    converted_diffstats: BTreeMap<String, Vec<String>>,
 }
 
 impl MaterializedProjectionCache {
@@ -421,8 +423,13 @@ impl PreparedMaterializedSessionDetail {
         let last_activity_at_ms = session
             .last_activity_at_ms()
             .and_then(|value| u64::try_from(value).ok());
-        let transcript =
-            TranscriptSnapshot::from_materialized_with_diffstats(&session, &current_tool_diffstats);
+        let transcript = TranscriptSnapshot::from_materialized_reusing(
+            &session,
+            &current_tool_diffstats,
+            &previous.converted_entries,
+            &previous.converted_diffstats,
+        );
+        let converted_entries = transcript.converted_entries();
         Self {
             session_id,
             applied_event_ordinal,
@@ -449,6 +456,8 @@ impl PreparedMaterializedSessionDetail {
                 last_agent_message,
                 latest_agent_activity,
                 tool_diffstats,
+                converted_entries,
+                converted_diffstats: current_tool_diffstats,
             },
         }
     }

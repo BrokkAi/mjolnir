@@ -501,7 +501,14 @@ pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], revers
 }
 
 /// Stateful, renderable projection of controller configuration and state.
+#[derive(Default)]
+struct SessionOrderCache {
+    inputs: Vec<(String, String, String, String, String)>,
+    ids: Vec<String>,
+}
+
 pub struct DashboardState {
+    session_order_cache: RefCell<SessionOrderCache>,
     pub(crate) config: HelConfig,
     pub(crate) state: HelState,
     pub(crate) quotas: BTreeMap<String, ProfileQuota>,
@@ -687,6 +694,7 @@ impl DashboardState {
             session_reviews: BTreeMap::new(),
             sessions_with_review: BTreeSet::new(),
             project_sources: BTreeMap::new(),
+            session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             move_operations: BTreeMap::new(),
@@ -1933,18 +1941,43 @@ impl DashboardState {
         let Some(active_workspace_id) = self.active_workspace_id.as_deref() else {
             return Vec::new();
         };
-        let mut active = self.state.sessions.values().collect::<Vec<_>>();
-        active.sort_by(|left, right| left.compare_by_creation(right));
+        let active = self
+            .state
+            .sessions
+            .values()
+            .filter(|session| {
+                session.workspace_id == active_workspace_id
+                    && (session.state.is_active()
+                        || self.transition_kind(&session.id).is_some()
+                        || (self.config.advanced.show_stopped_sessions
+                            && session.state == SessionState::Stopped))
+            })
+            .collect::<Vec<_>>();
+        let inputs = active
+            .iter()
+            .map(|session| {
+                let source = self.project_source(session);
+                (
+                    session.id.clone(),
+                    session.created_at.clone(),
+                    source.key,
+                    source.short,
+                    source.full,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut cache = self.session_order_cache.borrow_mut();
+        if cache.inputs == inputs {
+            return cache
+                .ids
+                .iter()
+                .filter_map(|id| self.state.sessions.get(id))
+                .collect();
+        }
+        let mut active = active;
+        active.sort_by_cached_key(|session| session.creation_order_key());
         let mut groups = BTreeMap::<String, Vec<&SessionRecord>>::new();
         for session in active {
-            if session.workspace_id != active_workspace_id
-                || (!session.state.is_active()
-                    && self.transition_kind(&session.id).is_none()
-                    && !(self.config.advanced.show_stopped_sessions
-                        && session.state == SessionState::Stopped))
-            {
-                continue;
-            }
             groups
                 .entry(self.project_source(session).key)
                 .or_default()
@@ -1956,7 +1989,10 @@ impl DashboardState {
             let source = self.project_source(sessions[0]);
             (source.short.to_lowercase(), source.full, source.key)
         });
-        groups.into_iter().flatten().collect()
+        let ordered = groups.into_iter().flatten().collect::<Vec<_>>();
+        cache.inputs = inputs;
+        cache.ids = ordered.iter().map(|session| session.id.clone()).collect();
+        ordered
     }
 
     pub fn project_source(&self, session: &SessionRecord) -> ProjectSourceIdentity {
@@ -3270,6 +3306,45 @@ mod tests {
             );
             assert_eq!(dashboard.mode, mode_before_quit, "{label}");
         }
+    }
+
+    #[test]
+    fn session_order_cache_tracks_creation_visibility_and_workspace_changes() {
+        let mut first = running_session();
+        first.id = "first".into();
+        first.created_at = "2026-01-01T00:00:00Z".into();
+        let mut second = first.clone();
+        second.id = "second".into();
+        second.created_at = "2026-01-02T00:00:00Z".into();
+        let mut dashboard = dashboard_with_session(first);
+        dashboard.state.sessions.insert(second.id.clone(), second);
+        let ids = |dashboard: &DashboardState| {
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .map(|session| session.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&dashboard), ["first", "second"]);
+        assert_eq!(ids(&dashboard), ["first", "second"]);
+        dashboard
+            .state
+            .sessions
+            .get_mut("second")
+            .unwrap()
+            .created_at = "2025-01-01T00:00:00Z".into();
+        assert_eq!(ids(&dashboard), ["second", "first"]);
+        dashboard.state.sessions.get_mut("second").unwrap().state = SessionState::Stopped;
+        assert_eq!(ids(&dashboard), ["first"]);
+        dashboard.config.advanced.show_stopped_sessions = true;
+        assert_eq!(ids(&dashboard), ["second", "first"]);
+        dashboard
+            .state
+            .sessions
+            .get_mut("second")
+            .unwrap()
+            .workspace_id = "elsewhere".into();
+        assert_eq!(ids(&dashboard), ["first"]);
     }
 
     #[test]

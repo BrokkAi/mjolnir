@@ -12,6 +12,52 @@ use crossterm::event::{
 use hel::hel_acp::RuntimeEvent;
 use hel::hel_worker::{SequencedEvent, WorkerEvent};
 
+#[test]
+fn background_conversion_reuses_unchanged_entries_and_refreshes_changed_text() {
+    let mut session = MaterializedSession::empty("incremental");
+    session.applied_event_ordinal = 2;
+    session.transcript = vec![
+        user_transcript_item(1, "first"),
+        user_transcript_item(2, "second"),
+    ];
+    let first = TranscriptSnapshot::from_materialized(&session);
+    let previous = first.converted_entries();
+    session.applied_event_ordinal = 3;
+    session.transcript[1] = user_transcript_item(2, "edited");
+    session.transcript.push(user_transcript_item(3, "third"));
+    let reused = TranscriptSnapshot::from_materialized_reusing(
+        &session,
+        &BTreeMap::new(),
+        &previous,
+        &BTreeMap::new(),
+    );
+    assert_eq!(reused.entries[0].revision, previous[0].revision);
+    assert_eq!(reused.entries[1].text, "edited");
+    assert_eq!(
+        reused.browser_tail(100),
+        TranscriptSnapshot::from_materialized(&session).browser_tail(100)
+    );
+}
+
+#[test]
+fn background_conversion_refreshes_added_and_removed_diffstats() {
+    let mut session = MaterializedSession::empty("diffstats");
+    session.applied_event_ordinal = 1;
+    session.transcript = vec![fixture_tool_item(1)];
+    let empty = BTreeMap::new();
+    let stats = BTreeMap::from([("tool:1".to_owned(), vec!["src/file-1.rs +3 -1".to_owned()])]);
+    let original = TranscriptSnapshot::from_materialized(&session);
+    let added =
+        TranscriptSnapshot::from_materialized_reusing(&session, &stats, &original.entries, &empty);
+    assert_eq!(added.entries[0].tool_diffstats, stats["tool:1"]);
+    let removed =
+        TranscriptSnapshot::from_materialized_reusing(&session, &empty, &added.entries, &stats);
+    assert_eq!(
+        removed.entries[0].tool_diffstats,
+        original.entries[0].tool_diffstats
+    );
+}
+
 fn completed_tool(seq: u64, title: &str) -> ChatEntry {
     let mut entry = ChatEntry::tool(seq, title, None, ToolStatus::Completed);
     entry.tool_summary = Some(title.to_owned());

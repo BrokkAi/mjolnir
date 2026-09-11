@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, EmbeddedResourceResource, PlanEntryStatus, SessionUpdate, ToolCall,
-    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind,
+    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdateFields, ToolKind,
 };
 #[cfg(feature = "controller")]
 use anyhow::{Result, bail};
@@ -581,6 +581,28 @@ enum ToolSummarySource {
         executable: String,
         arguments: Vec<String>,
     },
+}
+
+/// Whether a partial update changes inputs used to derive the tool summary.
+pub fn tool_call_update_changes_presentation(
+    call: &ToolCall,
+    fields: &ToolCallUpdateFields,
+) -> bool {
+    fields
+        .title
+        .as_ref()
+        .is_some_and(|title| title != &call.title)
+        || fields.kind.is_some_and(|kind| kind != call.kind)
+        || fields
+            .raw_input
+            .as_ref()
+            .is_some_and(|input| Some(input) != call.raw_input.as_ref())
+        || (call.kind == ToolKind::Execute
+            && fields
+                .raw_output
+                .as_ref()
+                .is_some_and(|output| Some(output) != call.raw_output.as_ref())
+            && command_source(call.raw_input.as_ref()).is_none())
 }
 
 /// Compute the stable presentation metadata for one complete ACP call.
@@ -2007,6 +2029,24 @@ mod tests {
             .kind(ToolKind::Execute)
             .raw_input(json!({"command": ["python", "-c", "print(1)"]}));
         assert_eq!(tool_call_presentation(&argv).summary, "python");
+    }
+
+    #[test]
+    fn output_updates_reuse_input_command_summaries_but_changed_commands_do_not() {
+        let call = ToolCall::new("shell", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "cargo test"}));
+        let mut output = ToolCallUpdateFields::default();
+        output.raw_output = Some(json!({"output": "x".repeat(128 * 1024)}));
+        assert!(!tool_call_update_changes_presentation(&call, &output));
+        let mut status = ToolCallUpdateFields::default();
+        status.status = Some(ToolCallStatus::Completed);
+        assert!(!tool_call_update_changes_presentation(&call, &status));
+        let mut changed = ToolCallUpdateFields::default();
+        changed.raw_input = Some(json!({"command": "cargo check"}));
+        assert!(tool_call_update_changes_presentation(&call, &changed));
+        let output_call = ToolCall::new("output", "Bash").kind(ToolKind::Execute);
+        assert!(tool_call_update_changes_presentation(&output_call, &output));
     }
 
     fn execute_summary(command: serde_json::Value) -> String {

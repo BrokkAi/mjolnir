@@ -135,7 +135,7 @@ enum EntryCollapse {
 /// surfaces other than the interactive chat view.
 #[derive(Debug)]
 pub struct TranscriptSnapshot {
-    entries: Vec<ChatEntry>,
+    entries: Arc<Vec<ChatEntry>>,
     latest_seq: u64,
     last_compaction_seq: u64,
     render_cache: TranscriptRenderCache,
@@ -152,7 +152,7 @@ impl TranscriptSnapshot {
 
     pub fn from_entries_at(entries: Vec<ChatEntry>, latest_seq: u64) -> Self {
         Self {
-            entries,
+            entries: Arc::new(entries),
             latest_seq,
             last_compaction_seq: 0,
             render_cache: TranscriptRenderCache::default(),
@@ -183,6 +183,44 @@ impl TranscriptSnapshot {
         self.entries
             .iter()
             .any(|entry| entry.role == ChatRole::Agent && !entry.text.trim().is_empty())
+    }
+
+    /// Reuse conversion of unchanged stored items during background preparation.
+    pub fn from_materialized_reusing(
+        session: &MaterializedSession,
+        diffstats: &BTreeMap<String, Vec<String>>,
+        previous: &[ChatEntry],
+        previous_diffstats: &BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        let mut entries = session
+            .transcript
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let exact = diffstats.get(&item.stable_id);
+                if let Some(entry) = previous.get(index)
+                    && (entry.source.is(item) || entry.source.0.as_deref() == Some(item.as_ref()))
+                    && exact == previous_diffstats.get(&item.stable_id)
+                {
+                    let mut entry = entry.clone();
+                    entry.seq = item_update_ordinal(item, session.applied_event_ordinal);
+                    entry.source = TranscriptSource(Some(item.clone()));
+                    entry
+                } else {
+                    materialized_chat_entry_with_diffstats(
+                        item,
+                        session.applied_event_ordinal,
+                        exact,
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        suppress_duplicate_standalone_terminal_output(&mut entries);
+        Self::from_entries_at(entries, session.applied_event_ordinal)
+    }
+
+    pub fn converted_entries(&self) -> Arc<Vec<ChatEntry>> {
+        Arc::clone(&self.entries)
     }
 
     #[cfg(test)]
@@ -1563,7 +1601,7 @@ impl ChatState {
 
     pub fn transcript_snapshot(&self) -> TranscriptSnapshot {
         TranscriptSnapshot {
-            entries: self.entries.clone(),
+            entries: Arc::new(self.entries.clone()),
             latest_seq: self.latest_seq,
             last_compaction_seq: self.last_compaction_seq,
             render_cache: TranscriptRenderCache::default(),

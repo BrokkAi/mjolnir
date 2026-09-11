@@ -1042,11 +1042,19 @@ fn project_session_update(
                 .with_context(|| {
                     format!("parse materialized ACP tool call {}", update.tool_call_id)
                 })?;
+            let presentation_changed = crate::hel_transcript::tool_call_update_changes_presentation(
+                &materialized_call,
+                &update.fields,
+            );
             materialized_call.update(update.fields.clone());
+            if presentation_changed
+                || presentation.as_ref().is_none_or(|value| {
+                    value.summary_version < crate::hel_transcript::TOOL_SUMMARY_VERSION
+                })
+            {
+                *presentation = Some(Box::new(tool_call_presentation(&materialized_call)));
+            }
             *call = serde_json::to_value(materialized_call)?;
-            let current_call: ToolCall = serde_json::from_value(call.clone())
-                .context("parse updated ACP tool call for presentation")?;
-            *presentation = Some(Box::new(tool_call_presentation(&current_call)));
             item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
             attach_terminal_outputs(current, index, mutation, &mut item);
             consume_fallback_terminal_tools(index, mutation, &mut item, false)?;

@@ -1164,16 +1164,13 @@ impl SessionRecord {
     /// oldest first by creation time, with the id as a stable tiebreak. A
     /// session whose timestamp does not parse sorts last.
     pub fn compare_by_creation(&self, other: &Self) -> std::cmp::Ordering {
-        match (
-            created_at_seconds(&self.created_at),
-            created_at_seconds(&other.created_at),
-        ) {
-            (Some(left), Some(right)) => left.cmp(&right),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
-        .then_with(|| self.id.cmp(&other.id))
+        self.creation_order_key().cmp(&other.creation_order_key())
+    }
+
+    /// Parse once per session when used with `sort_by_cached_key`.
+    pub fn creation_order_key(&self) -> (bool, Option<i64>, &str) {
+        let timestamp = created_at_seconds(&self.created_at);
+        (timestamp.is_none(), timestamp, &self.id)
     }
 
     fn validate(&self, map_id: &str) -> Result<()> {
