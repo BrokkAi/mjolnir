@@ -2178,7 +2178,7 @@ fn run_ssh_docker_overlay_smoke_test(
     validate_container_template(container)?;
     let name = resource_name(smoke_id)?;
     let prepare = ssh_command(ssh, ["sh", "-c",
-        "set -eu; root=$(mktemp -d /tmp/mj-docker-overlay-smoke.XXXXXXXXXX); printf 'lower\\n' >\"$root/original.txt\"; printf '%s\\n' \"$root\""])
+        "set -eu; root=$(mktemp -d /tmp/mj-docker-overlay-smoke.XXXXXXXXXX); printf 'lower\\n' >\"$root/original.txt\"; chmod 777 \"$root\"; chmod 666 \"$root/original.txt\"; printf '%s\\n' \"$root\""])
         .purpose("create remote Docker OverlayFS smoke source");
     let output = executor.execute(&prepare)?;
     ensure!(
@@ -2246,19 +2246,37 @@ fn run_ssh_docker_overlay_smoke_test(
 
 const DOCKER_OVERLAY_SMOKE_PROBE: &str = "test \"$(cat /mnt/hel-overlay-smoke/original.txt)\" = lower && printf 'changed\\n' >/mnt/hel-overlay-smoke/original.txt && printf 'created\\n' >/mnt/hel-overlay-smoke/container-created.txt";
 
+// macOS temporary directories are not normally shared into Docker VMs. The
+// home directory is shared by Colima's default configuration.
+fn docker_overlay_smoke_directory() -> Result<tempfile::TempDir> {
+    let parent = if cfg!(target_os = "macos") {
+        dirs::home_dir().context("locate shared home directory for Docker smoke test")?
+    } else {
+        std::env::temp_dir()
+    };
+    tempfile::Builder::new()
+        .prefix(".mj-docker-overlay-smoke-")
+        .tempdir_in(parent)
+        .context("create Docker OverlayFS smoke directory")
+}
+
 fn run_docker_overlay_smoke_test(
     container: &ContainerTemplate,
     smoke_id: &str,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     validate_container_template(container)?;
-    let lower = tempfile::Builder::new()
-        .prefix("mj-docker-overlay-smoke-")
-        .tempdir()
-        .context("create Docker OverlayFS smoke directory")?;
+    let lower = docker_overlay_smoke_directory()?;
     let original = lower.path().join("original.txt");
     let added = lower.path().join("container-created.txt");
     fs::write(&original, b"lower\n").context("write Docker OverlayFS smoke source")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The disposable probe tests the mount, independently of host/image UID.
+        fs::set_permissions(lower.path(), fs::Permissions::from_mode(0o777))?;
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o666))?;
+    }
     let name = resource_name(smoke_id)?;
     let mount = AdditionalMount {
         source: lower.path().to_path_buf(),
@@ -2275,11 +2293,21 @@ fn run_docker_overlay_smoke_test(
         .next()
         .context("Docker OverlayFS smoke cleanup plan is empty")?;
 
-    execute_checked(executor, &create)?;
-    let smoke_result = execute_checked(executor, &probe);
-    let cleanup_result = execute_checked(executor, &cleanup);
+    let smoke_result =
+        execute_checked(executor, &create).and_then(|()| execute_checked(executor, &probe));
+    if let Err(cleanup_error) = execute_checked(executor, &cleanup) {
+        // A surviving overlay still references its lower directory.
+        let retained = lower.keep();
+        let cleanup_error = cleanup_error.context(format!(
+            "Docker smoke cleanup failed; retained source at {}",
+            retained.display()
+        ));
+        return match smoke_result {
+            Ok(()) => Err(cleanup_error),
+            Err(error) => Err(error.context(format!("{cleanup_error:#}"))),
+        };
+    }
     smoke_result?;
-    cleanup_result?;
     ensure!(
         fs::read(&original).context("read Docker OverlayFS smoke source after container write")?
             == b"lower\n",
@@ -3169,6 +3197,18 @@ pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPl
         TargetLocator::SshDocker { .. } => unreachable!("handled above"),
         TargetLocator::LocalDocker { container_id } => {
             let script = r#"status=0
+helper="$1-mount-init"
+if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.attachment-helper"}}|{{index .Config.Labels "dev.mj.session"}}' "$helper" 2>/dev/null); then
+    if [ "$identity" = "true|$2" ]; then
+        docker rm --force "$helper" || status=$?
+    else
+        echo 'refusing to remove a foreign Docker attachment helper' >&2
+        status=2
+    fi
+elif ! docker info >/dev/null 2>&1; then
+    echo 'could not determine whether the Docker attachment helper exists' >&2
+    status=1
+fi
 if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$1" 2>/dev/null); then
     if [ "$identity" = "true|$2" ]; then
         docker rm --force "$1" || status=$?
@@ -3183,7 +3223,18 @@ fi
 if [ "$status" -eq 0 ]; then
     volumes=$(docker volume ls --quiet --filter "label=dev.mj.managed=true" --filter "label=dev.mj.session=$2") || status=$?
     if [ "$status" -eq 0 ]; then
-        for volume in $volumes; do docker volume rm --force "$volume" || status=$?; done
+        backings=
+        for volume in $volumes; do
+            backing=$(docker volume inspect --format '{{index .Labels "dev.mj.attachment-backing"}}' "$volume") || { status=$?; continue; }
+            if [ "$backing" = true ]; then
+                backings="$backings $volume"
+            else
+                docker volume rm --force "$volume" || status=$?
+            fi
+        done
+        if [ "$status" -eq 0 ]; then
+            for backing in $backings; do docker volume rm --force "$backing" || status=$?; done
+        fi
     fi
 fi
 if [ "$status" -eq 0 ]; then
@@ -3854,18 +3905,32 @@ fn podman_container_run(
 const DOCKER_OVERLAY_RUN_SCRIPT: &str = r#"set -eu
 session=$1
 container=$2
-shift 2
-root="$HOME/.cache/mjolnir/docker-overlays/$container"
-marker="$root/.hel-session"
+image=$3
+pull=$4
+shift 4
+helper="$container-mount-init"
 volumes=
+backings=
+remove_helper() {
+    if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.attachment-helper"}}|{{index .Config.Labels "dev.mj.session"}}' "$helper" 2>/dev/null); then
+        [ "$identity" = "true|$session" ] || {
+            echo "refusing foreign Docker attachment helper $helper" >&2
+            return 1
+        }
+        docker rm --force "$helper" >/dev/null
+    else
+        docker info >/dev/null
+    fi
+}
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
     if [ "$status" -ne 0 ]; then
         released=true
+        remove_helper || released=false
         if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$container" 2>/dev/null); then
             if [ "$identity" = "true|$session" ]; then
-                docker rm --force "$container" >/dev/null 2>&1 || released=false
+                docker rm --force "$container" >/dev/null || released=false
             else
                 released=false
             fi
@@ -3874,52 +3939,74 @@ cleanup() {
         fi
         if [ "$released" = true ]; then
             for volume in $volumes; do
-                docker volume rm --force "$volume" >/dev/null 2>&1 || released=false
+                docker volume rm --force "$volume" >/dev/null || released=false
             done
         fi
-        if [ "$released" = true ] && [ "$(cat "$marker" 2>/dev/null || true)" = "$session" ]; then
-            case $container in mj-*|hel-*) rm -rf -- "$root" ;; esac
+        if [ "$released" = true ]; then
+            for backing in $backings; do
+                docker volume rm --force "$backing" >/dev/null || released=false
+            done
+        fi
+        if [ "$released" != true ]; then
+            echo "Docker attachment cleanup failed; retained backing storage for session $session" >&2
         fi
     fi
     exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
-mkdir -p -- "$root"
-if [ -e "$marker" ]; then
-    [ "$(cat "$marker")" = "$session" ] || {
-        echo "refusing foreign Docker overlay directory $root" >&2
-        exit 1
+owned_volume() {
+    identity=$(docker volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$1")
+    [ "$identity" = "true|$session" ] || {
+        echo "refusing foreign Docker volume $1" >&2
+        return 1
     }
-elif [ -n "$(find "$root" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-    echo "refusing non-empty Docker overlay directory $root" >&2
-    exit 1
-else
-    printf '%s\n' "$session" >"$marker"
-fi
+}
+remove_helper
 while [ "$1" != -- ]; do
     ordinal=$1
     source=$2
     volume=$3
     shift 3
-    upper="$root/$ordinal/upper"
-    work="$root/$ordinal/work"
-    mkdir -p -- "$upper" "$work"
-    if ! docker volume inspect "$volume" >/dev/null 2>&1; then
-        docker volume create \
-            --driver local \
-            --label "dev.mj.managed=true" \
-            --label "dev.mj.session=$session" \
-            --opt type=overlay \
-            --opt device=overlay \
-            --opt "o=lowerdir=$source,upperdir=$upper,workdir=$work" \
-            "$volume" >/dev/null
+    backing="$volume-backing"
+    if docker volume inspect "$volume" >/dev/null 2>&1; then
+        owned_volume "$volume"
+        owned_volume "$backing"
+        volumes="$volumes $volume"
+        backings="$backings $backing"
+        continue
     fi
-    identity=$(docker volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume")
-    [ "$identity" = "true|$session" ] || {
-        echo "refusing foreign Docker volume $volume" >&2
-        exit 1
-    }
+    if ! docker volume inspect "$backing" >/dev/null 2>&1; then
+        docker volume create --driver local \
+            --label "dev.mj.managed=true" --label "dev.mj.session=$session" \
+            --label "dev.mj.attachment-backing=true" "$backing" >/dev/null
+    fi
+    owned_volume "$backing"
+    backings="$backings $backing"
+    docker run --name "$helper" --pull="$pull" --network none --user 0 \
+        --label "dev.mj.attachment-helper=true" --label "dev.mj.session=$session" \
+        --volume "$backing:/mj-attachment" \
+        --mount "type=bind,source=$source,target=/mj-source,readonly" \
+        --entrypoint sh "$image" -c '
+            set -eu
+            mkdir -p /mj-attachment/upper /mj-attachment/work
+            chown "$(stat -c %u:%g /mj-source)" /mj-attachment/upper
+            chmod "$(stat -c %a /mj-source)" /mj-attachment/upper
+        ' >/dev/null
+    remove_helper
+    root=$(docker volume inspect --format '{{.Mountpoint}}' "$backing")
+    case $root in /*) ;; *) echo "invalid Docker backing volume mountpoint: $root" >&2; exit 1 ;; esac
+    upper="$root/upper"
+    work="$root/work"
+    docker volume create \
+        --driver local \
+        --label "dev.mj.managed=true" \
+        --label "dev.mj.session=$session" \
+        --opt type=overlay \
+        --opt device=overlay \
+        --opt "o=lowerdir=$source,upperdir=$upper,workdir=$work" \
+        "$volume" >/dev/null
+    owned_volume "$volume"
     volumes="$volumes $volume"
 done
 shift
@@ -3928,6 +4015,15 @@ shift
 
 fn docker_overlay_volume_name(container_name: &str, ordinal: usize) -> String {
     format!("{container_name}-mount-{ordinal}")
+}
+
+fn docker_pull_policy(template: &ContainerTemplate) -> &'static str {
+    match template.pull_policy.at_launch(&template.image) {
+        ImagePullPolicy::Auto => unreachable!("at_launch resolves auto"),
+        ImagePullPolicy::Always | ImagePullPolicy::Newer => "always",
+        ImagePullPolicy::Missing => "missing",
+        ImagePullPolicy::Never => "never",
+    }
 }
 
 fn docker_container_run(
@@ -3958,6 +4054,8 @@ fn docker_container_run(
         "hel-docker-run".to_owned(),
         session_id.to_owned(),
         name.to_owned(),
+        template.image.clone(),
+        docker_pull_policy(template).to_owned(),
     ];
     for (ordinal, mount) in writable {
         args.extend([
@@ -3994,12 +4092,7 @@ fn container_run_args(
         // engine is left alone: its support for the flag is unverified.
         args.push("--init".to_owned());
     } else if engine == "docker" {
-        let pull = match template.pull_policy.at_launch(&template.image) {
-            ImagePullPolicy::Always | ImagePullPolicy::Newer => "always",
-            ImagePullPolicy::Missing => "missing",
-            ImagePullPolicy::Never => "never",
-            ImagePullPolicy::Auto => unreachable!("auto pull policy must resolve"),
-        };
+        let pull = docker_pull_policy(template);
         args.push(format!("--pull={pull}"));
         args.push("--init".to_owned());
     }

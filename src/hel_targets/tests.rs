@@ -2530,15 +2530,19 @@ printf '%s\n' "$*" >>"$state/invocations"
 case "${1-}" in
 container)
     [ "${2-}" = inspect ] || exit 2
-    [ -f "$state/container-labels" ] || exit 1
-    cat "$state/container-labels"
+    for argument do name=$argument; done
+    case $name in *-mount-init) labels=helper-labels ;; *) labels=container-labels ;; esac
+    [ -f "$state/$labels" ] || exit 1
+    cat "$state/$labels"
     ;;
 info)
     exit 0
     ;;
 rm)
     [ "${FAKE_DOCKER_FAIL_RM:-0}" = 1 ] && exit 42
-    rm -f "$state/container-labels"
+    for argument do name=$argument; done
+    case $name in *-mount-init) labels=helper-labels ;; *) labels=container-labels ;; esac
+    rm -f "$state/$labels"
     ;;
 run)
     name=
@@ -2550,8 +2554,18 @@ run)
             shift
         fi
     done
-    printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}" >"$state/container-labels"
-    [ "${FAKE_DOCKER_FAIL_RUN:-0}" = 1 ] && exit 125
+    case $name in
+    *-mount-init)
+        printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}" >"$state/helper-labels"
+        [ "${FAKE_DOCKER_FAIL_INIT:-0}" = 1 ] && exit 44
+        ;;
+
+    *)
+        printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}" >"$state/container-labels"
+        [ "${FAKE_DOCKER_FAIL_RUN:-0}" = 1 ] && exit 125
+        ;;
+    esac
+    exit 0
     ;;
 volume)
     case "${2-}" in
@@ -2561,10 +2575,12 @@ volume)
     inspect)
         volume=
         formatted=false
+        format=''
         shift 2
         while [ "$#" -gt 0 ]; do
             if [ "$1" = --format ]; then
                 formatted=true
+                format=$2
                 shift 2
             else
                 volume=$1
@@ -2575,7 +2591,11 @@ volume)
         [ -f "$state/volumes" ]
         grep -Fx "$volume" "$state/volumes" >/dev/null
         if [ "$formatted" = true ]; then
-            printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}"
+            case $format in
+            *Mountpoint*) printf '/daemon/volumes/%s/_data\n' "$volume" ;;
+            *attachment-backing*) case $volume in *-backing) echo true ;; *) echo '<no value>' ;; esac ;;
+            *) printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}" ;;
+            esac
         fi
         ;;
     create)
@@ -2590,7 +2610,9 @@ volume)
         ;;
     rm)
         [ "${FAKE_DOCKER_FAIL_VOLUME_RM:-0}" = 1 ] && exit 43
-        : >"$state/volumes"
+        for argument do volume=$argument; done
+        grep -Fxv "$volume" "$state/volumes" >"$state/remaining" || true
+        mv "$state/remaining" "$state/volumes"
         ;;
     *)
         exit 2
@@ -2767,7 +2789,12 @@ fn docker_overlay_run_rollback_removes_owned_mj_directory_after_run_failure() {
             ("FAKE_DOCKER_SESSION", SESSION),
         ],
     );
-    assert_eq!(output.status, 125);
+    assert_eq!(
+        output.status,
+        125,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         !home
             .join(".cache/mjolnir/docker-overlays")
@@ -3411,4 +3438,175 @@ fn ssh_docker_preflight_reports_the_remote_destination() {
     let text = format!("{error:#}");
     assert!(text.contains(&ssh().destination));
     assert!(text.contains("connection refused"));
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_attachment_init_failure_stops_helper_and_removes_backing_storage() {
+    let environment = fake_docker_environment();
+    let name = resource_name(SESSION).unwrap();
+    let command = docker_container_run(
+        &ContainerTemplate {
+            image: "fake:image".to_owned(),
+            pull_policy: ImagePullPolicy::Never,
+            extra_run_args: vec![],
+            workspace_storage: Default::default(),
+        },
+        &name,
+        SESSION,
+        &[AdditionalMount {
+            source: PathBuf::from("/macOS/private temp/source"),
+            destination: PathBuf::from("/mnt/cache"),
+            read_only: false,
+        }],
+    )
+    .unwrap();
+    let output = execute_with_fake_docker(
+        &environment,
+        &command,
+        &[
+            ("FAKE_DOCKER_FAIL_INIT", "1"),
+            ("FAKE_DOCKER_SESSION", SESSION),
+        ],
+    );
+    assert_eq!(
+        output.status,
+        44,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = environment.path().join("home/fake-docker");
+    assert!(!state.join("helper-labels").exists());
+    assert!(!state.join("container-labels").exists());
+    assert_eq!(std::fs::read_to_string(state.join("volumes")).unwrap(), "");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a running Docker daemon and cached agent-dev image"]
+fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
+    let source = docker_overlay_smoke_directory().unwrap();
+    let session = format!(
+        "vm-test-{}",
+        source
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .trim_start_matches('.')
+    );
+    let name = resource_name(&session).unwrap();
+    let payload = vec![b'x'; 256 * 1024];
+    std::fs::write(source.path().join("payload"), &payload).unwrap();
+    // Exercise the image's default user without assuming its UID equals macOS's.
+    std::fs::set_permissions(source.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::fs::set_permissions(
+        source.path().join("payload"),
+        std::fs::Permissions::from_mode(0o666),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("payload", source.path().join("link")).unwrap();
+    let template = ContainerTemplate {
+        image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+        pull_policy: ImagePullPolicy::Never,
+        extra_run_args: vec![],
+        workspace_storage: Default::default(),
+    };
+    let result = (|| -> Result<()> {
+        let create = docker_container_run(
+            &template,
+            &name,
+            &session,
+            &[AdditionalMount {
+                source: source.path().to_owned(),
+                destination: PathBuf::from("/mnt/source"),
+                read_only: false,
+            }],
+        )?;
+        execute_checked(&ProcessExecutor, &create)?;
+        // A file added after launch must remain visible: this is a shared lower,
+        // not a copied snapshot.
+        std::fs::write(source.path().join("after-launch"), b"shared")?;
+        execute_checked(
+            &ProcessExecutor,
+            &container_exec(
+                "docker",
+                &name,
+                [
+                    "sh",
+                    "-c",
+                    "test \"$(wc -c </mnt/source/payload)\" -eq 262144 && test \"$(cat /mnt/source/after-launch)\" = shared && test -L /mnt/source/link && test \"$(readlink /mnt/source/link)\" = payload && printf changed >/mnt/source/payload && touch /mnt/source/created",
+                ],
+            ),
+        )?;
+        ensure!(
+            std::fs::read(source.path().join("payload"))? == payload,
+            "original data changed"
+        );
+        ensure!(
+            !source.path().join("created").exists(),
+            "container wrote into source"
+        );
+        Ok(())
+    })();
+    let close = close_plan(&TargetLocator::LocalDocker { container_id: name }, &session).unwrap();
+    for command in &close.commands {
+        execute_checked(&ProcessExecutor, command).unwrap();
+    }
+    result.unwrap();
+    for kind in ["container", "volume"] {
+        let output = ProcessExecutor
+            .execute(&CommandSpec::new(
+                "docker",
+                [
+                    kind,
+                    "ls",
+                    "--quiet",
+                    "--filter",
+                    &format!("label=dev.mj.session={session}"),
+                ],
+            ))
+            .unwrap();
+        assert_eq!(output.status, 0);
+        assert!(
+            output.stdout.is_empty(),
+            "leftover {kind}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    run_setup_smoke_test(
+        &TargetTemplate::LocalDocker(template),
+        &format!("smoke-{session}"),
+        &ProcessExecutor,
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_cleanup_retains_backing_volume_when_overlay_removal_fails() {
+    let environment = fake_docker_environment();
+    let name = resource_name(SESSION).unwrap();
+    seed_docker_cleanup_state(&environment, &name);
+    let state = environment.path().join("home/fake-docker");
+    // List the backing first to prove cleanup follows dependencies, not ls order.
+    std::fs::write(
+        state.join("volumes"),
+        "mj-volume-backing\nmj-volume-overlay\n",
+    )
+    .unwrap();
+    let close = close_plan(&TargetLocator::LocalDocker { container_id: name }, SESSION).unwrap();
+    let output = execute_with_fake_docker(
+        &environment,
+        &close.commands[0],
+        &[("FAKE_DOCKER_FAIL_VOLUME_RM", "1")],
+    );
+    assert_eq!(output.status, 43);
+    let invocations = std::fs::read_to_string(state.join("invocations")).unwrap();
+    assert!(invocations.contains("volume rm --force mj-volume-overlay"));
+    assert!(!invocations.contains("volume rm --force mj-volume-backing"));
+    assert_eq!(
+        std::fs::read_to_string(state.join("volumes")).unwrap(),
+        "mj-volume-backing\nmj-volume-overlay\n"
+    );
 }
