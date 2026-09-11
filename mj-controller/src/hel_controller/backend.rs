@@ -142,6 +142,7 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
+        session.validate_configuration(&self.config)?;
         let locator = session.target.as_ref().context("session has no target")?;
         let backend = backend_locator(locator, session, &self.config)?;
         hel_targets::reconnect_plan(&backend, session_id)?

@@ -499,6 +499,11 @@ pub struct HarnessProfile {
 }
 
 impl HarnessProfile {
+    /// Discovery identifies an installation independently of user settings.
+    pub fn same_installation(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.home == other.home
+    }
+
     pub fn home_env(&self) -> &'static str {
         self.kind.home_env()
     }
@@ -1258,6 +1263,50 @@ impl Default for HelConfig {
 }
 
 impl HelConfig {
+    /// Suggest additions for setup without replacing existing entries. Both
+    /// setup surfaces use the same identities and collision-free names.
+    pub fn setup_additions(&self, discovered: &Self) -> Self {
+        fn additions<T: Clone>(
+            existing: &BTreeMap<String, T>,
+            discovered: &BTreeMap<String, T>,
+            same: impl Fn(&T, &T) -> bool,
+            base: impl Fn(&str, &T) -> String,
+        ) -> BTreeMap<String, T> {
+            let mut known = existing.clone();
+            let mut added = BTreeMap::new();
+            for (id, value) in discovered {
+                if known.values().any(|entry| same(entry, value)) {
+                    continue;
+                }
+                let id = unique_config_id(&known, &base(id, value));
+                known.insert(id.clone(), value.clone());
+                added.insert(id, value.clone());
+            }
+            added
+        }
+        Self {
+            profiles: additions(
+                &self.profiles,
+                &discovered.profiles,
+                HarnessProfile::same_installation,
+                |id, _| id.to_owned(),
+            ),
+            bundles: additions(
+                &self.bundles,
+                &discovered.bundles,
+                PartialEq::eq,
+                |_, bundle| bundle.primary_repo.clone(),
+            ),
+            targets: additions(
+                &self.targets,
+                &discovered.targets,
+                PartialEq::eq,
+                |id, _| id.to_owned(),
+            ),
+            ..Self::default()
+        }
+    }
+
     pub fn is_unconfigured(&self) -> bool {
         self.profiles.is_empty() && self.bundles.is_empty() && self.targets.is_empty()
     }
@@ -1720,6 +1769,23 @@ pub fn data_dir() -> PathBuf {
 
 pub fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
+}
+
+/// The first available configuration identifier, retaining a readable base.
+pub fn unique_config_id<T>(entries: &BTreeMap<String, T>, base: &str) -> String {
+    if !entries.contains_key(base) {
+        return base.to_owned();
+    }
+    for number in 2.. {
+        let suffix = format!("-{number}");
+        // Configuration identifiers are ASCII and limited to 64 bytes.
+        let prefix = base.chars().take(64 - suffix.len()).collect::<String>();
+        let candidate = format!("{prefix}{suffix}");
+        if !entries.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("configuration identifier space exhausted")
 }
 
 pub fn validate_id(kind: &str, id: &str) -> Result<()> {
@@ -2774,6 +2840,25 @@ mod tests {
         let rendered = fs::read_to_string(&path).unwrap();
         assert!(rendered.contains("kind = \"local-docker\""), "{rendered}");
         assert_eq!(HelConfig::load_from(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn setup_can_add_an_alternative_to_a_maximum_length_target_name() {
+        let id = "x".repeat(64);
+        let mut original = HelConfig::default();
+        original
+            .targets
+            .insert(id.clone(), TargetTemplate::LocalBare);
+        let mut discovered = HelConfig::default();
+        discovered
+            .targets
+            .insert(id, sample_config().targets["podman-default"].clone());
+        let additions = original.setup_additions(&discovered);
+        additions.validate().unwrap();
+        assert_eq!(additions.targets.len(), 1);
+        original.targets.extend(additions.targets);
+        assert_eq!(original.targets.len(), 2);
+        assert!(original.setup_additions(&discovered).targets.is_empty());
     }
 
     #[test]

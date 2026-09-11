@@ -381,7 +381,9 @@ impl ViewerSnapshot {
                     state: session_state_name(session.state).into(),
                     created_at: session.created_at.clone(),
                     updated_at: session.updated_at.clone(),
-                    has_error: session.last_error.is_some(),
+                    has_error: session.last_error.is_some()
+                        || session.configuration_issue(config).is_some(),
+                    configuration_issue: session.configuration_issue(config),
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
                     active_user_shells: Vec::new(),
@@ -530,6 +532,10 @@ pub struct ViewerSession {
     pub created_at: String,
     pub updated_at: String,
     pub has_error: bool,
+    /// Public identifiers and repair guidance only; never raw runtime errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_issue: Option<String>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4839,6 +4845,48 @@ mod tests {
     /// hand-written stub rather than importing a module.
     fn run_viewer_script(name: &str, script: &str) {
         run_web_check(name, script);
+    }
+
+    #[test]
+    fn web_configuration_repair_action_explains_missing_entries_without_a_request() {
+        let source = viewer_source("async function runSessionAction(", "sessions.onclick");
+        let setup = r#"
+const pendingActions = new Set();
+const snapshot = { sessions: [{ id: 'broken', configuration_issue: 'Restore bundle project in config.toml' }] };
+const errorNode = { textContent: '' };
+"#;
+        let checks = r#"
+await runSessionAction({ action: 'repair-config', id: 'broken' }, errorNode);
+if (!errorNode.textContent.includes('Restore bundle project')) throw Error('repair guidance missing');
+snapshot.sessions[0].configuration_issue = null;
+await runSessionAction({ action: 'repair-config', id: 'broken' }, errorNode);
+if (!errorNode.textContent.includes('repaired')) throw Error('stale configuration diagnostic');
+"#;
+        run_viewer_script(
+            "configuration-repair",
+            &format!("{setup}\n{source}\n{checks}"),
+        );
+    }
+
+    #[test]
+    fn viewer_reports_configuration_drift_without_exposing_private_configuration() {
+        let (mut config, state) = sample_config_state();
+        let bundle = config.bundles.remove("hel").unwrap();
+        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        assert!(snapshot.sessions[0].has_error);
+        assert!(
+            snapshot.sessions[0]
+                .configuration_issue
+                .as_deref()
+                .unwrap()
+                .contains("missing bundle")
+        );
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("secret-token"));
+        assert!(!json.contains("/highly/secret"));
+        config.bundles.insert("hel".into(), bundle);
+        let repaired = ViewerSnapshot::from_config_state(&config, &state, 2);
+        assert!(repaired.sessions[0].configuration_issue.is_none());
     }
 
     #[test]

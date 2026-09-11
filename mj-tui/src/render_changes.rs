@@ -101,6 +101,7 @@ pub(crate) struct VisibleStateSignature {
     created_at: String,
     updated_at: String,
     last_error: Option<String>,
+    configuration_issue: Option<String>,
     last_checkpoint_error: Option<String>,
     checkpoint_created_at: Option<String>,
     project_source: hel::hel_state::ProjectSourceIdentity,
@@ -266,6 +267,7 @@ impl DashboardState {
                 created_at: session.created_at.clone(),
                 updated_at: session.updated_at.clone(),
                 last_error: session.last_error.clone(),
+                configuration_issue: session.configuration_issue(&self.config),
                 last_checkpoint_error: session.last_checkpoint_error.clone(),
                 checkpoint_created_at: session
                     .checkpoint

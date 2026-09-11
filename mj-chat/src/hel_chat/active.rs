@@ -2842,8 +2842,7 @@ pub(super) fn render_in(
     } else {
         chat.split_action_areas.clear();
         chat.turn_review_action_areas.clear();
-        let (prompt_title, title_width, activity_title) =
-            prompt_title_line(chat, prompt_area.width);
+        let (prompt_title, activity_title) = prompt_title_line(chat, prompt_area.width);
         let mut prompt_block = theme::panel(prompt_focused)
             .padding(Padding::new(2, 1, 0, 0))
             .title(prompt_title);
@@ -2918,7 +2917,7 @@ pub(super) fn render_in(
         }
         let prompt_inner = prompt_block.inner(prompt_area);
         chat.prompt_content_width = prompt_width;
-        chat.voice_button_area = voice_button_area(prompt_area, title_width);
+        chat.voice_button_area = voice_button_area(prompt_area);
         let mut prompt_lines = chat
             .queued_prompts
             .iter()
@@ -3253,27 +3252,23 @@ fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
     parts
 }
 
-/// The prompt border keeps model, effort, and state beside the microphone chip.
-/// Activity owns the upper-right corner. A full configured spinner is used
-/// when both titles fit; the one-column frame keeps narrow prompts readable.
+/// The microphone chip owns the prompt border's upper-left corner, followed by
+/// model, effort, and state. Activity owns the upper-right corner. A full
+/// configured spinner is used when both titles fit; the one-column frame keeps
+/// narrow prompts readable.
 fn prompt_title_line(
     chat: &ChatState,
     prompt_width: u16,
-) -> (Line<'static>, usize, Option<Line<'static>>) {
+) -> (Line<'static>, Option<Line<'static>>) {
     let parts = prompt_title_parts(chat);
     let prefix_count =
         usize::from(chat.current_model().is_some()) + usize::from(chat.current_effort().is_some());
     let prefix = parts[..prefix_count.min(parts.len())].join(" · ");
     let suffix = parts[prefix_count.min(parts.len())..].join(" · ");
-    let before_mic = if prefix.is_empty() {
-        " ".to_owned()
-    } else {
-        format!(" {prefix} ")
-    };
-    let mut spans = vec![
-        Span::raw(before_mic.clone()),
-        Span::raw(format!(" {VOICE_BUTTON_GLYPH} ")),
-    ];
+    let mut spans = vec![Span::raw(format!(" {VOICE_BUTTON_GLYPH} "))];
+    if !prefix.is_empty() {
+        spans.push(Span::raw(format!(" {prefix} ")));
+    }
     if !suffix.is_empty() {
         spans.push(Span::raw(format!(" {suffix} ")));
     }
@@ -3295,11 +3290,7 @@ fn prompt_title_line(
         title.push(Span::raw(" "));
         Line::from(title)
     });
-    (
-        Line::from(spans),
-        display_width(&before_mic),
-        activity_title,
-    )
+    (Line::from(spans), activity_title)
 }
 
 /// Queue state and the hint for controlling the current turn live together

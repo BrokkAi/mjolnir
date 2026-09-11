@@ -15,20 +15,16 @@ use unicode_segmentation::UnicodeSegmentation;
 /// than selecting an emoji presentation with a potentially different width.
 pub(super) const VOICE_BUTTON_GLYPH: &str = "🎙︎";
 
-/// The microphone button is a chip in the prompt's top border, immediately
-/// after the model and effort labels. `title_width` is the display width of
-/// the title text rendered before the chip. Keep its geometry derived from the
-/// same Unicode width ratatui uses to lay out `Line`s.
-pub(super) fn voice_button_area(prompt_area: Rect, title_width: usize) -> Option<Rect> {
+/// The microphone button is a chip in the upper-left of the prompt's top
+/// border. Keep its geometry derived from the same Unicode width ratatui uses
+/// to lay out `Line`s.
+pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
     if prompt_area.width == 0 || prompt_area.height == 0 {
         return None;
     }
     let button_width = display_width(&format!(" {VOICE_BUTTON_GLYPH} "));
     let button_width = u16::try_from(button_width).ok()?;
-    let x = prompt_area
-        .x
-        .saturating_add(1)
-        .saturating_add(u16::try_from(title_width).ok()?);
+    let x = prompt_area.x.saturating_add(1);
     (x.saturating_add(button_width) < prompt_area.right())
         .then(|| Rect::new(x, prompt_area.y, button_width, 1))
 }

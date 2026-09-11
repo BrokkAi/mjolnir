@@ -593,6 +593,8 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
+    modal_click_transition: Option<(u16, u16, Instant)>,
+    suppress_modal_release: bool,
     /// Monotonic identity for global review settings discoveries. Keeping it on
     /// the dashboard prevents a late result from an older dialog instance
     /// matching a newly opened dialog with the same values.
@@ -716,6 +718,8 @@ impl DashboardState {
             collapsed_project_keys: BTreeSet::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
+            modal_click_transition: None,
+            suppress_modal_release: false,
             review_settings_generation: 0,
             spinner_save_pending: false,
             review_settings_choices: BTreeMap::new(),
@@ -1274,7 +1278,11 @@ impl DashboardState {
             }
             // The controller owns terminal-size comparison; focus events do
             // not mutate dashboard state by themselves.
-            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => DashboardAction::None,
+            Event::Resize(_, _) | Event::FocusLost => {
+                self.cancel_component_pointer();
+                DashboardAction::None
+            }
+            Event::FocusGained => DashboardAction::None,
         };
         let changed = self.render_change_revision() != revision
             || self.notices.generation() != notice_generation;
@@ -1304,6 +1312,10 @@ impl DashboardState {
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
             return DashboardAction::None;
         }
+        if key.kind == KeyEventKind::Press {
+            self.modal_click_transition = None;
+            self.suppress_modal_release = false;
+        }
         if is_paste_shortcut(key) {
             self.record_event_handled();
             return DashboardAction::PasteFromClipboard;
@@ -1312,9 +1324,11 @@ impl DashboardState {
         let cancel_shortcut = key.code == KeyCode::Char('c')
             && (key.modifiers.contains(KeyModifiers::CONTROL)
                 || dashboard_accelerator(key.modifiers));
-        if text_focused && cancel_shortcut {
-            self.cancel_modal();
-            return DashboardAction::None;
+        if text_focused && cancel_shortcut && self.component_modal_open() {
+            return self.handle_component_event(Event::Key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )));
         }
         // Ctrl-C belongs to the prompt or a text field. Everywhere else it is
         // intentionally inert, including modal controls that happen to use
@@ -1406,6 +1420,36 @@ impl DashboardState {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
+        let now = Instant::now();
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.suppress_modal_release =
+                self.modal_click_transition
+                    .take()
+                    .is_some_and(|(x, y, at)| {
+                        x == mouse.column
+                            && y == mouse.row
+                            && now.saturating_duration_since(at)
+                                <= mj_chat::components::DOUBLE_CLICK_INTERVAL
+                    });
+            if self.suppress_modal_release {
+                return DashboardAction::None;
+            }
+        }
+        if mouse.kind == MouseEventKind::Up(MouseButton::Left) && self.suppress_modal_release {
+            self.suppress_modal_release = false;
+            return DashboardAction::None;
+        }
+        let before = self.dialog_layer_key();
+        let action = self.handle_mouse_inner(mouse);
+        if mouse.kind == MouseEventKind::Up(MouseButton::Left) && before != self.dialog_layer_key()
+        {
+            self.modal_click_transition = Some((mouse.column, mouse.row, now));
+            self.cancel_component_pointer();
+        }
+        action
+    }
+
+    fn handle_mouse_inner(&mut self, mouse: MouseEvent) -> DashboardAction {
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             self.notices.dismiss(Instant::now());
         }
@@ -1729,6 +1773,15 @@ impl DashboardState {
         let Some(session) = self.selected_session() else {
             return DashboardAction::None;
         };
+        if let Some(issue) = session.configuration_issue(&self.config) {
+            self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ConfigurationRepair {
+                session_id: session.id.clone(),
+                error: issue,
+                previous: Box::new(self.mode.clone()),
+            }));
+            self.mark_render_changed();
+            return DashboardAction::None;
+        }
         if let Some(operation) = self.session_operations.get(&session.id) {
             self.notices.set(format!(
                 "{} is in progress; press Alt-X to cancel it.",
@@ -2439,6 +2492,31 @@ mod tests {
     }
 
     #[test]
+    fn target_id_escape_restores_parent_action_focus() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_target_actions();
+        let Mode::TargetActions(dialog) = &mut dashboard.mode else {
+            panic!("target actions should open");
+        };
+        dialog
+            .form
+            .get_mut()
+            .focus(crate::dialogs::DialogControl::TargetRename);
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(matches!(dashboard.mode, Mode::ConfigId(_)));
+        dashboard.handle_key(key(KeyCode::Esc));
+        let Mode::TargetActions(dialog) = &dashboard.mode else {
+            panic!("Escape should restore target actions");
+        };
+        assert!(
+            dialog
+                .form
+                .borrow()
+                .is_focused(crate::dialogs::DialogControl::TargetRename)
+        );
+    }
+
+    #[test]
     fn pane_actions_follow_the_focused_pane() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
@@ -3068,6 +3146,29 @@ mod tests {
                 kind: SessionOperationKind::Launching,
             }
         );
+    }
+
+    #[test]
+    fn opening_a_session_with_missing_configuration_explains_repair() {
+        let session = running_session();
+        let mut dashboard = dashboard_with_session(session);
+        let bundle_id = dashboard.selected_session().unwrap().bundle_id.clone();
+        let bundle = dashboard.config.bundles.remove(&bundle_id).unwrap();
+        assert_eq!(dashboard.open_selected_session(), DashboardAction::None);
+        let Mode::Confirm(dialog) = &dashboard.mode else {
+            panic!("repair dialog expected")
+        };
+        let Confirmation::ConfigurationRepair { error, .. } = &dialog.confirmation else {
+            panic!("repair details expected")
+        };
+        assert!(error.contains("missing bundle"));
+        assert!(error.contains("config.toml"));
+        dashboard.handle_key(key(KeyCode::Esc));
+        dashboard.config.bundles.insert(bundle_id, bundle);
+        assert!(!matches!(
+            dashboard.open_selected_session(),
+            DashboardAction::None
+        ));
     }
 
     /// The notice bar is the only report a background failure gets, so a key

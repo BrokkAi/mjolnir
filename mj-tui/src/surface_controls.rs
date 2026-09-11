@@ -547,8 +547,6 @@ mod tests {
         assert!(matches!(dashboard.mode, Mode::Palette(_)));
         let lines = draw(&mut dashboard, (120, 40));
         click(&mut dashboard, point(&lines, "Rename session"));
-        let lines = draw(&mut dashboard, (120, 40));
-        click(&mut dashboard, point(&lines, "Run"));
         assert!(matches!(dashboard.mode, Mode::Rename(_)));
     }
 

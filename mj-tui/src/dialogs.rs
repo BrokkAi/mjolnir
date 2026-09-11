@@ -24,7 +24,7 @@ use hel::hel_config::{HarnessKind, mount_history_host};
 use hel::hel_state::{MoveOperation, MovePhase, ResumeQueueDisposition};
 use hel::hel_targets::{AdditionalMount, default_mount_destination, validate_additional_mounts};
 use mj_chat::components::{
-    Button, ButtonRow, Checkbox, ChoiceList, ControlKind, Form, Interaction, Outcome, TextField,
+    Button, Checkbox, ChoiceList, ControlKind, Dialog, Interaction, Outcome, TextField,
 };
 use mj_chat::hel_selection::FrameSurfaces;
 use mj_chat::hel_text_input::TextInput;
@@ -43,7 +43,7 @@ const IMPORT_STALL_WARNING_AFTER: Duration = Duration::from_secs(10);
 
 /// Stable control identities used by the standard dashboard dialogs.
 ///
-/// Each dialog owns its own [`Form`], so the shared identities can be reused
+/// Each dialog owns its own [`Dialog`], so the shared identities can be reused
 /// across modes while retaining focus and pointer state during redraws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DialogControl {
@@ -97,7 +97,7 @@ pub struct ImportProfileOption {
 pub(crate) struct RenameEditor {
     pub(crate) session_id: String,
     pub(crate) title: TextInput,
-    pub(crate) form: RefCell<Form<DialogControl>>,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,17 +117,18 @@ impl ConfigEntryKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfigIdEditor {
+    pub(crate) return_to: Option<Box<TargetActionsDialog>>,
     pub(crate) kind: ConfigEntryKind,
     pub(crate) old_id: String,
     pub(crate) value: TextInput,
-    pub(crate) form: RefCell<Form<DialogControl>>,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TargetActionsDialog {
     pub(crate) target_ids: Vec<String>,
     pub(crate) target_index: usize,
-    pub(crate) form: RefCell<Form<DialogControl>>,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
     pub(crate) testing: Option<String>,
     pub(crate) result: Option<(String, Result<(), String>)>,
 }
@@ -147,7 +148,7 @@ pub(crate) struct WebDialog {
     pub(crate) listener_index: usize,
     pub(crate) inspection_message: Option<String>,
     pub(crate) confirm_stop: Option<WebListenerProcess>,
-    pub(crate) form: RefCell<Form<DialogControl>>,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
 impl WebDialog {
@@ -236,7 +237,7 @@ pub(crate) struct RepositoryOriginDialog {
     pub(crate) configured_origin: String,
     pub(crate) replacement: PathInput,
     pub(crate) error: Option<String>,
-    pub(crate) form: RefCell<Form<DialogControl>>,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
     pub(crate) launch: Box<DashboardAction>,
 }
 
@@ -245,6 +246,11 @@ pub(crate) enum Confirmation {
     RepairRepositoryRemotes {
         action: Box<DashboardAction>,
         repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+        previous: Box<Mode>,
+    },
+    ConfigurationRepair {
+        session_id: String,
+        error: String,
         previous: Box<Mode>,
     },
     LaunchFailed {
@@ -305,7 +311,7 @@ pub(crate) struct ConfirmDialog {
     scroll: u16,
     max_scroll: std::cell::Cell<u16>,
     pub(crate) confirmation: Confirmation,
-    pub(crate) form: RefCell<Form<DialogControl>>,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
 impl ConfirmDialog {
@@ -326,7 +332,7 @@ pub(crate) struct ImportProgress {
     total: Option<usize>,
     pub(crate) message: String,
     last_updated: Instant,
-    pub(crate) form: RefCell<Form<DialogControl>>,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,11 +342,14 @@ pub(crate) struct ImportBundleConfirmation {
     scratch_git_roots: Vec<String>,
     has_untracked_files: bool,
     ignore_untracked: bool,
-    pub(crate) form: RefCell<Form<DialogControl>>,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
-fn dialog_form(controls: &[DialogControl], initial: DialogControl) -> RefCell<Form<DialogControl>> {
-    let mut form = Form::new();
+fn dialog_form(
+    controls: &[DialogControl],
+    initial: DialogControl,
+) -> RefCell<Dialog<DialogControl>> {
+    let mut form = Dialog::new();
     for id in controls {
         let kind = match id {
             DialogControl::Field => ControlKind::TextField,
@@ -357,9 +366,9 @@ fn dialog_form(controls: &[DialogControl], initial: DialogControl) -> RefCell<Fo
     RefCell::new(form)
 }
 
-fn confirmation_form(confirmation: &Confirmation) -> RefCell<Form<DialogControl>> {
+fn confirmation_form(confirmation: &Confirmation) -> RefCell<Dialog<DialogControl>> {
     let buttons = confirmation_buttons(confirmation);
-    let mut form = Form::new();
+    let mut form = Dialog::new();
     for index in 0..buttons.len() {
         form.declare(DialogControl::ConfirmButton(index), ControlKind::Button);
     }
@@ -372,8 +381,8 @@ fn target_actions_form(
     target_count: usize,
     selected: usize,
     initial: DialogControl,
-) -> RefCell<Form<DialogControl>> {
-    let mut form = Form::new();
+) -> RefCell<Dialog<DialogControl>> {
+    let mut form = Dialog::new();
     form.declare(
         DialogControl::TargetList,
         ControlKind::ChoiceList {
@@ -405,7 +414,7 @@ fn sync_target_actions_form(dialog: &mut TargetActionsDialog) {
     form.end_frame(DialogControl::TargetList);
 }
 
-fn clear_dialog_form_geometry(form: &mut Form<DialogControl>) {
+fn clear_dialog_form_geometry(form: &mut Dialog<DialogControl>) {
     // Keep declarations available for keyboard input while the modal is
     // clipped, but discard hitboxes and any in-flight mouse gesture.
     form.cancel_pointer();
@@ -418,6 +427,7 @@ fn clear_dialog_form_geometry(form: &mut Form<DialogControl>) {
 pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
     match confirmation {
         Confirmation::RepairRepositoryRemotes { .. } => &["Cancel", "Repair and continue"],
+        Confirmation::ConfigurationRepair { .. } => &["Dismiss", "Open transcript", "Open setup"],
         Confirmation::LaunchFailed { retry: Some(_), .. } => &["Dismiss", "Retry launch"],
         Confirmation::LaunchFailed { .. } => &["Dismiss"],
         Confirmation::Dismiss {
@@ -458,7 +468,13 @@ fn primary_button(labels: &[&str]) -> usize {
 fn initial_confirmation_button(confirmation: &Confirmation, labels: &[&str]) -> usize {
     if matches!(
         confirmation,
-        Confirmation::Dismiss { .. } | Confirmation::LaunchFailed { .. }
+        Confirmation::Dismiss { .. }
+            | Confirmation::ConfigurationRepair { .. }
+            | Confirmation::LaunchFailed { .. }
+            | Confirmation::ForceDestroy { .. }
+            | Confirmation::DestroyStopped { .. }
+            | Confirmation::CloseFailed { .. }
+            | Confirmation::RepairRepositoryRemotes { .. }
     ) {
         0
     } else {
@@ -662,7 +678,7 @@ pub(crate) fn render_import_bundle_confirmation(
         );
     }
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         footer,
         &[
@@ -703,7 +719,7 @@ pub(crate) fn render_rename_editor(
         dismissible_modal_title(&mut form, popup, "Rename session", theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
     TextField::render(frame, field, &editor.title, &mut form, DialogControl::Field);
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         footer,
         &[
@@ -751,7 +767,7 @@ pub(crate) fn render_config_id_editor(
     );
     frame.render_widget(theme::modal().title(title), popup);
     TextField::render(frame, field, &editor.value, &mut form, DialogControl::Field);
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         footer,
         &[
@@ -861,7 +877,7 @@ pub(crate) fn render_target_actions(
         &mut form,
         DialogControl::TargetList,
     );
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         footer,
         &[
@@ -1051,7 +1067,7 @@ pub(crate) fn render_web_dialog(
         } else {
             Rect::default()
         };
-        ButtonRow::render(frame, footer, buttons, &mut form);
+        Dialog::render_actions(frame, footer, buttons, &mut form);
     }
     form.end_frame(dialog.default_control());
 }
@@ -1162,7 +1178,7 @@ pub(crate) fn render_repository_origin(
         &mut form,
         DialogControl::Field,
     );
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         footer,
         &[
@@ -1201,6 +1217,17 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                     ]
                 })
                 .collect(),
+        ),
+        Confirmation::ConfigurationRepair { error, .. } => (
+            " Configuration repair ",
+            vec![
+                Line::raw(error.clone()),
+                Line::raw(""),
+                Line::raw(
+                    "Open setup to restore the named entries. The session and its history are retained.",
+                ),
+                Line::raw("PgUp/PgDn scroll the full details. Esc dismisses."),
+            ],
         ),
         Confirmation::LaunchFailed { error, retry, .. } => {
             let mut lines = vec![
@@ -1386,7 +1413,9 @@ pub(crate) fn render_confirmation(
     let confirmation = &dialog.confirmation;
     // Minimum height per dialog; `popup_height` grows it to fit wrapped content.
     let nominal: u16 = match confirmation {
-        Confirmation::LaunchFailed { .. } | Confirmation::RepairRepositoryRemotes { .. } => 16,
+        Confirmation::ConfigurationRepair { .. }
+        | Confirmation::LaunchFailed { .. }
+        | Confirmation::RepairRepositoryRemotes { .. } => 16,
         Confirmation::Dismiss { .. } => 8,
         Confirmation::DirtyLocal { .. } => 11,
         Confirmation::CloseFailed { .. } => 12,
@@ -1445,7 +1474,7 @@ pub(crate) fn render_confirmation(
         popup,
     );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         footer,
         &buttons
@@ -1663,6 +1692,7 @@ impl DashboardState {
         };
         self.mode = Mode::ConfigId(ConfigIdEditor {
             kind: ConfigEntryKind::Profile,
+            return_to: None,
             value: TextInput::from_value(old_id.clone()).with_max_chars(64),
             old_id,
             form: dialog_form(
@@ -1764,6 +1794,7 @@ impl DashboardState {
                     DialogControl::TargetRename => {
                         self.mode = Mode::ConfigId(ConfigIdEditor {
                             kind: ConfigEntryKind::Target,
+                            return_to: Some(Box::new(dialog)),
                             value: TextInput::from_value(target_id.clone()).with_max_chars(64),
                             old_id: target_id,
                             form: dialog_form(
@@ -1809,10 +1840,14 @@ impl DashboardState {
         );
         let interaction = result.action;
         match interaction {
-            Some(Interaction::Cancel) => {
-                self.cancel_modal();
+            Some(Interaction::Cancel | Interaction::Activate(DialogControl::Cancel)) => {
+                if let Some(parent) = editor.return_to.take() {
+                    self.mode = Mode::TargetActions(*parent);
+                    self.mark_render_changed();
+                } else {
+                    self.cancel_modal();
+                }
             }
-            Some(Interaction::Activate(DialogControl::Cancel)) => self.cancel_modal(),
             Some(Interaction::Edit(DialogControl::Field, edit)) => {
                 if TextField::apply(&mut editor.value, edit) == Outcome::Changed {
                     crate::mark_render_changed_cells(
@@ -2254,7 +2289,9 @@ impl DashboardState {
         }
         if matches!(
             dialog.confirmation,
-            Confirmation::LaunchFailed { .. } | Confirmation::RepairRepositoryRemotes { .. }
+            Confirmation::ConfigurationRepair { .. }
+                | Confirmation::LaunchFailed { .. }
+                | Confirmation::RepairRepositoryRemotes { .. }
         ) && let Event::Key(key) = &event
             && key.kind != crossterm::event::KeyEventKind::Release
         {
@@ -2292,6 +2329,7 @@ impl DashboardState {
             Some(Interaction::Cancel) => match dialog.confirmation {
                 Confirmation::Dismiss { mode, .. }
                 | Confirmation::RepairRepositoryRemotes { previous: mode, .. }
+                | Confirmation::ConfigurationRepair { previous: mode, .. }
                 | Confirmation::LaunchFailed { previous: mode, .. } => {
                     self.restore_dismissed_mode(mode);
                 }
@@ -2315,6 +2353,25 @@ impl DashboardState {
         index: usize,
     ) -> DashboardAction {
         match (confirmation, index) {
+            (
+                Confirmation::ConfigurationRepair {
+                    session_id,
+                    previous,
+                    ..
+                },
+                index,
+            ) => {
+                self.restore_dismissed_mode(previous);
+                match index {
+                    1 => DashboardAction::Open { session_id },
+                    2 => {
+                        self.begin_setup();
+                        DashboardAction::None
+                    }
+                    _ => DashboardAction::None,
+                }
+            }
+
             (
                 Confirmation::RepairRepositoryRemotes {
                     action, previous, ..
@@ -2486,6 +2543,7 @@ mod tests {
             vec![repair.clone()],
             retry.clone(),
         );
+        dashboard.handle_key(key(KeyCode::Right));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::RepairRepositoryRemotes {
@@ -2495,6 +2553,32 @@ mod tests {
             }
         );
         assert_eq!(dashboard.mode, previous);
+    }
+
+    #[test]
+    fn configuration_repair_can_open_setup_or_preserved_transcript() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        for choice in [1, 2] {
+            let action = dashboard.activate_confirmation_button(
+                Confirmation::ConfigurationRepair {
+                    session_id: "session-1".into(),
+                    error: "missing bundle".into(),
+                    previous: Box::new(Mode::Dashboard),
+                },
+                choice,
+            );
+            if choice == 1 {
+                assert_eq!(
+                    action,
+                    DashboardAction::Open {
+                        session_id: "session-1".into()
+                    }
+                );
+            } else {
+                assert_eq!(action, DashboardAction::None);
+                assert!(matches!(dashboard.mode, Mode::Setup(_)));
+            }
+        }
     }
 
     #[test]
@@ -3094,6 +3178,13 @@ mod tests {
             dashboard.handle_key(control_key('c')),
             DashboardAction::None
         );
+        assert!(dashboard.dialog_confirmation_open());
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(!dashboard.dialog_confirmation_open());
+        assert_eq!(rename_focus(&dashboard), DialogControl::Field);
+        dashboard.handle_key(key(KeyCode::Esc));
+        dashboard.handle_key(key(KeyCode::Right));
+        dashboard.handle_key(key(KeyCode::Enter));
         assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 
@@ -3591,6 +3682,8 @@ mod tests {
     fn failed_stop_offers_retry_and_direct_force_stop() {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.show_close_failure("session-1".into(), "archive unavailable");
+        dashboard.handle_key(key(KeyCode::Right));
+        dashboard.handle_key(key(KeyCode::Right));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::Close {
@@ -3598,7 +3691,7 @@ mod tests {
             }
         );
         dashboard.show_close_failure("session-1".into(), "archive unavailable");
-        dashboard.handle_key(key(KeyCode::Left));
+        dashboard.handle_key(key(KeyCode::Right));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::ForceStop {
@@ -3656,6 +3749,11 @@ mod tests {
             panic!("expected destroy confirmation");
         };
         assert_eq!(confirmation_buttons(&dialog.confirmation), &["No", "Yes"]);
+        assert_eq!(
+            dialog.form.borrow().focused(),
+            Some(DialogControl::ConfirmButton(0))
+        );
+        dashboard.handle_key(key(KeyCode::Right));
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::DestroyStopped {

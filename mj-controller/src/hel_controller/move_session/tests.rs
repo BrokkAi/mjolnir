@@ -588,6 +588,8 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         worker_root: worker_root.clone(),
     };
     let mut session = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
+    // This relay belongs to a raw checkout, not an unconfigured bundle.
+    session.project_directory = Some(directory.path().to_path_buf());
     session.target_template_id = "local-bare".into();
     session.target = Some(target.clone());
     session.native_session_id = None;

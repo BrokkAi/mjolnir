@@ -2372,7 +2372,8 @@ fn add_summary_tool_rows(
     let synthetic_lines = render_transcript_entry(&synthetic, width, TranscriptRenderMode::Rich);
     let synthetic_body_start = synthetic_lines
         .len()
-        .saturating_sub(body.len().saturating_add(1));
+        .saturating_sub(body.len().saturating_add(1))
+        .saturating_add(thought_lines);
     let source = tools
         .iter()
         .map(|tool| tool.tool_summary.as_deref().unwrap_or(&tool.text))
@@ -2390,9 +2391,6 @@ fn add_summary_tool_rows(
     let mut search_from = 0usize;
     for (body_index, line) in body.iter().enumerate() {
         let line_index = synthetic_body_start.saturating_add(body_index);
-        if line_index < skip || line_index >= lines.len() {
-            continue;
-        }
         let line_text = row_text(line);
         let content = line_text
             .strip_prefix(ROLE_GUTTER)
@@ -2410,6 +2408,11 @@ fn add_summary_tool_rows(
         };
         let match_end = match_start.saturating_add(content.len());
         search_from = match_end;
+        // Offscreen rows still consume source text so repeated summaries
+        // remain associated with the call that actually occupies each row.
+        if line_index < skip || line_index >= lines.len() {
+            continue;
+        }
         let row = inner
             .y
             .saturating_add(u16::try_from(screen_start + line_index - skip).unwrap_or(u16::MAX));

@@ -6,8 +6,7 @@ use std::cell::{Cell, RefCell};
 use crate::widgets::dismissible_modal_title;
 use crossterm::event::{Event, KeyEventKind};
 use mj_chat::components::{
-    ButtonRow, Checkbox, ChoiceList, ControlKind, Form, FormViewport, Interaction, Outcome,
-    TextField,
+    Checkbox, ChoiceList, ControlKind, Dialog, FormViewport, Interaction, Outcome, TextField,
 };
 use ratatui::layout::Margin;
 
@@ -23,7 +22,7 @@ pub(crate) struct ContainerEditor {
     pub(crate) source: PathInput,
     pub(crate) destination: PathInput,
     pub(crate) read_only: bool,
-    pub(crate) form: RefCell<Form<ContainerEditFocus>>,
+    pub(crate) form: RefCell<Dialog<ContainerEditFocus>>,
     pub(crate) mount_index: usize,
     pub(crate) suggestion_index: usize,
     pub(crate) error: Option<String>,
@@ -77,6 +76,23 @@ impl Row<'_> {
 }
 
 impl ContainerEditor {
+    pub(crate) fn prepare_dialog_state(&mut self) {
+        let values = vec![
+            self.cpus.to_string(),
+            self.memory.to_string(),
+            self.source.to_string(),
+            self.destination.to_string(),
+            format!("{:?}", self.mounts),
+            self.read_only.to_string(),
+        ];
+        let form = self.form.get_mut();
+        form.track_draft(values);
+        form.set_dismiss_actions(&[ContainerEditFocus::Cancel]);
+        form.set_default_action(ContainerEditFocus::Save);
+        form.set_submit(ContainerEditFocus::Cpus, ContainerEditFocus::Save);
+        form.set_submit(ContainerEditFocus::Memory, ContainerEditFocus::Save);
+    }
+
     pub(crate) fn focused(&self) -> ContainerEditFocus {
         self.form
             .borrow()
@@ -409,7 +425,7 @@ pub(crate) fn render_container_editor(
         inner.width,
         u16::from(inner.height > 0),
     );
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         footer,
         &[
@@ -445,7 +461,7 @@ impl DashboardState {
             source: PathInput::new(),
             destination: PathInput::new(),
             read_only: false,
-            form: RefCell::new(Form::default()),
+            form: RefCell::new(Dialog::default()),
             mount_index: 0,
             suggestion_index: 0,
             error: None,
@@ -484,7 +500,8 @@ impl DashboardState {
     ) -> DashboardAction {
         use ContainerEditFocus::*;
         // Removing a directory is a domain operation on the focused list.
-        if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press && key.modifiers.is_empty() && matches!(key.code, KeyCode::Delete | KeyCode::Char('d')))
+        if !editor.form.borrow().confirmation_open()
+            && matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press && key.modifiers.is_empty() && matches!(key.code, KeyCode::Delete | KeyCode::Char('d')))
             && matches!(editor.focused(), Mounts | Suggestions)
         {
             editor.remove_selected();

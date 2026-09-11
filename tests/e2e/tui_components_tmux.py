@@ -361,7 +361,7 @@ def overlay_container_target(lab: Lab) -> None:
 
 
 def create_session(
-    lab: Lab, tmux: TmuxController, evidence: Evidence, seed: int, port: int
+    lab: Lab, tmux: TmuxController, evidence: Evidence, seed: int, port: int, dialogs_only: bool = False
 ) -> None:
     """Create a running fake-ACP session for dashboard and chat controls."""
 
@@ -437,7 +437,8 @@ def create_session(
     tmux.wait_for(f"reliability reply: {prompt}", "delayed fake ACP reply")
 
     from tui_components_chat import run_chat_controls
-    run_chat_controls(lab, tmux, evidence, session_id)
+    if not dialogs_only:
+        run_chat_controls(lab, tmux, evidence, session_id)
     screen = tmux.capture()
     evidence.event("session-running", f"wizard Create and API prompt for {title!r}", "running session visible", "running session visible", evidence.capture("session-running", screen))
     from tui_components_dialogs import run_dialog_acceptance
@@ -447,7 +448,7 @@ def create_session(
     from tui_components_actions import save_review_settings, save_target_id, stop_and_resume
     save_target_id(lab, tmux, evidence)
     save_review_settings(lab, tmux, evidence)
-    stop_and_resume(lab, tmux, evidence, session_id)
+    stop_and_resume(lab, tmux, evidence, session_id, dialogs_only)
     tmux.release()
 
 
@@ -512,9 +513,9 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
 
 
 def run_workflow(
-    lab: Lab, tmux: TmuxController, evidence: Evidence, seed: int, port: int
+    lab: Lab, tmux: TmuxController, evidence: Evidence, seed: int, port: int, dialogs_only: bool = False
 ) -> None:
-    create_session(lab, tmux, evidence, seed, port)
+    create_session(lab, tmux, evidence, seed, port, dialogs_only)
     # The daemon owns the in-memory configuration. Stop it before the
     # lab-only target overlay so the reattached dashboard and its daemon read
     # the container-backed fixture consistently.
@@ -527,7 +528,8 @@ def run_workflow(
     tmux.wait_for_any(("Sessions", "live-components"), "dashboard after direct reattach")
 
     dashboard_dimensions(tmux, evidence)
-    sidebar_relayout(tmux, evidence)
+    if not dialogs_only:
+        sidebar_relayout(tmux, evidence)
     tmux.resize(140, 40)
     tmux.wait_for("Sessions", "dashboard restored to 140x40")
 
@@ -653,7 +655,10 @@ def run_workflow(
     )
     cancel_x, cancel_y = locate_text(drag_screen, "Cancel", last=True)
     tmux.mouse_click(cancel_x, cancel_y)
-    tmux.wait_until(lambda: "Edit container" not in tmux.capture(), "mouse Cancel to close editor")
+    tmux.wait_for("Discard unsaved changes?", "container draft protection")
+    tmux.send_key("Right")
+    tmux.send_key("Enter")
+    tmux.wait_until(lambda: "Edit container" not in tmux.capture(), "mouse Cancel and Discard close editor")
     closed_screen = tmux.capture()
     evidence.event(
         "container-mouse-cancel",
@@ -720,6 +725,7 @@ def run_workflow(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", required=True, type=int)
+    parser.add_argument("--dialogs-only", action="store_true", help="Skip unrelated chat and sidebar interaction probes")
     parser.add_argument(
         "--hel",
         type=pathlib.Path,
@@ -781,6 +787,16 @@ def main() -> int:
     print(f"live-tmux: artifacts={lab.root}", flush=True)
     try:
         port = lab.prepare(fake_acp_delay_ms=300)
+        # This lab runs a Python ACP fixture from a seeded managed cache.
+        # Satisfy only the runtime preflight; reject actual package execution.
+        fixture_bin = lab.runtime_root / "bin"
+        for name, script in {
+            "node": "#!/bin/sh\n[ \"$1\" = -e ] && exit 0\nexit 1\n",
+            "npm": "#!/bin/sh\n[ \"$1\" = --version ] && { echo 10.0.0; exit 0; }\nexit 1\n",
+        }.items():
+            executable = fixture_bin / name
+            executable.write_text(script)
+            executable.chmod(0o700)
         config_path = lab.config / "config.toml"
         config_text = config_path.read_text()
         profile = config_text.split("[profiles.fake]", 1)[1].split("[bundles.fixture]", 1)[0]
@@ -789,7 +805,7 @@ def main() -> int:
         profile = profile.replace(json.dumps(str(lab.profile)), json.dumps(str(reviewer_home)))
         config_path.write_text(config_text + "\n[profiles.reviewer]" + profile + '\n[review]\nenabled = false\ntier = "extended"\nprofile = "reviewer"\n')
         (lab.runtime_root / "fake_acp.py").write_text((REPO_ROOT / "tests/e2e/tui_components_acp.py").read_text())
-        run_workflow(lab, tmux, evidence, args.seed, port)
+        run_workflow(lab, tmux, evidence, args.seed, port, args.dialogs_only)
         evidence.finish("passed")
         lab.trace["outcome"] = "passed"
         lab.trace["finished_at"] = lab.timestamp()

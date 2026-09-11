@@ -1257,6 +1257,97 @@ fn wrapped_summary_members_rebuild_hitboxes_for_their_visible_rows() {
     assert!(chat.expanded_tool_calls.contains(&2));
 }
 
+fn click_rendered_text(chat: &mut ChatState, rows: &[String], text: &str) {
+    let (row, line, offset) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| line.find(text).map(|offset| (row, line, offset)))
+        .unwrap_or_else(|| panic!("missing {text:?} in {rows:#?}"));
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: u16::try_from(display_width(&line[..offset])).unwrap(),
+        row: u16::try_from(row).unwrap(),
+        modifiers: KeyModifiers::NONE,
+    });
+}
+
+#[test]
+fn older_and_newer_tool_groups_expand_at_their_rendered_names_after_wrapped_thoughts() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    for (start, name) in [(1, "older"), (5, "newer")] {
+        let mut tool = completed_tool(start + 1, &format!("{name} provider title"));
+        tool.tool_summary = Some(format!("{name}-command"));
+        tool.tool_content = vec![format!("{name} tool details")];
+        chat.entries.extend([
+            thought(
+                start,
+                &format!("{name} thought with enough words to wrap across several rows"),
+            ),
+            tool,
+            completed_tool(start + 2, &format!("{name}-companion")),
+            ChatEntry::plain(start + 3, ChatRole::Agent, format!("{name} response")),
+        ]);
+    }
+
+    for name in ["older", "newer"] {
+        let rows = drawn_transcript(&mut chat, 36, 48);
+        click_rendered_text(&mut chat, &rows, &format!("{name}-command"));
+        let rows = drawn_transcript(&mut chat, 36, 48);
+        assert!(shows(&rows, &format!("{name} provider title")), "{rows:#?}");
+        assert!(shows(&rows, &format!("{name} tool details")), "{rows:#?}");
+        let other = if name == "older" { "newer" } else { "older" };
+        assert!(!shows(&rows, &format!("{other} tool details")));
+
+        click_rendered_text(&mut chat, &rows, &format!("{name} provider title"));
+        let rows = drawn_transcript(&mut chat, 36, 48);
+        assert!(shows(&rows, &format!("{name}-command")));
+        assert!(!shows(&rows, &format!("{name} tool details")));
+        assert!(chat.expanded_tool_calls.is_empty());
+    }
+}
+
+#[test]
+fn clicking_thought_text_above_a_tool_group_does_not_expand_a_call() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.extend([
+        thought(1, "thinking about tools"),
+        completed_tool(2, "first-command"),
+        completed_tool(3, "second-command"),
+    ]);
+    let rows = drawn_transcript(&mut chat, 60, 24);
+    click_rendered_text(&mut chat, &rows, "thinking about tools");
+    assert!(chat.expanded_tool_calls.is_empty());
+    assert_eq!(drawn_transcript(&mut chat, 60, 24), rows);
+}
+
+#[test]
+fn partially_scrolled_repeated_tool_names_expand_the_visible_call() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    for seq in 1..=4 {
+        let mut tool = completed_tool(seq, &format!("provider title {seq}"));
+        tool.tool_summary = Some("repeat-command".to_owned());
+        tool.tool_content = vec![format!("details for call {seq}")];
+        chat.entries.push(tool);
+    }
+    chat.entries.push(ChatEntry::plain(
+        5,
+        ChatRole::Agent,
+        "later response\n".repeat(30),
+    ));
+    drawn_transcript(&mut chat, 24, 16);
+    // The first tool's summary row is above the viewport; the second and
+    // third rows have identical text, including their trailing comma.
+    chat.anchor = TranscriptAnchor::Row { entry: 0, row: 2 };
+    let rows = drawn_transcript(&mut chat, 24, 16);
+    assert!(rows[1].contains("repeat-command,"), "{rows:#?}");
+    click_rendered_text(&mut chat, &rows, "repeat-command");
+    assert_eq!(chat.expanded_tool_calls, BTreeSet::from([2]));
+    let rendered = transcript_text(&mut chat, 24);
+    assert!(shows(&rendered, "provider title 2"));
+    assert!(shows(&rendered, "details for call 2"));
+    assert!(!shows(&rendered, "details for call 1"));
+}
+
 #[test]
 fn expanded_tool_uses_full_provider_title_and_details_in_rich_mode() {
     let mut chat = ChatState::new(&snapshot(), &[]);

@@ -481,7 +481,7 @@ fn new_session_wizard_renders_and_focuses_explicit_navigation_buttons() {
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new-session wizard");
     };
-    assert_eq!(wizard.focus, WizardFocus::Cancel);
+    assert_eq!(wizard.form.borrow().focused(), Some(WizardControl::Cancel));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::None
@@ -1137,6 +1137,13 @@ fn dashboard_at_mount_editor(source: &str) -> DashboardState {
     dashboard
 }
 
+fn new_wizard_focus(dashboard: &DashboardState) -> Option<WizardControl> {
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected new wizard")
+    };
+    wizard.form.borrow().focused()
+}
+
 fn wizard_mounts(dashboard: &DashboardState) -> &MountWizard {
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected the new-session wizard");
@@ -1149,7 +1156,10 @@ fn the_read_only_checkbox_rides_the_mount_into_the_created_session() {
     let mut dashboard = dashboard_at_mount_editor("/opt/cache");
 
     dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(wizard_mounts(&dashboard).focus, MountFocus::ReadOnly);
+    assert_eq!(
+        new_wizard_focus(&dashboard),
+        Some(WizardControl::MountReadOnly)
+    );
     dashboard.handle_key(key(KeyCode::Char(' ')));
     assert!(wizard_mounts(&dashboard).read_only);
 
@@ -1211,7 +1221,7 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
     // it and lands on Cancel. Space therefore belongs to the button rather
     // than attempting to toggle the forced read-only state.
     assert_eq!(wizard.form.borrow().focused(), Some(WizardControl::Cancel));
-    assert_eq!(wizard_mounts(&dashboard).focus, MountFocus::Cancel);
+    assert_eq!(new_wizard_focus(&dashboard), Some(WizardControl::Cancel));
     assert!(
         wizard_mounts(&dashboard).read_only,
         "a forced source must stay read-only"
@@ -1233,6 +1243,11 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
         dashboard.handle_key(key(KeyCode::Esc)),
         DashboardAction::None
     );
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Review));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(dashboard.dialog_confirmation_open());
+    dashboard.handle_key(key(KeyCode::Right));
+    dashboard.handle_key(key(KeyCode::Enter));
     assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
@@ -1419,7 +1434,10 @@ fn failed_source_validation_does_not_add_new_or_resume_mounts() {
     };
     assert!(wizard.mounts.mounts.is_empty());
     assert_eq!(wizard.mounts.source, "/missing");
-    assert_eq!(wizard.mounts.focus, MountFocus::Source);
+    assert_eq!(
+        wizard.form.borrow().focused(),
+        Some(WizardControl::MountSource)
+    );
     assert_eq!(
         wizard.mounts.error.as_deref(),
         Some("source path /missing does not exist or is not a directory")
@@ -1448,7 +1466,10 @@ fn failed_source_validation_does_not_add_new_or_resume_mounts() {
     };
     assert!(wizard.mounts.mounts.is_empty());
     assert_eq!(wizard.mounts.source, "/missing");
-    assert_eq!(wizard.mounts.focus, MountFocus::Source);
+    assert_eq!(
+        wizard.form.borrow().focused(),
+        Some(WizardControl::MountSource)
+    );
 }
 
 #[test]
@@ -2033,7 +2054,10 @@ fn stale_move_preparation_is_ignored_after_back_and_reentering_review() {
     // Submit is disabled while loading; Tab reaches Back from the form's
     // fallback focus. Returning to the target picker invalidates the request.
     dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(resume_wizard(&dashboard).review_focus, ReviewFocus::Back);
+    assert_eq!(
+        resume_wizard(&dashboard).form.borrow().focused(),
+        Some(WizardControl::Back)
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::None
@@ -2252,7 +2276,10 @@ fn new_target_step_minus_halves_container_size_when_focus_is_off_content() {
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new wizard after tab");
     };
-    assert_ne!(wizard.focus, WizardFocus::Content);
+    assert_ne!(
+        wizard.form.borrow().focused(),
+        Some(WizardControl::TargetList)
+    );
 
     dashboard.handle_key(key(KeyCode::Char('-')));
     let Mode::New(wizard) = &dashboard.mode else {
@@ -2679,4 +2706,29 @@ fn container_destination_rejects_home_shorthand() {
             .unwrap()
             .contains("container path")
     );
+}
+
+#[test]
+fn revisiting_or_reselecting_a_target_preserves_edited_resources() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.begin_new();
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Char('-')));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("new wizard")
+    };
+    let edited = wizard.resource_allocation.clone();
+    dashboard.handle_key(key(KeyCode::Home));
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    assert_eq!(wizard.resource_allocation, edited);
+    wizard.form.get_mut().focus(WizardControl::Back);
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("new wizard")
+    };
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert_eq!(wizard.resource_allocation, edited);
 }

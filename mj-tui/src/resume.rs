@@ -16,9 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use mj_chat::components::{
-    ButtonRow, ChoiceList, ControlKind, Form, Interaction, TabStrip, TextField,
-};
+use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TabStrip, TextField};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
@@ -165,7 +163,7 @@ pub(crate) struct ResumeDialog {
     pub(crate) selected: Option<ResumeRowKey>,
     pub(crate) row_index: usize,
     pub(crate) search: TextInput,
-    pub(crate) form: RefCell<Form<ResumeFocus>>,
+    pub(crate) form: RefCell<Dialog<ResumeFocus>>,
     pub(crate) opened_at: Instant,
 }
 
@@ -200,6 +198,10 @@ impl ResumeDialog {
         );
         form.declare_with_enabled(Cancel, ControlKind::Button, true);
         form.declare_with_enabled(Open, ControlKind::Button, self.can_open(rows));
+        form.set_list_identity(
+            ResumeFocus::Sessions,
+            format!("{:?}", rows.iter().map(|row| &row.key).collect::<Vec<_>>()),
+        );
         form.end_frame(Sessions);
     }
 
@@ -525,7 +527,7 @@ impl DashboardState {
             selected: None,
             row_index: 0,
             search: TextInput::new(),
-            form: RefCell::new(Form::default()),
+            form: RefCell::new(Dialog::default()),
             opened_at: Instant::now(),
         });
         self.rebuild_resume_rows();
@@ -1007,7 +1009,7 @@ pub(crate) fn render_resume_dialog(
         rows[3].width,
         u16::from(rows[3].height > 0),
     );
-    ButtonRow::render(
+    Dialog::render_actions(
         frame,
         button_area,
         &[
