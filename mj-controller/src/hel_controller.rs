@@ -473,7 +473,14 @@ impl Controller {
     pub fn load() -> Result<Self> {
         let config = HelConfig::load()?;
         let state = HelState::load()?;
-        state.validate_against_config(&config)?;
+        // Missing session dependencies must not lock users out of the tools
+        // needed to repair them. Operations validate the session they act on.
+        state.validate()?;
+        for session in state.sessions.values() {
+            if let Some(issue) = session.configuration_issue(&config) {
+                tracing::warn!(session_id = %session.id, "{issue}");
+            }
+        }
         Ok(Self { config, state })
     }
 
@@ -1824,6 +1831,77 @@ mod tests {
     }
 
     const UNPERSISTABLE_SESSION_CHILD: &str = "MJ_TEST_UNPERSISTABLE_SESSION_CHILD";
+
+    #[test]
+    fn missing_bundle_does_not_block_controller_or_other_sessions() {
+        const CHILD: &str = "MJ_TEST_MISSING_BUNDLE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            run_registration_child(
+                CHILD,
+                "missing_bundle_does_not_block_controller_or_other_sessions",
+                directory.path(),
+            );
+            return;
+        }
+        let _writer = hel::hel_database::install_isolated_test_writer();
+        let mut controller = Controller {
+            config: registration_config(),
+            state: HelState::default(),
+        };
+        let bundle = controller.config.bundles["project"].clone();
+        controller
+            .config
+            .bundles
+            .insert("other".into(), bundle.clone());
+        controller.config.save().unwrap();
+        let affected = controller
+            .register_session_with_resources(
+                "codex",
+                "project",
+                "podman",
+                "affected",
+                launch_options(Vec::new()),
+            )
+            .unwrap();
+        let healthy = controller
+            .register_session_with_resources(
+                "codex",
+                "other",
+                "podman",
+                "healthy",
+                launch_options(Vec::new()),
+            )
+            .unwrap();
+        controller.config.bundles.remove("project");
+        controller.config.save().unwrap();
+        let loaded = Controller::load().unwrap();
+        assert_eq!(loaded.state.sessions.len(), 2);
+        assert!(
+            loaded.state.sessions[&healthy]
+                .configuration_issue(&loaded.config)
+                .is_none()
+        );
+        let issue = loaded.reconnect_command(&affected).unwrap_err().to_string();
+        assert!(issue.contains("missing bundle"), "{issue}");
+        assert!(issue.contains("config.toml"), "{issue}");
+        // Loading must not turn a configuration problem into a persisted lifecycle failure.
+        assert_eq!(
+            loaded.state.sessions[&affected],
+            controller.state.sessions[&affected]
+        );
+        HelConfig::update(|config| {
+            config.bundles.insert("project".into(), bundle);
+            Ok(())
+        })
+        .unwrap();
+        let repaired = Controller::load().unwrap();
+        assert!(
+            repaired.state.sessions[&affected]
+                .configuration_issue(&repaired.config)
+                .is_none()
+        );
+    }
 
     const CONFIG_ID_RENAME_CHILD: &str = "MJ_TEST_CONFIG_ID_RENAME_CHILD";
 

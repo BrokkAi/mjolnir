@@ -2,13 +2,12 @@
 
 This is the operational contract for hosts that run Mjolnir Docker targets.
 Mjolnir drives the Docker CLI and requires it to reach a Linux Docker daemon.
-For `local-docker`, the daemon shares a filesystem host with the attached
-directories and Mjolnir's cache. For `ssh-docker`, the CLI, daemon, overlay
-backing directories, and attached source paths are all on the configured SSH
-host; the controller does not install Docker locally or use a Docker API
-library. The `--smoke` check below is authoritative for environments, such as
-desktop virtual machines, where the CLI endpoint and host filesystem may not be
-the same machine.
+For `local-docker`, attached source directories must be visible inside the
+Docker daemon's filesystem. Colima on macOS supports this through its shared
+home directory. OverlayFS writable storage lives in Docker-managed volumes
+inside the Linux VM, not in the macOS cache. For `ssh-docker`, attached sources
+are on the configured SSH host. The controller uses the Docker CLI and does not
+install Docker locally for an SSH target.
 
 ## Configure a target
 
@@ -77,16 +76,19 @@ docker volume create --driver local \
 ```
 
 Docker's built-in local volume driver passes these options to the Linux mount
-operation. The upper and work directories live below
-`~/.cache/mjolnir/docker-overlays/<container-name>` on the Docker filesystem
-host. For `ssh-docker`, that means the remote user's cache directory, not the
-controller's cache. Mjolnir records an ownership marker there, verifies labels
-before reusing a volume, and refuses a colliding foreign volume or backing
-directory.
+operation. The upper and work directories live in a separate labeled Docker
+backing volume on the daemon's Linux filesystem. A short-lived helper using the
+configured image creates these directories; it requires no privileged mode. The source
+remains the shared host directory: Mjolnir does not copy it into the volume.
+Mjolnir verifies ownership labels before reusing or removing resources and
+refuses colliding foreign volumes or helper containers. The writable layer
+preserves the source directory's ownership and permissions. As with ordinary
+Docker mounts, attached files must permit access by the image's configured user;
+Mjolnir does not rewrite file ownership or run the session as root.
 
 On a failed launch, Mjolnir removes only resources carrying the expected session
 identity. On normal close it removes the container first, then its labeled
-volumes, then the upper/work directory. It retains the backing directory if
+volumes, then the backing volume. It retains the backing volume if
 the container or a volume could not be removed, preventing deletion beneath a
 live mount.
 
@@ -119,11 +121,12 @@ mj doctor --json --smoke
 ```
 
 The regular check verifies the daemon and each configured image. The smoke
-check also creates its temporary lower directory on the Docker filesystem host,
-attaches it through the managed OverlayFS path, writes through the container
-view, confirms that the lower directory did not change, and removes the
-container, volume, and backing directory. Resolve every `fixable` result before
-launching a session.
+check creates its temporary lower directory under the user's shared home on
+macOS, or in the host temporary directory on Linux. It then attaches it through
+the managed OverlayFS path, writes through the container view, confirms that the lower directory did not change, and removes the
+container, overlay volume, and backing volume. Source directories outside
+Colima's shared locations must be shared in Colima's configuration before they
+can be attached. Resolve every `fixable` result before launching a session.
 
 ## Git clone cache and recovery
 

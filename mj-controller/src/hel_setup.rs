@@ -5,7 +5,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 
 use crate::hel_doctor::{
     CheckStatus, DoctorCheck, DoctorOptions, all_ready, apple_container_daemon_check,
@@ -15,7 +15,8 @@ use crate::hel_doctor::{
 use hel::hel_config::harness_authentication_marker;
 use hel::hel_config::{
     AwsAddressSource, ContainerTemplate, HarnessKind, HarnessProfile, HelConfig, PermissionMode,
-    ProjectBundle, ProjectRepository, SshConnection, TargetTemplate, validate_id,
+    ProjectBundle, ProjectRepository, SshConnection, TargetTemplate, unique_config_id as unique_id,
+    validate_id,
 };
 use hel::hel_targets::{
     CancellableProcessExecutor, CommandExecutor, CommandSpec,
@@ -211,10 +212,15 @@ pub fn run_setup_dialog(config_path: &Path) -> Result<SetupOutcome> {
 
 pub fn discover_current(executor: &impl CommandExecutor) -> SetupDiscovery {
     let home = dirs::home_dir();
-    let overrides = HarnessKind::ALL.into_iter().filter_map(|kind| {
-        std::env::var_os(kind.home_env()).map(|path| (kind, kind.home_from_environment(path)))
-    });
-    let homes = discover_harness_homes_with_executor(home.as_deref(), overrides, executor);
+    let overrides = HarnessKind::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            std::env::var_os(kind.home_env()).map(|path| (kind, kind.home_from_environment(path)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut homes =
+        discover_harness_homes_with_executor(home.as_deref(), overrides.clone(), executor);
+    discover_installed_harnesses(home.as_deref(), &overrides, &mut homes, executor);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     SetupDiscovery {
@@ -271,6 +277,50 @@ pub fn ssh_config_aliases(contents: &str) -> Vec<String> {
         }
     }
     aliases
+}
+
+/// A newly installed CLI may not create its profile directory until login.
+/// Run these probes through setup's bounded, cancellable executor.
+fn discover_installed_harnesses(
+    user_home: Option<&Path>,
+    overrides: &BTreeMap<HarnessKind, PathBuf>,
+    homes: &mut Vec<DiscoveredHome>,
+    executor: &impl CommandExecutor,
+) {
+    for kind in HarnessKind::ALL {
+        if homes.iter().any(|home| home.kind == kind) {
+            continue;
+        }
+        let Some(home) = overrides
+            .get(&kind)
+            .cloned()
+            .or_else(|| user_home.map(|home| home.join(kind.default_home_leaf())))
+        else {
+            continue;
+        };
+        let profile = HarnessProfile {
+            enabled: true,
+            kind,
+            home: home.clone(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        };
+        let (program, _) = hel::hel_credentials::login_command(&profile);
+        let probe = CommandSpec::new(program, ["--version"])
+            .purpose("detect installed harness before first login");
+        match executor.execute(&probe) {
+            Ok(output) if output.status == 0 => homes.push(DiscoveredHome {
+                kind,
+                path: home,
+                authenticated: false,
+            }),
+            Ok(_) => {}
+            Err(error) => tracing::debug!(
+                harness = kind.id(),
+                "installation probe unavailable: {error:#}"
+            ),
+        }
+    }
 }
 
 pub fn discover_harness_homes(
@@ -695,22 +745,6 @@ fn default_ssh_workspace_prefix() -> PathBuf {
     PathBuf::from(".local/share/hel/workspaces")
 }
 
-/// The first free id at or after `base_id`, so building a config never drops an
-/// entry by inserting over one that is already there.
-fn unique_id<T>(entries: &BTreeMap<String, T>, base_id: &str) -> String {
-    if !entries.contains_key(base_id) {
-        return base_id.to_owned();
-    }
-    let mut number = 2;
-    loop {
-        let candidate = format!("{base_id}-{number}");
-        if !entries.contains_key(&candidate) {
-            return candidate;
-        }
-        number += 1;
-    }
-}
-
 fn config_id(value: &str) -> String {
     let mut id = value
         .chars()
@@ -757,6 +791,7 @@ fn run_setup_dialog_inner(
     smoke_executor: &impl CommandExecutor,
     probe_executor: &impl CommandExecutor,
 ) -> Result<SetupOutcome> {
+    let existing = HelConfig::load_from(config_path)?;
     writeln!(output, "Welcome to Mjolnir setup.")?;
     writeln!(output)?;
     write_discovered_homes(output, &discovery.homes)?;
@@ -810,9 +845,17 @@ fn run_setup_dialog_inner(
         ssh.as_ref(),
     );
     config.validate()?;
+    let additions = reconcile_setup(input, output, &existing, config)?;
+    let runtimes = runtimes
+        .into_iter()
+        .filter(|(runtime, image)| {
+            let (_, target) = local_runtime_target(*runtime, image);
+            additions.targets.values().any(|added| added == &target)
+        })
+        .collect::<Vec<_>>();
 
     writeln!(output)?;
-    write_summary(output, config_path, &config, &runtimes)?;
+    write_summary(output, config_path, &additions, &runtimes)?;
     let confirmation = prompt(input, output, "Write this configuration? [y/N]: ")?;
     if !matches!(confirmation.to_ascii_lowercase().as_str(), "y" | "yes") {
         writeln!(output, "Setup cancelled.")?;
@@ -820,7 +863,9 @@ fn run_setup_dialog_inner(
     }
 
     writeln!(output, "Writing {}...", config_path.display())?;
-    config.save_to(config_path)?;
+    HelConfig::update_to(config_path, |latest| {
+        apply_setup_additions(latest, &additions)
+    })?;
     // A failed smoke test is a fixable prerequisite, not a reason to abandon
     // the run: the configuration is already written, and this is exactly when
     // the closing report's remediations matter most.
@@ -840,6 +885,90 @@ fn run_setup_dialog_inner(
     )?;
     writeln!(output, "Press n to start your first session.")?;
     Ok(SetupOutcome::Written)
+}
+
+/// Setup only adds entries. Existing identifiers may belong to live sessions.
+fn reconcile_setup(
+    input: &mut impl SetupPrompter,
+    output: &mut impl Write,
+    existing: &HelConfig,
+    discovered: HelConfig,
+) -> Result<HelConfig> {
+    let mut additions = existing.setup_additions(&discovered);
+    for id in additions.profiles.keys() {
+        writeln!(output, "Adding discovered profile {id}.")?;
+    }
+    for id in additions.bundles.keys() {
+        writeln!(output, "Adding repository bundle {id}.")?;
+    }
+    for (id, target) in &discovered.targets {
+        if !existing.targets.contains_key(id) {
+            continue;
+        }
+        let alternate = additions
+            .targets
+            .iter()
+            .find(|(_, added)| *added == target)
+            .map(|(id, _)| id.clone());
+        let Some(alternate) = alternate else { continue };
+        writeln!(
+            output,
+            "Target {id} already has different settings. Existing sessions will keep using it."
+        )?;
+        let answer = prompt(
+            input,
+            output,
+            &format!("Keep {id}, or add the discovered settings as {alternate}? [K/a]: "),
+        )?;
+        if !matches!(answer.to_ascii_lowercase().as_str(), "a" | "add") {
+            additions.targets.remove(&alternate);
+            writeln!(
+                output,
+                "Keeping target {id}; discovered settings were not added."
+            )?;
+        }
+    }
+    Ok(additions)
+}
+
+fn apply_setup_additions(latest: &mut HelConfig, additions: &HelConfig) -> Result<()> {
+    fn add<T: Clone>(
+        section: &str,
+        latest: &mut BTreeMap<String, T>,
+        additions: &BTreeMap<String, T>,
+        same: impl Fn(&T, &T) -> bool,
+    ) -> Result<()> {
+        for (id, value) in additions {
+            if latest.values().any(|existing| same(existing, value)) {
+                continue;
+            }
+            ensure!(
+                !latest.contains_key(id),
+                "{section} {id:?} changed while setup was open; no configuration was written. Rerun mj setup to review the current settings"
+            );
+            latest.insert(id.clone(), value.clone());
+        }
+        Ok(())
+    }
+    add(
+        "profile",
+        &mut latest.profiles,
+        &additions.profiles,
+        HarnessProfile::same_installation,
+    )?;
+    add(
+        "bundle",
+        &mut latest.bundles,
+        &additions.bundles,
+        PartialEq::eq,
+    )?;
+    add(
+        "target",
+        &mut latest.targets,
+        &additions.targets,
+        PartialEq::eq,
+    )?;
+    latest.validate()
 }
 
 fn write_discovered_homes(output: &mut impl Write, homes: &[DiscoveredHome]) -> Result<()> {
@@ -1217,25 +1346,24 @@ fn write_summary(
     config: &HelConfig,
     runtimes: &[(RuntimeKind, String)],
 ) -> Result<()> {
-    writeln!(output, "Mjolnir will write {} with:", config_path.display())?;
+    writeln!(output, "Mjolnir will add to {}:", config_path.display())?;
     writeln!(output, "  {} profile(s)", config.profiles.len())?;
     writeln!(output, "  {} bundle(s)", config.bundles.len())?;
-    writeln!(
-        output,
-        "  raw localhost target using configured harness homes directly"
-    )?;
-    for (runtime, _) in runtimes {
-        let target = config
-            .targets
-            .get(runtime.id())
-            .expect("configured runtime target exists");
-        let image = match target {
-            TargetTemplate::LocalPodman { container }
-            | TargetTemplate::LocalDocker { container }
-            | TargetTemplate::AppleContainer { container } => &container.image,
-            _ => unreachable!("setup runtime target is a local container"),
-        };
+    if config
+        .targets
+        .values()
+        .any(|target| matches!(target, TargetTemplate::LocalBare))
+    {
+        writeln!(
+            output,
+            "  raw localhost target using configured harness homes directly"
+        )?;
+    }
+    for (runtime, image) in runtimes {
         writeln!(output, "  {} target using {image}", runtime.label())?;
+    }
+    for id in config.targets.keys() {
+        writeln!(output, "  target id: {id}")?;
     }
     if let Some(TargetTemplate::AwsEc2 {
         launch_template,
@@ -1271,7 +1399,10 @@ fn write_summary(
         }
     }
     if config_path.exists() {
-        writeln!(output, "  This replaces the existing configuration file.")?;
+        writeln!(
+            output,
+            "  Existing profiles, bundles, targets, and preferences will be preserved."
+        )?;
     }
     Ok(())
 }
@@ -1448,6 +1579,42 @@ mod tests {
             runtimes: vec![],
             aws: None,
             ssh_hosts: vec![],
+        }
+    }
+
+    #[test]
+    fn newly_installed_harness_is_discovered_before_its_first_login() {
+        struct InstalledMuse;
+        impl CommandExecutor for InstalledMuse {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                assert_eq!(command.args, ["--version"]);
+                Ok(CommandOutput {
+                    status: if command.program == "muse" { 0 } else { 127 },
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-muse-home");
+        let overrides = BTreeMap::from([(HarnessKind::Muse, path.clone())]);
+        let mut homes = Vec::new();
+        for _ in 0..2 {
+            discover_installed_harnesses(
+                Some(directory.path()),
+                &overrides,
+                &mut homes,
+                &InstalledMuse,
+            );
+            assert_eq!(
+                homes,
+                vec![DiscoveredHome {
+                    kind: HarnessKind::Muse,
+                    path: path.clone(),
+                    authenticated: false
+                }]
+            );
+            assert!(!path.exists(), "discovery must not create a profile");
         }
     }
 
@@ -2172,6 +2339,191 @@ Host builder
     }
 
     #[test]
+    fn setup_preserves_working_configuration_and_discovers_new_installations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let home = DiscoveredHome {
+            kind: HarnessKind::Codex,
+            path: directory.path().join("codex"),
+            authenticated: true,
+        };
+        let repository = GithubRepository {
+            owner: "BrokkAi".into(),
+            repository: "muse-acp".into(),
+        };
+        let mut original = build_config_with_runtimes(
+            std::slice::from_ref(&home),
+            Some(&repository),
+            &[],
+            None,
+            None,
+        );
+        original.profiles.get_mut("codex").unwrap().enabled = false;
+        original
+            .profiles
+            .get_mut("codex")
+            .unwrap()
+            .environment
+            .insert("KEEP".into(), "custom".into());
+        original.phone.enabled = false;
+        original.startup.enabled = false;
+        original.save_to(&path).unwrap();
+        let discovery = SetupDiscovery {
+            homes: vec![
+                home,
+                DiscoveredHome {
+                    kind: HarnessKind::Muse,
+                    path: directory.path().join("muse"),
+                    authenticated: true,
+                },
+            ],
+            repository: Some(GithubRepository {
+                owner: "BrokkAi".into(),
+                repository: "mjolnir".into(),
+            }),
+            ..discovery_without_runtimes()
+        };
+        let executor = FakeExecutor::succeeds();
+        for _ in 0..2 {
+            let mut output = Vec::new();
+            run_setup_dialog_with(
+                &mut b"y\n".as_slice(),
+                &mut output,
+                &path,
+                &discovery,
+                &executor,
+                &executor,
+            )
+            .unwrap();
+            let saved = HelConfig::load_from(&path).unwrap();
+            assert_eq!(saved.profiles["codex"], original.profiles["codex"]);
+            assert_eq!(
+                saved.bundles["current-repository"],
+                original.bundles["current-repository"]
+            );
+            assert_eq!(saved.targets, original.targets);
+            assert_eq!(saved.phone, original.phone);
+            assert_eq!(saved.startup, original.startup);
+            assert_eq!(saved.profiles.len(), 2);
+            assert_eq!(saved.profiles["muse"].kind, HarnessKind::Muse);
+            assert_eq!(saved.bundles.len(), 2);
+            assert_eq!(
+                saved.bundles["mjolnir"].repositories[0].github.as_deref(),
+                Some("BrokkAi/mjolnir")
+            );
+        }
+    }
+
+    #[test]
+    fn setup_target_conflict_keeps_working_target_and_can_add_alternative() {
+        let original = build_config_with_runtimes(
+            &[],
+            None,
+            &[(RuntimeKind::Podman, "original:image")],
+            None,
+            None,
+        );
+        for (answer, expected_count) in [("\n", 1), ("a\n", 2)] {
+            let discovered = build_config_with_runtimes(
+                &[],
+                None,
+                &[(RuntimeKind::Podman, "new:image")],
+                None,
+                None,
+            );
+            let mut output = Vec::new();
+            let additions =
+                reconcile_setup(&mut answer.as_bytes(), &mut output, &original, discovered)
+                    .unwrap();
+            let mut saved = original.clone();
+            apply_setup_additions(&mut saved, &additions).unwrap();
+            assert_eq!(saved.targets["podman"], original.targets["podman"]);
+            assert_eq!(
+                saved.targets.len(),
+                original.targets.len() + expected_count - 1
+            );
+            assert!(
+                String::from_utf8(output)
+                    .unwrap()
+                    .contains("Existing sessions will keep using it")
+            );
+            if expected_count == 2 {
+                assert_eq!(
+                    saved.targets["podman-2"],
+                    local_runtime_target(RuntimeKind::Podman, "new:image").1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn setup_reloads_concurrent_changes_and_cancellation_writes_nothing() {
+        struct ConcurrentEdit<'a> {
+            path: &'a Path,
+            answer: &'a str,
+            conflict: bool,
+        }
+        impl SetupPrompter for ConcurrentEdit<'_> {
+            fn read_prompt(&mut self, _: &mut dyn Write, label: &str) -> Result<Option<String>> {
+                assert!(label.starts_with("Write this configuration?"));
+                HelConfig::update_to(self.path, |config| {
+                    config.phone.enabled = false;
+                    if self.conflict {
+                        config.targets.insert(
+                            "localhost".into(),
+                            local_runtime_target(RuntimeKind::Docker, "concurrent:image").1,
+                        );
+                    }
+                    Ok(())
+                })?;
+                Ok(Some(self.answer.into()))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let executor = FakeExecutor::succeeds();
+        let discovery = discovery_without_runtimes();
+        for (answer, conflict) in [("y", false), ("n", false), ("y", true)] {
+            HelConfig::default().save_to(&path).unwrap();
+            let outcome = run_setup_dialog_inner(
+                &mut ConcurrentEdit {
+                    path: &path,
+                    answer,
+                    conflict,
+                },
+                &mut Vec::new(),
+                &path,
+                &discovery,
+                &executor,
+                &executor,
+            );
+            let saved = HelConfig::load_from(&path).unwrap();
+            assert!(!saved.phone.enabled);
+            if conflict {
+                assert!(
+                    outcome
+                        .unwrap_err()
+                        .to_string()
+                        .contains("changed while setup was open")
+                );
+                assert_eq!(
+                    saved.targets["localhost"],
+                    local_runtime_target(RuntimeKind::Docker, "concurrent:image").1
+                );
+            } else if answer == "n" {
+                assert_eq!(outcome.unwrap(), SetupOutcome::Cancelled);
+                assert!(saved.targets.is_empty());
+            } else {
+                assert_eq!(outcome.unwrap(), SetupOutcome::Written);
+                assert!(matches!(
+                    saved.targets["localhost"],
+                    TargetTemplate::LocalBare
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn dialog_configures_every_usable_runtime_as_a_normal_target() {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
@@ -2340,7 +2692,7 @@ Host builder
         );
         assert!(output.contains("fixable Harness profile codex"), "{output}");
         assert!(
-            output.contains("  remediation: Create or select the Codex home"),
+            output.contains("  remediation: Run `mj login --profile codex`"),
             "{output}"
         );
         assert!(

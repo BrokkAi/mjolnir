@@ -248,6 +248,11 @@ pub(crate) enum Confirmation {
         repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
         previous: Box<Mode>,
     },
+    ConfigurationRepair {
+        session_id: String,
+        error: String,
+        previous: Box<Mode>,
+    },
     LaunchFailed {
         error: String,
         retry: Option<Box<DashboardAction>>,
@@ -422,6 +427,7 @@ fn clear_dialog_form_geometry(form: &mut Dialog<DialogControl>) {
 pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
     match confirmation {
         Confirmation::RepairRepositoryRemotes { .. } => &["Cancel", "Repair and continue"],
+        Confirmation::ConfigurationRepair { .. } => &["Dismiss", "Open transcript", "Open setup"],
         Confirmation::LaunchFailed { retry: Some(_), .. } => &["Dismiss", "Retry launch"],
         Confirmation::LaunchFailed { .. } => &["Dismiss"],
         Confirmation::Dismiss {
@@ -463,6 +469,7 @@ fn initial_confirmation_button(confirmation: &Confirmation, labels: &[&str]) -> 
     if matches!(
         confirmation,
         Confirmation::Dismiss { .. }
+            | Confirmation::ConfigurationRepair { .. }
             | Confirmation::LaunchFailed { .. }
             | Confirmation::ForceDestroy { .. }
             | Confirmation::DestroyStopped { .. }
@@ -1211,6 +1218,17 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 })
                 .collect(),
         ),
+        Confirmation::ConfigurationRepair { error, .. } => (
+            " Configuration repair ",
+            vec![
+                Line::raw(error.clone()),
+                Line::raw(""),
+                Line::raw(
+                    "Open setup to restore the named entries. The session and its history are retained.",
+                ),
+                Line::raw("PgUp/PgDn scroll the full details. Esc dismisses."),
+            ],
+        ),
         Confirmation::LaunchFailed { error, retry, .. } => {
             let mut lines = vec![
                 Line::raw("The session could not start. This message stays until you dismiss it."),
@@ -1395,7 +1413,9 @@ pub(crate) fn render_confirmation(
     let confirmation = &dialog.confirmation;
     // Minimum height per dialog; `popup_height` grows it to fit wrapped content.
     let nominal: u16 = match confirmation {
-        Confirmation::LaunchFailed { .. } | Confirmation::RepairRepositoryRemotes { .. } => 16,
+        Confirmation::ConfigurationRepair { .. }
+        | Confirmation::LaunchFailed { .. }
+        | Confirmation::RepairRepositoryRemotes { .. } => 16,
         Confirmation::Dismiss { .. } => 8,
         Confirmation::DirtyLocal { .. } => 11,
         Confirmation::CloseFailed { .. } => 12,
@@ -2269,7 +2289,9 @@ impl DashboardState {
         }
         if matches!(
             dialog.confirmation,
-            Confirmation::LaunchFailed { .. } | Confirmation::RepairRepositoryRemotes { .. }
+            Confirmation::ConfigurationRepair { .. }
+                | Confirmation::LaunchFailed { .. }
+                | Confirmation::RepairRepositoryRemotes { .. }
         ) && let Event::Key(key) = &event
             && key.kind != crossterm::event::KeyEventKind::Release
         {
@@ -2307,6 +2329,7 @@ impl DashboardState {
             Some(Interaction::Cancel) => match dialog.confirmation {
                 Confirmation::Dismiss { mode, .. }
                 | Confirmation::RepairRepositoryRemotes { previous: mode, .. }
+                | Confirmation::ConfigurationRepair { previous: mode, .. }
                 | Confirmation::LaunchFailed { previous: mode, .. } => {
                     self.restore_dismissed_mode(mode);
                 }
@@ -2330,6 +2353,25 @@ impl DashboardState {
         index: usize,
     ) -> DashboardAction {
         match (confirmation, index) {
+            (
+                Confirmation::ConfigurationRepair {
+                    session_id,
+                    previous,
+                    ..
+                },
+                index,
+            ) => {
+                self.restore_dismissed_mode(previous);
+                match index {
+                    1 => DashboardAction::Open { session_id },
+                    2 => {
+                        self.begin_setup();
+                        DashboardAction::None
+                    }
+                    _ => DashboardAction::None,
+                }
+            }
+
             (
                 Confirmation::RepairRepositoryRemotes {
                     action, previous, ..
@@ -2511,6 +2553,32 @@ mod tests {
             }
         );
         assert_eq!(dashboard.mode, previous);
+    }
+
+    #[test]
+    fn configuration_repair_can_open_setup_or_preserved_transcript() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        for choice in [1, 2] {
+            let action = dashboard.activate_confirmation_button(
+                Confirmation::ConfigurationRepair {
+                    session_id: "session-1".into(),
+                    error: "missing bundle".into(),
+                    previous: Box::new(Mode::Dashboard),
+                },
+                choice,
+            );
+            if choice == 1 {
+                assert_eq!(
+                    action,
+                    DashboardAction::Open {
+                        session_id: "session-1".into()
+                    }
+                );
+            } else {
+                assert_eq!(action, DashboardAction::None);
+                assert!(matches!(dashboard.mode, Mode::Setup(_)));
+            }
+        }
     }
 
     #[test]

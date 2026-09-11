@@ -1197,7 +1197,21 @@ impl DashboardState {
         dialog.discovering = false;
         match result {
             Ok(config) => {
-                let discovered = serde_json::to_value(config).expect("config serializes");
+                // Reconcile against the current draft, including edits made
+                // while discovery was running, rather than dropping collisions.
+                let current: HelConfig = match serde_json::from_value(dialog.draft.clone()) {
+                    Ok(current) => current,
+                    Err(error) => {
+                        dialog.notice = Some(format!(
+                            "Review the setup draft before detecting entries: {error}"
+                        ));
+                        dialog.prepare();
+                        self.mark_render_changed();
+                        return;
+                    }
+                };
+                let additions = current.setup_additions(&config);
+                let discovered = serde_json::to_value(additions).expect("config serializes");
                 for section in ["profiles", "targets", "bundles"] {
                     if let Some(entries) = discovered[section].as_object() {
                         for (key, value) in entries {
@@ -1215,7 +1229,7 @@ impl DashboardState {
                 }
                 schema::expand(&mut dialog.draft, &mut Vec::new());
                 dialog.notice =
-                    Some("Detected entries added to the draft. Review them, then Save.".into());
+                    Some("New discoveries added to the draft; conflicting settings have separate names. Review them, then Save.".into());
             }
             Err(error) => dialog.notice = Some(format!("Detection failed: {error}")),
         }
@@ -1990,6 +2004,41 @@ mod tests {
             .unwrap();
         let disabled = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(disabled.contains('☐'), "{disabled}");
+    }
+
+    #[test]
+    fn detection_adds_conflicting_installations_to_the_draft_without_losing_settings() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let original = dashboard.config.clone();
+        dashboard.begin_setup();
+        let generation = setup_dialog_mut(&mut dashboard.mode).unwrap().generation;
+        let mut discovered = original.clone();
+        discovered.profiles.get_mut("codex-1").unwrap().home = "/profiles/new-codex".into();
+        discovered
+            .targets
+            .insert("podman".into(), hel::hel_config::TargetTemplate::LocalBare);
+        discovered.bundles.get_mut("hel").unwrap().repositories[0].github =
+            Some("owner/new-repository".into());
+        for _ in 0..2 {
+            dashboard.setup_discovered(generation, Ok(discovered.clone()));
+            let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+            let draft: HelConfig = serde_json::from_value(dialog.draft.clone()).unwrap();
+            assert_eq!(draft.profiles["codex-1"], original.profiles["codex-1"]);
+            assert_eq!(
+                draft.profiles["codex-1-2"].home,
+                std::path::PathBuf::from("/profiles/new-codex")
+            );
+            assert_eq!(draft.targets["podman"], original.targets["podman"]);
+            assert!(matches!(
+                draft.targets["podman-2"],
+                hel::hel_config::TargetTemplate::LocalBare
+            ));
+            assert_eq!(draft.bundles["hel"], original.bundles["hel"]);
+            assert_eq!(draft.bundles.len(), original.bundles.len() + 1);
+            assert_eq!(draft.profiles.len(), original.profiles.len() + 1);
+            assert_eq!(draft.targets.len(), original.targets.len() + 1);
+        }
+        assert_eq!(dashboard.config, original, "discovery only edits the draft");
     }
 
     #[test]

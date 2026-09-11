@@ -1773,6 +1773,15 @@ impl DashboardState {
         let Some(session) = self.selected_session() else {
             return DashboardAction::None;
         };
+        if let Some(issue) = session.configuration_issue(&self.config) {
+            self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ConfigurationRepair {
+                session_id: session.id.clone(),
+                error: issue,
+                previous: Box::new(self.mode.clone()),
+            }));
+            self.mark_render_changed();
+            return DashboardAction::None;
+        }
         if let Some(operation) = self.session_operations.get(&session.id) {
             self.notices.set(format!(
                 "{} is in progress; press Alt-X to cancel it.",
@@ -3137,6 +3146,29 @@ mod tests {
                 kind: SessionOperationKind::Launching,
             }
         );
+    }
+
+    #[test]
+    fn opening_a_session_with_missing_configuration_explains_repair() {
+        let session = running_session();
+        let mut dashboard = dashboard_with_session(session);
+        let bundle_id = dashboard.selected_session().unwrap().bundle_id.clone();
+        let bundle = dashboard.config.bundles.remove(&bundle_id).unwrap();
+        assert_eq!(dashboard.open_selected_session(), DashboardAction::None);
+        let Mode::Confirm(dialog) = &dashboard.mode else {
+            panic!("repair dialog expected")
+        };
+        let Confirmation::ConfigurationRepair { error, .. } = &dialog.confirmation else {
+            panic!("repair details expected")
+        };
+        assert!(error.contains("missing bundle"));
+        assert!(error.contains("config.toml"));
+        dashboard.handle_key(key(KeyCode::Esc));
+        dashboard.config.bundles.insert(bundle_id, bundle);
+        assert!(!matches!(
+            dashboard.open_selected_session(),
+            DashboardAction::None
+        ));
     }
 
     /// The notice bar is the only report a background failure gets, so a key

@@ -284,9 +284,8 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
     let transcript = read_native_transcript(harness, &located.source_path)?;
     println!("Original cwd: {}", transcript.cwd.display());
 
-    let config = HelConfig::load()?;
     let mut state = HelState::load()?;
-    state.validate_against_config(&config)?;
+    state.validate()?;
     let targets = session_edit_targets(&transcript, &home)?;
     if !confirm_import_safety(&targets, args.allow_dirty_local, args.allow_omitted_non_git)? {
         println!("{IMPORT_CANCELLED_MESSAGE}");

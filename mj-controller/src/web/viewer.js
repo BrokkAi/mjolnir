@@ -692,6 +692,7 @@ function attentionParts(session) {
 function sessionMenuActions(session) {
   const can = session.capabilities || {};
   const actions = [];
+  if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
   if (can.cancel_operation) actions.push(['Cancel operation', 'danger', 'cancel']);
   if (can.stop) actions.push(['Stop session', 'danger', 'close']);
@@ -837,6 +838,7 @@ function operationLabel(operation, now) {
 
 function sessionActivityLabel(session, now = serverClockMs()) {
   if (session.operation) return operationLabel(session.operation, now);
+  if (session.configuration_issue) return 'Needs configuration repair';
   if (session.has_error && isTransitioningSession(session)) return 'Needs recovery';
   if (['starting', 'stopping', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);
@@ -1690,6 +1692,7 @@ function resumeCardSignature(session) {
     session.operation?.kind,
     session.state,
     session.has_error,
+    session.configuration_issue,
     session.title,
     session.display_location,
     (session.queued_prompts || []).length,
@@ -1754,6 +1757,7 @@ function updateResumeCard(card, session, rebuild = false) {
   body.append(heading, el('p', 'dim', `${sessionLifecycleLabel(session)} · ${session.display_location || session.target_id || 'Unknown target'}`));
   if (session.state === 'lost' && !recovery?.checkpoint_retained) body.append(el('p', 'resume-status error', 'The session is lost. No verified recovery checkpoint is available.'));
   else if (session.state === 'destroyed-with-data-loss') body.append(el('p', 'resume-status error', 'The session was destroyed with data loss. No session data remains to resume.'));
+  else if (session.configuration_issue) body.append(el('p', 'resume-status error', session.configuration_issue));
   else if (session.has_error) body.append(el('p', 'resume-status error', 'The previous operation reported an error. Review the available choices before trying again.'));
   if (recovery) {
     const phase = recovery.phase === 'cancelled' ? 'cancelled' : recovery.phase === 'failed' ? 'failed' : 'interrupted';
@@ -4327,6 +4331,7 @@ function renderConversationTransition(session) {
   const notice = loading
     ? ''
     : session.operation?.notice
+      || session.configuration_issue
       || (session.has_error ? 'The operation needs recovery. Use the available action to try again.' : '');
   conversationTransitionNotice.textContent = notice;
   conversationTransitionNotice.hidden = !notice;
@@ -4706,6 +4711,11 @@ async function runSessionAction(dataset, errorNode, extra) {
   const actionExtra = { ...(extra || {}) };
   delete actionExtra.workspace_id;
   delete actionExtra.isCurrent;
+  if (dataset.action === 'repair-config') {
+    const session = snapshot?.sessions.find(item => item.id === dataset.id);
+    errorNode.textContent = session?.configuration_issue || 'Configuration is repaired. Retry opening the session.';
+    return true;
+  }
   if (dataset.action === 'open') {
     navigate({ name: 'conversation', sessionId: dataset.id });
     return true;

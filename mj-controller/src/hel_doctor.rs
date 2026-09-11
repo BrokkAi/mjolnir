@@ -427,8 +427,8 @@ fn harness_checks(config: Option<&HelConfig>, executor: &impl CommandExecutor) -
                     title,
                     format!("{} does not exist", profile.home.display()),
                     format!(
-                        "Create or select the {} home, then set its `home` path in config.toml.",
-                        profile.kind.display_name()
+                        "{} If this profile should use an existing installation, select its home in Setup.",
+                        harness_login_remediation(id, profile)
                     ),
                 );
             }

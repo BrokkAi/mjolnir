@@ -405,6 +405,7 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
+        previous.validate_configuration(&self.config)?;
         ensure!(
             !matches!(
                 previous.state,
@@ -633,6 +634,7 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
+        session.validate_configuration(&self.config)?;
         let locator = session
             .target
             .as_ref()

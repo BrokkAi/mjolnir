@@ -124,6 +124,19 @@ mod tests {
         config
             .targets
             .insert("target-1".into(), TargetTemplate::LocalBare);
+        config.bundles.insert(
+            "bundle-1".into(),
+            hel::hel_config::ProjectBundle {
+                primary_repo: "project".into(),
+                repositories: vec![hel::hel_config::ProjectRepository {
+                    id: "project".into(),
+                    github: Some("owner/project".into()),
+                    local: None,
+                    destination: "project".into(),
+                    git_ref: None,
+                }],
+            },
+        );
         let mut state = HelState::default();
         state.sessions.insert(
             "session-1".into(),

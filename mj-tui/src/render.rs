@@ -525,6 +525,27 @@ fn drawn_session_rows_with_options(
                 let mut lines = Vec::new();
                 lines.extend(heading_line);
                 let spacing = u16::from(expanded && !options.summary_only);
+                if session.configuration_issue(&dashboard.config).is_some() {
+                    lines.push(Line::styled(
+                        format!("{prefix}{}", session_name(session)),
+                        Style::default().fg(theme::palette().session_error),
+                    ));
+                    lines.push(Line::styled(
+                        "  Needs config repair",
+                        Style::default().fg(theme::palette().session_error),
+                    ));
+                    if expanded && !options.summary_only {
+                        lines.push(Line::from("  Enter for repair details · F7 setup"));
+                    }
+                    rows.push(DrawnSessionRow {
+                        session: Some(index),
+                        heading: heading_key,
+                        lines,
+                        spacing,
+                    });
+                    continue;
+                }
+
                 if let Some(transition) = dashboard.transition_kind(&session.id) {
                     lines.push(session_transition_line(
                         &prefix,
@@ -3422,6 +3443,19 @@ mod tests {
     }
 
     #[test]
+    fn missing_configuration_renders_repair_status_and_clears_after_restore() {
+        let session = running_session();
+        let bundle_id = session.bundle_id.clone();
+        let mut dashboard = dashboard_with_session(session);
+        let bundle = dashboard.config.bundles.remove(&bundle_id).unwrap();
+        let broken = drawn(&mut dashboard, 120, 44).join("\n");
+        assert!(broken.contains("Needs config repair"), "{broken}");
+        dashboard.config.bundles.insert(bundle_id, bundle);
+        let repaired = drawn(&mut dashboard, 120, 44).join("\n");
+        assert!(!repaired.contains("Needs config repair"), "{repaired}");
+    }
+
+    #[test]
     fn session_transitions_preserve_the_blank_row_before_the_next_session() {
         let mut first = running_session();
         first.project_directory = Some("/projects/shared".into());
@@ -6076,9 +6110,11 @@ mod tests {
         assert!(rendered.contains("ACP pretty name"), "{rendered}");
         assert!(dashboard.pane_areas.is_some());
         dashboard.focus_sessions();
-        assert!(
-            matches!(dashboard.handle_key(key(KeyCode::Enter)), DashboardAction::Open { session_id } if session_id == "session-1")
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
         );
+        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
     }
 
     #[test]
