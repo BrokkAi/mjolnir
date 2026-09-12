@@ -837,6 +837,11 @@ pub struct ManagedWorktree {
     pub worktree_root: PathBuf,
     pub branch: String,
     pub target: ManagedWorktreeTarget,
+    /// The commit the session branch was created at. Recorded so an export can
+    /// diff against it in one read; sessions created before this field existed
+    /// fall back to the branch reflog, which expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
 }
 
 impl ManagedWorktree {
@@ -2016,6 +2021,7 @@ mod tests {
             ),
             branch: "mj/0123456789abcdef".into(),
             target: ManagedWorktreeTarget::Local,
+            base_commit: None,
         });
         assert_eq!(session.project_name(&config), "source");
     }
@@ -2146,6 +2152,7 @@ mod tests {
             ),
             branch: "mj/0123456789abcdef".into(),
             target: ManagedWorktreeTarget::Local,
+            base_commit: None,
         });
         let source = session.project_source(&config);
         assert_eq!(source.short, "source");

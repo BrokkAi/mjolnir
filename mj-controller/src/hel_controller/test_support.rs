@@ -211,6 +211,7 @@ pub(super) fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecor
         worktree_root,
         branch: format!("mj/{session_id}"),
         target,
+        base_commit: None,
     });
     session
 }
@@ -271,6 +272,7 @@ pub(super) fn managed_worktree_session(repository: &Path, session_id: &str) -> S
         worktree_root: repository.join(".mj/worktrees").join(session_id),
         branch: format!("mj/{session_id}"),
         target: ManagedWorktreeTarget::Local,
+        base_commit: None,
     };
     create_managed_worktree(
         &ProcessExecutor,

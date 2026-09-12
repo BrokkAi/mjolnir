@@ -455,6 +455,7 @@ fn normalized_state_round_trip_preserves_children_and_order() {
             destination: "builder".into(),
             ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
         },
+        base_commit: None,
     });
     record.resource_allocation = None;
     record.target = Some(TargetLocator::LocalBare {

@@ -806,6 +806,7 @@ pub(crate) async fn run_server(
     options.set_subagent_backend(Arc::new(api::ApiBackend::new(
         worker_commands_tx.client(),
         Arc::new(move |session_id: &str| api_runtime.session_state(session_id)),
+        daemon_runtime.clone(),
     )));
     let renewal_cancellation = termination.child_token();
     let mut renewal_task = None;

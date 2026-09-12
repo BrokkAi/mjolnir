@@ -10,26 +10,61 @@
 //! stall unrelated requests.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
-use hel::hel_state::SessionState;
+use hel::hel_state::{MaterializedExecutionState, SessionState};
+use hel::hel_targets::{self, CancellableProcessExecutor, CommandExecutor, CommandOutput};
 use hel::hel_worker::RelayCommand;
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, ViewError, new_command_id};
+use mj_controller::hel_controller::{Controller, SessionExportLayout};
 use mj_controller::hel_server::api::{
     BundleExport, ExportError, PushedBranch, StartFollowup, StartStatus, SubagentBackend,
     TranscriptPage, TurnState, TurnSummary,
 };
+
+use crate::daemon::RuntimeState;
 
 /// How the follow-up task learns whether a session is still on its way up.
 ///
 /// It is a function rather than the daemon runtime itself because that is all
 /// the follow-up needs, and a test can supply the states it wants to drive.
 pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + Sync>;
+
+/// What the export operations need from the daemon beyond a session's live
+/// actor: the durable record, and a checkpoint on demand.
+///
+/// It is a trait rather than the daemon runtime itself so the backend can be
+/// built in a test without one, the same reason the follow-up reads session
+/// state through a function.
+pub trait ExportRuntime: Send + Sync {
+    /// The in-memory record for a session, or `None` when the daemon holds
+    /// none.
+    fn session_record(&self, session_id: &str) -> Option<hel::hel_state::SessionRecord>;
+
+    /// Checkpoint a session now, returning the archive it wrote.
+    fn checkpoint_now(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<hel::hel_state::CheckpointMetadata>>;
+}
+
+impl ExportRuntime for RuntimeState {
+    fn session_record(&self, session_id: &str) -> Option<hel::hel_state::SessionRecord> {
+        RuntimeState::session_record(self, session_id)
+    }
+
+    fn checkpoint_now(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<hel::hel_state::CheckpointMetadata>> {
+        Box::pin(async move { self.checkpoint_session_now(&session_id).await })
+    }
+}
 
 /// How long the follow-up waits for a session to become usable before giving
 /// up. Provisioning a container or an SSH host can take many minutes, and the
@@ -38,6 +73,13 @@ const START_DEADLINE: Duration = Duration::from_secs(30 * 60);
 /// How long each attempt to reach the session actor, or to observe a view
 /// change, blocks before the record state is re-read.
 const START_POLL: Duration = Duration::from_secs(5);
+/// How long one worker export command may run. A diff of a large checkout over
+/// SSH is slow; a target that has stopped answering must not hold the caller's
+/// HTTP request open indefinitely.
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// Clap's exit code for a usage failure, which is what a worker binary too old
+/// to know the export subcommands answers.
+const CLAP_USAGE_EXIT_CODE: i32 = 2;
 
 /// How far one created session's follow-up has got, and the task driving it.
 struct Start {
@@ -51,16 +93,24 @@ struct Start {
 pub struct ApiBackend {
     sessions: SessionControl,
     session_states: SessionStateSource,
+    /// The daemon operations the export path needs: session records, and the
+    /// checkpoint a bundle export is read from.
+    exports: Arc<dyn ExportRuntime>,
     /// How far each created session's follow-up configuration and first prompt
     /// have got.
     starts: Arc<Mutex<BTreeMap<String, Start>>>,
 }
 
 impl ApiBackend {
-    pub fn new(sessions: SessionControl, session_states: SessionStateSource) -> Self {
+    pub fn new(
+        sessions: SessionControl,
+        session_states: SessionStateSource,
+        exports: Arc<dyn ExportRuntime>,
+    ) -> Self {
         Self {
             sessions,
             session_states,
+            exports,
             starts: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -77,6 +127,43 @@ impl ApiBackend {
             }
             present
         });
+    }
+
+    /// Refuse an export that needs the target when the session no longer has
+    /// one. The record drops its locator on stop, so this is the honest answer
+    /// rather than a command that cannot be addressed anywhere.
+    fn require_live_target(&self, session_id: &str) -> Result<(), ExportError> {
+        let record = self
+            .exports
+            .session_record(session_id)
+            .ok_or_else(|| ExportError::Refused(format!("unknown session {session_id}")))?;
+        match record.target {
+            Some(_) => Ok(()),
+            None => Err(ExportError::Refused(format!(
+                "session {session_id} has no live target; export its checkpoint bundle instead"
+            ))),
+        }
+    }
+
+    /// Refuse a push while the agent is still working. A push mid-turn would
+    /// publish a tree the agent is in the middle of changing.
+    async fn require_idle_turn(&self, session_id: &str) -> Result<(), ExportError> {
+        let Ok(handle) = self.sessions.session(session_id.to_owned()).await else {
+            return Ok(());
+        };
+        let Some(snapshot) = handle.view().snapshot else {
+            return Ok(());
+        };
+        let running = matches!(
+            snapshot.materialized.execution,
+            MaterializedExecutionState::Running { .. }
+        ) || snapshot.materialized.active_turn.is_some();
+        if running {
+            return Err(ExportError::Refused(
+                "this session is running a turn; cancel or wait for it before pushing".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -195,8 +282,94 @@ where
         .with_context(|| format!("{label} task panicked"))?
 }
 
-fn not_in_this_milestone(what: &str) -> anyhow::Error {
-    anyhow::anyhow!("{what} is not implemented in this milestone")
+/// Run one blocking export step off the async runtime.
+async fn export_blocking<T, F>(label: &'static str, job: F) -> Result<T, ExportError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(job).await {
+        Ok(result) => result.map_err(ExportError::Failed),
+        Err(error) => Err(ExportError::Failed(anyhow!(
+            "{label} task panicked: {error}"
+        ))),
+    }
+}
+
+/// Where one session's work lives on its target.
+async fn export_layout(session_id: String) -> Result<SessionExportLayout, ExportError> {
+    export_blocking("resolve the session export layout", move || {
+        let executor = CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT);
+        Controller::load()?.session_export_layout(&session_id, &executor)
+    })
+    .await
+}
+
+/// The directory on the target holding the session's primary repository.
+fn primary_repository_path(layout: &SessionExportLayout) -> Result<String, ExportError> {
+    let repository = layout
+        .repositories
+        .iter()
+        .find(|repository| repository.id == layout.primary_repository)
+        .ok_or_else(|| {
+            ExportError::Failed(anyhow!(
+                "session workspace has no repository {:?}",
+                layout.primary_repository
+            ))
+        })?;
+    Ok(target_join(
+        &layout.workspace_root,
+        &repository.relative_destination,
+    ))
+}
+
+/// Join a relative path onto a target-side root.
+///
+/// Target paths are POSIX text whatever this daemon runs on, so the components
+/// are spelled with `/` here rather than by the host's separator.
+fn target_join(root: &str, relative: &Path) -> String {
+    let mut path = root.trim_end_matches('/').to_owned();
+    for component in relative.components() {
+        if let Component::Normal(part) = component {
+            path.push('/');
+            path.push_str(&part.to_string_lossy());
+        }
+    }
+    path
+}
+
+/// Run one `hel worker ...` command on the session's target and return its
+/// standard output.
+async fn worker_command(
+    layout: SessionExportLayout,
+    session_id: String,
+    arguments: Vec<String>,
+    purpose: &'static str,
+) -> Result<Vec<u8>, ExportError> {
+    let output: CommandOutput = export_blocking(purpose, move || {
+        let binary = format!(
+            "{}/hel",
+            hel_targets::worker_root(&layout.backend, &session_id)?
+        );
+        let mut argv = vec![binary, "worker".to_owned()];
+        argv.extend(arguments);
+        let command = hel_targets::command_on_locator(&layout.backend, &session_id, argv, purpose)?;
+        CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT).execute(&command)
+    })
+    .await?;
+    match output.status {
+        0 => Ok(output.stdout),
+        // A worker installed before these subcommands existed answers clap's
+        // usage failure. That is not a failed export: resuming the session
+        // reinstalls the worker and the same call then works.
+        CLAP_USAGE_EXIT_CODE => Err(ExportError::Refused(
+            "worker on this target predates export support; resume the session to upgrade".into(),
+        )),
+        status => Err(ExportError::Failed(anyhow!(
+            "{purpose} failed with status {status}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
 }
 
 impl SubagentBackend for ApiBackend {
@@ -355,31 +528,137 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
-    fn diff(&self, _session_id: String) -> BoxFuture<'_, std::result::Result<String, ExportError>> {
-        Box::pin(async move { Err(ExportError::Failed(not_in_this_milestone("diff export"))) })
+    fn diff(&self, session_id: String) -> BoxFuture<'_, std::result::Result<String, ExportError>> {
+        Box::pin(async move {
+            self.require_live_target(&session_id)?;
+            let layout = export_layout(session_id.clone()).await?;
+            let repository = primary_repository_path(&layout)?;
+            let mut arguments = vec!["diff".to_owned(), "--repository".to_owned(), repository];
+            if let Some(worktree) = &layout.managed_worktree {
+                match &worktree.base_commit {
+                    Some(base) => {
+                        arguments.push("--base".to_owned());
+                        arguments.push(base.clone());
+                    }
+                    // Sessions created before the base was recorded still name
+                    // their branch, whose reflog says where it started.
+                    None => {
+                        arguments.push("--branch".to_owned());
+                        arguments.push(worktree.branch.clone());
+                    }
+                }
+            }
+            let stdout = worker_command(layout, session_id, arguments, "session diff").await?;
+            String::from_utf8(stdout).map_err(|error| {
+                ExportError::Failed(anyhow!("the session diff was not UTF-8: {error}"))
+            })
+        })
     }
 
     fn read_file(
         &self,
-        _session_id: String,
-        _path: PathBuf,
+        session_id: String,
+        path: PathBuf,
     ) -> BoxFuture<'_, std::result::Result<Vec<u8>, ExportError>> {
-        Box::pin(async move { Err(ExportError::Failed(not_in_this_milestone("file export"))) })
+        Box::pin(async move {
+            self.require_live_target(&session_id)?;
+            let layout = export_layout(session_id.clone()).await?;
+            let arguments = vec![
+                "read-file".to_owned(),
+                "--root".to_owned(),
+                layout.workspace_root.clone(),
+                "--path".to_owned(),
+                target_join("", &path).trim_start_matches('/').to_owned(),
+            ];
+            worker_command(layout, session_id, arguments, "session file read").await
+        })
     }
 
     fn push_branch(
         &self,
-        _session_id: String,
-        _branch: String,
+        session_id: String,
+        branch: String,
     ) -> BoxFuture<'_, std::result::Result<PushedBranch, ExportError>> {
-        Box::pin(async move { Err(ExportError::Failed(not_in_this_milestone("branch push"))) })
+        Box::pin(async move {
+            self.require_live_target(&session_id)?;
+            self.require_idle_turn(&session_id).await?;
+            let layout = export_layout(session_id.clone()).await?;
+            let repository = primary_repository_path(&layout)?;
+            let arguments = vec![
+                "push-branch".to_owned(),
+                "--repository".to_owned(),
+                repository,
+                "--branch".to_owned(),
+                branch,
+            ];
+            let stdout =
+                worker_command(layout, session_id, arguments, "session branch push").await?;
+            let pushed: hel::hel_archive::PushedBranch =
+                serde_json::from_slice(&stdout).map_err(|error| {
+                    ExportError::Failed(anyhow!("the worker's push result was unreadable: {error}"))
+                })?;
+            Ok(PushedBranch {
+                branch: pushed.branch,
+                remote: pushed.remote,
+            })
+        })
     }
 
     fn bundle(
         &self,
-        _session_id: String,
+        session_id: String,
     ) -> BoxFuture<'_, std::result::Result<BundleExport, ExportError>> {
-        Box::pin(async move { Err(ExportError::Failed(not_in_this_milestone("bundle export"))) })
+        Box::pin(async move {
+            let record = self
+                .exports
+                .session_record(&session_id)
+                .ok_or_else(|| ExportError::Refused(format!("unknown session {session_id}")))?;
+            // A live session's work is only in the archive once it has been
+            // checkpointed, so take a fresh checkpoint; a stopped session's
+            // last checkpoint already holds everything it did.
+            let archive_path = match record.target {
+                Some(_) => {
+                    self.exports
+                        .checkpoint_now(session_id.clone())
+                        .await
+                        .map_err(ExportError::Failed)?
+                        .archive_path
+                }
+                None => {
+                    record
+                        .checkpoint
+                        .ok_or_else(|| {
+                            ExportError::Refused(
+                                "this session has no checkpoint to export a bundle from".into(),
+                            )
+                        })?
+                        .archive_path
+                }
+            };
+            let bundles = export_blocking("verify the checkpoint bundles", move || {
+                hel::hel_archive::verify_repository_bundles_streaming(&archive_path)
+            })
+            .await?;
+            let repository = bundles
+                .repositories
+                .iter()
+                .find(|repository| repository.metadata.id == bundles.primary_repository)
+                .ok_or_else(|| {
+                    ExportError::Failed(anyhow!(
+                        "the checkpoint has no repository {:?}",
+                        bundles.primary_repository
+                    ))
+                })?;
+            if repository.committed_bundle.is_empty() {
+                return Err(ExportError::Refused(
+                    "no commits beyond the session base".into(),
+                ));
+            }
+            Ok(BundleExport {
+                repository: repository.metadata.id.clone(),
+                bytes: repository.committed_bundle.clone(),
+            })
+        })
     }
 }
 
@@ -462,6 +741,22 @@ mod tests {
     /// Every session this daemon is asked about is up and running.
     fn running_states() -> SessionStateSource {
         Arc::new(|_| Some(SessionState::Running))
+    }
+
+    /// An export runtime with nothing in it. The follow-up tests never export;
+    /// the export path's own behavior is proved by the API handler tests.
+    struct NoExports;
+
+    impl ExportRuntime for NoExports {
+        fn session_record(&self, _session_id: &str) -> Option<hel::hel_state::SessionRecord> {
+            None
+        }
+        fn checkpoint_now(
+            &self,
+            session_id: String,
+        ) -> BoxFuture<'_, Result<hel::hel_state::CheckpointMetadata>> {
+            Box::pin(async move { bail!("session {session_id} cannot be checkpointed in a test") })
+        }
     }
 
     /// A connected view whose harness is ready and offers one model.
@@ -549,6 +844,7 @@ mod tests {
                 view: None,
             })),
             running_states(),
+            Arc::new(NoExports),
         );
 
         let turn_id = backend
@@ -583,6 +879,7 @@ mod tests {
                 view: Some(ready_view("gpt-5-codex")),
             })),
             running_states(),
+            Arc::new(NoExports),
         );
 
         backend
@@ -631,6 +928,7 @@ mod tests {
                 view: Some(ready_view("gpt-5-codex")),
             })),
             running_states(),
+            Arc::new(NoExports),
         );
 
         backend
@@ -672,6 +970,7 @@ mod tests {
                 view: None,
             })),
             running_states(),
+            Arc::new(NoExports),
         );
         let error = backend
             .prompt("session-2".into(), "hello".into())

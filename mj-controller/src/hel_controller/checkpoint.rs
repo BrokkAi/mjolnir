@@ -42,6 +42,27 @@ use super::{
     scp_command_spec, ssh_command_spec, target_kind, target_profile_home,
 };
 
+/// Where one session's work lives on its target.
+///
+/// Produced by [`Controller::session_export_layout`] and used both to build a
+/// checkpoint export specification and to run the worker's export commands
+/// against the right repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionExportLayout {
+    /// The provisioned target the session's commands run on.
+    pub backend: hel_targets::TargetLocator,
+    /// The directory on the target that every repository is relative to.
+    pub workspace_root: String,
+    /// The id, within `repositories`, of the repository a caller means when it
+    /// names no repository.
+    pub primary_repository: String,
+    pub repositories: Vec<CheckpointRepositorySpec>,
+    /// Set when the session works in a Hel-owned worktree of the user's own
+    /// checkout, which is what records the branch and base commit an export
+    /// compares against.
+    pub managed_worktree: Option<hel::hel_state::ManagedWorktree>,
+}
+
 /// How long an idle relay may fail to admit a barrier before its worker is
 /// treated as wedged. Busy recovery checkpoints defer immediately. A close
 /// sends a non-steering turn cancellation and gives the worker this same
@@ -590,6 +611,101 @@ impl Controller {
         Ok(artifact)
     }
 
+    /// Where a session's repositories live on its target, and what each one
+    /// contributes to an export.
+    ///
+    /// A checkpoint and a diff, a file read or a branch push all need the same
+    /// answers - which target, which directory, which repository is the
+    /// primary - so they are derived once here rather than restated wherever a
+    /// caller reaches the target.
+    pub fn session_export_layout(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<SessionExportLayout> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?
+            .clone();
+        let locator = session
+            .target
+            .as_ref()
+            .context("session has no live target")?;
+        let backend = backend_locator(locator, &session, &self.config)?;
+        let (workspace_root, primary_repository, repositories) =
+            if let Some(project_directory) = &session.project_directory {
+                let parent = project_directory
+                    .parent()
+                    .context("bare project directory has no parent")?;
+                let destination = project_directory
+                    .file_name()
+                    .context("bare project directory cannot be the filesystem root")?;
+                (
+                    parent.to_string_lossy().into_owned(),
+                    "project".to_owned(),
+                    vec![CheckpointRepositorySpec {
+                        id: "project".into(),
+                        relative_destination: PathBuf::from(destination),
+                        // Managed worktrees are retired on Stop, so their
+                        // dirty/untracked state must travel in the archive.
+                        // Their branch and objects remain in the owning Git
+                        // repository; no remote origin is required. Unmanaged
+                        // raw checkouts remain in place.
+                        capture: if session.managed_worktree.is_some() {
+                            CheckpointRepositoryCapture::DeltaFrom {
+                                base_commit: super::worktree::raw_checkout_position(
+                                    &session,
+                                    &self.config,
+                                    project_directory,
+                                    executor,
+                                )?
+                                .head_commit,
+                            }
+                        } else {
+                            CheckpointRepositoryCapture::MetadataOnly
+                        },
+                        origin_override: None,
+                    }],
+                )
+            } else {
+                let bundle = self
+                    .config
+                    .bundles
+                    .get(&session.bundle_id)
+                    .context("session bundle is missing")?;
+                let workspace_root = match &backend {
+                    hel_targets::TargetLocator::LocalPodman { .. }
+                    | hel_targets::TargetLocator::LocalDocker { .. }
+                    | hel_targets::TargetLocator::AppleContainer { .. }
+                    | hel_targets::TargetLocator::SshPodman { .. }
+                    | hel_targets::TargetLocator::SshDocker { .. } => "/workspace".to_string(),
+                    hel_targets::TargetLocator::AwsEc2 { workspace, .. }
+                    | hel_targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
+                    hel_targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
+                };
+                let repositories = bundle
+                    .repositories
+                    .iter()
+                    .map(|repository| CheckpointRepositorySpec {
+                        id: repository.id.clone(),
+                        relative_destination: repository.destination.clone(),
+                        capture: CheckpointRepositoryCapture::RemoteWorkspace,
+                        origin_override: None,
+                    })
+                    .collect();
+                (workspace_root, bundle.primary_repo.clone(), repositories)
+            };
+        Ok(SessionExportLayout {
+            backend,
+            workspace_root,
+            primary_repository,
+            repositories,
+            managed_worktree: session.managed_worktree,
+        })
+    }
+
     pub(super) async fn checkpoint_session_latched(
         &self,
         session_id: &str,
@@ -635,21 +751,13 @@ impl Controller {
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
         session.validate_configuration(&self.config)?;
-        let locator = session
-            .target
-            .as_ref()
-            .context("session has no live target")?;
-        let backend = backend_locator(locator, &session, &self.config)?;
+        let layout = self.session_export_layout(session_id, executor)?;
+        let backend = layout.backend.clone();
         let profile = self
             .config
             .profiles
             .get(&session.last_profile)
             .context("session profile is missing")?;
-        let bundle = session
-            .project_directory
-            .is_none()
-            .then(|| self.config.bundles.get(&session.bundle_id))
-            .flatten();
         let reconnect = hel_targets::reconnect_plan(&backend, session_id)?
             .commands
             .into_iter()
@@ -657,65 +765,12 @@ impl Controller {
             .context("reconnect plan is empty")?;
         let worker_root = hel_targets::worker_root(&backend, session_id)?;
         let harness_home = target_profile_home(&backend, session_id, profile);
-        let (workspace_root, primary_repository, repositories) =
-            if let Some(project_directory) = &session.project_directory {
-                let parent = project_directory
-                    .parent()
-                    .context("bare project directory has no parent")?;
-                let destination = project_directory
-                    .file_name()
-                    .context("bare project directory cannot be the filesystem root")?;
-                (
-                    parent.to_string_lossy().into_owned(),
-                    "project".to_owned(),
-                    vec![CheckpointRepositorySpec {
-                        id: "project".into(),
-                        relative_destination: PathBuf::from(destination),
-                        // Managed worktrees are retired on Stop, so their
-                        // dirty/untracked state must travel in the archive.
-                        // Their branch and objects remain in the owning Git
-                        // repository; no remote origin is required. Unmanaged
-                        // raw checkouts remain in place.
-                        capture: if session.managed_worktree.is_some() {
-                            CheckpointRepositoryCapture::DeltaFrom {
-                                base_commit: super::worktree::raw_checkout_position(
-                                    &session,
-                                    &self.config,
-                                    project_directory,
-                                    executor,
-                                )?
-                                .head_commit,
-                            }
-                        } else {
-                            CheckpointRepositoryCapture::MetadataOnly
-                        },
-                        origin_override: None,
-                    }],
-                )
-            } else {
-                let bundle = bundle.context("session bundle is missing")?;
-                let workspace_root = match &backend {
-                    hel_targets::TargetLocator::LocalPodman { .. }
-                    | hel_targets::TargetLocator::LocalDocker { .. }
-                    | hel_targets::TargetLocator::AppleContainer { .. }
-                    | hel_targets::TargetLocator::SshPodman { .. }
-                    | hel_targets::TargetLocator::SshDocker { .. } => "/workspace".to_string(),
-                    hel_targets::TargetLocator::AwsEc2 { workspace, .. }
-                    | hel_targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
-                    hel_targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
-                };
-                let repositories = bundle
-                    .repositories
-                    .iter()
-                    .map(|repository| CheckpointRepositorySpec {
-                        id: repository.id.clone(),
-                        relative_destination: repository.destination.clone(),
-                        capture: CheckpointRepositoryCapture::RemoteWorkspace,
-                        origin_override: None,
-                    })
-                    .collect();
-                (workspace_root, bundle.primary_repo.clone(), repositories)
-            };
+        let SessionExportLayout {
+            workspace_root,
+            primary_repository,
+            repositories,
+            ..
+        } = layout;
         let target_path = |path: &str| match &backend {
             hel_targets::TargetLocator::AwsEc2 { .. }
             | hel_targets::TargetLocator::SshBare { .. }
@@ -2323,6 +2378,99 @@ mod tests {
     use hel::hel_worker::{RelayCommand, RelayCursor, RelayExecutionState};
 
     use super::*;
+
+    /// An executor that fails if it is used. The layout of a session whose
+    /// repositories are described by configuration is derived without touching
+    /// the target at all.
+    struct UnusedExecutor;
+
+    impl CommandExecutor for UnusedExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            panic!("the export layout ran {command:?}");
+        }
+    }
+
+    #[test]
+    fn the_export_layout_places_each_session_kind_in_its_workspace() {
+        let session_id = "1123456789abcdef0123456789abcdef";
+        let mut config = crate::hel_controller::test_support::resume_compatibility_config();
+        config.bundles.insert(
+            "app-bundle".into(),
+            hel::hel_config::ProjectBundle {
+                primary_repo: "app".into(),
+                repositories: vec![hel::hel_config::ProjectRepository {
+                    id: "app".into(),
+                    github: None,
+                    local: None,
+                    destination: PathBuf::from("app"),
+                    git_ref: None,
+                }],
+            },
+        );
+
+        // A bundle session's repositories are laid out under the target's own
+        // workspace directory.
+        let mut session = checkpoint_test_session(session_id);
+        session.bundle_id = "app-bundle".into();
+        session.target = Some(hel::hel_state::TargetLocator::LocalPodman {
+            container_id: "hel-session".into(),
+            workspace_storage: Default::default(),
+        });
+        let mut state = HelState::default();
+        state.sessions.insert(session_id.into(), session.clone());
+        let controller = Controller {
+            config: config.clone(),
+            state,
+        };
+
+        let layout = controller
+            .session_export_layout(session_id, &UnusedExecutor)
+            .unwrap();
+        assert_eq!(layout.workspace_root, "/workspace");
+        assert_eq!(layout.primary_repository, "app");
+        assert_eq!(
+            layout
+                .repositories
+                .iter()
+                .map(|repository| (
+                    repository.id.clone(),
+                    repository.relative_destination.clone()
+                ))
+                .collect::<Vec<_>>(),
+            [("app".to_owned(), PathBuf::from("app"))]
+        );
+        assert!(matches!(
+            layout.repositories[0].capture,
+            CheckpointRepositoryCapture::RemoteWorkspace
+        ));
+        assert!(layout.managed_worktree.is_none());
+
+        // A bare checkout is its own workspace: the directory's parent, plus
+        // the checkout itself as the one repository.
+        let mut raw = session;
+        raw.target_template_id = "local-bare".into();
+        raw.project_directory = Some(PathBuf::from("/home/dev/project"));
+        raw.target = Some(hel::hel_state::TargetLocator::LocalBare {
+            worker_root: PathBuf::from("/home/dev/.local/share/hel/workers/session"),
+        });
+        let mut state = HelState::default();
+        state.sessions.insert(session_id.into(), raw);
+        let controller = Controller { config, state };
+
+        let layout = controller
+            .session_export_layout(session_id, &UnusedExecutor)
+            .unwrap();
+        assert_eq!(layout.workspace_root, "/home/dev");
+        assert_eq!(layout.primary_repository, "project");
+        assert_eq!(
+            layout.repositories[0].relative_destination,
+            PathBuf::from("project")
+        );
+        assert!(matches!(
+            layout.repositories[0].capture,
+            CheckpointRepositoryCapture::MetadataOnly
+        ));
+    }
 
     #[test]
     fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {

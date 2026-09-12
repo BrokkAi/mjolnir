@@ -1146,3 +1146,171 @@ fn create_symlink(target: &Path, destination: &Path) -> Result<()> {
 fn create_symlink(_target: &Path, _destination: &Path) -> Result<()> {
     bail!("symlink restore is not supported on this platform")
 }
+
+// ---------------------------------------------------------------------------
+// Session export
+// ---------------------------------------------------------------------------
+
+/// The work a session did in one repository, as a unified diff.
+///
+/// The comparison is the session's base commit against the working tree,
+/// tracked and untracked alike, so a caller sees what the agent produced
+/// whether or not it committed. The base is resolved in the order the caller
+/// can trust: an explicit base, then the immutable base a managed network
+/// workspace records, then the commit the session branch was created at.
+pub fn session_diff(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: Option<&str>,
+    branch: Option<&str>,
+) -> Result<String> {
+    let base = match base.map(str::trim).filter(|base| !base.is_empty()) {
+        Some(base) => base.to_owned(),
+        None => match remote_workspace_base(runner, repository)? {
+            Some(base) => base,
+            None => match branch {
+                Some(branch) => branch_creation_commit(runner, repository, branch)?
+                    .context("no session base recorded")?,
+                None => bail!("no session base recorded"),
+            },
+        },
+    };
+    let base_tree = git_text(
+        runner,
+        repository,
+        ["rev-parse", &format!("{base}^{{tree}}")],
+    )
+    .context("resolve the session base tree")?;
+    let current = capture_worktree_tree(runner, repository)?;
+    diff_between_trees(runner, repository, Some(&base_tree), &current)
+}
+
+/// The commit a branch was created at, read from its reflog.
+///
+/// The oldest reflog entry is the branch's creation, so its commit is where the
+/// session started. Reflogs expire, which is why a recorded base is preferred;
+/// this is the fallback for sessions created before one was recorded.
+fn branch_creation_commit(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    branch: &str,
+) -> Result<Option<String>> {
+    let reference = format!("refs/heads/{branch}");
+    let output = run_git(
+        runner,
+        repository,
+        ["reflog", "show", "--format=%H", &reference],
+        &[],
+    )?;
+    if output.status != 0 {
+        return Ok(None);
+    }
+    let text = std::str::from_utf8(&output.stdout).context("decode the branch reflog")?;
+    Ok(text
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_owned()))
+}
+
+/// A branch this push created or advanced, and the remote it reached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushedBranch {
+    pub remote: String,
+    pub branch: String,
+}
+
+/// Why a session branch could not be pushed.
+///
+/// A missing remote is separated from a failed push because it is the one
+/// outcome the caller can fix without looking at Git's output: nothing was
+/// attempted, and configuring a remote makes the same call work.
+#[derive(Debug)]
+pub enum PushBranchError {
+    /// The repository names neither `remote.pushDefault` nor `origin`.
+    NoRemote,
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for PushBranchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoRemote => write!(formatter, "no push remote configured"),
+            Self::Failed(error) => write!(formatter, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for PushBranchError {}
+
+impl From<anyhow::Error> for PushBranchError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// Push the session's current HEAD to `branch` on the repository's push remote.
+///
+/// The refspec names HEAD rather than the session branch so this works the same
+/// way on a detached checkout, and the destination is spelled in full so a
+/// remote's push rules cannot redirect it somewhere else.
+pub fn push_branch(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    branch: &str,
+) -> Result<PushedBranch, PushBranchError> {
+    if branch.starts_with('-') {
+        return Err(PushBranchError::Failed(anyhow!(
+            "branch name must not start with '-'"
+        )));
+    }
+    let checked = run_git(
+        runner,
+        repository,
+        ["check-ref-format", "--branch", branch],
+        &[],
+    )?;
+    if checked.status != 0 {
+        return Err(PushBranchError::Failed(anyhow!(
+            "{branch:?} is not a valid branch name"
+        )));
+    }
+    let remote = push_remote(runner, repository)?;
+    let refspec = format!("HEAD:refs/heads/{branch}");
+    let pushed = run_git(runner, repository, ["push", &remote, &refspec], &[])?;
+    if pushed.status != 0 {
+        return Err(PushBranchError::Failed(git_failure(
+            "push the session branch",
+            &pushed,
+        )));
+    }
+    Ok(PushedBranch {
+        remote,
+        branch: branch.to_owned(),
+    })
+}
+
+/// The remote a push goes to: the configured default, else `origin` when the
+/// repository has one.
+fn push_remote(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<String, PushBranchError> {
+    let configured = run_git(
+        runner,
+        repository,
+        ["config", "--get", "remote.pushDefault"],
+        &[],
+    )?;
+    if configured.status == 0 {
+        let name = trim_output(&configured.stdout, "read the configured push remote")?;
+        if !name.is_empty() {
+            return Ok(name);
+        }
+    }
+    let remotes =
+        git_text(runner, repository, ["remote"]).context("list the repository remotes")?;
+    if remotes.lines().any(|remote| remote.trim() == "origin") {
+        return Ok("origin".to_owned());
+    }
+    Err(PushBranchError::NoRemote)
+}

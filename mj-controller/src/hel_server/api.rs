@@ -12,13 +12,15 @@
 //! reaches them through [`SubagentBackend`], because this crate cannot depend
 //! on the daemon runtime that owns them.
 
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result as AnyResult};
 use axum::extract::{Path, Query, State};
-use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, COOKIE, HeaderValue};
+use axum::http::header::{
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, HeaderValue,
+};
 use axum::http::{Request as HttpRequest, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -434,14 +436,41 @@ pub enum StartStatus {
 /// A page of transcript items, read from the durable projection.
 pub use hel::hel_database::TranscriptPage;
 
-/// A branch the daemon pushed on the caller's behalf. Served in M4.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A branch the daemon pushed on the caller's behalf.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PushedBranch {
     pub branch: String,
     pub remote: String,
 }
 
-/// A git bundle of the session's work. Served in M4.
+/// Which file of the session's workspace to read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileQuery {
+    /// Path relative to the session's workspace root.
+    pub path: String,
+}
+
+/// What form the caller wants the session's work in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportKind {
+    /// A unified diff, as `GET /diff` returns.
+    Patch,
+    /// A branch pushed to the repository's push remote.
+    Branch,
+    /// The git bundle of the session's committed work.
+    Bundle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportRequest {
+    pub kind: ExportKind,
+    /// The branch to push. Required when `kind` is `branch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+/// A git bundle of the session's work.
 #[derive(Debug, Clone)]
 pub struct BundleExport {
     pub repository: String,
@@ -739,6 +768,9 @@ pub(super) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions/{session_id}/wait", post(wait))
         .route("/sessions/{session_id}/close", post(close))
         .route("/sessions/{session_id}/cancel-turn", post(cancel_turn))
+        .route("/sessions/{session_id}/diff", get(diff))
+        .route("/sessions/{session_id}/files", get(read_file))
+        .route("/sessions/{session_id}/export", post(export))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             require_api_auth,
@@ -1032,6 +1064,91 @@ async fn send_action(
     }
 }
 
+/// A unified diff of everything the session changed.
+async fn diff(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Response, ApiFailure> {
+    let backend = backend(&state)?.clone();
+    let diff = backend.diff(session_id).await?;
+    Ok(([(CONTENT_TYPE, "text/x-diff; charset=utf-8")], diff).into_response())
+}
+
+/// One file from the session's workspace, as bytes.
+///
+/// The path is checked here as well as on the target: a caller that spells an
+/// absolute or escaping path has made a mistake worth naming, and there is no
+/// reason to spend a round trip to the target discovering it.
+async fn read_file(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<FileQuery>,
+) -> Result<Response, ApiFailure> {
+    let backend = backend(&state)?.clone();
+    let path = PathBuf::from(&query.path);
+    if query.path.trim().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(ApiFailure::bad_request(
+            "path must be relative to the session workspace and must not contain '..'",
+        ));
+    }
+    let bytes = backend.read_file(session_id, path).await?;
+    Ok(([(CONTENT_TYPE, "application/octet-stream")], bytes).into_response())
+}
+
+/// Get the session's work out, in whichever form the caller asked for.
+async fn export(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ExportRequest>,
+) -> Result<Response, ApiFailure> {
+    let backend = backend(&state)?.clone();
+    match request.kind {
+        ExportKind::Patch => {
+            let diff = backend.diff(session_id).await?;
+            Ok(([(CONTENT_TYPE, "text/x-diff; charset=utf-8")], diff).into_response())
+        }
+        ExportKind::Branch => {
+            let branch = request
+                .branch
+                .as_deref()
+                .map(str::trim)
+                .filter(|branch| !branch.is_empty())
+                .ok_or_else(|| ApiFailure::bad_request("a branch export needs a branch name"))?
+                .to_owned();
+            let pushed = backend.push_branch(session_id, branch).await?;
+            Ok(Json(pushed).into_response())
+        }
+        ExportKind::Bundle => {
+            let bundle = backend.bundle(session_id.clone()).await?;
+            // The filename reaches a header, so keep it to characters that
+            // cannot end the quoted string or split the response.
+            let filename: String = format!("{session_id}-{}.bundle", bundle.repository)
+                .chars()
+                .map(|character| match character {
+                    'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '-' | '_' => character,
+                    _ => '-',
+                })
+                .collect();
+            Ok((
+                [
+                    (CONTENT_TYPE, "application/octet-stream".to_owned()),
+                    (
+                        CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{filename}\""),
+                    ),
+                ],
+                bundle.bytes,
+            )
+                .into_response())
+        }
+    }
+}
+
 async fn wait(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -1213,7 +1330,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::Request;
-    use axum::http::header::{CONTENT_TYPE, SET_COOKIE};
+    use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, SET_COOKIE};
     use http_body_util::BodyExt as _;
     use tokio::sync::{mpsc, watch};
     use tower::ServiceExt as _;
@@ -1241,6 +1358,16 @@ mod tests {
         /// The page and the limit the transcript handler asked for.
         transcript: Mutex<Option<TranscriptPage>>,
         transcript_limits: Mutex<Vec<usize>>,
+        /// Export answers. `None` stands for a refusal, which is what an
+        /// export that cannot be produced looks like to a handler.
+        diff: Option<String>,
+        file: Option<Vec<u8>>,
+        pushed: Option<PushedBranch>,
+        bundle: Option<BundleExport>,
+        /// When set, the diff fails outright rather than being refused.
+        diff_fails: bool,
+        /// The path the file handler asked the backend for.
+        file_paths: Mutex<Vec<PathBuf>>,
     }
 
     impl FakeBackend {
@@ -1322,24 +1449,45 @@ mod tests {
             })
         }
         fn diff(&self, _session_id: String) -> BoxFuture<'_, Result<String, ExportError>> {
-            Box::pin(async { Err(ExportError::Refused("not implemented".into())) })
+            Box::pin(async {
+                if self.diff_fails {
+                    return Err(ExportError::Failed(anyhow::anyhow!("git exploded")));
+                }
+                self.diff
+                    .clone()
+                    .ok_or_else(|| ExportError::Refused("this session has no live target".into()))
+            })
         }
         fn read_file(
             &self,
             _session_id: String,
-            _path: PathBuf,
+            path: PathBuf,
         ) -> BoxFuture<'_, Result<Vec<u8>, ExportError>> {
-            Box::pin(async { Err(ExportError::Refused("not implemented".into())) })
+            Box::pin(async move {
+                self.file_paths.lock().unwrap().push(path);
+                self.file
+                    .clone()
+                    .ok_or_else(|| ExportError::Refused("this session has no live target".into()))
+            })
         }
         fn push_branch(
             &self,
             _session_id: String,
-            _branch: String,
+            branch: String,
         ) -> BoxFuture<'_, Result<PushedBranch, ExportError>> {
-            Box::pin(async { Err(ExportError::Refused("not implemented".into())) })
+            Box::pin(async move {
+                self.pushed
+                    .clone()
+                    .map(|pushed| PushedBranch { branch, ..pushed })
+                    .ok_or_else(|| ExportError::Refused("this session is running a turn".into()))
+            })
         }
         fn bundle(&self, _session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
-            Box::pin(async { Err(ExportError::Refused("not implemented".into())) })
+            Box::pin(async {
+                self.bundle.clone().ok_or_else(|| {
+                    ExportError::Refused("no commits beyond the session base".into())
+                })
+            })
         }
     }
 
@@ -2090,6 +2238,222 @@ mod tests {
                 .unwrap()
                 .outcome,
             WaitOutcome::Error
+        );
+    }
+
+    #[tokio::test]
+    async fn the_diff_route_answers_a_patch_and_maps_export_failures() {
+        let backend = Arc::new(FakeBackend {
+            diff: Some("--- a/one\n+++ b/one\n".to_owned()),
+            ..FakeBackend::default()
+        });
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::get("/api/v1/sessions/session-1/diff"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/x-diff; charset=utf-8"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("+++ b/one"));
+
+        // A refusal is something the caller can act on; a failure is not.
+        let (app, _actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
+        let response = app
+            .oneshot(
+                bearer(Request::get("/api/v1/sessions/session-1/diff"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(
+            Arc::new(FakeBackend {
+                diff_fails: true,
+                ..FakeBackend::default()
+            }),
+            |_| {},
+        );
+        let response = app
+            .oneshot(
+                bearer(Request::get("/api/v1/sessions/session-1/diff"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json_body(response).await["error"], "git exploded");
+    }
+
+    #[tokio::test]
+    async fn the_file_route_returns_bytes_and_refuses_a_path_that_leaves_the_workspace() {
+        let backend = Arc::new(FakeBackend {
+            file: Some(b"file bytes".to_vec()),
+            ..FakeBackend::default()
+        });
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::get(
+                    "/api/v1/sessions/session-1/files?path=app/README.md",
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/octet-stream"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), b"file bytes");
+        assert_eq!(
+            backend.file_paths.lock().unwrap().as_slice(),
+            [PathBuf::from("app/README.md")]
+        );
+
+        for path in ["../etc/passwd", "/etc/passwd"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    bearer(Request::get(format!(
+                        "/api/v1/sessions/session-1/files?path={path}"
+                    )))
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{path} must never reach the target"
+            );
+        }
+        assert_eq!(
+            backend.file_paths.lock().unwrap().len(),
+            1,
+            "a rejected path is not sent to the backend"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_export_route_serves_each_kind_in_its_own_form() {
+        let backend = Arc::new(FakeBackend {
+            diff: Some("--- a/one\n".to_owned()),
+            pushed: Some(PushedBranch {
+                branch: String::new(),
+                remote: "origin".to_owned(),
+            }),
+            bundle: Some(BundleExport {
+                repository: "app".to_owned(),
+                bytes: b"bundle bytes".to_vec(),
+            }),
+            ..FakeBackend::default()
+        });
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/export"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"kind":"patch"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/x-diff; charset=utf-8"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/export"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"kind":"branch","branch":"review/one"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["branch"], "review/one");
+        assert_eq!(body["remote"], "origin");
+
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/export"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"kind":"branch"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a branch export without a branch name is the caller's mistake"
+        );
+
+        let response = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/export"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"kind":"bundle"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            response.headers().get(CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"session-1-app.bundle\""
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), b"bundle bytes");
+    }
+
+    #[tokio::test]
+    async fn an_empty_bundle_is_refused_rather_than_served_as_an_empty_file() {
+        let (app, _actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
+        let response = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/export"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"kind":"bundle"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(response).await["error"],
+            "no commits beyond the session base"
         );
     }
 }

@@ -26,7 +26,7 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - [x] (2026-09-11) M1: persist the per-turn outcome in the projection and database; API module with auth, version header, sessions list/get, prompt, wait, close, cancel-turn; daemon-side backend.
 - [x] (2026-09-11) M2: start with model/effort/prompt follow-up and durable idempotency keys.
 - [x] (2026-09-11) M3: transcript paged by seq from SQLite.
-- [ ] M4: export: worker subcommands, diff, file fetch, branch push, bundle.
+- [x] (2026-09-11) M4: export: worker subcommands, diff, file fetch, branch push, bundle.
 - [ ] M5: CLI subcommands and the API reference page.
 
 ## Surprises & Discoveries
@@ -56,6 +56,11 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - Observation: a closed `watch` channel reports "changed" immediately and forever, so the first wait loop spun without ever letting a timer fire. The test hung rather than failing.
   Evidence: `pstree` showed the test binary alive with one busy thread and no progress; `tokio::select!` was taking the `snapshot_rx.changed()` branch on every pass because the test factory dropped the sender.
   Resolution: the loop now returns 503 when the snapshot channel closes, which is the honest answer when the control loop that publishes session facts is gone.
+
+- Observation: `plan_workspace_to_raw` can reattach a branch a previous move retired (`reuse_existing_branch`), so its base commit is the branch's original creation point, not the repository's current HEAD. Only a freshly created branch records a base; a reattached one keeps `None` and falls back to the reflog.
+- Observation: `verify_repository_bundles_streaming` returned the repository bundles but not the archive manifest's `bundle.primary_repository`, so a bundle export of a stopped session had no way to name the primary repository. The type is used in exactly one place, so it gained that field rather than the caller re-reading the archive.
+- Observation: `session_export_layout` cannot serve a stopped session: it derives the target locator, and a stopped record has none. The bundle export therefore reads the primary repository id from the archive instead of the layout, which is also what makes it work after the target is gone.
+- Observation: two workspace test failures during validation (`node_preflight_checks_missing_old_and_supported_tools_on_profile_path`, `npm_upgrade_restarts_after_the_running_package_is_removed`, the latter failing to spawn a child process at all) were load flakes: both passed on their own and in a second full run.
 
 ## Decision Log
 
@@ -118,6 +123,15 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - Decision: an oversized `limit` on the transcript route is clamped to 1000 rather than refused.
   Rationale: paging is the route's purpose, and a 400 would only make the caller retry with a smaller number it has to guess at; the response says how far the page reached through `latest_seq`.
   Date/Author: 2026-09-11, M3 implementation.
+- Decision: `ApiBackend` reaches the daemon's records and checkpoints through an `ExportRuntime` trait that `RuntimeState` implements, rather than holding `Arc<RuntimeState>`.
+  Rationale: the export path needs exactly two things from the runtime, and a trait keeps the backend constructible in the existing follow-up tests, which have no daemon runtime - the same reasoning that made session state a function in M1.
+  Date/Author: 2026-09-11, M4 implementation.
+- Decision: the worker's push-branch reports "no push remote configured" as a typed `PushBranchError::NoRemote`, but the API maps a failed worker command to 500 rather than 409.
+  Rationale: the type is what the git helper's own test asserts; across the process boundary only an exit code survives, and inventing a second exit-code convention to recover the distinction would buy less than it costs. Exit code 2 is already reserved for clap's usage failure, which is how a worker too old to know these subcommands is told apart.
+  Date/Author: 2026-09-11, M4 implementation.
+- Decision: the bundle export names the primary repository from the checkpoint archive's own manifest, not from the session's export layout.
+  Rationale: a stopped session has no target and therefore no layout, and the archive is the only thing a stopped session's bundle can come from; reading the name from the same place as the bytes keeps the two from disagreeing.
+  Date/Author: 2026-09-11, M4 implementation.
 - Decision: each transcript item carries both flattened `text` and its raw `body`.
   Rationale: the common caller wants to read the conversation, and flattening a tool call or a plan correctly needs the same helpers every other surface uses; a caller that needs the structure should not have to re-derive it from prose.
   Date/Author: 2026-09-11, M3 implementation.

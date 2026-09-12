@@ -184,7 +184,7 @@ impl Controller {
             .context("only a repository already on this machine can become a checkout")?;
         self.validate_project_directory(target_id, source, executor)
             .context("this session's repository is unavailable")?;
-        let worktree = ManagedWorktree {
+        let mut worktree = ManagedWorktree {
             source_project_directory: source.to_path_buf(),
             source_repository: source.to_path_buf(),
             worktree_root: source.join(".mj").join("worktrees").join(&session.id),
@@ -195,9 +195,17 @@ impl Controller {
                     .get(target_id)
                     .with_context(|| format!("unknown target template {target_id:?}"))?,
             )?,
+            base_commit: None,
         };
         let reuse_existing_branch =
             retained_managed_worktree_branch_available(executor, &worktree)?;
+        // A fresh branch starts at the repository's HEAD, so that is what an
+        // export diffs against. A retained branch already carries the session's
+        // commits; its own creation point is what its reflog names.
+        if !reuse_existing_branch {
+            worktree.base_commit =
+                Some(read_checkout_position(executor, &worktree.target, source)?.head_commit);
+        }
         if !reuse_existing_branch {
             ensure_managed_worktree_available(executor, &worktree)?;
         }
@@ -252,12 +260,17 @@ impl Controller {
             .join(".mj")
             .join("worktrees")
             .join(session_id);
+        // The worktree branch is created from the repository's HEAD, so record
+        // that commit as the session base rather than rediscovering it later.
+        let base_commit =
+            read_checkout_position(executor, &target, &inspection.source_repository)?.head_commit;
         let managed = ManagedWorktree {
             source_project_directory: inspection.source_project_directory,
             source_repository: inspection.source_repository,
             worktree_root: worktree_root.clone(),
             branch: format!("mj/{session_id}"),
             target,
+            base_commit: Some(base_commit),
         };
         ensure_managed_worktree_available(executor, &managed)?;
         let record = self.state.sessions.get_mut(session_id).unwrap();
@@ -2042,6 +2055,7 @@ mod tests {
             worktree_root: repository.path().join(".mj/worktrees").join(session_id),
             branch: format!("mj/{session_id}"),
             target,
+            base_commit: None,
         };
         create_managed_worktree(
             &ProcessExecutor,
@@ -2148,6 +2162,7 @@ mod tests {
                 destination: "builder".into(),
                 ssh_args: Vec::new(),
             },
+            base_commit: None,
         };
         let executor = RemoteExecutor {
             path_checks: RefCell::new(0),
@@ -2366,6 +2381,9 @@ mod tests {
                 worktree_root: repository.path().join(".mj/worktrees").join(session_id),
                 branch: format!("mj/{session_id}"),
                 target: ManagedWorktreeTarget::Local,
+                // The new branch starts at the repository's HEAD, which is
+                // what an export of this session diffs against.
+                base_commit: Some(test_git(repository.path(), &["rev-parse", "HEAD"])),
             }
         );
 
@@ -2525,6 +2543,7 @@ mod tests {
                 worktree_root: repository.join(".mj/worktrees").join(session_id),
                 branch: format!("mj/{session_id}"),
                 target: ManagedWorktreeTarget::Local,
+                base_commit: None,
             },
             reuse_existing_branch: false,
         };
@@ -2563,6 +2582,7 @@ mod tests {
                     worktree_root: repository.join(".mj/worktrees").join(session_id),
                     branch: format!("mj/{session_id}"),
                     target: ManagedWorktreeTarget::Local,
+                    base_commit: None,
                 },
                 reuse_existing_branch: false,
             },
@@ -2621,6 +2641,7 @@ mod tests {
             worktree_root: repository.path().join(".mj/worktrees").join(session_id),
             branch: format!("mj/{session_id}"),
             target: ManagedWorktreeTarget::Local,
+            base_commit: None,
         };
         create_managed_worktree(
             &ProcessExecutor,
@@ -2674,6 +2695,7 @@ mod tests {
             worktree_root: repository.path().join(".mj/worktrees").join(session_id),
             branch: format!("mj/{session_id}"),
             target: target.clone(),
+            base_commit: None,
         };
         let error = create_managed_worktree(
             &ProcessExecutor,
@@ -2713,6 +2735,7 @@ mod tests {
             worktree_root: repository.path().join(".mj/worktrees").join(session_id),
             branch: branch.clone(),
             target,
+            base_commit: None,
         };
 
         let error = ensure_managed_worktree_available(&ProcessExecutor, &worktree).unwrap_err();

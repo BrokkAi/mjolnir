@@ -91,6 +91,32 @@ enum WorkerCommand {
         #[arg(long)]
         socket: PathBuf,
     },
+    /// Print a unified diff of the session's work in one repository.
+    Diff {
+        #[arg(long)]
+        repository: PathBuf,
+        /// The commit the session started from, when the controller recorded one.
+        #[arg(long)]
+        base: Option<String>,
+        /// The session branch, whose reflog names the commit it was created at.
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Write one file from the session workspace to standard output.
+    ReadFile {
+        #[arg(long)]
+        root: PathBuf,
+        /// Path relative to the workspace root.
+        #[arg(long)]
+        path: PathBuf,
+    },
+    /// Push the repository's current HEAD to a branch on its push remote.
+    PushBranch {
+        #[arg(long)]
+        repository: PathBuf,
+        #[arg(long)]
+        branch: String,
+    },
 }
 
 fn write_worker_exit_record(root: &Path, reason: &str) {
@@ -207,7 +233,41 @@ async fn run_command(command: Command) -> Result<()> {
         }
         WorkerCommand::MemoryMcp { root } => hel::hel_project_memory::run_mcp_stdio(&root),
         WorkerCommand::ReviewMcp { socket } => hel::hel_review::mcp::run_mcp_stdio(&socket),
+        WorkerCommand::Diff {
+            repository,
+            base,
+            branch,
+        } => {
+            let diff = hel::hel_archive::session_diff(
+                &hel::hel_archive::SystemGit,
+                &repository,
+                base.as_deref(),
+                branch.as_deref(),
+            )?;
+            write_stdout(diff.as_bytes())
+        }
+        WorkerCommand::ReadFile { root, path } => {
+            write_stdout(&hel::hel_archive::read_session_file(&root, &path)?)
+        }
+        WorkerCommand::PushBranch { repository, branch } => {
+            let pushed =
+                hel::hel_archive::push_branch(&hel::hel_archive::SystemGit, &repository, &branch)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+            println!("{}", serde_json::to_string(&pushed)?);
+            Ok(())
+        }
     }
+}
+
+/// Write an export payload to standard output unchanged. A diff and a file are
+/// bytes the caller reassembles, so nothing may add or trim a newline.
+fn write_stdout(bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(bytes)
+        .context("write to standard output")?;
+    stdout.flush().context("flush standard output")
 }
 
 #[cfg(test)]
@@ -263,6 +323,72 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn export_subcommands_parse_the_arguments_the_controller_sends() {
+        let cli = Cli::try_parse_from([
+            "hel",
+            "worker",
+            "diff",
+            "--repository",
+            "/workspace/app",
+            "--branch",
+            "mj/session-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Worker(WorkerArgs {
+                command: WorkerCommand::Diff {
+                    repository,
+                    base: None,
+                    branch: Some(branch),
+                },
+            }) if repository == Path::new("/workspace/app") && branch == "mj/session-1"
+        ));
+
+        let cli = Cli::try_parse_from([
+            "hel",
+            "worker",
+            "read-file",
+            "--root",
+            "/workspace",
+            "--path",
+            "app/README.md",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Worker(WorkerArgs {
+                command: WorkerCommand::ReadFile { root, path },
+            }) if root == Path::new("/workspace") && path == Path::new("app/README.md")
+        ));
+
+        let cli = Cli::try_parse_from([
+            "hel",
+            "worker",
+            "push-branch",
+            "--repository",
+            "/workspace/app",
+            "--branch",
+            "review/one",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Worker(WorkerArgs {
+                command: WorkerCommand::PushBranch { repository, branch },
+            }) if repository == Path::new("/workspace/app") && branch == "review/one"
+        ));
+    }
+
+    /// A worker that predates these subcommands answers a usage failure, which
+    /// is how the controller tells "too old" from "the export failed".
+    #[test]
+    fn an_unknown_worker_subcommand_is_a_clap_usage_failure() {
+        let error = Cli::try_parse_from(["hel", "worker", "diff-not-a-command"]).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
     }
 
     #[test]

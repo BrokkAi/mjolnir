@@ -2302,6 +2302,34 @@ impl RuntimeState {
             .map(|record| record.state)
     }
 
+    /// One in-memory session record, or `None` when the daemon holds none.
+    pub(crate) fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+        self.controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .sessions
+            .get(session_id)
+            .cloned()
+    }
+
+    /// Checkpoint a session now and publish the result, the way the daemon's
+    /// own checkpoint action does.
+    ///
+    /// The API's bundle export needs a fresh archive for a running session, and
+    /// it must take the same lifecycle guard and controller refresh as any
+    /// other checkpoint rather than driving the controller behind their backs.
+    pub(crate) async fn checkpoint_session_now(
+        &self,
+        session_id: &str,
+    ) -> Result<hel::hel_state::CheckpointMetadata> {
+        ensure_no_active_lifecycle(self)?;
+        let mut controller = blocking(Controller::load).await?;
+        let checkpoint = controller.checkpoint_session(session_id).await?;
+        refresh_runtime_controller(self).await;
+        Ok(checkpoint)
+    }
+
     /// In-memory records and ownership sampled with the same lock order as
     /// completion. A web publish must not pair old records with a new absence
     /// of ownership, even while its background database reload is in flight.
@@ -4814,13 +4842,9 @@ async fn handle_action(
             refresh_runtime_controller(state).await;
             Ok(DaemonReply::OptionalSessionState(changed))
         }
-        DaemonAction::CheckpointSession { session_id } => {
-            ensure_no_active_lifecycle(state)?;
-            let mut controller = blocking(Controller::load).await?;
-            let checkpoint = controller.checkpoint_session(&session_id).await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Checkpoint(checkpoint))
-        }
+        DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
+            state.checkpoint_session_now(&session_id).await?,
+        )),
         DaemonAction::ScanRecovery => {
             let scan =
                 blocking(|| Ok(Controller::load()?.scan_orphan_workers(&ProcessExecutor))).await?;

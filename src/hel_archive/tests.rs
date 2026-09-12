@@ -2178,3 +2178,115 @@ fn review_capture_ignores_files_git_ignores() {
         "ignored build output is not a change a review should see"
     );
 }
+
+#[test]
+fn a_session_diff_shows_tracked_and_untracked_work_against_the_recorded_base() {
+    let repository = tempfile::tempdir().unwrap();
+    initialize_repository(repository.path());
+    commit_file(repository.path(), "tracked.txt", b"base\n", "base");
+    let base = git_line(repository.path(), &["rev-parse", "HEAD"]);
+    git(repository.path(), &["config", "mj.remoteWorkspace", "true"]);
+    git(repository.path(), &["config", "mj.baseCommit", &base]);
+
+    // Work the agent committed, work it left staged, and a new file it never
+    // told Git about all belong in what the session produced.
+    commit_file(repository.path(), "tracked.txt", b"changed\n", "work");
+    fs::write(repository.path().join("untracked.txt"), b"new\n").unwrap();
+
+    let patch = session_diff(&SystemGit, repository.path(), None, None).unwrap();
+    assert!(
+        patch.contains("+changed") && patch.contains("untracked.txt"),
+        "the diff covers committed and untracked work: {patch}"
+    );
+}
+
+#[test]
+fn a_session_diff_falls_back_to_the_commit_its_branch_was_created_at() {
+    let repository = tempfile::tempdir().unwrap();
+    initialize_repository(repository.path());
+    commit_file(repository.path(), "tracked.txt", b"base\n", "base");
+    let base = git_line(repository.path(), &["rev-parse", "HEAD"]);
+    git(repository.path(), &["checkout", "-q", "-b", "mj/session-1"]);
+    commit_file(repository.path(), "tracked.txt", b"changed\n", "work");
+
+    let patch = session_diff(&SystemGit, repository.path(), None, Some("mj/session-1")).unwrap();
+    assert!(
+        patch.contains("-base") && patch.contains("+changed"),
+        "with no recorded base the branch reflog names the session's start: {patch}"
+    );
+
+    // The same repository with no base and no branch cannot answer at all.
+    let error = session_diff(&SystemGit, repository.path(), None, None).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no session base recorded"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        git_line(repository.path(), &["rev-parse", "HEAD~1"]),
+        base,
+        "the diff reads the repository without moving it"
+    );
+}
+
+#[test]
+fn pushing_a_session_branch_reaches_origin_and_reports_a_missing_remote() {
+    let parent = tempfile::tempdir().unwrap();
+    let repository = parent.path().join("work");
+    initialize_repository(&repository);
+    commit_file(&repository, "tracked.txt", b"base\n", "base");
+
+    let error = push_branch(&SystemGit, &repository, "review/one").unwrap_err();
+    assert!(
+        matches!(error, PushBranchError::NoRemote),
+        "a repository with no remote refuses before running a push: {error}"
+    );
+
+    let remote = parent.path().join("origin.git");
+    git(
+        parent.path(),
+        &["init", "-q", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        &repository,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+
+    let pushed = push_branch(&SystemGit, &repository, "review/one").unwrap();
+    assert_eq!(pushed.remote, "origin");
+    assert_eq!(pushed.branch, "review/one");
+    assert_eq!(
+        git_line(&remote, &["rev-parse", "refs/heads/review/one"]),
+        git_line(&repository, &["rev-parse", "HEAD"]),
+        "the pushed branch names the session's current commit"
+    );
+}
+
+#[test]
+fn a_session_file_read_stays_inside_the_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("inside.txt"), b"visible\n").unwrap();
+    fs::write(outside.path().join("secret.txt"), b"private\n").unwrap();
+
+    assert_eq!(
+        read_session_file(root.path(), Path::new("inside.txt")).unwrap(),
+        b"visible\n"
+    );
+
+    let error = read_session_file(root.path(), Path::new("../secret.txt")).unwrap_err();
+    assert!(
+        format!("{error:#}").contains(".."),
+        "unexpected error: {error:#}"
+    );
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), root.path().join("link"))
+            .unwrap();
+        let error = read_session_file(root.path(), Path::new("link")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("leaves the session workspace"),
+            "a symlink out of the workspace is refused: {error:#}"
+        );
+    }
+}

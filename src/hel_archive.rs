@@ -456,6 +456,9 @@ pub struct VerifiedRepositoryBundle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedRepositoryBundles {
     pub archive_sha256: String,
+    /// The id, within `repositories`, of the repository the session's work is
+    /// primarily in.
+    pub primary_repository: String,
     pub repositories: Vec<VerifiedRepositoryBundle>,
 }
 
@@ -769,6 +772,7 @@ pub fn verify_repository_bundles_streaming(path: &Path) -> Result<VerifiedReposi
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     Ok(VerifiedRepositoryBundles {
         archive_sha256: digest_reader(&mut file)?,
+        primary_repository: contents.manifest.bundle.primary_repository.clone(),
         repositories,
     })
 }
@@ -2252,16 +2256,56 @@ pub fn redact_origin_credentials(origin: &str) -> Result<String> {
     Ok(url.to_string())
 }
 
+/// The largest file the session file export will return. A caller that wants a
+/// build artifact wants the bundle, not a response the daemon has to hold in
+/// memory in full.
+pub const MAX_SESSION_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read one file from a session's workspace.
+///
+/// The path is relative and must stay inside `root` after both ends are
+/// canonicalized, so neither a `..` component nor a symlink pointing out of the
+/// workspace can reach the rest of the target's filesystem.
+pub fn read_session_file(root: &Path, relative: &Path) -> Result<Vec<u8>> {
+    crate::hel_config::validate_relative_destination(relative)
+        .context("read a file from the session workspace")?;
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("resolve session workspace {}", root.display()))?;
+    let path = root
+        .join(relative)
+        .canonicalize()
+        .with_context(|| format!("resolve {} in the session workspace", relative.display()))?;
+    ensure!(
+        path.starts_with(&root),
+        "{} leaves the session workspace",
+        relative.display()
+    );
+    let metadata = std::fs::metadata(&path)
+        .with_context(|| format!("read {} in the session workspace", relative.display()))?;
+    ensure!(
+        metadata.is_file(),
+        "{} is not a regular file",
+        relative.display()
+    );
+    ensure!(
+        metadata.len() <= MAX_SESSION_FILE_BYTES,
+        "{} is larger than {MAX_SESSION_FILE_BYTES} bytes",
+        relative.display()
+    );
+    fs::read(&path).with_context(|| format!("read {} in the session workspace", relative.display()))
+}
+
 mod git;
 
 pub(crate) use git::ensure_no_symlink_ancestors;
 pub use git::{
     GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, GitOutput,
-    GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV, NON_INTERACTIVE_GIT_SSH_COMMAND,
-    REVIEW_BASELINE_REF, REVIEW_CAPTURE_REF, SystemGit, capture_worktree_tree,
+    GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV, NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError,
+    PushedBranch, REVIEW_BASELINE_REF, REVIEW_CAPTURE_REF, SystemGit, capture_worktree_tree,
     collect_git_metadata_snapshot, collect_git_snapshot, collect_git_snapshot_with_progress,
-    diff_between_trees, empty_tree_id, has_origin_refs, pin_review_tree, remote_workspace_base,
-    restore_git_snapshot,
+    diff_between_trees, empty_tree_id, has_origin_refs, pin_review_tree, push_branch,
+    remote_workspace_base, restore_git_snapshot, session_diff,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};
