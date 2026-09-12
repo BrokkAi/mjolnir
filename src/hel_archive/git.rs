@@ -321,7 +321,7 @@ pub const REVIEW_BASELINE_REF: &str = "refs/hel/review-baseline";
 ///
 /// The staging runs against a scratch index file named by `GIT_INDEX_FILE`, so
 /// the repository's real index, working tree and HEAD are untouched: after this
-/// call `git status` reports exactly what it reported before. Ignored files stay
+/// call `git status` reports exactly what it reported before. Untracked ignored files stay
 /// out, because `git add -A` honours the ignore rules, which is what makes two
 /// captures comparable as "what the agent changed".
 pub fn capture_worktree_tree(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
@@ -339,6 +339,43 @@ pub fn capture_worktree_tree(runner: &dyn GitCommandRunner, repository: &Path) -
         OsString::from("GIT_INDEX_FILE"),
         index_path.as_os_str().to_os_string(),
     )];
+    let real_index = git_text(
+        runner,
+        repository,
+        ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    )
+    .context("locate the real Git index")?;
+    match std::fs::copy(&real_index, &index_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let head = run_git(
+                runner,
+                repository,
+                ["rev-parse", "--verify", "--quiet", "HEAD"],
+                &[],
+            )?;
+            ensure!(
+                head.status == 0 || head.status == 1,
+                "{}",
+                git_failure("resolve capture HEAD", &head)
+            );
+            let base = if head.status == 0 { "HEAD" } else { "--empty" };
+            git_success(
+                runner,
+                repository,
+                GitCommand {
+                    arguments: ["read-tree", base]
+                        .into_iter()
+                        .map(OsString::from)
+                        .collect(),
+                    stdin: Vec::new(),
+                    env: scratch.to_vec(),
+                },
+                "initialize the scratch index",
+            )?;
+        }
+        Err(error) => return Err(error).context("copy the real Git index for capture"),
+    }
     let staged = git_success(
         runner,
         repository,

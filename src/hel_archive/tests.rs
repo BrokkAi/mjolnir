@@ -2290,3 +2290,104 @@ fn a_session_file_read_stays_inside_the_workspace() {
         );
     }
 }
+
+#[test]
+fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
+    let repository = tempfile::tempdir().unwrap();
+    initialize_repository(repository.path());
+    for name in [
+        "unchanged",
+        "modified",
+        "deleted",
+        "staged-deleted",
+        "cached-deleted",
+    ] {
+        commit_file(repository.path(), name, b"base\n", name);
+    }
+    commit_file(
+        repository.path(),
+        ".gitignore",
+        b"unchanged\nmodified\ndeleted\nstaged-deleted\ncached-deleted\nnew-ignored\nforced\n",
+        "ignore tracked files",
+    );
+    fs::write(repository.path().join("modified"), b"changed\n").unwrap();
+    fs::remove_file(repository.path().join("deleted")).unwrap();
+    git(repository.path(), &["rm", "staged-deleted"]);
+    git(repository.path(), &["rm", "--cached", "cached-deleted"]);
+    fs::write(repository.path().join("new-ignored"), b"ignored\n").unwrap();
+    fs::write(repository.path().join("forced"), b"forced\n").unwrap();
+    git(repository.path(), &["add", "-f", "forced"]);
+    let index = fs::read(repository.path().join(".git/index")).unwrap();
+    let tree = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
+    assert_eq!(
+        git(repository.path(), &["show", &format!("{tree}:unchanged")]),
+        b"base\n"
+    );
+    assert_eq!(
+        git(repository.path(), &["show", &format!("{tree}:modified")]),
+        b"changed\n"
+    );
+    assert_eq!(
+        git(repository.path(), &["show", &format!("{tree}:forced")]),
+        b"forced\n"
+    );
+    let files = git_line(repository.path(), &["ls-tree", "--name-only", &tree]);
+    for absent in ["deleted", "staged-deleted", "cached-deleted", "new-ignored"] {
+        assert!(
+            !files.lines().any(|file| file == absent),
+            "{absent}: {files}"
+        );
+    }
+    assert_eq!(
+        fs::read(repository.path().join(".git/index")).unwrap(),
+        index
+    );
+}
+
+#[test]
+fn review_capture_uses_linked_worktree_index_and_bootstraps_missing_index() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("repo");
+    fs::create_dir(&repository).unwrap();
+    initialize_repository(&repository);
+    commit_file(&repository, "tracked", b"base\n", "base");
+    commit_file(&repository, ".gitignore", b"tracked\n", "ignore");
+    let linked = root.path().join("linked");
+    git(
+        &repository,
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    );
+    fs::write(linked.join("tracked"), b"linked\n").unwrap();
+    let index = git_line(
+        &linked,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    );
+    let before = fs::read(&index).unwrap();
+    let tree = capture_worktree_tree(&SystemGit, &linked).unwrap();
+    assert_eq!(
+        git(&linked, &["show", &format!("{tree}:tracked")]),
+        b"linked\n"
+    );
+    assert_eq!(fs::read(&index).unwrap(), before);
+    fs::remove_file(&index).unwrap();
+    assert_eq!(capture_worktree_tree(&SystemGit, &linked).unwrap(), tree);
+    assert!(!Path::new(&index).exists());
+}
+
+#[test]
+fn review_capture_handles_unborn_repositories_and_rejects_corrupt_indexes() {
+    let repository = tempfile::tempdir().unwrap();
+    initialize_repository(repository.path());
+    fs::write(repository.path().join(".gitignore"), b"ignored\n").unwrap();
+    fs::write(repository.path().join("ignored"), b"ignored\n").unwrap();
+    fs::write(repository.path().join("new"), b"new\n").unwrap();
+    let tree = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
+    let files = git_line(repository.path(), &["ls-tree", "--name-only", &tree]);
+    assert!(files.lines().any(|name| name == "new"));
+    assert!(!files.lines().any(|name| name == "ignored"));
+    let index = repository.path().join(".git/index");
+    assert!(!index.exists());
+    fs::write(&index, b"corrupt index").unwrap();
+    assert!(capture_worktree_tree(&SystemGit, repository.path()).is_err());
+    assert_eq!(fs::read(index).unwrap(), b"corrupt index");
+}
