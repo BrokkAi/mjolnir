@@ -3644,6 +3644,7 @@ mod tests {
                             .record_command_completed(
                                 &prompt_id,
                                 RelayCommandOutcome::Prompt {
+                                    diagnostic: None,
                                     stop_reason: "cancelled".into(),
                                     usage: None,
                                 },

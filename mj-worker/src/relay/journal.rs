@@ -1529,6 +1529,7 @@ mod tests {
             .record_command_completed(
                 "checkpointed-command",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -2022,6 +2023,7 @@ mod tests {
             .record_command_completed(
                 "keep-idempotent",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },

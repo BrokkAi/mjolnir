@@ -936,6 +936,83 @@ fn assert_prompt(command: CommandRequest, expected_id: &str, expected_text: &str
 }
 
 #[tokio::test]
+async fn kimi_diagnostic_is_enriched_before_durable_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("kimi");
+    let session = home.join("sessions/workspace").join(SESSION_ID);
+    let wire = session.join("agents/main/wire.jsonl");
+    std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+    std::fs::write(
+        session.join("state.json"),
+        serde_json::json!({"id":SESSION_ID}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"sessionId":SESSION_ID,"sessionDir":session})
+        ),
+    )
+    .unwrap();
+    std::fs::write(&wire, "").unwrap();
+    let root = temp.path().join("relay");
+    let mut durable = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    durable.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+    durable
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(&mut durable, "quota-prompt", prompt("test"));
+    durable.claim_pending_commands(true).unwrap();
+    let started = durable
+        .operational_state()
+        .active_prompt
+        .unwrap()
+        .started_at_ms;
+    let relay = Arc::new(Mutex::new(durable));
+    let mut monitor = Some(unix::KimiTaskMonitor::new(Ok(home)));
+    monitor
+        .as_mut()
+        .unwrap()
+        .attach(SESSION_ID.into(), &relay)
+        .await
+        .unwrap();
+    // Large intervening output exercises the existing bounded native follower.
+    let records = [
+        serde_json::json!({"type":"turn.started","agentId":"main","turnId":1,"time":started}),
+        serde_json::json!({"type":"assistant.delta","text":"x".repeat(80*1024)}),
+        serde_json::json!({"type":"turn.ended","agentId":"main","turnId":1,"reason":"failed","error":{"code":"provider.auth_error","message":"Five-hour usage limit exceeded","details":{"statusCode":403}}}),
+    ];
+    std::fs::write(
+        &wire,
+        records.iter().map(|r| format!("{r}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let mut event = RuntimeEvent::PromptFinished {
+        request_id: "quota-prompt".into(),
+        stop_reason: "error".into(),
+        usage: None,
+        diagnostic: None,
+    };
+    unix::prepare_kimi_runtime_event(&mut monitor, &relay, &mut event)
+        .await
+        .unwrap();
+    unix::record_runtime_event(&relay, &mut BTreeMap::new(), event).unwrap();
+    assert!(relay.lock().unwrap().capacity_retry_deadline().is_none());
+    drop(relay);
+    let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    let events = reopened
+        .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(&event.observation,
+        RelayObservation::CommandCompleted { outcome:mj_core::relay::RelayCommandOutcome::Prompt { stop_reason, diagnostic:Some(diagnostic), .. }, .. }
+        if stop_reason == "QuotaLimit" && diagnostic.http_status == Some(403)
+    )));
+}
+
+#[tokio::test]
 async fn kimi_native_task_level_blocks_replacement_until_termination() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("kimi");
@@ -1217,6 +1294,7 @@ async fn offline_prompt_queue_runs_serially_without_a_controller() {
     assert_prompt(first, "prompt-1", "first");
     event_tx
         .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
             request_id: "prompt-1".into(),
             stop_reason: "end_turn".into(),
             usage: None,
@@ -1307,6 +1385,7 @@ async fn config_during_a_prompt_waits_but_cancel_dispatches_immediately() {
 
     event_tx
         .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
             request_id: "active-prompt".into(),
             stop_reason: "cancelled".into(),
             usage: None,
@@ -1413,6 +1492,7 @@ async fn cancel_turn_interrupts_a_running_prompt_without_steering_or_cutting_a_c
 
     event_tx
         .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
             request_id: "active-prompt".into(),
             stop_reason: "cancelled".into(),
             usage: None,
@@ -1711,6 +1791,7 @@ async fn out_of_band_sends_cannot_park_the_dispatching_coordinator() {
     );
     event_tx
         .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
             request_id: "prompt-warm-up".into(),
             stop_reason: "end_turn".into(),
             usage: None,
@@ -2010,6 +2091,7 @@ async fn set_session_mode_waits_for_idle_then_records_a_durable_outcome() {
 
     event_tx
         .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
             request_id: "prompt-1".into(),
             stop_reason: "end_turn".into(),
             usage: None,
@@ -2154,6 +2236,7 @@ async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
         .unwrap();
     event_tx
         .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
             request_id: "prompt-1".into(),
             stop_reason: "cancelled".into(),
             usage: None,
@@ -2651,6 +2734,7 @@ async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
     // is over. A fresh cycle opens the next one.
     event_tx
         .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
             request_id: "prompt-mid-turn".into(),
             stop_reason: "end_turn".into(),
             usage: None,
@@ -4953,6 +5037,7 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
     }) }).unwrap();
     event_tx
         .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
             request_id: "capacity-original".into(),
             stop_reason: "EndTurn".into(),
             usage: None,

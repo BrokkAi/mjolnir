@@ -8,6 +8,7 @@ pub mod attachment;
 pub mod checkpoint;
 pub mod config;
 pub mod credentials;
+pub mod diagnostic;
 pub mod diff;
 pub mod elicitation;
 pub mod goal;

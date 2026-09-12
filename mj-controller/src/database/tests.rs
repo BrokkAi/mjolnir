@@ -4593,6 +4593,7 @@ fn a_projection_page_persists_the_turn_outcome_and_the_queue_acceptance_ordinal(
         execution: Some(MaterializedExecutionState::Idle),
         active_turn: Some(None),
         last_turn_outcome: Some(MaterializedTurnOutcome {
+            diagnostic: None,
             usage: None,
             command_id: "prompt-1".into(),
             accepted_ordinal: Some(1),

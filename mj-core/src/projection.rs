@@ -568,7 +568,11 @@ fn project_observation(
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
             match outcome {
-                crate::relay::RelayCommandOutcome::Prompt { stop_reason, usage } => {
+                crate::relay::RelayCommandOutcome::Prompt {
+                    stop_reason,
+                    usage,
+                    diagnostic,
+                } => {
                     let native_running =
                         crate::goal::GoalState::from_configuration(&current.configuration)?
                             .running();
@@ -581,6 +585,7 @@ fn project_observation(
                         .as_ref()
                         .filter(|turn| turn.command_id == *command_id);
                     mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                        diagnostic: diagnostic.clone(),
                         usage: usage.clone(),
                         command_id: command_id.clone(),
                         accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal),
@@ -705,6 +710,7 @@ fn project_observation(
                     .filter(|turn| turn.command_id == *command_id);
                 let outcome_text = message.clone();
                 mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                    diagnostic: None,
                     usage: None,
                     command_id: command_id.clone(),
                     accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal).or_else(|| {
@@ -2375,6 +2381,7 @@ mod tests {
             RelayObservation::CommandCompleted {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "EndTurn".into(),
                     usage: None,
                 },
@@ -2468,6 +2475,7 @@ mod tests {
                 RelayObservation::CommandCompleted {
                     command_id: command_id.into(),
                     outcome: RelayCommandOutcome::Prompt {
+                        diagnostic: None,
                         stop_reason: "EndTurn".into(),
                         usage: None,
                     },
@@ -2607,6 +2615,7 @@ mod tests {
             RelayObservation::CommandCompleted {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -2635,6 +2644,7 @@ mod tests {
             RelayObservation::CommandCompleted {
                 command_id: "initial-prompt".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -2721,6 +2731,7 @@ mod tests {
             RelayObservation::CommandCompleted {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -3010,6 +3021,7 @@ mod tests {
             RelayObservation::CommandCompleted {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -3259,6 +3271,7 @@ mod tests {
             RelayObservation::CommandCompleted {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -3920,6 +3933,7 @@ mod tests {
             RelayObservation::CommandCompleted {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -4493,6 +4507,7 @@ mod tests {
         RelayObservation::CommandCompleted {
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
             },

@@ -232,6 +232,8 @@ pub struct ApiSession {
     /// list is built from does not carry turn identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_diagnostic: Option<mj_core::diagnostic::TurnDiagnostic>,
     #[serde(default)]
     pub config_options: Vec<super::ViewerConfigOption>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -257,6 +259,7 @@ impl From<&ViewerSession> for ApiSession {
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             last_turn_outcome: None,
+            last_turn_diagnostic: None,
             config_options: session.config_options.clone(),
             pending_elicitations: session.pending_elicitations.clone(),
         }
@@ -420,6 +423,9 @@ impl From<&mj_client::session::ManagedSessionView> for RelayHealth {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaitResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<mj_core::diagnostic::TurnDiagnostic>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -800,7 +806,15 @@ impl WaitDecision {
         let (kind, stop_reason, message) = match &outcome.outcome {
             TurnOutcomeKind::Completed { stop_reason } => {
                 let (kind, message) = map_stop_reason(stop_reason);
-                (kind, Some(stop_reason.clone()), message)
+                (
+                    kind,
+                    Some(stop_reason.clone()),
+                    outcome
+                        .diagnostic
+                        .as_ref()
+                        .map(|d| d.message.clone())
+                        .or(message),
+                )
             }
             TurnOutcomeKind::Rejected { message } => {
                 (WaitOutcome::Error, None, Some(message.clone()))
@@ -1152,6 +1166,10 @@ async fn get_session(
     };
     if let Ok(backend) = backend(&state) {
         if let Some(turn) = backend.turn_state(session_id.clone()).await? {
+            session.last_turn_diagnostic = turn
+                .last_turn_outcome
+                .as_ref()
+                .and_then(|turn| turn.diagnostic.clone());
             session.last_turn_outcome = turn.last_turn_outcome.map(api_turn_outcome);
         }
         if let Some(handle) = backend.session_handle(session_id).await? {
@@ -1672,6 +1690,7 @@ async fn wait(
                 let snapshot = snapshot_rx.borrow();
                 let session = require_session_record(&snapshot, &session_id)?;
                 return Ok(Json(WaitResponse {
+                           diagnostic: None,
                     pending_elicitations: Vec::new(),
                     usage: None,
                     outcome: WaitOutcome::Timeout,
@@ -1752,6 +1771,7 @@ fn build_observation(
 // travels in the new top-level wait field and the dedicated usage endpoint.
 fn api_turn_outcome(mut turn: MaterializedTurnOutcome) -> MaterializedTurnOutcome {
     turn.usage = None;
+    turn.diagnostic = None;
     turn
 }
 
@@ -1769,6 +1789,10 @@ async fn finish_wait(
     session
         .last_turn_outcome
         .clone_from(&observation.last_turn_outcome);
+    session.last_turn_diagnostic = session
+        .last_turn_outcome
+        .as_ref()
+        .and_then(|turn| turn.diagnostic.clone());
     session.last_turn_outcome = session.last_turn_outcome.map(api_turn_outcome);
     let summary = match decision.turn_start_position {
         Some(position) => Some(
@@ -1779,6 +1803,14 @@ async fn finish_wait(
         None => None,
     };
     Ok(WaitResponse {
+        diagnostic: observation
+            .last_turn_outcome
+            .as_ref()
+            .filter(|turn| {
+                turn.turn_start_position.is_some()
+                    && turn.turn_start_position == decision.turn_start_position
+            })
+            .and_then(|turn| turn.diagnostic.clone()),
         pending_elicitations: if decision.outcome == WaitOutcome::InputRequired {
             observation.pending_elicitations.clone()
         } else {
@@ -2891,6 +2923,7 @@ mod tests {
                     execution: MaterializedExecutionState::Idle,
                     active_turn: None,
                     last_turn_outcome: Some(MaterializedTurnOutcome {
+                        diagnostic: None,
                         usage: Some(mj_core::usage::TokenUsage::from_acp(
                             mj_core::config::HarnessKind::Codex,
                             agent_client_protocol::schema::v1::Usage::new(30, 20, 10),
@@ -2937,6 +2970,53 @@ mod tests {
         assert_eq!(body["usage"]["total_tokens"], 30);
         assert!(body["usage"].get("thought_tokens").is_none());
         assert!(body["session"]["last_turn_outcome"].get("usage").is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
+        let diagnostic = mj_core::diagnostic::TurnDiagnostic::from_provider(&serde_json::json!({
+            "code":"provider.auth_error", "message":"Five-hour usage limit exceeded; resets at 23:00 UTC.",
+            "details":{"statusCode":403,"resetAt":"23:00 UTC"}
+        })).unwrap();
+        let mut turn = completed(5, "QuotaLimit");
+        turn.diagnostic = Some(diagnostic.clone());
+        let backend = Arc::new(FakeBackend {
+            turn_states: Mutex::new(vec![Some(TurnState {
+                execution: MaterializedExecutionState::Idle,
+                active_turn: None,
+                last_turn_outcome: Some(turn),
+            })]),
+            summary: Some(TurnSummary {
+                turn_number: 1,
+                turn_started_at_ms: 100,
+                last_changed_at_ms: 500,
+                final_message: None,
+            }),
+            ..FakeBackend::default()
+        });
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+        let response = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/wait"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"turn_id":5}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["outcome"], "quota_limit");
+        assert_eq!(body["message"], diagnostic.message);
+        assert_eq!(body["diagnostic"]["http_status"], 403);
+        assert_eq!(body["diagnostic"]["reset_at"], "23:00 UTC");
+        assert_eq!(body["session"]["last_turn_diagnostic"], body["diagnostic"]);
+        assert!(body["capacity_retry"].is_null());
+        assert!(
+            body["session"]["last_turn_outcome"]
+                .get("diagnostic")
+                .is_none()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3008,6 +3088,7 @@ mod tests {
 
     fn completed(accepted_ordinal: u64, stop_reason: &str) -> MaterializedTurnOutcome {
         MaterializedTurnOutcome {
+            diagnostic: None,
             usage: None,
             command_id: format!("prompt-{accepted_ordinal}"),
             accepted_ordinal: Some(accepted_ordinal),
@@ -3081,6 +3162,7 @@ mod tests {
 
         let mut rejected = idle(None);
         rejected.last_turn_outcome = Some(MaterializedTurnOutcome {
+            diagnostic: None,
             usage: None,
             command_id: "prompt-1".into(),
             accepted_ordinal: Some(4),

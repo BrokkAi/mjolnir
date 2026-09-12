@@ -198,6 +198,7 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
     match normalized.as_str() {
         "endturn" => PromptCompletion::Finished,
         "cancelled" | "canceled" => PromptCompletion::Cancelled,
+        "quotalimit" => PromptCompletion::QuotaLimit,
         _ if crate::relay::is_capacity_stop_reason(stop_reason) => PromptCompletion::QuotaLimit,
         _ => PromptCompletion::Error,
     }
@@ -207,6 +208,9 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaterializedTurnOutcome {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<crate::diagnostic::TurnDiagnostic>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::usage::TokenUsage>,
     pub command_id: String,

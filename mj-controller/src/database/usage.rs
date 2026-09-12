@@ -114,6 +114,12 @@ mod tests {
         .enumerate()
         {
             let turn = MaterializedTurnOutcome {
+                diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
+                    message: "Usage limit exceeded".into(),
+                    code: Some("provider.auth_error".into()),
+                    http_status: Some(403),
+                    reset_at: None,
+                }),
                 command_id: format!("p{i}"),
                 accepted_ordinal: None,
                 turn_start_position: Some(i as u64 + 1),
@@ -162,6 +168,10 @@ mod tests {
         }
         let first = load_session_usage_from(&path, "usage", 0, 2)?.unwrap();
         assert_eq!(first.turns.len(), 2);
+        assert_eq!(
+            first.turns[0].diagnostic.as_ref().unwrap().http_status,
+            Some(403)
+        );
         assert_eq!(first.provider_session_cost.as_ref().unwrap().amount, 1.25);
         assert_eq!(first.coverage.recorded_turns, 4);
         assert_eq!(first.coverage.full_turn_reports, 2);

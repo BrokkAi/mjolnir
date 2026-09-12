@@ -110,6 +110,17 @@ impl KimiWireFollower {
         self.tracker.snapshot()
     }
 
+    /// The current main-agent turn only; older failures cannot describe a new prompt.
+    pub fn turn_diagnostic_since(
+        &self,
+        started_at_ms: i64,
+    ) -> Option<mj_core::diagnostic::TurnDiagnostic> {
+        let turn = self.tracker.turn.as_ref()?;
+        (turn.started_at_ms >= started_at_ms)
+            .then(|| turn.diagnostic.clone())
+            .flatten()
+    }
+
     /// Read complete appended lines, retaining a trailing partial line.
     ///
     /// A malformed complete line is an error.  The follower commits no state
@@ -312,9 +323,17 @@ pub fn full_scan(wire_path: &Path) -> Result<KimiTaskSnapshot> {
 
 #[derive(Debug, Clone, Default)]
 struct TaskTracker {
+    turn: Option<NativeTurn>,
     active: BTreeMap<String, KimiBackgroundTask>,
     provider_tool_ids: BTreeSet<String>,
     observed_task_ids: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeTurn {
+    id: Value,
+    started_at_ms: i64,
+    diagnostic: Option<mj_core::diagnostic::TurnDiagnostic>,
 }
 
 impl TaskTracker {
@@ -531,6 +550,37 @@ fn parse_line(tracker: &mut TaskTracker, line: &[u8], line_number: u64, path: &P
     let Some(event_type) = record.get("type").and_then(Value::as_str) else {
         return Ok(());
     };
+    if matches!(event_type, "turn.started" | "turn.ended") {
+        if record.get("agentId").and_then(Value::as_str) != Some("main") {
+            return Ok(());
+        }
+        let Some(id) = record
+            .get("turnId")
+            .filter(|id| id.is_u64() || id.is_string())
+        else {
+            return Ok(());
+        };
+        if event_type == "turn.started" {
+            // A start always invalidates the preceding failure, even if malformed.
+            tracker.turn = record
+                .get("time")
+                .and_then(Value::as_i64)
+                .map(|time| NativeTurn {
+                    id: id.clone(),
+                    started_at_ms: time,
+                    diagnostic: None,
+                });
+        } else if let Some(turn) = tracker.turn.as_mut().filter(|turn| turn.id == *id) {
+            turn.diagnostic = if record.get("reason").and_then(Value::as_str) == Some("failed") {
+                record
+                    .get("error")
+                    .and_then(mj_core::diagnostic::TurnDiagnostic::from_provider)
+            } else {
+                None
+            };
+        }
+        return Ok(());
+    }
     let Some(event_kind) = task_event_kind(event_type) else {
         return Ok(());
     };
@@ -729,6 +779,69 @@ mod tests {
             .into_bytes();
         bytes.push(b'\n');
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_follow_only_the_current_matching_main_turn() {
+        let append_jsonl = |path: &Path, records: &[Value]| {
+            use std::io::Write;
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap();
+            for record in records {
+                writeln!(file, "{record}").unwrap();
+            }
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wire.jsonl");
+        let failure = json!({"type":"turn.ended", "agentId":"main", "turnId":1,"reason":"failed", "error":{
+            "message":"Five-hour usage limit exceeded. Resets at 23:00 UTC.", "code":"provider.auth_error", "details":{"statusCode":403}
+        }});
+        append_jsonl(
+            &path,
+            &[
+                json!({"type":"turn.started","agentId":"main","turnId":1,"time":100}),
+                failure.clone(),
+            ],
+        );
+        let mut follower = KimiWireFollower::open(&path).unwrap();
+        let diagnostic = follower.turn_diagnostic_since(90).unwrap();
+        assert!(diagnostic.is_usage_limit());
+        assert_eq!(diagnostic.http_status, Some(403));
+        assert!(follower.turn_diagnostic_since(101).is_none());
+        append_jsonl(
+            &path,
+            &[
+                json!({"type":"turn.started","agentId":"main","turnId":2,"time":200}),
+                failure.clone(),
+                json!({"type":"turn.ended","agentId":"child","turnId":2,"reason":"failed","error":{"message":"quota exhausted"}}),
+            ],
+        );
+        follower.refresh().unwrap();
+        assert!(follower.turn_diagnostic_since(190).is_none());
+        let mut next = failure;
+        next["turnId"] = json!(2);
+        // An incomplete JSONL append must not produce a diagnostic.
+        let bytes = serde_json::to_vec(&next).unwrap();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        file.write_all(&bytes).unwrap();
+        follower.refresh().unwrap();
+        assert!(follower.turn_diagnostic_since(190).is_none());
+        file.write_all(b"\n").unwrap();
+        follower.refresh().unwrap();
+        assert!(follower.turn_diagnostic_since(190).is_some());
+        append_jsonl(
+            &path,
+            &[
+                json!({"type":"turn.started","agentId":"main","turnId":3,"time":300}),
+                json!({"type":"turn.ended","agentId":"main","turnId":3,"reason":"completed"}),
+            ],
+        );
+        follower.refresh().unwrap();
+        assert!(follower.turn_diagnostic_since(290).is_none());
     }
 
     #[test]

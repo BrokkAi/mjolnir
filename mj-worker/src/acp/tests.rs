@@ -1917,6 +1917,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
                 request_id,
                 stop_reason,
                 usage,
+                ..
             } => break (request_id, stop_reason, usage),
             _ => {}
         }

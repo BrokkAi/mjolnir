@@ -3724,6 +3724,7 @@ mod tests {
             observation: RelayObservation::CommandCompleted {
                 command_id: command_id.to_owned(),
                 outcome: RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".to_owned(),
                     usage: None,
                 },

@@ -281,7 +281,7 @@ response = json.loads(result.stdout)
 | `finished` | The turn completed normally. |
 | `error` | The turn failed or was rejected, the session could not be launched or started, or the harness gave a stop reason Mjolnir does not recognize. `stop_reason` and `message` say which. |
 | `cancelled` | The turn was cancelled or interrupted, which is what `cancel-turn` produces. |
-| `quota_limit` | The model was at capacity and no retry is armed. |
+| `quota_limit` | Reported usage quota is exhausted, or the model was at capacity and no retry is armed. |
 | `timeout` | The deadline passed with the turn still running. Wait again with the same `turn_id`. |
 | `stopped` | The session is stopped, stopping, or failed, so no turn can finish on it. |
 
@@ -289,6 +289,14 @@ response = json.loads(result.stdout)
   `elapsed_ms` is how long it took from its first item to its last change. Both
   are absent when the wait ended without a finished turn.
 - `final_message` is the agent's last message of the turn, flattened to text.
+- `diagnostic`, when available, preserves the provider failure's `message`,
+  optional `code`, `http_status`, and provider-supplied `reset_at`. The same
+  explanation appears in `message`; session detail exposes `last_turn_diagnostic`.
+  Diagnostic details persist with the turn and its completion event.
+- **Usage quota exhaustion does not schedule a retry.** A recognized Kimi usage
+  limit returns `quota_limit` with stop reason `QuotaLimit`. The caller decides
+  when to send another prompt. HTTP 403 or an authentication error alone is not
+  enough to classify a quota limit. Reset text is not an invented retry deadline.
 - **A capacity retry keeps the wait waiting.** When the model reports capacity
   limits, the worker arms its own retry and submits it; returning `quota_limit`
   then would make your next prompt collide with that retry. If the deadline

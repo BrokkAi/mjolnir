@@ -2505,6 +2505,7 @@ async fn serve_session(
                             // is recovered by `run_bridge` via child exit or a
                             // protocol error after the session is open.
                             let mut usage = None;
+                            let mut diagnostic = None;
                             let stop_reason = match response {
                                 Ok(response) => {
                                     usage = response.usage.map(|usage| mj_core::usage::TokenUsage::from_acp(spec.harness, usage));
@@ -2524,6 +2525,7 @@ async fn serve_session(
                                     format!("{:?}", response.stop_reason)
                                 }
                                 Err(error) => {
+                                    diagnostic = Some(mj_core::diagnostic::TurnDiagnostic::from_acp(&error));
                                     emit_runtime_event(
                                         events,
                                         RuntimeEvent::Warning {
@@ -2533,6 +2535,8 @@ async fn serve_session(
                                     .await?;
                                     if spec.harness == HarnessKind::Codex && mj_core::relay::capacity_error(&error) {
                                         mj_core::relay::CAPACITY_STOP_REASON.to_owned()
+                                    } else if spec.harness == HarnessKind::Kimi && diagnostic.as_ref().is_some_and(|d| d.is_usage_limit()) {
+                                        mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
                                     } else {
                                         PROMPT_ERROR_STOP_REASON.to_owned()
                                     }
@@ -2544,6 +2548,7 @@ async fn serve_session(
                                     request_id,
                                     stop_reason,
                                     usage,
+                                    diagnostic,
                                 },
                             )
                             .await?;
@@ -2620,7 +2625,7 @@ async fn serve_session(
                                 if !prompt_running {
                                     apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
                                     emit_runtime_event(events, RuntimeEvent::PromptFinished {
-                                        request_id, stop_reason: "Cancelled".into(), usage: None }).await?;
+                                        request_id, stop_reason: "Cancelled".into(), usage: None, diagnostic: None }).await?;
                                     break;
                                 }
                                 if steering_supported
@@ -2808,7 +2813,7 @@ async fn serve_session(
                                 }
                                 Err(error) => {
                                     emit_runtime_event(events, RuntimeEvent::Warning { message: format!("Plan implementation stopped: could not restore bypassPermissions: {error:#}") }).await?;
-                                    emit_runtime_event(events, RuntimeEvent::PromptFinished { request_id, stop_reason: PROMPT_ERROR_STOP_REASON.into(), usage: None }).await?;
+                                    emit_runtime_event(events, RuntimeEvent::PromptFinished { request_id, stop_reason: PROMPT_ERROR_STOP_REASON.into(), usage: None, diagnostic: None }).await?;
                                     break;
                                 }
                             }

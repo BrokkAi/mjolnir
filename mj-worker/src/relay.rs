@@ -1143,15 +1143,16 @@ impl DurableRelay {
             ));
         }
         if let RelayRequest::Hello { supported, .. } = &envelope.request {
-            let Some(negotiated) = RelayVersionRange::CURRENT.negotiate(*supported) else {
+            let writer_range = RelayVersionRange {
+                min: mj_core::relay::RELAY_PROVIDER_DETAILS_PROTOCOL,
+                max: RELAY_PROTOCOL_VERSION,
+            };
+            let Some(negotiated) = writer_range.negotiate(*supported) else {
                 return Some(relay_error(
                     RelayErrorCode::IncompatibleProtocol,
                     format!(
                         "controller supports {}-{}, relay supports protocol {}-{}",
-                        supported.min,
-                        supported.max,
-                        RELAY_MIN_PROTOCOL_VERSION,
-                        RELAY_PROTOCOL_VERSION
+                        supported.min, supported.max, writer_range.min, writer_range.max
                     ),
                     false,
                     None,
@@ -1165,6 +1166,16 @@ impl DurableRelay {
                     worker_build: self.worker_build.clone(),
                 },
             });
+        }
+        if matches!(envelope.request, RelayRequest::Attach { .. })
+            && envelope.protocol_version < mj_core::relay::RELAY_PROVIDER_DETAILS_PROTOCOL
+        {
+            return Some(relay_error(
+                RelayErrorCode::IncompatibleProtocol,
+                "upgrade the controller to read provider turn details without losing event integrity",
+                false,
+                None,
+            ));
         }
         if !envelope.request.supported_at(envelope.protocol_version) {
             return Some(incompatible_request_protocol(envelope.protocol_version));
@@ -3322,6 +3333,7 @@ pub(crate) mod test_support {
             .record_command_completed(
                 command_id,
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -3740,6 +3752,7 @@ mod tests {
             .record_command_completed(
                 "second-prompt",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -4008,6 +4021,7 @@ mod tests {
             .record_command_completed(
                 "command-one",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -4105,6 +4119,7 @@ mod tests {
             .record_command_completed(
                 "prompt-command-1",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -4151,6 +4166,7 @@ mod tests {
             .record_command_completed(
                 "prompt-command-1",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -4677,6 +4693,7 @@ mod tests {
             .record_command_completed(
                 "00000000000000000000000000000001",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -4886,6 +4903,7 @@ mod tests {
             .record_command_completed(
                 "next-prompt",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -5286,6 +5304,7 @@ mod tests {
             .record_command_completed(
                 "parent-command",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -5427,6 +5446,7 @@ mod tests {
                 "completed" => relay.record_command_completed(
                     "review-prompt",
                     RelayCommandOutcome::Prompt {
+                        diagnostic: None,
                         stop_reason: "end_turn".into(),
                         usage: None,
                     },
@@ -5719,6 +5739,7 @@ mod tests {
                 .record_command_completed(
                     "memory-prompt",
                     RelayCommandOutcome::Prompt {
+                        diagnostic: None,
                         stop_reason: "end_turn".into(),
                         usage: None,
                     },
@@ -5783,6 +5804,7 @@ mod tests {
                 "completed" => relay.record_command_completed(
                     "boundary-prompt",
                     RelayCommandOutcome::Prompt {
+                        diagnostic: None,
                         stop_reason: "end_turn".into(),
                         usage: None,
                     },
@@ -5878,6 +5900,7 @@ mod tests {
             .record_command_completed(
                 "parent-prompt",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -6178,6 +6201,7 @@ mod tests {
             .record_command_completed(
                 "active-prompt",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "cancelled".into(),
                     usage: None,
                 },

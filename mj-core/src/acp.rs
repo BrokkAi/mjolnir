@@ -360,6 +360,9 @@ pub enum RuntimeEvent {
         action: String,
     },
     PromptFinished {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<crate::diagnostic::TurnDiagnostic>,
+
         #[serde(default, skip_serializing_if = "String::is_empty")]
         request_id: String,
         stop_reason: String,

@@ -685,10 +685,10 @@ impl KimiTaskMonitor {
     }
 }
 
-async fn prepare_kimi_runtime_event(
+pub(super) async fn prepare_kimi_runtime_event(
     monitor: &mut Option<KimiTaskMonitor>,
     relay: &Arc<Mutex<DurableRelay>>,
-    event: &RuntimeEvent,
+    event: &mut RuntimeEvent,
 ) -> Result<()> {
     let Some(monitor) = monitor.as_mut() else {
         return Ok(());
@@ -697,8 +697,32 @@ async fn prepare_kimi_runtime_event(
         RuntimeEvent::SessionStarted {
             native_session_id, ..
         } => monitor.attach(native_session_id.clone(), relay).await,
-        RuntimeEvent::SessionConfigured { .. } | RuntimeEvent::PromptFinished { .. } => {
-            monitor.refresh(relay, true).await
+        RuntimeEvent::SessionConfigured { .. } => monitor.refresh(relay, true).await,
+        RuntimeEvent::PromptFinished {
+            request_id,
+            stop_reason,
+            diagnostic,
+            ..
+        } => {
+            let started = relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .operational_state()
+                .active_prompt
+                .filter(|prompt| prompt.command_id == *request_id)
+                .map(|prompt| prompt.started_at_ms);
+            monitor.refresh(relay, true).await?;
+            if let Some(native) = started
+                .and_then(|started| monitor.follower.as_ref()?.turn_diagnostic_since(started))
+            {
+                *stop_reason = if native.is_usage_limit() {
+                    mj_core::diagnostic::QUOTA_STOP_REASON.into()
+                } else {
+                    "error".into()
+                };
+                *diagnostic = Some(native);
+            }
+            Ok(())
         }
         RuntimeEvent::HarnessRestarting { .. } | RuntimeEvent::Stopped => {
             monitor.detach();
@@ -856,13 +880,13 @@ pub(crate) async fn run_relay_coordinator(
 async fn record_runtime_event_batch(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
-    first: RuntimeEvent,
+    mut first: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
 ) -> Result<bool> {
-    prepare_kimi_runtime_event(kimi_tasks, relay, &first).await?;
+    prepare_kimi_runtime_event(kimi_tasks, relay, &mut first).await?;
     track_user_shell_completion(user_shells, &first);
     if record_runtime_event_and_track_configuration(relay, in_flight, first, session_configured)? {
         return Ok(true);
@@ -891,8 +915,8 @@ async fn record_queued_runtime_events(
 ) -> Result<bool> {
     for recorded in 0..maximum {
         match events.try_recv() {
-            Ok(event) => {
-                prepare_kimi_runtime_event(kimi_tasks, relay, &event).await?;
+            Ok(mut event) => {
+                prepare_kimi_runtime_event(kimi_tasks, relay, &mut event).await?;
                 track_user_shell_completion(user_shells, &event);
                 if record_runtime_event_and_track_configuration(
                     relay,
@@ -1026,11 +1050,16 @@ pub(super) fn record_runtime_event(
             request_id,
             stop_reason,
             usage,
+            diagnostic,
         } => {
             in_flight.remove(&request_id);
             relay.record_command_completed(
                 &request_id,
-                RelayCommandOutcome::Prompt { stop_reason, usage },
+                RelayCommandOutcome::Prompt {
+                    stop_reason,
+                    usage,
+                    diagnostic,
+                },
             )?;
         }
         RuntimeEvent::ConfigApplied {

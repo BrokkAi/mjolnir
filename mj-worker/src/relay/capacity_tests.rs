@@ -36,11 +36,27 @@ mod tests {
             .record_command_completed(
                 id,
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: stop.into(),
                     usage: None,
                 },
             )
             .unwrap()
+    }
+
+    #[test]
+    fn usage_quota_completion_does_not_schedule_capacity_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = open(root.path());
+        start(&mut relay, "quota-prompt");
+        finish(
+            &mut relay,
+            "quota-prompt",
+            "",
+            mj_core::diagnostic::QUOTA_STOP_REASON,
+        );
+        assert!(relay.capacity_retry_deadline().is_none());
+        assert!(relay.operational_state().active_prompt.is_none());
     }
 
     #[test]
@@ -199,6 +215,7 @@ mod tests {
             .record_command_completed(
                 "following-prompt",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "EndTurn".into(),
                     usage: None,
                 },
@@ -230,6 +247,7 @@ mod tests {
             .record_command_completed(
                 "original-prompt",
                 RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "EndTurn".into(),
                     usage: None,
                 },

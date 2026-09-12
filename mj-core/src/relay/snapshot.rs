@@ -702,6 +702,9 @@ pub enum RelayCommandOutcome {
     Prompt {
         stop_reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<crate::diagnostic::TurnDiagnostic>,
+
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<crate::usage::TokenUsage>,
     },
     UserShell {

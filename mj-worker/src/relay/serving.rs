@@ -83,7 +83,7 @@ mod tests {
     }
 
     #[test]
-    fn hello_from_protocol_v1_controller_negotiates_v1() {
+    fn hello_refuses_readers_that_cannot_preserve_provider_details() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
         let response = relay.handle(RelayRequestEnvelope {
@@ -95,12 +95,15 @@ mod tests {
             },
         });
         assert_eq!(response.protocol_version, 1);
-        match response.body {
-            RelayResponseBody::Ok {
-                payload: RelayResponsePayload::Hello { negotiated, .. },
-            } => assert_eq!(negotiated, 1),
-            other => panic!("expected a v1 hello, got {other:?}"),
-        }
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Error {
+                error: RelayProtocolError {
+                    code: RelayErrorCode::IncompatibleProtocol,
+                    ..
+                }
+            }
+        ));
     }
 
     /// The controller decides whether to replace a worker from what hello

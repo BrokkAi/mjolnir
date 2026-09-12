@@ -11,7 +11,7 @@ Remediate the two latest #986 comments (branch-export authentication and lost Ki
 - [x] (2026-09-12) Inspected source and reports; user approved the plan.
 - [x] (2026-09-12) Existing real-worker authentication suite: 5 passed.
 - [x] (2026-09-12) Installer suite: 11 passed; disposable real Grok install: 1 passed, both final launchers execute.
-- [ ] Preserve turn diagnostics and classify Kimi quota exhaustion.
+- [x] (2026-09-12) Kimi diagnostics validated through native follower, durable relay reopening, HTTP wait, quota policy, protocol negotiation, and database replay.
 - [ ] Ingest Grok turn usage and preserve provider accounting details.
 - [ ] Validate, document, and commit coherent phases on the current branch.
 
@@ -62,3 +62,5 @@ Add shared optional TurnDiagnostic and provider accounting types without new cra
 Initial plan recorded 2026-09-12 from the approved conversational plan. No implementation checks have run yet.
 
 Revision: runtime relocation and lease-safe repair validated with fixtures and the pinned real installer. Logs: target/provider-installer-tests.log, target/provider-grok-install-live.log, target/provider-branch-auth-tests.log. Slow tool startup prompted runbook inspection; TEST_STATEID remained 86 to 86, no host changes.
+
+Revision: diagnostics use optional TurnDiagnostic throughout completion storage; API compatibility keeps nested legacy session outcomes unchanged and adds top-level last_turn_diagnostic. Writer protocol 10 rejects readers that would drop provider fields and corrupt digest checks; new controllers retain old-worker read support. Focused diagnostic, quota, protocol, and persistence checks passed. The live Grok probe additionally proved response _meta.usage already contains the full prompt ledger, with the same promptId as the native completion extension. Ingest both and deduplicate by that identity. Logs are target/provider-*-tests.log and target/provider-diagnostic-final.log.

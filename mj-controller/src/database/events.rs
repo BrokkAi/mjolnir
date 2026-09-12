@@ -201,6 +201,7 @@ mod tests {
             RelayObservation::CommandCompleted {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                 },
@@ -377,6 +378,7 @@ mod tests {
             unreachable!()
         };
         *outcome = RelayCommandOutcome::Prompt {
+            diagnostic: None,
             stop_reason: "provider_error".into(),
             usage: None,
         };
