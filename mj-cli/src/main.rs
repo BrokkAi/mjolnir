@@ -5,6 +5,8 @@
 //! [`server`] implements the daemon-owned phone control, [`pollers`] the background
 //! feeds both of them read, and [`import`] session adoption.
 
+mod api_client;
+mod api_commands;
 mod daemon;
 mod dashboard;
 mod desktop;
@@ -80,6 +82,26 @@ enum Command {
     Move(MoveArgs),
     /// Run a harness login for a profile so live sessions pick up fresh credentials.
     Login(LoginArgs),
+    /// Create a session through the API and print its id.
+    New(api_commands::NewArgs),
+    /// Send a prompt to a session, optionally waiting for the turn.
+    Prompt(api_commands::PromptArgs),
+    /// Block until a turn ends and print how it ended.
+    Wait(api_commands::WaitArgs),
+    /// Page through a session's transcript.
+    Transcript(api_commands::TranscriptArgs),
+    /// Print a unified diff of a session's work.
+    Diff(api_commands::DiffArgs),
+    /// Get a session's work out as a patch, a pushed branch, or a git bundle.
+    Export(api_commands::ExportArgs),
+    /// List the sessions the daemon holds.
+    Sessions(api_commands::SessionsArgs),
+    /// Close a session.
+    Close(api_commands::SessionArgs),
+    /// Cancel the turn a session is running.
+    CancelTurn(api_commands::SessionArgs),
+    /// Print the API base URL and where its bearer token lives.
+    ApiInfo(api_commands::ApiInfoArgs),
 }
 
 #[derive(Debug, Args)]
@@ -301,6 +323,16 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Checkpoint(_)) => "checkpoint",
         Some(Command::Move(_)) => "move",
         Some(Command::Login(_)) => "login",
+        Some(Command::New(_)) => "new",
+        Some(Command::Prompt(_)) => "prompt",
+        Some(Command::Wait(_)) => "wait",
+        Some(Command::Transcript(_)) => "transcript",
+        Some(Command::Diff(_)) => "diff",
+        Some(Command::Export(_)) => "export",
+        Some(Command::Sessions(_)) => "sessions",
+        Some(Command::Close(_)) => "close",
+        Some(Command::CancelTurn(_)) => "cancel-turn",
+        Some(Command::ApiInfo(_)) => "api-info",
     }
 }
 
@@ -350,6 +382,36 @@ async fn run_command(
         }
         Some(Command::Move(args)) => move_session(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Login(args)) => login(args).await.map(|()| DashboardExit::Normal),
+        Some(Command::New(args)) => api_commands::new_session(args, requested_workspace)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Prompt(args)) => api_commands::prompt(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Wait(args)) => api_commands::wait(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Transcript(args)) => api_commands::transcript(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Diff(args)) => api_commands::diff(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Export(args)) => api_commands::export(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Sessions(args)) => api_commands::sessions(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Close(args)) => api_commands::close(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::CancelTurn(args)) => api_commands::cancel_turn(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::ApiInfo(args)) => api_commands::api_info(args)
+            .await
+            .map(|()| DashboardExit::Normal),
     }
 }
 

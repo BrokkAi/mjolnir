@@ -153,6 +153,42 @@ mj recover destroy --session <id> --target <id> --confirm <id>
 
 Inspect `scan` output before adopting or destroying anything. See [session recovery](/sessions/#recover-an-orphaned-worker) and [durability](/durability/) for the surrounding guarantees.
 
+## Drive a session from another agent
+
+```text
+mj new --profile <id> --target <id> [--bundle <id>] [--project-directory <path>]
+       [--workspace-id <id>] [--title <text>] [--model <name>] [--effort <name>]
+       [--idempotency-key <key>] [--prompt-file <path>] [<prompt>|-] [--json]
+mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>] [--json]
+mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--json]
+mj transcript --session <id> [--after-seq <seq>] [--limit <count>] [--json]
+mj diff --session <id> [--json]
+mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
+           [--path <workspace-relative path>] [--out <path>] [--json]
+mj sessions [--session <id>] [--json]
+mj close --session <id>
+mj cancel-turn --session <id>
+mj api-info [--json]
+```
+
+These commands run one Mjolnir session as a subagent: `mj new` starts it with a
+first prompt and prints its id, `mj wait` blocks until the turn ends and prints
+the outcome, the turn number, the elapsed time, and the agent's final message,
+and `mj prompt --wait` does both for the next prompt. A prompt comes from the
+positional argument, from `--prompt-file`, or from standard input when the
+argument is `-`.
+
+`mj export` writes a patch, a bundle, or one workspace file (`--kind file
+--path <path>`) to `--out`, or to standard output when no file is named;
+`--kind branch` pushes the session's work and reports the branch and remote
+instead. `mj transcript` pages by `--after-seq`, so a caller that
+remembers the last `seq` it read sees only what is new.
+
+Every command takes `--json` and then prints the API response unchanged. They
+are clients for the [HTTP API](/api-reference/), which documents the routes,
+the wait outcomes, the export preconditions, and the bearer token these
+commands read. `mj api-info` prints the base URL and the token file.
+
 ## Operator environment variables
 
 Most behavior belongs in [configuration](/configuration/). These environment variables select filesystem locations or companion binaries before configuration loads:

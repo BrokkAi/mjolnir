@@ -27,7 +27,7 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - [x] (2026-09-11) M2: start with model/effort/prompt follow-up and durable idempotency keys.
 - [x] (2026-09-11) M3: transcript paged by seq from SQLite.
 - [x] (2026-09-11) M4: export: worker subcommands, diff, file fetch, branch push, bundle.
-- [ ] M5: CLI subcommands and the API reference page.
+- [x] (2026-09-11) M5: CLI subcommands, the API client, and the API reference page.
 
 ## Surprises & Discoveries
 
@@ -61,6 +61,11 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - Observation: `verify_repository_bundles_streaming` returned the repository bundles but not the archive manifest's `bundle.primary_repository`, so a bundle export of a stopped session had no way to name the primary repository. The type is used in exactly one place, so it gained that field rather than the caller re-reading the archive.
 - Observation: `session_export_layout` cannot serve a stopped session: it derives the target locator, and a stopped record has none. The bundle export therefore reads the primary repository id from the archive instead of the layout, which is also what makes it work after the target is gone.
 - Observation: two workspace test failures during validation (`node_preflight_checks_missing_old_and_supported_tools_on_profile_path`, `npm_upgrade_restarts_after_the_running_package_is_removed`, the latter failing to spawn a child process at all) were load flakes: both passed on their own and in a second full run.
+
+- Observation: the exit code was the only thing a worker refusal carried across the process boundary, so `PushBranchError::NoRemote` and `session_diff`'s "no session base recorded" both reached the API as 500. M5 gave the three export subcommands exit code 3 for typed refusals; `hel_server/api.rs` already tested `Refused` -> 409, so only the worker and `worker_command` changed.
+- Observation: `mj-cli` had no `axum` dependency, so the API client test that answers itself from a canned router needed one as a dev-dependency.
+- Observation: clippy's `dead_code` is judged on the non-test build, so the client's `session()` and `read_file()` could not be justified by their tests alone. They gained real callers: `mj sessions --session <id>` and `mj export --kind file --path <path>`.
+- Observation: the build disk (`/mnt/optane`, which holds the symlinked `target/` and the shared build cache) was 100% full during validation. Validation ran with `CARGO_TARGET_DIR` pointed at a gitignored `target-local/` on the roomy filesystem; nothing was redirected to `/tmp` and the shared cache was left alone.
 
 ## Decision Log
 
@@ -136,6 +141,19 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
   Rationale: the common caller wants to read the conversation, and flattening a tool call or a plan correctly needs the same helpers every other surface uses; a caller that needs the structure should not have to re-derive it from prose.
   Date/Author: 2026-09-11, M3 implementation.
 
+- Decision: worker export refusals use exit code 3 with the reason on standard error, and `session_diff` and `read_session_file` return a typed `SessionExportError`.
+  Rationale: M4 decided the distinction was not worth a second exit-code convention, but the result was that the most likely user mistakes -- an unconfigured push remote, a file outside the workspace -- looked like daemon failures. One named constant shared by the worker and `worker_command` costs less than the wrong status code.
+  Date/Author: 2026-09-11, M5 implementation.
+- Decision: the CLI reads one file through `mj export --kind file --path`, rather than a separate subcommand.
+  Rationale: `GET /files` is one of the ways to get a session's work out, which is what `mj export` is for, and a fourth kind reads better than a twelfth top-level subcommand.
+  Date/Author: 2026-09-11, M5 implementation.
+- Decision: `mj new` takes the session-scoped workspace as `--workspace-id`, and resolves the global `--workspace NAME` through the existing `resolve_store_workspace`.
+  Rationale: `--workspace` is already a global flag naming a workspace by name; reusing it for an id would make one spelling mean two things.
+  Date/Author: 2026-09-11, M5 implementation.
+- Decision: `mj wait` and `mj prompt --wait` exit non-zero on any outcome but `finished`.
+  Rationale: the caller is a script or an orchestrating agent, and a turn that errored, was cancelled, timed out, or hit a quota limit is not a success it should continue past without looking.
+  Date/Author: 2026-09-11, M5 implementation.
+
 ## Outcomes & Retrospective
 
 M1 (2026-09-11). The projection and the SQLite store now carry per-turn identity and outcome, and the daemon serves `/api/v1/sessions`, `/sessions/{id}`, `/sessions/{id}/prompt`, `/wait`, `/close` and `/cancel-turn` behind a bearer token with a `Mj-Api-Version: 1` header and `Cache-Control: no-store` on every response, 401s included. A caller can submit a prompt, receive its relay acceptance ordinal as `turn_id`, and block on that specific turn; queued prompts and capacity retries are handled by the pure `resolve_wait`, which is tested directly rather than through the HTTP loop.
@@ -143,6 +161,12 @@ M1 (2026-09-11). The projection and the SQLite store now carry per-turn identity
 What remains for later milestones is what the plan already scheduled: session creation with model, effort and a first prompt (M2), transcript paging (M3), export (M4), and the CLI and documentation (M5). The `SubagentBackend` trait already declares those methods, so adding them changes implementations rather than the trait.
 
 The lesson worth carrying forward is that this repository's schema migrations must be structurally guarded rather than version-guarded: six existing tests rewind `user_version` without removing later migrations' artifacts, and a bare `ALTER TABLE` in a new migration fails all of them.
+
+M5 (2026-09-11). The feature is complete. `mj` now carries the subagent commands the issue asked for -- `new`, `prompt` (with `--wait`), `wait`, `transcript`, `diff`, `export`, `sessions`, `close`, `cancel-turn`, and `api-info` -- each a thin client over the `/api/v1` routes through `mj-cli/src/api_client.rs`, each with `--json` printing the route's response unchanged. The client resolves the viewer URL the way the desktop bootstrap does, reads the bearer token from the file the daemon mints, and refuses any response that does not name contract version 1, so a `mj` talking to a daemon of another major version says so instead of guessing at the body. `docs/src/content/docs/api-reference.md` documents every route, the wait outcomes, transcript paging by `seq`, idempotency keys, the export preconditions, and the CLI-to-route mapping.
+
+Two things were worth the detour. The first is the refusal exit code: M4 had judged the distinction not worth a convention, but the practical effect was that a missing push remote read as a server failure, so M5 reversed that decision and carried the reason across the process boundary. The second is that clippy judges dead code on the non-test build: two client methods the plan required had to earn real callers rather than living on their tests, which produced `mj sessions --session` and `mj export --kind file` -- both better than the alternative of deleting them.
+
+What is still untested by machine is the end-to-end acceptance run in "Validation and Acceptance": it needs a daemon, a configured profile, and a real target, so it remains a manual check.
 
 ## Context and Orientation
 

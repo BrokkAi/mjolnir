@@ -121,6 +121,7 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'CLI reference', slug: 'cli-reference' },
+            { label: 'HTTP API reference', slug: 'api-reference' },
             { label: 'Security boundaries', slug: 'security' },
             { label: 'Troubleshooting', slug: 'troubleshooting' },
           ],
