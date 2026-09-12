@@ -9,14 +9,17 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 engine=${1:?usage: build-linux-worker.sh docker-or-podman [--release]}
 shift
 profile=debug
-profile_flag=""
-if [ "${1:-}" = --release ]; then
-  profile=release
-  profile_flag=--release
-  shift
-fi
+profile_args=()
+case "${1:-}" in
+  --release) profile=release; profile_args=(--release); shift ;;
+  --profile)
+    profile=${2:?--profile needs a value}
+    profile_args=(--profile "$profile")
+    if [ "$profile" = dev ]; then profile=debug; fi
+    shift 2 ;;
+esac
 if [ "$#" -ne 0 ]; then
-  echo "usage: build-linux-worker.sh docker-or-podman [--release]" >&2
+  echo "usage: build-linux-worker.sh docker-or-podman [--release | --profile NAME]" >&2
   exit 2
 fi
 
@@ -55,5 +58,5 @@ mkdir -p "$output"
     chmod 755 /output/mj-worker.next
     /output/mj-worker.next --version >&2
     mv -f /output/mj-worker.next /output/mj-worker
-  ' sh "$triple" "$profile" ${profile_flag:+"$profile_flag"}
+  ' sh "$triple" "$profile" ${profile_args[@]+"${profile_args[@]}"}
 printf '%s\n' "$triple"

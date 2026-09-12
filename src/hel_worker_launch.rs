@@ -94,6 +94,9 @@ pub struct WorkerLaunchConfig {
     #[serde(default)]
     pub run_mode: WorkerRunMode,
     pub session_id: String,
+    /// Explicit target settings shared by primary and reviewer processes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub target_environment: std::collections::BTreeMap<String, String>,
     pub harness: HarnessKind,
     pub bridge_command: PathBuf,
     pub bridge_args: Vec<String>,

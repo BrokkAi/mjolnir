@@ -77,9 +77,9 @@ pub(crate) async fn resolve(
     if runtime == HarnessRuntimePolicy::Ambient {
         return Ok(None);
     }
-    let environment = environment.clone();
+    let environment = hel::hel_login_environment::with_overrides(environment).await?;
     tokio::task::spawn_blocking(move || {
-        let root = cache_root()?;
+        let root = cache_root(&environment)?;
         resolve_at(&root, harness, execution_policy, &environment)
     })
     .await
@@ -87,11 +87,12 @@ pub(crate) async fn resolve(
     .map(Some)
 }
 
-fn cache_root() -> Result<PathBuf> {
-    let base = match std::env::var_os("XDG_CACHE_HOME") {
+fn cache_root(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
+    let base = match environment.get("XDG_CACHE_HOME") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
         _ => PathBuf::from(
-            std::env::var_os("HOME")
+            environment
+                .get("HOME")
                 .filter(|path| !path.is_empty())
                 .context("managed harness installation needs HOME or XDG_CACHE_HOME")?,
         )
@@ -270,7 +271,7 @@ fn install_npm(
     command
         .args(["ci", "--omit=dev", "--no-audit", "--no-fund"])
         .current_dir(staging);
-    apply_path(&mut command, environment);
+    apply_environment(&mut command, environment);
     run_checked(&mut command, "install exact managed npm harness")
 }
 
@@ -305,7 +306,7 @@ fn install_muse(staging: &Path, environment: &BTreeMap<String, String>) -> Resul
         .arg("--strip-components=1")
         .arg("-C")
         .arg(&bin);
-    apply_path(&mut tar, environment);
+    apply_environment(&mut tar, environment);
     run_checked(&mut tar, "extract verified Muse ACP archive")?;
     std::fs::remove_file(archive)?;
     let muse_target = field("muse_target")?;
@@ -339,7 +340,7 @@ fn download_verified(
     ])
     .arg(destination)
     .arg(url);
-    apply_path(&mut curl, environment);
+    apply_environment(&mut curl, environment);
     run_checked(&mut curl, "download pinned Muse runtime")?;
     let actual = hel::hel_worker_launch::worker_executable_digest(destination)?;
     anyhow::ensure!(
@@ -356,14 +357,14 @@ fn require_node_22(environment: &BTreeMap<String, String>) -> Result<()> {
         "-e",
         "process.exit(Number(process.versions.node.split('.')[0]) >= 22 ? 0 : 1)",
     ]);
-    apply_path(&mut node, environment);
+    apply_environment(&mut node, environment);
     run_checked(
         &mut node,
         "verify Node.js 22 or newer for managed harness installation",
     )?;
     let mut npm = Command::new("npm");
     npm.arg("--version");
-    apply_path(&mut npm, environment);
+    apply_environment(&mut npm, environment);
     run_checked(&mut npm, "verify npm for managed harness installation")
 }
 
@@ -379,7 +380,7 @@ fn install_kimi(staging: &Path, environment: &BTreeMap<String, String>) -> Resul
         .env("KIMI_CODE_HOME", staging)
         .env("KIMI_NO_MODIFY_PATH", "1")
         .current_dir(staging);
-    apply_path(&mut bash, environment);
+    apply_environment(&mut bash, environment);
     run_with_input_checked(&mut bash, &script, "install exact managed Kimi Code")
 }
 
@@ -397,7 +398,7 @@ fn install_grok(staging: &Path, environment: &BTreeMap<String, String>) -> Resul
         .env("HOME", &isolated_home)
         .env("GROK_BIN_DIR", staging.join("bin"))
         .current_dir(staging);
-    apply_path(&mut bash, environment);
+    apply_environment(&mut bash, environment);
     run_with_input_checked(&mut bash, &script, "install exact managed Grok")
 }
 
@@ -408,7 +409,7 @@ fn download_installer(
 ) -> Result<Vec<u8>> {
     let mut curl = Command::new("curl");
     curl.args(["-fsSL", url]);
-    apply_path(&mut curl, environment);
+    apply_environment(&mut curl, environment);
     let output = hel::hel_subprocess::run_with_input(&mut curl, &[])
         .with_context(|| operation.to_owned())?;
     if !output.status.success() {
@@ -453,9 +454,19 @@ fn output_summary(output: &std::process::Output) -> String {
     format!("{} ({tail})", output.status)
 }
 
-fn apply_path(command: &mut Command, environment: &BTreeMap<String, String>) {
-    if let Some(path) = environment.get("PATH") {
-        command.env("PATH", path);
+fn apply_environment(command: &mut Command, environment: &BTreeMap<String, String>) {
+    // Keep command-specific installer settings above the clean session base.
+    let overrides = command
+        .get_envs()
+        .map(|(name, value)| (name.to_owned(), value.map(ToOwned::to_owned)))
+        .collect::<Vec<_>>();
+    command.env_clear().envs(environment);
+    for (name, value) in overrides {
+        if let Some(value) = value {
+            command.env(name, value);
+        } else {
+            command.env_remove(name);
+        }
     }
 }
 

@@ -186,6 +186,14 @@ COPY scripts/install-muse.py /opt/mjolnir/install-muse.py
 RUN python3 /opt/mjolnir/install-muse.py /opt/mjolnir/muse-runtime.json /usr/local/bin
 ENV MUSE_CLI=/usr/local/bin/muse
 
+# Session workers construct a clean login environment instead of inheriting
+# the container exec environment. Keep image tool settings in that login too.
+RUN printf '%s\n' \
+        'export CODEX_PATH=/usr/local/lib/node_modules/@openai/codex/bin/codex.js' \
+        'export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright' \
+        'export MUSE_CLI=/usr/local/bin/muse' \
+        > /etc/profile.d/20-mjolnir-tools.sh
+
 RUN useradd --create-home --shell /bin/bash hel \
     && mkdir -p /workspace /var/lib/hel \
     && chown -R hel:hel /workspace /var/lib/hel \

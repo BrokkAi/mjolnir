@@ -96,6 +96,7 @@ impl ReviewerCancellation {
 /// Everything a reviewer inherits from the primary session it reviews for.
 #[derive(Debug, Clone)]
 pub struct ReviewerPlacement {
+    pub target_environment: std::collections::BTreeMap<String, String>,
     /// The primary worker root. The reviewer lives in a subdirectory of it.
     pub worker_root: PathBuf,
     /// Primary session id, used to name the reviewer's relay session.
@@ -728,7 +729,8 @@ impl ReviewerRole {
         };
         let relay = self.open_relay()?;
 
-        let mut environment = config.environment.clone();
+        let mut environment = self.placement.target_environment.clone();
+        environment.extend(config.environment.clone());
         // The worker fixes the harness home itself: a controller must never be
         // able to aim a reviewer at the primary's credentials.
         environment.insert(
@@ -750,6 +752,7 @@ impl ReviewerRole {
             environment.extend(managed.environment.clone());
         }
 
+        let session_environment = hel::hel_login_environment::with_overrides(&environment).await?;
         let supervisor_path = root.join("acp-supervisor.json");
         AcpSupervisorSpec {
             command: managed_harness.as_ref().map_or_else(
@@ -797,12 +800,13 @@ impl ReviewerRole {
         let spec = LaunchSpec {
             command: self.placement.worker_executable.clone(),
             args: vec![
+                "--login-environment-ready".into(),
                 "worker".into(),
                 "acp-supervisor".into(),
                 "--spec".into(),
                 supervisor_path.to_string_lossy().into_owned(),
             ],
-            environment: Default::default(),
+            environment: session_environment,
             cwd: self.placement.cwd.clone(),
             additional_directories: self.placement.additional_directories.clone(),
             // A reviewer reads the workspace; it never syncs project memory,

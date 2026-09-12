@@ -408,6 +408,7 @@ fn spawn_shell(line: &str, spawn: &TerminalSpawn) -> Result<tokio::process::Chil
     command
         .arg("-c")
         .arg(line)
+        .env_clear()
         .current_dir(&spawn.cwd)
         // ACP has no terminal-input method, so nothing ever writes to the
         // child; a null stdin also rules out the write-while-draining deadlock.
@@ -417,6 +418,7 @@ fn spawn_shell(line: &str, spawn: &TerminalSpawn) -> Result<tokio::process::Chil
     for (name, value) in &spawn.env {
         command.env(name, value);
     }
+    command.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
     // Own the group so a kill reaches descendants holding the pipes open.
     command.process_group(0);
     command
@@ -585,6 +587,26 @@ async fn report_event(events: &mpsc::Sender<RuntimeEvent>, event: RuntimeEvent) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_environment_is_complete_not_an_ambient_overlay() {
+        let registry = TerminalRegistry::new();
+        let (events, _received) = mpsc::channel(16);
+        let id = registry.create(TerminalSpawn {
+            command: "printf '%s|%s|%s' \"${HOME-unset}\" \"${CARGO_MANIFEST_DIR-unset}\" \"$SESSION_SETTING\"".into(),
+            args: Vec::new(),
+            env: vec![("SESSION_SETTING".into(), "explicit".into())],
+            cwd: std::env::current_dir().unwrap(),
+            output_byte_limit: 4096,
+        }, events.clone()).unwrap();
+        let exit = registry.exit_receiver(&id).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), wait_for_exit(exit))
+            .await
+            .unwrap();
+        assert_eq!(registry.output(&id).unwrap().output, "unset|unset|explicit");
+        registry.shutdown(&events).await;
+    }
 
     #[test]
     fn the_buffer_keeps_the_tail_and_latches_truncated() {

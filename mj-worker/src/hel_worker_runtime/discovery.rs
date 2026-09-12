@@ -27,6 +27,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     .await?
     .context("managed discovery installation is missing")?;
     environment.extend(managed.environment.clone());
+    let session_environment = hel::hel_login_environment::with_overrides(&environment).await?;
     let supervisor = spec.cwd.join("acp-supervisor.json");
     AcpSupervisorSpec {
         command: managed.command.clone(),
@@ -39,12 +40,13 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     let launch = LaunchSpec {
         command: std::env::current_exe()?,
         args: vec![
+            "--login-environment-ready".into(),
             "worker".into(),
             "acp-supervisor".into(),
             "--spec".into(),
             supervisor.to_string_lossy().into_owned(),
         ],
-        environment: Default::default(),
+        environment: session_environment,
         cwd: spec.cwd,
         additional_directories: vec![],
         project_memory: None,

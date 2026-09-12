@@ -120,6 +120,11 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Replace ambient process variables with the explicitly supplied environment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_env: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<std::path::PathBuf>,
     pub purpose: String,
     #[serde(default)]
     pub stage: Option<ProvisionStage>,
@@ -149,6 +154,8 @@ impl CommandSpec {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
             env: BTreeMap::new(),
+            clear_env: false,
+            cwd: None,
             purpose: String::new(),
             stage: None,
             parallel_group: None,
@@ -511,9 +518,7 @@ impl CommandExecutor for ProcessExecutor {
             return self.execute_with_stdin(command, &mut input);
         }
         let started = Instant::now();
-        let output = Command::new(&command.program)
-            .args(&command.args)
-            .envs(&command.env)
+        let output = configured_command(command)
             .stdin(Stdio::null())
             .output()
             .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
@@ -531,8 +536,7 @@ impl CommandExecutor for ProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        let mut process = Command::new(&command.program);
-        process.args(&command.args).envs(&command.env);
+        let process = configured_command(command);
         // Plain process execution is not cancellable, so the transfer only
         // ends when the child does.
         stream_command_with_stdin(process, command, input, &|| false)
@@ -709,9 +713,20 @@ impl CancellableProcessExecutor {
     }
 }
 
-fn cancellable_command(command: &CommandSpec) -> Command {
+fn configured_command(command: &CommandSpec) -> Command {
     let mut process = Command::new(&command.program);
+    if command.clear_env {
+        process.env_clear();
+    }
+    if let Some(cwd) = &command.cwd {
+        process.current_dir(cwd);
+    }
     process.args(&command.args).envs(&command.env);
+    process
+}
+
+fn cancellable_command(command: &CommandSpec) -> Command {
+    let mut process = configured_command(command);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -768,16 +783,31 @@ impl CommandExecutor for CancellableProcessExecutor {
             let mut bytes = Vec::new();
             std::io::copy(&mut stderr, &mut bytes).map(|_| bytes)
         });
+        let mut status = None;
         let status = loop {
             if self.is_cancelled() {
                 terminate_cancellable_child(&mut child);
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
+                for (stream, reader) in [("stdout", stdout_reader), ("stderr", stderr_reader)] {
+                    match reader.join() {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            tracing::warn!(stream, %error, "cancelled command reader failed")
+                        }
+                        Err(_) => tracing::warn!(stream, "cancelled command reader panicked"),
+                    }
+                }
                 bail!("operation cancelled while {}", command.purpose);
             }
-            if let Some(status) = child
-                .try_wait()
-                .with_context(|| format!("wait for {}", command.purpose))?
+            if status.is_none() {
+                status = child
+                    .try_wait()
+                    .with_context(|| format!("wait for {}", command.purpose))?;
+            }
+            // Descendants can retain these pipes after the shell exits. Keep
+            // enforcing the deadline until both readers have actually finished.
+            if let Some(status) = status
+                && stdout_reader.is_finished()
+                && stderr_reader.is_finished()
             {
                 break status;
             }

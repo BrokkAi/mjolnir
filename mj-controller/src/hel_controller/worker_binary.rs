@@ -16,8 +16,7 @@ use crate::hel_session_manager::{
     WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
 };
 use hel::hel_config::{
-    ExecutionPolicy, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write,
-    data_dir,
+    HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write, data_dir,
 };
 use hel::hel_harness_runtime::{
     CLAUDE_ACP_VERSION, CODEX_ACP_PACKAGE, CODEX_ACP_VERSION, DEEPSEEK_DSH_VERSION,
@@ -27,8 +26,8 @@ use hel::hel_targets::{
     self, CommandExecutor, CommandPlan, CommandSpec, ProcessExecutor, ProvisionStage, SshTarget,
 };
 use hel::hel_worker_launch::{
-    DISCOVER_LOGIN_PATH_ENV, HarnessRuntimePolicy, ProjectMemoryLaunchConfig,
-    ProjectMemoryMcpDelivery, WorkerLaunchConfig, WorkerOwnership,
+    HarnessRuntimePolicy, ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery, WorkerLaunchConfig,
+    WorkerOwnership,
 };
 
 use super::backend::backend_locator;
@@ -85,14 +84,8 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("session target template is missing")?;
-        let (launch, project_memory, target_profile_home) = worker_launch_config(
-            session,
-            profile,
-            bundle,
-            backend,
-            session_id,
-            target.execution_policy(),
-        )?;
+        let (launch, project_memory, target_profile_home) =
+            worker_launch_config(session, profile, bundle, backend, session_id, target)?;
 
         let staging = tempfile::tempdir().context("create worker staging directory")?;
         let launch_path = staging.path().join("launch.json");
@@ -243,14 +236,8 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("session target template is missing")?;
-        let (mut launch, _, _) = worker_launch_config(
-            session,
-            profile,
-            bundle,
-            backend,
-            session_id,
-            target.execution_policy(),
-        )?;
+        let (mut launch, _, _) =
+            worker_launch_config(session, profile, bundle, backend, session_id, target)?;
         if hel::hel_database::load_move_operation(session_id)?.is_some_and(|operation| {
             operation.source_checkpoint_only
                 && operation.destination_target.is_none()
@@ -347,8 +334,9 @@ fn worker_launch_config(
     bundle: Option<&ProjectBundle>,
     backend: &hel_targets::TargetLocator,
     session_id: &str,
-    execution_policy: ExecutionPolicy,
+    target: &hel::hel_config::TargetTemplate,
 ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
+    let execution_policy = target.execution_policy();
     let target_profile_home = target_profile_home(backend, session_id, profile);
     let workspace = if let Some(project_directory) = &session.project_directory {
         (project_directory.to_string_lossy().into_owned(), Vec::new())
@@ -377,14 +365,24 @@ fn worker_launch_config(
         );
     }
     let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
-    let mut environment = profile.environment.clone();
+    use hel::hel_config::TargetTemplate;
+    let target_environment = match target {
+        TargetTemplate::LocalPodman { container }
+        | TargetTemplate::LocalDocker { container }
+        | TargetTemplate::AppleContainer { container }
+        | TargetTemplate::SshPodman { container, .. }
+        | TargetTemplate::SshDocker { container, .. } => container.environment.clone(),
+        _ => Default::default(),
+    };
+    let mut environment = target_environment.clone();
+    environment.extend(profile.environment.clone());
     profile
         .kind
         .configure_home_environment(Path::new(&target_profile_home), &mut environment);
     profile
         .kind
         .configure_execution_environment(execution_policy, &mut environment)?;
-    configure_login_path_discovery(&mut environment, backend);
+    environment.remove(hel::hel_worker_launch::DISCOVER_LOGIN_PATH_ENV);
     let mut project_memory =
         project_memory_launch(session, bundle, &workspace, &target_profile_home)?;
     project_memory.mcp_delivery = project_memory_mcp_delivery(profile.kind, backend);
@@ -401,6 +399,7 @@ fn worker_launch_config(
     );
     Ok((
         WorkerLaunchConfig {
+            target_environment,
             run_mode: Default::default(),
             session_id: session_id.to_string(),
             harness: profile.kind,
@@ -461,23 +460,6 @@ fn apply_claude_setup_token(
             %error,
             "ignoring an unreadable Claude setup token"
         ),
-    }
-}
-
-fn configure_login_path_discovery(
-    environment: &mut std::collections::BTreeMap<String, String>,
-    backend: &hel_targets::TargetLocator,
-) {
-    environment.remove(DISCOVER_LOGIN_PATH_ENV);
-    if !environment.contains_key("PATH")
-        && matches!(
-            backend,
-            hel_targets::TargetLocator::LocalBare { .. }
-                | hel_targets::TargetLocator::AwsEc2 { .. }
-                | hel_targets::TargetLocator::SshBare { .. }
-        )
-    {
-        environment.insert(DISCOVER_LOGIN_PATH_ENV.into(), "1".into());
     }
 }
 
@@ -4207,39 +4189,6 @@ mod tests {
         );
     }
     #[test]
-    fn only_raw_targets_without_an_explicit_path_request_login_path_discovery() {
-        let raw = hel_targets::TargetLocator::LocalBare {
-            worker_root: "/worker".into(),
-        };
-        let managed = hel_targets::TargetLocator::LocalPodman {
-            container_id: "container".into(),
-            workspace_storage: Default::default(),
-        };
-
-        let mut environment = BTreeMap::new();
-        configure_login_path_discovery(&mut environment, &raw);
-        assert_eq!(
-            environment.get(DISCOVER_LOGIN_PATH_ENV).map(String::as_str),
-            Some("1")
-        );
-
-        let mut explicit = BTreeMap::from([
-            ("PATH".into(), "/configured/bin".into()),
-            (DISCOVER_LOGIN_PATH_ENV.into(), "stale".into()),
-        ]);
-        configure_login_path_discovery(&mut explicit, &raw);
-        assert_eq!(
-            explicit.get("PATH").map(String::as_str),
-            Some("/configured/bin")
-        );
-        assert!(!explicit.contains_key(DISCOVER_LOGIN_PATH_ENV));
-
-        let mut managed_environment =
-            BTreeMap::from([(DISCOVER_LOGIN_PATH_ENV.into(), "stale".into())]);
-        configure_login_path_discovery(&mut managed_environment, &managed);
-        assert!(!managed_environment.contains_key(DISCOVER_LOGIN_PATH_ENV));
-    }
-    #[test]
     fn bare_targets_use_managed_harnesses_but_containers_stay_ambient() {
         let ssh = SshTarget {
             destination: "user@example.test".into(),
@@ -4794,6 +4743,7 @@ mod tests {
             commands: RefCell::new(Vec::new()),
         };
         let launch = WorkerLaunchConfig {
+            target_environment: Default::default(),
             run_mode: Default::default(),
             session_id: session.into(),
             harness: HarnessKind::Codex,
@@ -4888,6 +4838,7 @@ mod tests {
             launch: RefCell::new(None),
         };
         let launch = WorkerLaunchConfig {
+            target_environment: Default::default(),
             run_mode: Default::default(),
             session_id: "session-local".into(),
             harness: HarnessKind::Codex,
@@ -4967,6 +4918,7 @@ mod tests {
             commands: RefCell::new(Vec::new()),
         };
         let mut launch = WorkerLaunchConfig {
+            target_environment: Default::default(),
             run_mode: Default::default(),
             session_id: session.into(),
             harness: HarnessKind::Kimi,

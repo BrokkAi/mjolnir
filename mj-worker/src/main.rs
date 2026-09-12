@@ -19,6 +19,9 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(name = "mj-worker", version, about = "Mjolnir target-side worker")]
 struct Cli {
+    /// Internal handoff: the parent explicitly supplied the clean login snapshot.
+    #[arg(long, hide = true, global = true)]
+    login_environment_ready: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -190,9 +193,74 @@ fn install_stderr_logging() -> Result<()> {
     Ok(())
 }
 
+/// Clean the worker itself as well as its harnesses: Git and other target-side
+/// helpers must not inherit controller or build-tool variables either.
+fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
+    if cli.login_environment_ready {
+        return hel::hel_login_environment::initialize_from_parent();
+    }
+    let Command::Worker(args) = &cli.command;
+    let needs_login = match &args.command {
+        WorkerCommand::Run { config, .. } => Some(
+            hel::hel_worker_launch::WorkerLaunchConfig::read(config)?.run_mode
+                != hel::hel_worker_launch::WorkerRunMode::CheckpointOnly,
+        ),
+        WorkerCommand::PrepareHarness { .. }
+        | WorkerCommand::DiscoverConfig { .. }
+        | WorkerCommand::Diff { .. }
+        | WorkerCommand::PushBranch { .. } => Some(true),
+        _ => None,
+    };
+    let Some(needs_login) = needs_login else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let mut environment = if needs_login {
+            hel::hel_login_environment::discover()?
+        } else {
+            hel::hel_login_environment::bootstrap()?
+        };
+        if let WorkerCommand::Run { config, .. } | WorkerCommand::PrepareHarness { config } =
+            &args.command
+        {
+            environment.extend(WorkerLaunchConfig::read(config)?.target_environment);
+        }
+        let executable = if cfg!(target_os = "linux") {
+            PathBuf::from("/proc/self/exe")
+        } else {
+            std::env::current_exe()?
+        };
+        let mut arguments = std::env::args_os();
+        let argv0 = arguments
+            .next()
+            .context("worker executable argument is missing")?;
+        let error = std::process::Command::new(executable)
+            // Lifecycle probes identify the installed `hel worker run --root`
+            // prefix. Keep it intact across re-exec, including argv[0].
+            .arg0(argv0)
+            .args(arguments)
+            .arg("--login-environment-ready")
+            .env_clear()
+            .envs(environment)
+            .exec();
+        Err(error).context("start worker with target login environment")
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("target login environment requires a Unix worker")
+}
+
 fn main() -> Result<()> {
     install_stderr_logging()?;
     let cli = Cli::parse();
+    if let Err(error) = bootstrap_login_environment(&cli) {
+        let Command::Worker(args) = &cli.command;
+        if let WorkerCommand::Run { root, .. } = &args.command {
+            write_worker_exit_record(root, &format!("initialize worker environment: {error:#}"));
+        }
+        return Err(error);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

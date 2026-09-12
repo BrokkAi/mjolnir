@@ -131,11 +131,12 @@ fn spawn_user_shell(
 ) -> Result<tokio::task::JoinHandle<()>> {
     let mut command = tokio::process::Command::new("bash");
     command
-        .arg("-lc")
+        .arg("-c")
         .arg(crate::hel_worker_runtime::github_cli_login_shell_command(
             &spec.command,
         ))
         .current_dir(&spec.cwd)
+        .env_clear()
         .envs(&spec.environment)
         .env_remove("GH_TOKEN")
         .env_remove("GITHUB_TOKEN")

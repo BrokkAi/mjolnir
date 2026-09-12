@@ -867,6 +867,7 @@ async fn run_inner(
     mut requests: mpsc::Receiver<CommandRequest>,
     events: mpsc::Sender<RuntimeEvent>,
 ) -> Result<()> {
+    spec.environment = crate::hel_login_environment::with_overrides(&spec.environment).await?;
     let mut rapid_deaths = 0_u32;
     let mut replacing_previous_bridge = false;
     loop {
@@ -918,6 +919,7 @@ async fn run_bridge(
 ) -> Result<Option<BridgeRestart>> {
     let mut child = Command::new(&spec.command)
         .args(&spec.args)
+        .env_clear()
         .envs(&spec.environment)
         .current_dir(&spec.cwd)
         .stdin(Stdio::piped())
@@ -1470,6 +1472,7 @@ where
     // A terminal runs where the session runs unless the agent names a
     // directory of its own.
     let session_cwd = spec.cwd.clone();
+    let session_environment = spec.environment.clone();
     let restart = Arc::new(Mutex::new(None));
     let restart_slot = restart.clone();
     Client
@@ -1776,13 +1779,13 @@ where
                 let spawn = TerminalSpawn {
                     command: request.command.clone(),
                     args: request.args.clone(),
-                    // Additions, not a replacement: the child inherits the
-                    // daemon environment it needs to reach the toolchain.
-                    env: request
-                        .env
-                        .iter()
-                        .map(|variable| (variable.name.clone(), variable.value.clone()))
-                        .collect(),
+                    env: {
+                        let mut environment = session_environment.clone();
+                        environment.extend(request.env.iter().map(|variable| {
+                            (variable.name.clone(), variable.value.clone())
+                        }));
+                        environment.into_iter().collect()
+                    },
                     cwd: request.cwd.clone().unwrap_or_else(|| session_cwd.clone()),
                     output_byte_limit: request
                         .output_byte_limit

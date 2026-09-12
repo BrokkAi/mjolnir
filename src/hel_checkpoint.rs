@@ -4303,6 +4303,7 @@ mod tests {
         fs::create_dir_all(&memory_root).unwrap();
         fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
         crate::hel_worker_launch::WorkerLaunchConfig {
+            target_environment: Default::default(),
             run_mode: Default::default(),
             session_id: SESSION.into(),
             harness: HarnessKind::Codex,

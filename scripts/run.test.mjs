@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
-function fixture() {
-  const root = mkdtempSync(path.join(tmpdir(), 'mj-run-'));
+function fixture(platform = 'Linux') {
+  const root = mkdtempSync(path.join(tmpdir(), 'mj run '));
   const scripts = path.join(root, 'scripts');
   const bin = path.join(root, 'bin');
   mkdirSync(scripts);
@@ -15,105 +15,99 @@ function fixture() {
     copyFileSync(new URL(name, import.meta.url), path.join(scripts, name));
     chmodSync(path.join(scripts, name), 0o755);
   }
-  const tool = (name, body) => {
-    writeFileSync(path.join(bin, name), `#!/bin/bash\nset -eu\n${body}\n`, { mode: 0o755 });
-  };
-  tool('uname', 'echo Darwin');
+  const tool = (name, body) => writeFileSync(path.join(bin, name), `#!/bin/bash\nset -eu\n${body}\n`, { mode: 0o755 });
+  tool('uname', `case "$1" in -s) echo ${platform} ;; -m) echo x86_64 ;; esac`);
+  tool('rustup', 'echo x86_64-unknown-linux-musl');
   tool('docker', `
     if [ "$1" = info ]; then exit 0; fi
     for arg in "$@"; do if [ "$arg" = uname ]; then echo aarch64; exit 0; fi; done
-    if [ "\${FAIL_BUILD:-0}" = 1 ]; then exit 42; fi
+    if [ "\${FAIL_KIND:-}" = portable ]; then echo portable-failed >&2; exit 42; fi
     for arg in "$@"; do
-      case "$arg" in
-        type=bind,source=*,target=/output)
-          output=\${arg#type=bind,source=}
-          output=\${output%,target=/output}
-          mkdir -p "$output"
-          touch "$output/mj-worker"
-          chmod 755 "$output/mj-worker"
-          ;;
+      case "$arg" in type=bind,source=*,target=/output)
+        output=\${arg#type=bind,source=}; output=\${output%,target=/output}
+        mkdir -p "$output"; echo fresh > "$output/mj-worker"; chmod 755 "$output/mj-worker" ;;
       esac
     done
   `);
-  tool('cargo', `
-    if [ "$1" = run ]; then
-      test -x "$EXPECTED_WORKER"
-      test "$MJ_DEV_RESTART_STALE_DAEMON" = 1
-      touch "$RAN_CLIENT"
-    fi
-  `);
-  return { root, bin, script: path.join(scripts, 'run.sh') };
-}
-
-for (const release of [false, true]) {
-  test(`macOS ${release ? 'release' : 'debug'} launch prepares a Linux worker before running the client`, () => {
-    const { root, bin, script } = fixture();
-    try {
-      const marker = path.join(root, 'client-ran');
-      const result = spawnSync('/bin/bash', [script, ...(release ? ['--release'] : []), '--', 'doctor'], {
-        encoding: 'utf8',
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RAN_CLIENT: marker,
-          EXPECTED_WORKER: path.join(root, 'target/worker/aarch64-unknown-linux-musl', release ? 'release' : 'debug', 'mj-worker') },
-      });
-      assert.equal(result.status, 0, result.stderr);
-      assert.ok(existsSync(marker));
-    } finally { rmSync(root, { recursive: true, force: true }); }
+  writeFileSync(path.join(bin, 'cargo'), `#!${process.execPath}
+import fs from 'node:fs';
+import path from 'node:path';
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.BUILD_LOG, JSON.stringify(args) + '\\n');
+if (args[0] !== 'build') throw new Error('client must not run through Cargo');
+const value = (key, fallback) => {
+  const i = args.indexOf(key);
+  return i >= 0 ? args[i+1] : args.find(arg => arg.startsWith(key + '='))?.slice(key.length+1) ?? fallback;
+};
+const cli = value('--bin') === 'mj';
+const triple = value('--target', '');
+const profile = args.includes('--release') ? 'release' : value('--profile', 'debug');
+const kind = cli ? 'cli' : triple ? 'portable' : 'native';
+if (kind === process.env.FAIL_KIND) { console.error(kind + '-failed'); process.exit(42); }
+const dir = path.resolve(value('--target-dir', 'target'), triple, profile);
+fs.mkdirSync(dir, { recursive: true });
+const executable = path.join(dir, cli ? 'mj' : 'mj-worker');
+if (!cli) { fs.writeFileSync(executable, 'fresh'); process.exit(0); }
+fs.writeFileSync(executable, ${JSON.stringify(`#!${process.execPath}
+import fs from 'node:fs';
+fs.writeFileSync(process.env.RAN_CLIENT, JSON.stringify({ args: process.argv.slice(2), restart: process.env.MJ_DEV_RESTART_STALE_DAEMON, marker: process.env.USER_SETTING }));
+`)}, {mode: 0o755});
+if (process.env.NO_ARTIFACT !== '1') console.log(JSON.stringify({ reason: 'compiler-artifact', target: {name:'mj', kind:['bin']}, executable }));
+`, { mode: 0o755 });
+  const marker = path.join(root, 'client-ran');
+  const log = path.join(root, 'builds.jsonl');
+  const run = (args = [], extra = {}) => spawnSync('/bin/bash', [path.join(scripts, 'run.sh'), ...args], {
+    encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BUILD_LOG: log, RAN_CLIENT: marker, USER_SETTING: 'preserved', ...extra },
   });
+  return { root, marker, log, run };
 }
 
-test('a failed Linux worker build prevents starting a daemon with missing assets', () => {
-  const { root, bin, script } = fixture();
-  try {
-    const marker = path.join(root, 'client-ran');
-    const result = spawnSync('/bin/bash', [script], {
-      encoding: 'utf8',
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAIL_BUILD: '1', RAN_CLIENT: marker },
-    });
-    assert.equal(result.status, 42, result.stderr);
-    assert.equal(existsSync(marker), false);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-for (const release of [false, true]) {
-  for (const failure of ['', 'native', 'portable']) {
-    test(`Linux ${release ? 'release' : 'debug'} prepares both workers (${failure || 'success'})`, () => {
-      const { root, bin, script } = fixture();
+for (const platform of ['Linux', 'Darwin']) {
+  for (const release of [false, true]) {
+    test(`${platform} ${release ? 'release' : 'debug'} builds workers and directly executes the CLI`, () => {
+      const f = fixture(platform);
       try {
+        const result = f.run([...(release ? ['--release'] : []), '--', 'doctor', 'a b', '--release']);
+        assert.equal(result.status, 0, result.stderr);
         const profile = release ? 'release' : 'debug';
-        const marker = path.join(root, 'client-ran');
-        writeFileSync(path.join(bin, 'uname'), '#!/bin/bash\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac\n');
-        writeFileSync(path.join(bin, 'rustup'), '#!/bin/bash\necho x86_64-unknown-linux-musl\n', { mode: 0o755 });
-        writeFileSync(path.join(bin, 'cargo'), `#!/bin/bash
-set -eu
-command=$1
-shift
-triple='' profile=debug
-while [ $# -gt 0 ]; do
-  case "$1" in --target) triple=$2; shift ;; --release) profile=release ;; esac
-  shift
-done
-if [ "$command" = build ]; then
-  kind=native
-  if [ -n "$triple" ]; then kind=portable; fi
-  if [ "$kind" = "$FAIL_KIND" ]; then exit 42; fi
-  output="target/worker/\${triple:+$triple/}$profile"
-  mkdir -p "$output"
-  echo fresh > "$output/mj-worker"
-else
-  test "$(cat target/worker/$profile/mj-worker)" = fresh
-  test "$(cat target/worker/x86_64-unknown-linux-musl/$profile/mj-worker)" = fresh
-  touch "$RAN_CLIENT"
-fi
-`);
-        mkdirSync(path.join(root, 'target/worker', profile), { recursive: true });
-        writeFileSync(path.join(root, 'target/worker', profile, 'mj-worker'), 'stale');
-        const result = spawnSync('/bin/bash', [script, ...(release ? ['--release'] : [])], {
-          encoding: 'utf8',
-          env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAIL_KIND: failure, RAN_CLIENT: marker },
-        });
-        assert.equal(result.status, failure ? 42 : 0, result.stderr);
-        assert.equal(existsSync(marker), !failure);
-      } finally { rmSync(root, { recursive: true, force: true }); }
+        assert.equal(readFileSync(path.join(f.root, 'target/worker', profile, 'mj-worker'), 'utf8').trim(), 'fresh');
+        const triple = platform === 'Linux' ? 'x86_64-unknown-linux-musl' : 'aarch64-unknown-linux-musl';
+        assert.equal(readFileSync(path.join(f.root, 'target/worker', triple, profile, 'mj-worker'), 'utf8').trim(), 'fresh');
+        assert.deepEqual(JSON.parse(readFileSync(f.marker)), { args: ['doctor', 'a b', '--release'], restart: '1', marker: 'preserved' });
+        const builds = readFileSync(f.log, 'utf8').trim().split('\n').map(JSON.parse);
+        assert.ok(builds.every(args => args[0] === 'build'));
+        assert.equal(builds.at(-1).includes('doctor'), false);
+      } finally { rmSync(f.root, { recursive: true, force: true }); }
     });
   }
 }
+
+for (const failure of ['native', 'portable', 'cli']) {
+  test(`${failure} build failure is visible and prevents launching the client`, () => {
+    const f = fixture();
+    try {
+      const result = f.run([], { FAIL_KIND: failure });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, new RegExp(`${failure}-failed`));
+      assert.equal(existsSync(f.marker), false);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+}
+
+test('the reported artifact supports a custom target directory and profile', () => {
+  const f = fixture();
+  try {
+    const result = f.run(['--target-dir', path.join(f.root, 'custom artifacts'), '--profile', 'dev', '--', '--version']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(f.marker)).args, ['--version']);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('missing artifact fails instead of launching a stale binary', () => {
+  const f = fixture();
+  try {
+    const result = f.run([], { NO_ARTIFACT: '1' });
+    assert.notEqual(result.status, 0);
+    assert.equal(existsSync(f.marker), false);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});

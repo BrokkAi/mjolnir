@@ -234,6 +234,7 @@ impl Fixture {
         }
         let bridge = bridge_script(temp.path());
         let sidecar = Arc::new(ReviewerSidecar::new(ReviewerPlacement {
+            target_environment: Default::default(),
             worker_root: worker_root.clone(),
             session_id: SESSION_ID.to_owned(),
             cwd: workspace,
@@ -1416,6 +1417,7 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
     let worker_root = temp.path().join("worker");
     std::fs::create_dir_all(&worker_root).unwrap();
     let sidecar = std::sync::Arc::new(ReviewerSidecar::new(ReviewerPlacement {
+        target_environment: Default::default(),
         worker_root: worker_root.clone(),
         session_id: SESSION_ID.to_owned(),
         cwd: temp.path().to_path_buf(),

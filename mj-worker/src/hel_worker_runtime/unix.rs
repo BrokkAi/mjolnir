@@ -26,8 +26,6 @@ use hel::hel_worker::{
 use hel::hel_worker_protocol::{DecodedRelayRequest, decode_relay_request};
 
 pub(crate) const ACP_EVENT_CHANNEL_CAPACITY: usize = 256;
-const LOGIN_PATH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const LOGIN_PATH_MARKER: &str = "__HEL_LOGIN_PATH__=";
 const KIMI_TASK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const KIMI_TASK_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(8);
 
@@ -72,6 +70,9 @@ pub(super) fn write_worker_pidfile(root: &std::path::Path, pid: u32) -> Result<(
 }
 
 pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result<()> {
+    let mut target_environment = config.target_environment.clone();
+    target_environment.extend(config.environment);
+    config.environment = target_environment;
     let startup_directory = std::env::current_dir()?;
     let root = super::resolve_relative_worker_root(root, &startup_directory);
     super::resolve_relative_harness_home(&mut config, &startup_directory);
@@ -90,13 +91,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     });
     std::fs::create_dir_all(&root)
         .with_context(|| format!("create worker root {}", root.display()))?;
-    if !checkpoint_only
-        && config.environment.remove(DISCOVER_LOGIN_PATH_ENV).is_some()
-        && !config.environment.contains_key("PATH")
-        && let Some(path) = discover_login_path(&config.session_id).await
-    {
-        config.environment.insert("PATH".into(), path);
-    }
+    config.environment.remove(DISCOVER_LOGIN_PATH_ENV);
     let socket = root.join("control.sock");
     // Refuse a second daemon before touching durable state: opening the
     // relay recovers the journal in place, so getting that far would
@@ -234,7 +229,18 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         .await;
     }
 
-    configure_github_cli(&root, &mut config.environment)?;
+    let base_environment = hel::hel_login_environment::resolve().await?;
+    let mut session_environment = base_environment.clone();
+    session_environment.extend(config.environment.clone());
+    configure_github_cli(&root, &mut session_environment)?;
+    // Persist only explicit and Mjolnir-generated overrides, never shell exports.
+    config.environment = session_environment
+        .iter()
+        .filter(|(name, value)| {
+            config.environment.contains_key(*name) || base_environment.get(*name) != Some(*value)
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
     let managed_harness = super::harness::resolve(
         config.harness_runtime,
         config.harness,
@@ -247,6 +253,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         config.bridge_command = managed.command.clone();
         config.bridge_args = managed.args.clone();
         config.environment.extend(managed.environment.clone());
+        session_environment.extend(managed.environment.clone());
     }
     let harness_gc = managed_harness
         .as_ref()
@@ -257,7 +264,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     let (dispatch_wake_tx, dispatch_wake_rx) = mpsc::channel(1);
     let user_shells = crate::hel_user_shell::UserShellRegistry::new(
         config.cwd.clone(),
-        config.environment.clone(),
+        session_environment.clone(),
         acp_events_tx.clone(),
     );
     let supervisor_path = root.join("acp-supervisor.json");
@@ -276,6 +283,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // nothing else. It stays idle until a controller asks for a second
     // opinion, so constructing it costs nothing.
     let reviewer = Arc::new(ReviewerSidecar::new(ReviewerPlacement {
+        target_environment: config.target_environment.clone(),
         worker_root: root.clone(),
         session_id: config.session_id.clone(),
         cwd: config.cwd.clone(),
@@ -311,12 +319,13 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         let acp_spec = LaunchSpec {
             command: worker_executable,
             args: vec![
+                "--login-environment-ready".into(),
                 "worker".into(),
                 "acp-supervisor".into(),
                 "--spec".into(),
                 supervisor_path.to_string_lossy().into_owned(),
             ],
-            environment: Default::default(),
+            environment: session_environment,
             cwd: config.cwd,
             additional_directories: config.additional_directories,
             extra_mcp_servers: Vec::new(),
@@ -454,12 +463,10 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
 /// Install or validate the managed harness named by a proposed launch config
 /// without starting, stopping, or otherwise touching the session worker.
 pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<()> {
-    if config.environment.remove(DISCOVER_LOGIN_PATH_ENV).is_some()
-        && !config.environment.contains_key("PATH")
-        && let Some(path) = discover_login_path(&config.session_id).await
-    {
-        config.environment.insert("PATH".into(), path);
-    }
+    let mut environment = config.target_environment.clone();
+    environment.extend(config.environment);
+    config.environment = environment;
+    config.environment.remove(DISCOVER_LOGIN_PATH_ENV);
     let prepared = super::harness::resolve(
         config.harness_runtime,
         config.harness,
@@ -474,73 +481,6 @@ pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<(
         bail!("managed harness preparation produced no installation");
     }
     Ok(())
-}
-
-async fn discover_login_path(session_id: &str) -> Option<String> {
-    use hel::hel_targets::{BoundedProcessExecutor, CommandExecutor};
-
-    let result = tokio::task::spawn_blocking(|| {
-        BoundedProcessExecutor::new(LOGIN_PATH_DISCOVERY_TIMEOUT)
-            .execute(&login_path_discovery_command())
-    })
-    .await;
-    let output = match result {
-        Ok(Ok(output)) if output.status == 0 => output,
-        Ok(Ok(output)) => {
-            tracing::warn!(
-                session_id,
-                status = output.status,
-                "login PATH discovery failed; using the worker base PATH"
-            );
-            return None;
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(
-                session_id,
-                error = format!("{error:#}"),
-                "login PATH discovery failed; using the worker base PATH"
-            );
-            return None;
-        }
-        Err(error) => {
-            tracing::warn!(
-                session_id,
-                %error,
-                "login PATH discovery task stopped; using the worker base PATH"
-            );
-            return None;
-        }
-    };
-    match parse_login_path(&output.stdout) {
-        Some(path) => Some(path),
-        None => {
-            tracing::warn!(
-                session_id,
-                "login PATH discovery returned an invalid PATH; using the worker base PATH"
-            );
-            None
-        }
-    }
-}
-
-pub(super) fn login_path_discovery_command() -> hel::hel_targets::CommandSpec {
-    hel::hel_targets::CommandSpec::new(
-        "sh",
-        [
-            "-lc",
-            &format!("printf '\\n{LOGIN_PATH_MARKER}%s\\n' \"$PATH\""),
-        ],
-    )
-    .purpose("discover the target login PATH")
-}
-
-pub(super) fn parse_login_path(stdout: &[u8]) -> Option<String> {
-    let output = std::str::from_utf8(stdout).ok()?;
-    let path = output
-        .lines()
-        .rev()
-        .find_map(|line| line.strip_prefix(LOGIN_PATH_MARKER))?;
-    (!path.is_empty() && !path.chars().any(char::is_control)).then(|| path.to_owned())
 }
 
 pub(super) async fn abort_peer_and_return<T>(
@@ -2507,11 +2447,7 @@ fi
     hel::hel_config::atomic_write_existing(&shell_environment, SHELL_ENVIRONMENT.as_bytes())?;
     std::fs::set_permissions(&shell_environment, std::fs::Permissions::from_mode(0o600))?;
 
-    let inherited_path = environment
-        .get("PATH")
-        .cloned()
-        .or_else(|| std::env::var("PATH").ok())
-        .unwrap_or_default();
+    let inherited_path = environment.get("PATH").cloned().unwrap_or_default();
     let bin_text = bin.to_string_lossy().into_owned();
     environment.insert(
         "PATH".into(),
@@ -3095,10 +3031,12 @@ where
         .as_deref()
         .map(super::harness::acquire_supervisor_lease)
         .transpose()?;
+    let environment = hel::hel_login_environment::with_overrides(&spec.environment).await?;
     let mut command = tokio::process::Command::new(&spec.command);
     command
         .args(&spec.args)
-        .envs(&spec.environment)
+        .env_clear()
+        .envs(&environment)
         .env_remove("GH_TOKEN")
         .env_remove("GITHUB_TOKEN")
         .current_dir(&spec.cwd)
