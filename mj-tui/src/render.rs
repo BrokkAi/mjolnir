@@ -3059,7 +3059,7 @@ mod tests {
             let status = (row.x..row.right())
                 .map(|x| terminal.backend().buffer()[(x, row.y + 1)].symbol())
                 .collect::<String>();
-            assert!(status.contains("Running "), "{status:?}");
+            assert!(status.contains("Working "), "{status:?}");
             assert!(status.contains(" Q1"), "{status:?}");
             assert!(!status.contains('…'), "{status:?}");
         }
@@ -3605,7 +3605,7 @@ mod tests {
         assert!(second_draw.contains("answer 0"), "{second_draw}");
         assert!(!second_draw.contains("beta answer"), "{second_draw}");
         assert!(
-            second_draw.contains("[2] beta") && second_draw.contains("Running"),
+            second_draw.contains("[2] beta") && second_draw.contains("Working"),
             "the collapsed group keeps a two-line summary per session: {second_draw}"
         );
 
@@ -3894,7 +3894,7 @@ mod tests {
             let lines = buffer_lines(buffer);
             let row = lines
                 .iter()
-                .position(|line| line.contains("podman") && line.contains("Running"))
+                .position(|line| line.contains("podman") && line.contains("Working"))
                 .expect("session row");
             buffer[(cell_column(&lines[row], "podman"), row as u16)].fg
         };
@@ -4563,7 +4563,7 @@ mod tests {
         assert!(
             expanded
                 .iter()
-                .any(|line| line.contains("Running") && line.contains("43m3")),
+                .any(|line| line.contains("1 task") && line.contains("43m3")),
             "the expanded row: {expanded:?}"
         );
 
@@ -4571,6 +4571,7 @@ mod tests {
         minimized.set_session_activity("session-1", activity);
         minimize_all_panes(&mut minimized);
         let summary = drawn(&mut minimized, 120, 44).join("\n");
+        assert!(summary.contains("1 task"), "{summary}");
         assert!(!summary.contains("You:"), "{summary}");
         assert!(!summary.contains("Agent:"), "{summary}");
     }

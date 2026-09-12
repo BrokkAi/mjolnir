@@ -981,6 +981,19 @@ async fn kimi_native_task_level_blocks_replacement_until_termination() {
     let mut monitor = unix::KimiTaskMonitor::new(Ok(home));
     monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
 
+    let task_query = || {
+        use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+        let mut call = ToolCall::new("0:query-not-launcher", "TaskOutput");
+        call.status = ToolCallStatus::Completed;
+        call.raw_output = Some(serde_json::json!({"output": "task_id: agent-1\nstatus: running"}));
+        SessionUpdate::ToolCall(call)
+    };
+    relay
+        .lock()
+        .unwrap()
+        .record_session_update(task_query())
+        .unwrap();
+
     let running = relay.lock().unwrap().operational_state();
     assert_eq!(running.background_commands.len(), 1);
     assert!(!running.safe_to_replace(HarnessKind::Kimi));
@@ -1006,6 +1019,12 @@ async fn kimi_native_task_level_blocks_replacement_until_termination() {
     .unwrap();
     monitor.refresh(&relay, true).await.unwrap();
 
+    // A delayed query response must not resurrect a terminated native task.
+    relay
+        .lock()
+        .unwrap()
+        .record_session_update(task_query())
+        .unwrap();
     let finished = relay.lock().unwrap().operational_state();
     assert!(finished.background_commands.is_empty());
     assert!(finished.safe_to_replace(HarnessKind::Kimi));

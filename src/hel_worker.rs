@@ -116,6 +116,12 @@ struct KimiTaskEntry {
     parent_tool_call_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct KimiProvisionalTask {
+    command: BackgroundCommand,
+    native_task_id: Option<String>,
+}
+
 /// `_meta` key the Claude adapter puts on the `usage_update` that settles a
 /// turn. Its value is an object with a `kind` naming the origin.
 const CLAUDE_ORIGIN_META_KEY: &str = "_claude/origin";
@@ -375,8 +381,10 @@ pub struct DurableRelay {
     /// Kimi detached agents and processes confirmed by its native journal.
     kimi_background_tasks: BTreeMap<String, KimiTaskEntry>,
     /// Positive ACP launch evidence retained until the native journal
-    /// correlates it through `parentToolCallId`.
-    kimi_provisional_tasks: BTreeMap<String, BackgroundCommand>,
+    /// correlates it through native task identity or `parentToolCallId`.
+    kimi_provisional_tasks: BTreeMap<String, KimiProvisionalTask>,
+    kimi_observed_task_ids: BTreeSet<String>,
+    kimi_observed_tool_ids: BTreeSet<String>,
     /// Whether Kimi's provider-owned background work is synchronized. Other
     /// policies leave this absent.
     background_work_known: Option<bool>,
@@ -595,6 +603,8 @@ impl DurableRelay {
             claude_background_tasks: BTreeMap::new(),
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
+            kimi_observed_task_ids: BTreeSet::new(),
+            kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
             claude_stoppable_tasks: BTreeSet::new(),
             active_agent_terminals: BTreeMap::new(),
@@ -825,7 +835,7 @@ impl DurableRelay {
                     .filter(|(tool_call_id, _)| {
                         self.bound_agent_terminal(Some(tool_call_id)).is_none()
                     })
-                    .map(|(_, command)| command.clone()),
+                    .map(|(_, task)| task.command.clone()),
             );
         }
         commands.sort_by(|left, right| {
@@ -899,12 +909,13 @@ impl DurableRelay {
         self.persist_activity_transition()
     }
 
-    /// Replace Kimi's native detached-agent level and reconcile any ACP
-    /// launcher evidence whose provider tool call is now present in the wire.
+    /// Replace Kimi's native task level and reconcile ACP launch or query
+    /// evidence against task and launcher identities retained by the wire.
     pub fn kimi_background_tasks_changed(
         &mut self,
         tasks: Vec<crate::hel_acp::KimiBackgroundTask>,
         observed_tool_call_ids: BTreeSet<String>,
+        observed_task_ids: BTreeSet<String>,
     ) -> Result<()> {
         if self.background_work != BackgroundWorkPolicy::KimiTasks
             || matches!(
@@ -914,8 +925,16 @@ impl DurableRelay {
         {
             return Ok(());
         }
-        self.kimi_provisional_tasks.retain(|tool_call_id, _| {
-            !observed_tool_call_ids.contains(kimi_native_tool_call_id(tool_call_id))
+        self.kimi_observed_task_ids = observed_task_ids;
+        self.kimi_observed_tool_ids = observed_tool_call_ids;
+        self.kimi_provisional_tasks.retain(|tool_call_id, task| {
+            !self
+                .kimi_observed_tool_ids
+                .contains(kimi_native_tool_call_id(tool_call_id))
+                && !task
+                    .native_task_id
+                    .as_ref()
+                    .is_some_and(|id| self.kimi_observed_task_ids.contains(id))
         });
         self.kimi_background_tasks = tasks
             .into_iter()
@@ -1027,6 +1046,8 @@ impl DurableRelay {
         self.claude_background_tasks.clear();
         self.kimi_background_tasks.clear();
         self.kimi_provisional_tasks.clear();
+        self.kimi_observed_task_ids.clear();
+        self.kimi_observed_tool_ids.clear();
         self.agent_terminal_tool_calls.clear();
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             self.background_work_known = Some(false);
@@ -2277,6 +2298,8 @@ impl DurableRelay {
             self.claude_background_tasks.clear();
             self.kimi_background_tasks.clear();
             self.kimi_provisional_tasks.clear();
+            self.kimi_observed_task_ids.clear();
+            self.kimi_observed_tool_ids.clear();
             self.agent_terminal_tool_calls.clear();
             if self.background_work == BackgroundWorkPolicy::KimiTasks {
                 self.background_work_known = Some(false);
@@ -2536,16 +2559,44 @@ impl DurableRelay {
         if !explicit_background && !background_title && task_id.is_none() {
             return;
         }
-        let started_at_ms = self.step_clock.started_at_ms().unwrap_or_else(epoch_millis);
+        if self
+            .kimi_observed_tool_ids
+            .contains(kimi_native_tool_call_id(tool_call_id))
+            || task_id.is_some_and(|id| self.kimi_observed_task_ids.contains(id))
+        {
+            self.kimi_provisional_tasks.remove(tool_call_id);
+            return;
+        }
+        // Several TaskOutput/WaitFor calls may observe the same native task.
+        // Keep one provisional entry until its lifecycle stream catches up.
+        let mut started_at_ms = self.step_clock.started_at_ms().unwrap_or_else(epoch_millis);
+        if let Some(id) = task_id {
+            self.kimi_provisional_tasks.retain(|existing_call, task| {
+                if task.native_task_id.as_deref() == Some(id) {
+                    started_at_ms = started_at_ms.min(task.command.started_at_ms);
+                    existing_call == tool_call_id
+                } else {
+                    true
+                }
+            });
+        }
         let command = kimi_agent_description(title, raw_input, task_id);
         self.kimi_provisional_tasks
             .entry(tool_call_id.to_owned())
-            .and_modify(|task| task.command = command.clone())
-            .or_insert(BackgroundCommand {
-                id: background_task_id("kimi-provisional", tool_call_id),
-                started_at_ms,
-                command,
-                can_stop: false,
+            .and_modify(|task| {
+                task.command.command = command.clone();
+                if let Some(id) = task_id {
+                    task.native_task_id = Some(id.to_owned());
+                }
+            })
+            .or_insert(KimiProvisionalTask {
+                command: BackgroundCommand {
+                    id: background_task_id("kimi-provisional", tool_call_id),
+                    started_at_ms,
+                    command,
+                    can_stop: false,
+                },
+                native_task_id: task_id.map(str::to_owned),
             });
     }
 
@@ -5015,6 +5066,65 @@ mod tests {
         SessionUpdate::ToolCall(call)
     }
 
+    #[test]
+    fn kimi_task_queries_reconcile_by_native_identity_in_either_event_order() {
+        use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
+
+        for native_first in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = DurableRelay::open(temp.path(), "kimi-queries", "test").unwrap();
+            relay.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+            relay
+                .record_observation(RelayObservation::SessionConfigured {
+                    config_options: Vec::new(),
+                })
+                .unwrap();
+            let query = |call_id: &'static str, title: &'static str| {
+                let mut call = ToolCall::new(call_id, title);
+                call.status = ToolCallStatus::Completed;
+                call.raw_input = Some(serde_json::json!({"task_id": "bash-tlqj0v63"}));
+                call.raw_output = Some(serde_json::json!({
+                    "output": "retrieval_status: not_ready\ntask_id: bash-tlqj0v63\nstatus: running\nparent_tool_call_id: tool-launcher\n"
+                }));
+                SessionUpdate::ToolCall(call)
+            };
+            let native = crate::hel_acp::KimiBackgroundTask {
+                task_id: "bash-tlqj0v63".into(),
+                description: "validation".into(),
+                started_at_ms: 1_000,
+                parent_tool_call_id: Some("tool-launcher".into()),
+            };
+            let tools = BTreeSet::from(["tool-launcher".into()]);
+            let tasks = BTreeSet::from(["bash-tlqj0v63".into()]);
+            if native_first {
+                relay
+                    .kimi_background_tasks_changed(
+                        vec![native.clone()],
+                        tools.clone(),
+                        tasks.clone(),
+                    )
+                    .unwrap();
+            }
+            for (id, title) in [("0:query-one", "TaskOutput"), ("0:query-two", "WaitFor")] {
+                relay.record_session_update(query(id, title)).unwrap();
+                assert_eq!(relay.operational_state().background_commands.len(), 1);
+            }
+            relay
+                .kimi_background_tasks_changed(vec![native], tools.clone(), tasks.clone())
+                .unwrap();
+            assert_eq!(relay.operational_state().background_commands.len(), 1);
+            relay
+                .kimi_background_tasks_changed(Vec::new(), tools, tasks)
+                .unwrap();
+            assert!(relay.operational_state().background_commands.is_empty());
+            relay
+                .record_session_update(query("0:late-query", "TaskOutput"))
+                .unwrap();
+            assert!(relay.operational_state().background_commands.is_empty());
+            assert!(relay.operational_state().is_quiet());
+        }
+    }
+
     fn kimi_background_agent_card_with_running_task_id_only() -> SessionUpdate {
         use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
 
@@ -5095,6 +5205,7 @@ mod tests {
             .kimi_background_tasks_changed(
                 vec![kimi_process_task("tool_bash")],
                 BTreeSet::from(["tool_bash".into()]),
+                BTreeSet::new(),
             )
             .unwrap();
 
@@ -5110,7 +5221,11 @@ mod tests {
 
         relay.agent_terminal_closed("term-60").unwrap();
         relay
-            .kimi_background_tasks_changed(Vec::new(), BTreeSet::from(["tool_bash".into()]))
+            .kimi_background_tasks_changed(
+                Vec::new(),
+                BTreeSet::from(["tool_bash".into()]),
+                BTreeSet::new(),
+            )
             .unwrap();
         assert!(
             relay.operational_state().background_commands.is_empty(),
@@ -5126,6 +5241,7 @@ mod tests {
             .kimi_background_tasks_changed(
                 vec![kimi_process_task("tool_bash")],
                 BTreeSet::from(["tool_bash".into()]),
+                BTreeSet::new(),
             )
             .unwrap();
 
@@ -5193,7 +5309,7 @@ mod tests {
             .unwrap();
 
         relay
-            .kimi_background_tasks_changed(Vec::new(), BTreeSet::new())
+            .kimi_background_tasks_changed(Vec::new(), BTreeSet::new(), BTreeSet::new())
             .unwrap();
         assert_eq!(relay.operational_state().background_commands.len(), 1);
 
@@ -5206,6 +5322,7 @@ mod tests {
                     parent_tool_call_id: Some("tool_agent".into()),
                 }],
                 BTreeSet::from(["tool_agent".into()]),
+                BTreeSet::new(),
             )
             .unwrap();
         let state = relay.operational_state();
@@ -5224,7 +5341,7 @@ mod tests {
                 .record_session_update(kimi_background_agent_card())
                 .unwrap();
             relay
-                .kimi_background_tasks_changed(Vec::new(), BTreeSet::new())
+                .kimi_background_tasks_changed(Vec::new(), BTreeSet::new(), BTreeSet::new())
                 .unwrap();
             relay.record_observation(observation).unwrap();
             let state = relay.operational_state();
@@ -5273,6 +5390,7 @@ mod tests {
                     parent_tool_call_id: Some("tool_agent".into()),
                 }],
                 BTreeSet::from(["tool_agent".into()]),
+                BTreeSet::new(),
             )
             .unwrap();
         let running = relay.operational_state();
@@ -5281,7 +5399,11 @@ mod tests {
         assert!(!running.is_quiet());
 
         relay
-            .kimi_background_tasks_changed(Vec::new(), BTreeSet::from(["tool_agent".into()]))
+            .kimi_background_tasks_changed(
+                Vec::new(),
+                BTreeSet::from(["tool_agent".into()]),
+                BTreeSet::new(),
+            )
             .unwrap();
         let terminated = relay.operational_state();
         assert!(terminated.background_commands.is_empty());
@@ -5302,6 +5424,7 @@ mod tests {
                     started_at_ms: 1_000,
                     parent_tool_call_id: None,
                 }],
+                BTreeSet::new(),
                 BTreeSet::new(),
             )
             .unwrap();

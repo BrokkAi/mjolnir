@@ -44,6 +44,8 @@ pub struct KimiBackgroundTask {
 pub struct KimiTaskSnapshot {
     pub tasks: Vec<KimiBackgroundTask>,
     pub provider_tool_ids: BTreeSet<String>,
+    /// Native task identities, retained after termination to reconcile late ACP queries.
+    pub observed_task_ids: BTreeSet<String>,
 }
 
 impl KimiTaskSnapshot {
@@ -312,6 +314,7 @@ pub fn full_scan(wire_path: &Path) -> Result<KimiTaskSnapshot> {
 struct TaskTracker {
     active: BTreeMap<String, KimiBackgroundTask>,
     provider_tool_ids: BTreeSet<String>,
+    observed_task_ids: BTreeSet<String>,
 }
 
 impl TaskTracker {
@@ -319,6 +322,7 @@ impl TaskTracker {
         KimiTaskSnapshot {
             tasks: self.active.values().cloned().collect(),
             provider_tool_ids: self.provider_tool_ids.clone(),
+            observed_task_ids: self.observed_task_ids.clone(),
         }
     }
 
@@ -328,9 +332,11 @@ impl TaskTracker {
         }
         match event.kind {
             TaskEventKind::Started(task) => {
+                self.observed_task_ids.insert(task.task_id.clone());
                 self.active.insert(task.task_id.clone(), task);
             }
             TaskEventKind::Terminated { task_id } => {
+                self.observed_task_ids.insert(task_id.clone());
                 self.active.remove(&task_id);
             }
         }
@@ -826,6 +832,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["legacy"]
         );
+        assert!(snapshot.observed_task_ids.contains("modern"));
+        assert!(snapshot.observed_task_ids.contains("legacy"));
         assert!(snapshot.provider_tool_ids.contains("call-modern"));
         assert!(snapshot.provider_tool_ids.contains("call-legacy"));
     }
