@@ -886,15 +886,23 @@ impl Controller {
             // Restored native identity is not current-process readiness.
             // Startup gets its own cancellable budget; its timeout must not
             // enter the wedged-checkpoint worker-restart path below.
-            wait_for_native_session_in_stage(
-                relay.connection_mut(),
-                executor,
-                hel_targets::ProvisionStage::Starting,
-            )
-            .await?;
+            let checkpoint_only = relay
+                .connection_mut()
+                .sync()
+                .await?
+                .operational
+                .checkpoint_only;
+            if !checkpoint_only {
+                wait_for_native_session_in_stage(
+                    relay.connection_mut(),
+                    executor,
+                    hel_targets::ProvisionStage::Starting,
+                )
+                .await?;
+            }
             if exclusivity == LatchExclusivity::HoldThroughClose {
                 let snapshot = relay.connection_mut().sync().await?;
-                if snapshot.operational.capacity_retry.is_some() {
+                if !checkpoint_only && snapshot.operational.capacity_retry.is_some() {
                     // An explicit stop/move cancels recovery before sealing the
                     // checkpoint. Routine recovery copies preserve its deadline.
                     relay
@@ -1318,6 +1326,70 @@ impl Controller {
             cursor,
             completion,
         })
+    }
+
+    pub(super) async fn prepare_move_source_checkpoint(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+        operation: &mut hel::hel_state::MoveOperation,
+    ) -> Result<()> {
+        let snapshot = super::move_session::refresh_move_source(manager, session_id).await?;
+        if snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.operational.checkpoint_only)
+        {
+            operation.source_checkpoint_only = true;
+            hel::hel_database::save_move_operation(operation)?;
+            return Ok(());
+        }
+        if snapshot.as_ref().is_some_and(|snapshot| {
+            matches!(
+                snapshot.operational.execution,
+                RelayExecutionState::Closing | RelayExecutionState::Closed
+            )
+        }) {
+            return Ok(());
+        }
+        if !operation.source_checkpoint_only
+            && snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.operational.native_session_is_ready())
+        {
+            return Ok(());
+        }
+        ensure!(
+            !executor.cancellation_requested() && !operation.cancellation_requested,
+            "Move cancelled before source recovery"
+        );
+        operation.source_checkpoint_only = true;
+        hel::hel_database::save_move_operation(operation)?;
+        executor.notify_notice("Recovering source data without starting its old harness");
+        let (backend, worker_root) = self.worker_placement(session_id)?;
+        let reconnect = hel_targets::reconnect_plan(&backend, session_id)?
+            .commands
+            .into_iter()
+            .next()
+            .context("reconnect plan is empty")?;
+        let launch = self.current_worker_launch_config(session_id, &backend)?;
+        let connection = self
+            .restart_worker_with_installed_binary(
+                session_id,
+                executor,
+                InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &worker_root,
+                    reconnect: &reconnect,
+                    launch: Some(&launch),
+                    messages: &RESTART_FOR_CHECKPOINT,
+                },
+            )
+            .await?;
+        adopt_restarted_checkpoint_relay(session_id, Some(manager), connection)
+            .await?
+            .release();
+        Ok(())
     }
 
     /// Reach the session worker for a checkpoint, restarting it when the proxy
@@ -2542,6 +2614,7 @@ mod tests {
             operational: hel::hel_worker::RelayOperationalState {
                 capacity_retry: None,
                 activity_turn_started_at_ms: None,
+                checkpoint_only: false,
                 acp_ready: None,
                 store_id: None,
                 idle_since_ms: None,
@@ -3298,6 +3371,7 @@ mod tests {
     const LEGACY_RELEASE_TEST_CHILD: &str = "MJ_TEST_LEGACY_RELEASE_LATCH_CHILD";
     #[cfg(unix)]
     const REUSE_TEST_CHILD: &str = "MJ_TEST_REUSE_LATCH_CHILD";
+    const LATCH_CHECKPOINT_ONLY: &str = "MJ_TEST_LATCH_CHECKPOINT_ONLY";
     const LATCH_RELAY_STARTUP_DELAY_MS: &str = "MJ_TEST_LATCH_STARTUP_DELAY_MS";
     const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
     /// Whether the scripted relay understands the early checkpoint release.
@@ -3335,9 +3409,17 @@ mod tests {
                 .expect("open the relay start log");
             writeln!(log, "{}", std::process::id()).expect("record this relay start");
         }
-        let mut relay =
+        let checkpoint_only = std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some();
+        let mut relay = if checkpoint_only {
+            hel::hel_worker::DurableRelay::open_for_checkpoint(
+                Path::new(&root),
+                LATCH_RELAY_SESSION,
+                "1.0.0",
+            )
+        } else {
             hel::hel_worker::DurableRelay::open(Path::new(&root), LATCH_RELAY_SESSION, "1.0.0")
-                .expect("open the test relay journal");
+        }
+        .expect("open the test relay journal");
         if relay.operational_state().native_session_id.is_none() {
             relay
                 .record_observation(hel::hel_worker::RelayObservation::SessionOpened {
@@ -3386,7 +3468,7 @@ mod tests {
         while let Some(request) =
             hel::hel_worker::read_relay_frame(&mut reader).expect("read a relay request")
         {
-            if !configured && Instant::now() >= ready_at {
+            if !checkpoint_only && !configured && Instant::now() >= ready_at {
                 relay
                     .record_observation(hel::hel_worker::RelayObservation::SessionConfigured {
                         config_options: Vec::new(),
@@ -3402,7 +3484,7 @@ mod tests {
                 }
             ) {
                 assert!(
-                    relay.operational_state().native_session_is_ready(),
+                    checkpoint_only || relay.operational_state().native_session_is_ready(),
                     "checkpoint submitted before current ACP startup finished"
                 );
             }
@@ -3413,6 +3495,9 @@ mod tests {
             };
             hel::hel_worker::write_relay_frame(&mut writer, &response)
                 .expect("answer a relay request");
+            if checkpoint_only {
+                relay.dispatch_checkpoint_only().unwrap();
+            }
             for claimed in relay
                 .claim_pending_commands(true)
                 .expect("claim relay commands")
@@ -3518,6 +3603,9 @@ mod tests {
                 LATCH_RELAY_STARTS.to_owned(),
                 starts.to_string_lossy().into_owned(),
             );
+        }
+        if std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some() {
+            spec.env.insert(LATCH_CHECKPOINT_ONLY.into(), "1".into());
         }
         if release == ReleaseSupport::Rejected {
             spec.env
@@ -4037,6 +4125,31 @@ mod tests {
     /// and keeps the installed archive, while the next latch after real
     /// session content goes back through the full export.
     #[cfg(unix)]
+    #[test]
+    fn a_move_checkpoint_can_verify_its_archive_without_source_harness_readiness() {
+        let directory = tempfile::tempdir().unwrap();
+        let name = format!(
+            "{}::a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--nocapture"])
+            .env(REUSE_TEST_CHILD, "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_DATA_DIR", directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "checkpoint-only capture failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content() {
         // MJ_DATA_DIR is process-global, so run the database-backed half in an
@@ -4148,6 +4261,20 @@ mod tests {
         for directory in [&relay_root, &profile_home, &archive_directory] {
             std::fs::create_dir_all(directory).unwrap();
         }
+        if std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some() {
+            let mut seed =
+                hel::hel_worker::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0")
+                    .unwrap();
+            seed.record_observation(hel::hel_worker::RelayObservation::SessionOpened {
+                native_session_id: "native-session".into(),
+                resumed: true,
+            })
+            .unwrap();
+            seed.record_observation(hel::hel_worker::RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        }
         // The archive covers the fake runtime's SessionOpened and
         // SessionConfigured events, before any checkpoint bookkeeping.
         let checkpoint = write_checkpoint_gate_archive(&archive_directory, LATCH_RELAY_SESSION, 2);
@@ -4237,6 +4364,22 @@ mod tests {
         let cursor = latched.cursor.clone();
         latched.complete().await.unwrap();
         wait_until_the_actor_serves_again(&handle).await;
+
+        if std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some() {
+            let snapshot = handle.view().snapshot.unwrap();
+            assert!(snapshot.operational.checkpoint_only);
+            assert!(!snapshot.operational.native_session_is_ready());
+            assert_eq!(
+                verify_archive_streaming(&checkpoint.archive_path)
+                    .unwrap()
+                    .manifest
+                    .session
+                    .native_session_id,
+                "native-session"
+            );
+            channels.shutdown.shutdown().await.unwrap();
+            return;
+        }
 
         // An ordinary recovery copy during a turn must defer before it
         // journals BeginCheckpoint, so no disconnect-cancellation message is

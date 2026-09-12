@@ -326,6 +326,7 @@ pub struct DurableRelay {
     worker_build: Option<String>,
     /// Current ACP process readiness; never recovered from the journal.
     acp_ready: bool,
+    checkpoint_only: bool,
     /// Optional extension advertised by the current ACP process.
     steering_supported: Option<bool>,
     snapshot: RelaySnapshot,
@@ -404,6 +405,29 @@ impl DurableRelay {
         root: impl Into<PathBuf>,
         session_id: impl Into<String>,
         relay_version: impl Into<String>,
+    ) -> Result<Self> {
+        Self::open_with_mode(root, session_id, relay_version, false)
+    }
+
+    /// Open existing durable state without promoting work onto a harness.
+    pub fn open_for_checkpoint(
+        root: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        relay_version: impl Into<String>,
+    ) -> Result<Self> {
+        let root = root.into();
+        anyhow::ensure!(
+            root.join(RELAY_STATE_FILE).is_file(),
+            "checkpoint recovery requires existing relay state"
+        );
+        Self::open_with_mode(root, session_id, relay_version, true)
+    }
+
+    fn open_with_mode(
+        root: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        relay_version: impl Into<String>,
+        checkpoint_only: bool,
     ) -> Result<Self> {
         let root = root.into();
         let session_id = session_id.into();
@@ -552,6 +576,7 @@ impl DurableRelay {
             relay_version: relay_version.into(),
             worker_build: None,
             acp_ready: false,
+            checkpoint_only,
             steering_supported: None,
             snapshot,
             journal_spans,
@@ -661,6 +686,7 @@ impl DurableRelay {
     pub fn operational_state(&self) -> RelayOperationalState {
         let mut state = self.snapshot.operational_state();
         state.acp_ready = Some(self.acp_ready);
+        state.checkpoint_only = self.checkpoint_only;
         state.steering_supported = self.steering_supported;
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.current_step_started_at_ms = self.step_clock.started_at_ms();
@@ -1677,6 +1703,20 @@ impl DurableRelay {
             }
         }
 
+        if self.checkpoint_only
+            && !command.is_relay_local()
+            && !matches!(
+                command,
+                RelayCommand::BeginCheckpoint { .. } | RelayCommand::Close { .. }
+            )
+        {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "session is being preserved for Move; resume it to run commands",
+                false,
+                None,
+            )));
+        }
         let created_at_ms = epoch_millis();
         let accepted_ordinal = self.append_relay_event(
             Some(command_id),
@@ -1844,7 +1884,7 @@ impl DurableRelay {
         acp_session_configured: bool,
         maximum: usize,
     ) -> Result<Vec<ClaimedRelayCommand>> {
-        if !acp_session_configured || maximum == 0 {
+        if self.checkpoint_only || !acp_session_configured || maximum == 0 {
             return Ok(Vec::new());
         }
         self.promote_next_queued_command()?;
@@ -1970,6 +2010,72 @@ impl DurableRelay {
         Ok(claimed)
     }
 
+    /// Advance only lifecycle commands after the old owning process was stopped.
+    /// No ACP channel or harness readiness is involved in this mode.
+    pub fn dispatch_checkpoint_only(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.checkpoint_only,
+            "worker is not in checkpoint-only mode"
+        );
+        let mut commands: Vec<_> = self
+            .snapshot
+            .dispatches
+            .iter()
+            .filter(|(_, dispatch)| {
+                matches!(
+                    dispatch.command,
+                    RelayCommand::BeginCheckpoint { .. } | RelayCommand::Close { .. }
+                )
+            })
+            .filter(|(_, dispatch)| {
+                matches!(
+                    dispatch.state,
+                    RelayDispatchState::Queued | RelayDispatchState::Pending
+                )
+            })
+            .map(|(id, _)| {
+                (
+                    self.snapshot.handled_commands[id].accepted_ordinal,
+                    id.clone(),
+                )
+            })
+            .collect();
+        commands.sort();
+        for (_, id) in commands {
+            let command = self.snapshot.dispatches[&id].command.clone();
+            // Close is sealed by acceptance but executes only after the controller
+            // releases its verified barrier, just like the ordinary coordinator.
+            if self.snapshot.checkpoint_barrier.is_some() {
+                continue;
+            }
+            if self.snapshot.dispatches[&id].state == RelayDispatchState::Queued {
+                self.append_relay_event(
+                    Some(&id),
+                    RelayObservation::CommandStarted {
+                        command_id: id.clone(),
+                        started_at_ms: epoch_millis(),
+                    },
+                )?;
+            }
+            let mut next = self.snapshot.clone();
+            next.dispatches
+                .get_mut(&id)
+                .expect("lifecycle command")
+                .state = RelayDispatchState::InFlight;
+            self.commit_snapshot(next)?;
+            match command {
+                RelayCommand::BeginCheckpoint { .. } => {
+                    self.record_checkpoint_ready(&id)?;
+                }
+                RelayCommand::Close { .. } => {
+                    self.record_command_completed(&id, RelayCommandOutcome::Closed)?;
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+
     /// Claim user shell work independently of ACP turns. Run commands honor
     /// the caller's concurrency limit; cancellation controls bypass it so a
     /// full shell pool can always be stopped.
@@ -1977,7 +2083,7 @@ impl DurableRelay {
         &mut self,
         maximum_runs: usize,
     ) -> Result<Vec<ClaimedRelayCommand>> {
-        if self.snapshot.checkpoint_barrier.is_some() {
+        if self.checkpoint_only || self.snapshot.checkpoint_barrier.is_some() {
             return Ok(Vec::new());
         }
         let barrier_ordinal = self
@@ -2690,7 +2796,8 @@ impl DurableRelay {
         // it must not hold a queued prompt: the adapter queues a prompt that
         // arrives mid-turn and answers it as soon as that turn ends.
         // `active_prompt` is the real gate on dispatch.
-        if self.snapshot.active_prompt.is_some()
+        if self.checkpoint_only
+            || self.snapshot.active_prompt.is_some()
             || self.promoted_config_in_progress()
             || self.snapshot.checkpoint_barrier.is_some()
             || matches!(

@@ -1195,6 +1195,7 @@ mod tests {
 
     fn incomplete_move() -> MoveOperation {
         MoveOperation {
+            source_checkpoint_only: false,
             operation_id: "move-1".into(),
             selection: hel::hel_state::MoveSelection {
                 clear_resource_allocation: false,

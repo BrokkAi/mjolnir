@@ -190,6 +190,7 @@ mod tests {
             recovery_floor_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
             store_id: None,
             native_session_id: None,
+            checkpoint_only: false,
             acp_ready: None,
             agent_capabilities: None,
             agent_info: None,

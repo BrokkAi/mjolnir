@@ -1158,6 +1158,7 @@ mod tests {
             action => panic!("entering move review should request preparation: {action:?}"),
         };
         let preparation = hel::hel_state::MovePreparation {
+            source_unavailable: false,
             selection: hel::hel_state::MoveSelection {
                 session_id: "session-1".into(),
                 profile_id: Some("codex-1".into()),

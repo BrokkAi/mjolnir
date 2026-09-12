@@ -37,23 +37,33 @@ impl RuntimeState {
         self: &Arc<Self>,
         selection: MoveSelection,
     ) -> Result<MovePreparation> {
-        let source_harness = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .state
-            .sessions
-            .get(&selection.session_id)
-            .context("Move session is missing")?
-            .harness_kind;
-        let live = self
-            .session_manager
-            .session(selection.session_id.clone())
-            .await
-            .ok();
-        if let Some(handle) = &live {
-            handle.sync_now().await?;
-        }
+        let (source_harness, source_active) = {
+            let controller = self
+                .controller
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let source = controller
+                .state
+                .sessions
+                .get(&selection.session_id)
+                .context("Move session is missing")?;
+            (
+                source.harness_kind,
+                matches!(
+                    source.state,
+                    SessionState::Running | SessionState::Disconnected
+                ),
+            )
+        };
+        let snapshot = if source_active {
+            mj_controller::hel_controller::move_session::refresh_move_source(
+                &self.session_manager,
+                &selection.session_id,
+            )
+            .await?
+        } else {
+            None
+        };
         let runtime = tokio::runtime::Handle::current();
         let mut preparation = blocking(move || {
             let controller = Controller::load()?;
@@ -61,7 +71,12 @@ impl RuntimeState {
                 .block_on(controller.prepare_move_session_controlled(selection, &ProcessExecutor))
         })
         .await?;
-        if let Some(snapshot) = live.and_then(|handle| handle.view().snapshot) {
+        preparation.source_unavailable = source_active
+            && snapshot
+                .as_ref()
+                .is_none_or(|snapshot| !snapshot.operational.native_session_is_ready());
+        preparation.active |= preparation.source_unavailable;
+        if let Some(snapshot) = snapshot {
             let mut operational = snapshot.operational;
             operational.queued_prompts.clear();
             operational.checkpoint_barrier = None;

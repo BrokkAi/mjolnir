@@ -73,3 +73,47 @@ test('a failed Linux worker build prevents starting a daemon with missing assets
     assert.equal(existsSync(marker), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+for (const release of [false, true]) {
+  for (const failure of ['', 'native', 'portable']) {
+    test(`Linux ${release ? 'release' : 'debug'} prepares both workers (${failure || 'success'})`, () => {
+      const { root, bin, script } = fixture();
+      try {
+        const profile = release ? 'release' : 'debug';
+        const marker = path.join(root, 'client-ran');
+        writeFileSync(path.join(bin, 'uname'), '#!/bin/bash\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac\n');
+        writeFileSync(path.join(bin, 'rustup'), '#!/bin/bash\necho x86_64-unknown-linux-musl\n', { mode: 0o755 });
+        writeFileSync(path.join(bin, 'cargo'), `#!/bin/bash
+set -eu
+command=$1
+shift
+triple='' profile=debug
+while [ $# -gt 0 ]; do
+  case "$1" in --target) triple=$2; shift ;; --release) profile=release ;; esac
+  shift
+done
+if [ "$command" = build ]; then
+  kind=native
+  if [ -n "$triple" ]; then kind=portable; fi
+  if [ "$kind" = "$FAIL_KIND" ]; then exit 42; fi
+  output="target/worker/\${triple:+$triple/}$profile"
+  mkdir -p "$output"
+  echo fresh > "$output/mj-worker"
+else
+  test "$(cat target/worker/$profile/mj-worker)" = fresh
+  test "$(cat target/worker/x86_64-unknown-linux-musl/$profile/mj-worker)" = fresh
+  touch "$RAN_CLIENT"
+fi
+`);
+        mkdirSync(path.join(root, 'target/worker', profile), { recursive: true });
+        writeFileSync(path.join(root, 'target/worker', profile, 'mj-worker'), 'stale');
+        const result = spawnSync('/bin/bash', [script, ...(release ? ['--release'] : [])], {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAIL_KIND: failure, RAN_CLIENT: marker },
+        });
+        assert.equal(result.status, failure ? 42 : 0, result.stderr);
+        assert.equal(existsSync(marker), !failure);
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  }
+}

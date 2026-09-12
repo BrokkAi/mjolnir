@@ -1966,6 +1966,9 @@ function renderMoveForm() {
       ? 'Resource sizing: use destination defaults. Attached directories remain fixed to this workspace.'
       : 'Resource sizing and attached directories: retain the source workspace settings.'));
     moveStep.append(el('p', 'dim', preparation.cross_harness ? 'This is a cross-harness handoff. Harness-private state is rebuilt from the canonical transcript.' : 'The same harness session state will be restored when supported.'));
+    if (preparation.source_unavailable) {
+      moveStep.append(el('p', 'move-warning', 'Source is unavailable; Move will recover its saved data without starting its old harness.'));
+    }
     if (preparation.active) {
       const warning = el('label', 'move-warning');
       const check = document.createElement('input');

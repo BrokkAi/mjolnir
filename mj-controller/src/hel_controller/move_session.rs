@@ -98,6 +98,32 @@ pub use hel::hel_state::{MoveOutcome, MovePreparation, MoveSelection, MoveSessio
 use hel::hel_targets::{CommandExecutor, ProvisionStage, ProvisionStageGuard};
 use hel::hel_worker::RelayCommand;
 
+/// Refresh source state without turning a dead source harness into a Move prerequisite.
+/// Leasing preserves typed transport failures, unlike the UI's string-valued sync reply.
+pub async fn refresh_move_source(
+    manager: &SessionManagerControl,
+    id: &str,
+) -> Result<Option<hel::hel_state::ManagedSessionSnapshot>> {
+    let handle = manager
+        .wait_for_session(id, std::time::Duration::from_secs(5))
+        .await?;
+    let result = async {
+        let mut lease = handle.lease_connection().await?;
+        let snapshot = lease.connection_mut().sync().await?;
+        lease.release();
+        Ok(snapshot)
+    }
+    .await;
+    match result {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(error) if crate::hel_worker_client::RelayTransportDead::marks(&error) => {
+            tracing::warn!(session_id = id, error = %error, "Move will recover the unavailable source without its harness");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn digest(value: &impl serde::Serialize) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
 }
@@ -388,6 +414,7 @@ impl Controller {
             .map(|operation| operation.operation_id.clone())
             .unwrap_or(new_command_id("move")?);
         Ok(MovePreparation {
+            source_unavailable: false,
             selection,
             source_profile_id: source.last_profile.clone(),
             source_target_template_id: source.target_template_id.clone(),
@@ -423,13 +450,14 @@ impl Controller {
                 SessionState::Running | SessionState::Disconnected
             ) {
                 let source_harness = self.state.sessions[&id].harness_kind;
-                let handle = manager
-                    .wait_for_session(&id, std::time::Duration::from_secs(5))
-                    .await?;
-                handle.sync_now().await?;
+                let snapshot = refresh_move_source(manager, &id).await?;
                 let (active, queue, fingerprint) = self.move_confirmation(&checked.selection)?;
+                checked.source_unavailable = snapshot
+                    .as_ref()
+                    .is_none_or(|snapshot| !snapshot.operational.native_session_is_ready());
                 checked.active = active
-                    || handle.view().snapshot.as_ref().is_some_and(|snapshot| {
+                    || checked.source_unavailable
+                    || snapshot.as_ref().is_some_and(|snapshot| {
                         let mut operational = snapshot.operational.clone();
                         operational.queued_prompts.clear();
                         operational.checkpoint_barrier = None;
@@ -493,6 +521,7 @@ impl Controller {
                 op
             }
             None => MoveOperation {
+                source_checkpoint_only: false,
                 operation_id: prepared.operation_id.clone(),
                 selection: checked.selection.clone(),
                 source_profile_id: source.last_profile.clone(),
@@ -653,6 +682,8 @@ impl Controller {
     ) -> Result<()> {
         let id = operation.selection.session_id.clone();
         if self.state.sessions[&id].state == SessionState::Closing {
+            self.prepare_move_source_checkpoint(&id, executor, manager, operation)
+                .await?;
             let handle = manager
                 .wait_for_session(&id, std::time::Duration::from_secs(5))
                 .await?;

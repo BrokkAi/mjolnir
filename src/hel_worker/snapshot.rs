@@ -397,6 +397,9 @@ pub struct RelayOperationalState {
     /// session. Older workers omit this field and are treated as ready.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_ready: Option<bool>,
+    /// This process serves recovered state without running a harness.
+    #[serde(default)]
+    pub checkpoint_only: bool,
     pub agent_capabilities: Option<Box<AgentCapabilities>>,
     pub agent_info: Option<Implementation>,
     /// Older workers do not report the optional ACP steering extension.
@@ -458,7 +461,8 @@ impl RelayOperationalState {
     /// a current worker that explicitly reports not ready is authoritative.
     #[must_use]
     pub fn native_session_is_ready(&self) -> bool {
-        self.execution != RelayExecutionState::Closed
+        !self.checkpoint_only
+            && self.execution != RelayExecutionState::Closed
             && self.native_session_id.is_some()
             && self.acp_ready.unwrap_or(true)
     }
@@ -853,6 +857,7 @@ impl RelaySnapshot {
             native_session_id: self.native_session_id.clone(),
             // Readiness belongs to the current worker process, so durable
             // snapshots must never carry it across a restart.
+            checkpoint_only: false,
             acp_ready: None,
             agent_capabilities: self.agent_capabilities.clone(),
             agent_info: self.agent_info.clone(),

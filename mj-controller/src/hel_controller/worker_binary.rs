@@ -243,7 +243,7 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("session target template is missing")?;
-        let (launch, _, _) = worker_launch_config(
+        let (mut launch, _, _) = worker_launch_config(
             session,
             profile,
             bundle,
@@ -251,6 +251,27 @@ impl Controller {
             session_id,
             target.execution_policy(),
         )?;
+        if hel::hel_database::load_move_operation(session_id)?.is_some_and(|operation| {
+            operation.source_checkpoint_only
+                && operation.destination_target.is_none()
+                && matches!(
+                    operation.phase,
+                    hel::hel_state::MovePhase::Preparing
+                        | hel::hel_state::MovePhase::ClosingSource
+                        | hel::hel_state::MovePhase::Failed
+                        | hel::hel_state::MovePhase::Cancelled
+                )
+                && session.last_profile == operation.source_profile_id
+                && session.target == operation.source_target
+                && matches!(
+                    session.state,
+                    hel::hel_state::SessionState::Running
+                        | hel::hel_state::SessionState::Disconnected
+                        | hel::hel_state::SessionState::Closing
+                )
+        }) {
+            launch.run_mode = hel::hel_worker_launch::WorkerRunMode::CheckpointOnly;
+        }
         Ok(launch)
     }
 
@@ -380,6 +401,7 @@ fn worker_launch_config(
     );
     Ok((
         WorkerLaunchConfig {
+            run_mode: Default::default(),
             session_id: session_id.to_string(),
             harness: profile.kind,
             bridge_command: PathBuf::from(bridge_command),
@@ -4772,6 +4794,7 @@ mod tests {
             commands: RefCell::new(Vec::new()),
         };
         let launch = WorkerLaunchConfig {
+            run_mode: Default::default(),
             session_id: session.into(),
             harness: HarnessKind::Codex,
             bridge_command: "ignored".into(),
@@ -4865,6 +4888,7 @@ mod tests {
             launch: RefCell::new(None),
         };
         let launch = WorkerLaunchConfig {
+            run_mode: Default::default(),
             session_id: "session-local".into(),
             harness: HarnessKind::Codex,
             bridge_command: "ignored".into(),
@@ -4943,6 +4967,7 @@ mod tests {
             commands: RefCell::new(Vec::new()),
         };
         let mut launch = WorkerLaunchConfig {
+            run_mode: Default::default(),
             session_id: session.into(),
             harness: HarnessKind::Kimi,
             bridge_command: "ignored".into(),

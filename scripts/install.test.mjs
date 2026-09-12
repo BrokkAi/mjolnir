@@ -38,7 +38,7 @@ function fixture(os, arch) {
     done
     test "$locked" = 1
     if [ "$command" = build ]; then
-      if [ "\${FAIL_BUILD:-0}" = 1 ]; then exit 42; fi
+      if [ "\${FAIL_BUILD:-0}" = 1 ] || [ "\${FAIL_TARGET:-none}" = "\${triple:-native}" ]; then exit 42; fi
       output="$target_dir/\${triple:+$triple/}release"
       mkdir -p "$output"
       echo "worker \${triple:-native}" > "$output/mj-worker"
@@ -71,10 +71,13 @@ function fixture(os, arch) {
   return { root, installed: (name) => path.join(installRoot, 'bin', name), run };
 }
 
-test('Linux install places the host musl worker beside the installed mj', () => {
+test('Linux install replaces a stale native worker and installs the portable worker', () => {
   const { root, installed, run } = fixture('Linux', 'x86_64');
   try {
+    mkdirSync(path.dirname(installed('mj-worker')), { recursive: true });
+    writeFileSync(installed('mj-worker'), 'stale');
     const result = run({ INSTALLED_TARGET: 'x86_64-unknown-linux-musl' });
+    assert.equal(readFileSync(installed('mj-worker'), 'utf8'), 'worker native\n');
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /mj test/);
     assert.equal(
@@ -105,3 +108,17 @@ test('macOS install places the native worker and the container-built Linux worke
     );
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+for (const target of ['native', 'x86_64-unknown-linux-musl']) {
+  test(`failed ${target} build preserves an existing installation`, () => {
+    const { root, installed, run } = fixture('Linux', 'x86_64');
+    try {
+      mkdirSync(path.dirname(installed('mj')), { recursive: true });
+      const names = ['mj', 'mj-worker', 'mj-worker-x86_64-unknown-linux-musl'];
+      for (const name of names) writeFileSync(installed(name), `previous ${name}`);
+      const result = run({ INSTALLED_TARGET: 'x86_64-unknown-linux-musl', FAIL_TARGET: target });
+      assert.equal(result.status, 42, result.stderr);
+      for (const name of names) assert.equal(readFileSync(installed(name), 'utf8'), `previous ${name}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}

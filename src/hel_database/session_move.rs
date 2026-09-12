@@ -116,6 +116,7 @@ mod tests {
 
     fn operation(session: &SessionRecord) -> MoveOperation {
         MoveOperation {
+            source_checkpoint_only: false,
             operation_id: "move-one".into(),
             selection: MoveSelection {
                 clear_resource_allocation: false,

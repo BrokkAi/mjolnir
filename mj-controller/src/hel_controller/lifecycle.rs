@@ -59,6 +59,8 @@ impl Controller {
         operation: &mut hel::hel_state::MoveOperation,
         preparation: Option<&hel::hel_state::MovePreparation>,
     ) -> Result<bool> {
+        self.prepare_move_source_checkpoint(session_id, executor, manager, operation)
+            .await?;
         self.close_session_controlled_with_manager(
             session_id,
             executor,

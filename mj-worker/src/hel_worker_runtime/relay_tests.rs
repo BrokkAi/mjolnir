@@ -87,6 +87,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 
 fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
+        run_mode: Default::default(),
         session_id: SESSION_ID.into(),
         harness: HarnessKind::Codex,
         bridge_command: "codex-acp".into(),
@@ -5000,4 +5001,263 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
     assert!(command_rx.try_recv().is_err());
     event_tx.send(RuntimeEvent::Stopped).unwrap();
     coordinator.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_only_daemon_preserves_work_and_seals_without_a_harness() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("worker");
+    let mut durable = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    durable
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "saved-native-session".into(),
+            resumed: true,
+        })
+        .unwrap();
+    submit(&mut durable, "interrupted-turn", prompt("working"));
+    durable.claim_pending_commands(true).unwrap();
+    let queued_text = "preserved work ".repeat(10_000);
+    submit(&mut durable, "queued-prompt", prompt(&queued_text));
+    submit(
+        &mut durable,
+        "queued-model",
+        RelayCommand::SetConfig {
+            key: "model".into(),
+            value: "withdrawn-model".into(),
+        },
+    );
+    let shell_marker = temp.path().join("shell-ran");
+    submit(
+        &mut durable,
+        "queued-shell",
+        RelayCommand::RunUserShell {
+            command: format!("touch {}", shell_marker.display()),
+        },
+    );
+    drop(durable);
+    let mut config = launch_config("profile-that-must-not-be-used");
+    config.run_mode = hel::hel_worker_launch::WorkerRunMode::CheckpointOnly;
+    config.harness_runtime = hel::hel_worker_launch::HarnessRuntimePolicy::Managed;
+    config.bridge_command = temp.path().join("nonexistent-harness");
+    config.cwd = temp.path().to_owned();
+    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
+    let stream = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(stream) = tokio::net::UnixStream::connect(root.join("control.sock")).await {
+                break stream;
+            }
+            assert!(!daemon.is_finished(), "checkpoint-only startup failed");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    async fn request(
+        reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        request: RelayRequest,
+    ) -> RelayResponseBody {
+        let envelope = RelayRequestEnvelope {
+            request_id: "checkpoint-test".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request,
+        };
+        let mut bytes = serde_json::to_vec(&envelope).unwrap();
+        bytes.push(b'\n');
+        writer.write_all(&bytes).await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reader.read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        serde_json::from_str::<RelayResponseEnvelope>(&line)
+            .unwrap()
+            .body
+    }
+    let state = match request(&mut reader, &mut writer, RelayRequest::Status).await {
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Status(state),
+        } => state,
+        body => panic!("{body:?}"),
+    };
+    assert!(state.checkpoint_only);
+    assert_eq!(state.acp_ready, Some(false));
+    assert_eq!(
+        state.native_session_id.as_deref(),
+        Some("saved-native-session")
+    );
+    assert_eq!(
+        state
+            .queued_prompts
+            .iter()
+            .map(|p| p.command_id.as_str())
+            .collect::<Vec<_>>(),
+        ["queued-prompt", "queued-model"]
+    );
+    assert!(matches!(
+        request(
+            &mut reader,
+            &mut writer,
+            RelayRequest::Submit {
+                command_id: "new-prompt".into(),
+                command: prompt("must not run"),
+            }
+        )
+        .await,
+        RelayResponseBody::Error { .. }
+    ));
+    assert!(matches!(
+        request(
+            &mut reader,
+            &mut writer,
+            RelayRequest::Submit {
+                command_id: "recovery-barrier".into(),
+                command: RelayCommand::BeginCheckpoint { reason: None },
+            }
+        )
+        .await,
+        RelayResponseBody::Ok { .. }
+    ));
+    let state = match request(&mut reader, &mut writer, RelayRequest::Status).await {
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Status(state),
+        } => state,
+        body => panic!("{body:?}"),
+    };
+    let cursor = state.checkpoint_ready.unwrap();
+    let mut wrong = cursor.clone();
+    wrong.ordinal += 1;
+    assert!(matches!(
+        request(
+            &mut reader,
+            &mut writer,
+            RelayRequest::Submit {
+                command_id: "bad-close".into(),
+                command: RelayCommand::Close {
+                    barrier_command_id: "recovery-barrier".into(),
+                    expected: wrong
+                },
+            }
+        )
+        .await,
+        RelayResponseBody::Error { .. }
+    ));
+    assert!(matches!(
+        request(
+            &mut reader,
+            &mut writer,
+            RelayRequest::Submit {
+                command_id: "recovery-close".into(),
+                command: RelayCommand::Close {
+                    barrier_command_id: "recovery-barrier".into(),
+                    expected: cursor
+                },
+            }
+        )
+        .await,
+        RelayResponseBody::Ok { .. }
+    ));
+    let completed = request(
+        &mut reader,
+        &mut writer,
+        RelayRequest::Submit {
+            command_id: "recovery-complete".into(),
+            command: RelayCommand::CompleteCheckpoint {
+                barrier_command_id: "recovery-barrier".into(),
+            },
+        },
+    )
+    .await;
+    assert!(
+        matches!(completed, RelayResponseBody::Ok { .. }),
+        "{completed:?}"
+    );
+    let state = match request(&mut reader, &mut writer, RelayRequest::Status).await {
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Status(state),
+        } => state,
+        body => panic!("{body:?}"),
+    };
+    assert_eq!(state.execution, RelayExecutionState::Closed);
+    assert!(!root.join("acp-supervisor.json").exists());
+    assert!(!shell_marker.exists());
+    writer.shutdown().await.unwrap();
+    daemon.abort();
+    assert!(daemon.await.unwrap_err().is_cancelled());
+    let reopened = DurableRelay::open_for_checkpoint(&root, SESSION_ID, "1.0.0").unwrap();
+    assert_eq!(
+        reopened.operational_state().execution,
+        RelayExecutionState::Closed
+    );
+    assert_eq!(reopened.operational_state().queued_prompts.len(), 2);
+}
+
+#[test]
+fn checkpoint_only_restart_releases_an_abandoned_barrier_and_preserves_an_accepted_close() {
+    let temp = tempfile::tempdir().unwrap();
+    drop(DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap());
+    let mut relay = DurableRelay::open_for_checkpoint(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(
+        &mut relay,
+        "abandoned-barrier",
+        RelayCommand::BeginCheckpoint { reason: None },
+    );
+    relay.dispatch_checkpoint_only().unwrap();
+    assert!(relay.operational_state().checkpoint_ready.is_some());
+    drop(relay);
+    let mut relay = DurableRelay::open_for_checkpoint(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    assert!(relay.operational_state().checkpoint_ready.is_none());
+    submit(
+        &mut relay,
+        "verified-barrier",
+        RelayCommand::BeginCheckpoint { reason: None },
+    );
+    relay.dispatch_checkpoint_only().unwrap();
+    let cursor = relay.operational_state().checkpoint_ready.unwrap();
+    submit(
+        &mut relay,
+        "accepted-close",
+        RelayCommand::Close {
+            barrier_command_id: "verified-barrier".into(),
+            expected: cursor,
+        },
+    );
+    relay.dispatch_checkpoint_only().unwrap();
+    assert_eq!(
+        relay.operational_state().execution,
+        RelayExecutionState::Closing
+    );
+    drop(relay);
+    let mut relay = DurableRelay::open_for_checkpoint(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    relay.dispatch_checkpoint_only().unwrap();
+    assert_eq!(
+        relay.operational_state().execution,
+        RelayExecutionState::Closed
+    );
+    assert_eq!(relay.operational_state().acp_ready, Some(false));
+}
+
+#[tokio::test]
+async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting_a_harness() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("worker");
+    let mut config = launch_config("unused-profile");
+    config.run_mode = hel::hel_worker_launch::WorkerRunMode::CheckpointOnly;
+    config.cwd = temp.path().to_owned();
+    let error = unix::run_daemon(root.clone(), config.clone())
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("existing relay state"));
+    let state = root.join(hel::hel_worker::RELAY_STATE_FILE);
+    std::fs::write(&state, b"corrupt state").unwrap();
+    let error = unix::run_daemon(root.clone(), config).await.unwrap_err();
+    assert!(format!("{error:#}").contains("parse"));
+    assert_eq!(std::fs::read(state).unwrap(), b"corrupt state");
+    assert!(!root.join("control.sock").exists());
+    assert!(!root.join("acp-supervisor.json").exists());
 }
