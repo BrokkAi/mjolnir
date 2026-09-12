@@ -318,6 +318,24 @@ pub fn running_executable_digest() -> Option<String> {
     }
 }
 
+/// Private, prompt-free harness discovery. All paths belong to one probe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileProbeSpec {
+    pub harness: HarnessKind,
+    pub profile_home: PathBuf,
+    pub environment: std::collections::BTreeMap<String, String>,
+    pub cwd: PathBuf,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileConfig {
+    pub model: Option<String>,
+    pub models: Vec<crate::hel_acp::SessionConfigChoice>,
+    pub efforts: Vec<crate::hel_acp::SessionConfigChoice>,
+    pub observed_at: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

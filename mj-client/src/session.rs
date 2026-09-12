@@ -166,6 +166,17 @@ impl PendingRelaySync {
 }
 
 pub trait SessionHandleBackend: Send + Sync {
+    fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
+        let session_id = self.session_id().to_owned();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                hel::hel_database::load_config_result(&session_id, &command_id)
+            })
+            .await
+            .context("read configuration completion task")?
+        })
+    }
+
     fn clone_box(&self) -> Box<dyn SessionHandleBackend>;
     fn session_id(&self) -> &str;
     fn view(&self) -> ManagedSessionView;
@@ -224,6 +235,34 @@ impl SessionHandle {
 
     pub async fn submit(&self, command_id: String, command: RelayCommand) -> Result<u64> {
         self.enqueue_submit(command_id, command).await?.wait().await
+    }
+
+    /// Apply a setting and wait for its durable success or rejection.
+    pub async fn set_config(&self, key: String, value: String) -> Result<()> {
+        let command_id = new_command_id("set-config")?;
+        self.submit(command_id.clone(), RelayCommand::SetConfig { key, value })
+            .await?;
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if let Some(error) = self.backend.config_result(command_id.clone()).await? {
+                    if let Some(error) = error {
+                        anyhow::bail!("{error}");
+                    }
+                    self.sync_now().await?;
+                    return Ok(());
+                }
+                ensure!(
+                    !self.is_stopped(),
+                    "session stopped while applying configuration"
+                );
+                if let Some(error) = self.view().error {
+                    anyhow::bail!("configuration connection failed: {}", error.detail());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .context("configuration command did not complete within 60 seconds")?
     }
 
     pub async fn enqueue_submit(

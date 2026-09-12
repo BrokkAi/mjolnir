@@ -102,6 +102,10 @@ enum Command {
     CancelTurn(api_commands::SessionArgs),
     /// Print the API base URL and where its bearer token lives.
     ApiInfo(api_commands::ApiInfoArgs),
+    /// Discover available models and efforts for a profile.
+    Models(api_commands::ModelsArgs),
+    /// Apply a session configuration setting.
+    SetConfig(api_commands::SetConfigArgs),
 }
 
 #[derive(Debug, Args)]
@@ -333,6 +337,8 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Close(_)) => "close",
         Some(Command::CancelTurn(_)) => "cancel-turn",
         Some(Command::ApiInfo(_)) => "api-info",
+        Some(Command::Models(_)) => "models",
+        Some(Command::SetConfig(_)) => "set-config",
     }
 }
 
@@ -400,13 +406,19 @@ async fn run_command(
         Some(Command::Export(args)) => api_commands::export(args)
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Sessions(args)) => api_commands::sessions(args)
+        Some(Command::Sessions(args)) => api_commands::sessions(args, requested_workspace)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Close(args)) => api_commands::close(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::CancelTurn(args)) => api_commands::cancel_turn(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Models(args)) => api_commands::models(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::SetConfig(args)) => api_commands::set_config(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::ApiInfo(args)) => api_commands::api_info(args)

@@ -400,3 +400,69 @@ mj close --session <id>
 `mj transcript --session <id>` still answers after the close: the projection
 outlives the session. See [session lifecycle](/sessions/) for what closing and
 resuming do, and [security boundaries](/security/) for what the token reaches.
+
+
+## Discover and change model settings
+
+`GET /api/v1/profiles/{profile_id}/config` returns `model`, `models`, `efforts`,
+and `observed_at` (Unix seconds). Each choice contains its exact `value`, display
+`name`, and optional `description`. Add `?model=<value>` to discover effort
+choices for that model. An empty cache is populated automatically with a
+prompt-free harness probe; no project session or container is created. The
+first lookup may install the managed harness on the controller and take several
+minutes. Discovery currently requires a Unix controller with the harness's
+installation prerequisites and access to the profile's provider.
+
+The cache persists across daemon restarts, expires after 24 hours, and is keyed
+by profile settings and harness installation version. Efforts are cached per
+model. Concurrent cold lookups share discovery. Probe failures remain retryable
+and return `503` with their cause. Live managed workers with a matching build
+refresh their model-specific entries. Container harnesses are still authoritative
+about the settings they actually accept.
+
+`POST /sessions` automatically discovers and validates requested `model` and
+`effort` before bundling or provisioning. An unknown selector returns `400` with
+available values, after refreshing cached choices. Settings are applied model
+first, then effort using the model's updated choices. A later target-side
+configuration failure leaves the session available for repair and is reported
+by `wait`. It does not consume a prompt turn.
+
+Session responses include `config_options` with each setting's `key`, `label`,
+`current`, and `choices`. Apply one setting with:
+
+```http
+PATCH /api/v1/sessions/{session_id}/config
+Content-Type: application/json
+
+{"key":"model","value":"kimi-code/k3"}
+```
+
+The route waits for the setting to be applied and returns the updated session.
+Invalid advertised choices return `400`; a rejected configuration command returns
+`409` with its reason. Initialization must finish before callers change settings
+or send another prompt. After repairing a failed initialization, submit a new
+prompt explicitly; the original first prompt is not replayed.
+
+```sh
+mj models --profile kimi --json
+mj models --profile kimi --model kimi-code/k3 --json
+mj set-config --session "$id" --key model --value kimi-code/k3 --json
+mj set-config --session "$id" --key effort --value high --json
+```
+
+## Workspace selection and stopping provisioning
+
+`GET /api/v1/sessions?workspace_id=<id>` filters the session list. The CLI resolves
+`mj sessions --workspace <name>` to that workspace ID. Without a selector, the
+list includes all workspaces.
+
+`close` is accepted while provisioning or another lifecycle operation is in
+flight. It cancels cancellable work, prevents the initial prompt, waits for the
+old operation to release ownership, and then cleans up. Repeated closes join the
+same operation. A stopping session's `wait` returns `stopped`, including when an
+earlier initialization failed. Cleanup errors remain visible in session state.
+
+The CLI and `mj api-info` probe API support before reading the token file. A
+daemon predating this API produces an explicit `mj daemon restart` instruction;
+no restart is performed automatically. Disabled viewers, connection failures,
+incompatible API versions, and missing tokens have separate diagnostics.

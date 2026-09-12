@@ -3602,7 +3602,7 @@ async fn set_session_config(
 
 /// One selectable value of a session configuration option, flattened out of
 /// the harness's ACP select shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionConfigChoice {
     pub value: String,
     pub name: String,

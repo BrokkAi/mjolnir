@@ -6,6 +6,7 @@ mod git_cache;
 mod lifecycle;
 pub mod move_session;
 mod network_git;
+pub mod profile_config;
 mod provisioning;
 mod readiness;
 mod recovery_scan;

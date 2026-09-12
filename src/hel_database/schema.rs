@@ -379,6 +379,15 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     ensure_session_container_override_columns(connection)?;
     ensure_session_mount_read_only_column(connection)?;
     ensure_materialized_elicitation_column(connection)?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS profile_config_cache (
+        profile TEXT NOT NULL, model TEXT NOT NULL, fingerprint TEXT NOT NULL,
+        observed_at INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(profile, model));
+        CREATE TABLE IF NOT EXISTS api_config_results (
+        session_id TEXT NOT NULL REFERENCES materialized_sessions(session_id) ON DELETE CASCADE,
+        command_id TEXT NOT NULL, error TEXT, PRIMARY KEY(session_id, command_id));",
+    )?;
+
     if version < 10 {
         migrate_stopped_session_state(connection)?;
     }

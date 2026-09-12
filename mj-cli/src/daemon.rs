@@ -618,6 +618,7 @@ pub(crate) struct RuntimeState {
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
     session_manager: SessionManagerControl,
     lifecycle: Mutex<BTreeMap<String, ActiveLifecycle>>,
+    close_requested: Mutex<BTreeSet<String>>,
     controller: Mutex<Controller>,
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<()>,
@@ -851,6 +852,7 @@ impl RuntimeState {
             workspaces_tx,
             session_manager,
             lifecycle: Mutex::new(BTreeMap::new()),
+            close_requested: Mutex::new(BTreeSet::new()),
             controller: Mutex::new(controller),
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(()),
@@ -1660,7 +1662,69 @@ impl RuntimeState {
         }
     }
 
+    pub(crate) fn request_close(&self, session_id: &str) {
+        self.close_requested
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session_id.to_owned());
+        self.publish_revision();
+    }
+
+    pub(crate) fn clear_close_request(&self, session_id: &str) {
+        self.close_requested
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(session_id);
+        self.publish_revision();
+    }
+
+    pub(crate) fn close_is_requested(&self, session_id: &str) -> bool {
+        self.close_requested
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(session_id)
+    }
+
     pub(crate) async fn close_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        self.request_close(&session_id);
+        let result = self.close_requested_session(session_id.clone()).await;
+        self.clear_close_request(&session_id);
+        result
+    }
+
+    async fn wait_before_close(self: &Arc<Self>, session_id: &str) -> Result<()> {
+        // Cancellation is a request: the old owner must actually finish before
+        // close acquires the target, including an irreversible create commit.
+        let pending = {
+            let operations = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            operations
+                .get(session_id)
+                .filter(|operation| {
+                    !matches!(
+                        operation.kind,
+                        LifecycleKind::Close | LifecycleKind::Cleanup
+                    )
+                })
+                .map(|operation| {
+                    operation.request_cancel();
+                    operation.result.clone()
+                })
+        };
+        if let Some(pending) = pending {
+            if let Err(error) = Self::wait_lifecycle_result(pending.clone()).await {
+                tracing::debug!(%session_id, %error, "previous lifecycle ended before close");
+            }
+            self.remove_completed_lifecycle(&pending);
+        }
+
+        Ok(())
+    }
+
+    async fn close_requested_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        self.wait_before_close(&session_id).await?;
         let (already_stopped, needs_cleanup) = blocking({
             let session_id = session_id.clone();
             move || {
@@ -2293,6 +2357,9 @@ impl RuntimeState {
     /// holds no record for it. Reading one field costs one lock rather than a
     /// clone of every record, which is what a poll wants.
     pub(crate) fn session_state(&self, session_id: &str) -> Option<hel::hel_state::SessionState> {
+        if self.close_is_requested(session_id) {
+            return Some(SessionState::Closing);
+        }
         self.controller
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2341,7 +2408,20 @@ impl RuntimeState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let operations = self.active_lifecycles();
-        (controller.state.sessions.clone(), operations)
+        let mut records = controller.state.sessions.clone();
+        for id in self
+            .close_requested
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+        {
+            if let Some(record) = records.get_mut(id)
+                && record.state != SessionState::Stopped
+            {
+                record.state = SessionState::Closing;
+            }
+        }
+        (records, operations)
     }
 
     pub(crate) fn cancel_lifecycle_if_active(&self, session_id: &str) {
@@ -6840,6 +6920,56 @@ mod tests {
         assert_eq!(state.active_lifecycles()[0].operation_id, second_id);
         release.notify_one();
         RuntimeState::wait_lifecycle_result(second).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_waits_for_cancelled_or_committed_provisioning_to_release_ownership() {
+        for committed in [false, true] {
+            let state = test_runtime_state();
+            let control = CreateSessionControl::default();
+            let release = Arc::new(tokio::sync::Notify::new());
+            state
+                .start_or_join_lifecycle_controlled(
+                    "close-race".into(),
+                    LifecycleKind::Create,
+                    None,
+                    None,
+                    Some(control.clone()),
+                    {
+                        let release = release.clone();
+                        move |_, _, _| async move {
+                            release.notified().await;
+                            Ok(DaemonLifecycleResult::Done)
+                        }
+                    },
+                )
+                .unwrap();
+            if committed {
+                assert!(control.grant_commit());
+            }
+            state.request_close("close-race");
+            let waiter = {
+                let state = state.clone();
+                tokio::spawn(async move { state.wait_before_close("close-race").await })
+            };
+            tokio::task::yield_now().await;
+            assert!(
+                !waiter.is_finished(),
+                "cleanup must wait for the owning operation"
+            );
+            assert_eq!(control.cancelled.load(Ordering::Acquire), !committed);
+            assert_eq!(
+                state.session_state("close-race"),
+                Some(SessionState::Closing)
+            );
+            release.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!state.lifecycle.lock().unwrap().contains_key("close-race"));
+        }
     }
 
     #[tokio::test]

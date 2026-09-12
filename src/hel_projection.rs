@@ -642,8 +642,10 @@ fn project_observation(
                         },
                     );
                 }
-                crate::hel_worker::RelayCommandOutcome::Configured
-                | crate::hel_worker::RelayCommandOutcome::SessionModeSet
+                crate::hel_worker::RelayCommandOutcome::Configured => {
+                    mutation.config_results.push((command_id.clone(), None));
+                }
+                crate::hel_worker::RelayCommandOutcome::SessionModeSet
                 | crate::hel_worker::RelayCommandOutcome::Cancelled
                 | crate::hel_worker::RelayCommandOutcome::CheckpointCompleted
                 | crate::hel_worker::RelayCommandOutcome::CheckpointReleased
@@ -665,6 +667,11 @@ fn project_observation(
             command,
             message,
         } => {
+            if *command == RelayCommandKind::SetConfig {
+                mutation
+                    .config_results
+                    .push((command_id.clone(), Some(message.clone())));
+            }
             let prompt_was_started = index.get(&format!("user:{command_id}")).is_some();
             let queued_entry = current
                 .queued_prompts

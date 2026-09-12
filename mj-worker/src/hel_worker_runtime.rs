@@ -72,7 +72,18 @@ pub(crate) fn enforce_execution_policy(config: &mut WorkerLaunchConfig) -> Resul
 }
 
 #[cfg(unix)]
+mod discovery;
+#[cfg(unix)]
 pub(crate) mod harness;
+#[cfg(unix)]
+pub use discovery::discover_profile_config;
+#[cfg(not(unix))]
+pub async fn discover_profile_config(
+    _spec: hel::hel_worker_launch::ProfileProbeSpec,
+) -> anyhow::Result<hel::hel_worker_launch::ProfileConfig> {
+    anyhow::bail!("profile discovery requires a Unix worker host")
+}
+
 #[cfg(unix)]
 pub(crate) mod reviewer;
 #[cfg(unix)]

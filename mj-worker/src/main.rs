@@ -38,6 +38,11 @@ struct WorkerArgs {
 
 #[derive(Debug, Subcommand)]
 enum WorkerCommand {
+    /// Discover profile model choices without submitting a prompt.
+    DiscoverConfig {
+        #[arg(long)]
+        spec: PathBuf,
+    },
     /// Own an ACP bridge and durable session event log.
     Run {
         #[arg(long)]
@@ -215,6 +220,12 @@ async fn run_command(command: Command) -> Result<()> {
             prepare_managed_harness(WorkerLaunchConfig::read(&config)?).await
         }
         WorkerCommand::Proxy { root } => proxy(root).await,
+        WorkerCommand::DiscoverConfig { spec } => {
+            let spec = serde_json::from_slice(&std::fs::read(spec)?)?;
+            let config = mj_worker::hel_worker_runtime::discover_profile_config(spec).await?;
+            println!("{}", serde_json::to_string(&config)?);
+            Ok(())
+        }
         WorkerCommand::AcpSupervisor { spec } => {
             run_acp_supervisor(AcpSupervisorSpec::read(&spec)?).await
         }

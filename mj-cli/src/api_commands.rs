@@ -375,7 +375,10 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
     }
 }
 
-pub(crate) async fn sessions(args: SessionsArgs) -> Result<()> {
+pub(crate) async fn sessions(
+    args: SessionsArgs,
+    requested_workspace: Option<String>,
+) -> Result<()> {
     let client = ApiClient::connect().await?;
     if let Some(session_id) = &args.session {
         let session = client.session(session_id).await?;
@@ -388,7 +391,11 @@ pub(crate) async fn sessions(args: SessionsArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let list = client.sessions().await?;
+    let workspace = match requested_workspace {
+        Some(name) => Some(crate::resolve_store_workspace(Some(&name)).await?),
+        None => None,
+    };
+    let list = client.sessions_in_workspace(workspace).await?;
     if args.json {
         return print_json(&list);
     }
@@ -506,6 +513,73 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
         "{}",
         serde_json::to_string_pretty(value).context("serialize the API response")?
     );
+    Ok(())
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ModelsArgs {
+    #[arg(long)]
+    profile: String,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+pub(crate) struct SetConfigArgs {
+    #[arg(long)]
+    session: String,
+    #[arg(long)]
+    key: String,
+    #[arg(long)]
+    value: String,
+    #[arg(long)]
+    json: bool,
+}
+pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
+    let choices = ApiClient::connect()
+        .await?
+        .models(&args.profile, args.model)
+        .await?;
+    if args.json {
+        return print_json(&choices);
+    }
+    for model in choices.models {
+        println!("{}  {}", model.value, model.name);
+    }
+    println!(
+        "effort ({}): {}",
+        choices.model.as_deref().unwrap_or("default"),
+        choices
+            .efforts
+            .iter()
+            .map(|c| c.value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(())
+}
+pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
+    let session = ApiClient::connect()
+        .await?
+        .set_config(
+            &args.session,
+            &mj_controller::hel_server::api::SetConfigRequest {
+                key: args.key,
+                value: args.value,
+            },
+        )
+        .await?;
+    if args.json {
+        return print_json(&session);
+    }
+    for option in session.config_options {
+        println!(
+            "{} {}",
+            option.key,
+            option.current.as_deref().unwrap_or("unknown")
+        );
+    }
     Ok(())
 }
 

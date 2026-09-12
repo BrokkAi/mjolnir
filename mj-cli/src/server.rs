@@ -514,12 +514,14 @@ fn admit_phone_action(
     running_actions: usize,
     active_sessions: &mut std::collections::BTreeSet<String>,
 ) -> std::result::Result<Option<String>, ActionOutcome> {
-    if !phone_action_capacity_available(running_actions) {
+    let closing = matches!(action, ControllerAction::Close { .. });
+    if !closing && !phone_action_capacity_available(running_actions) {
         return Err(ActionOutcome::Busy);
     }
     let session_id = controller_action_session_id(action);
     if let Some(session_id) = &session_id
         && !active_sessions.insert(session_id.clone())
+        && !closing
     {
         return Err(ActionOutcome::SessionBusy);
     }
@@ -883,6 +885,7 @@ pub(crate) async fn run_server(
         let mut controller_reload_invalidated = false;
         let mut pending_action_errors = std::collections::BTreeMap::<String, String>::new();
         let mut active_actions = std::collections::BTreeSet::new();
+        let mut closing_actions = std::collections::BTreeMap::<String, u64>::new();
         let mut next_action_id = 0_u64;
         let mut action_cancellations = std::collections::BTreeMap::<u64, PhoneActionControl>::new();
         let mut action_sessions = std::collections::BTreeMap::<u64, String>::new();
@@ -1163,6 +1166,20 @@ pub(crate) async fn run_server(
                         tracing::warn!(session_id = %update.session_id, "could not persist relay session metadata: {error:#}");
                     }
                     if let Some(snapshot) = update.view.snapshot {
+                        if snapshot.operational.native_session_is_ready()
+                            && operational.get(&update.session_id).is_none_or(|old: &hel::hel_worker::RelayOperationalState| old.config_options != snapshot.operational.config_options)
+                            && let Some(session) = controller.state.sessions.get(&update.session_id)
+                            && matches!(session.target, Some(hel::hel_state::TargetLocator::LocalBare { .. } | hel::hel_state::TargetLocator::SshBare { .. } | hel::hel_state::TargetLocator::AwsEc2 { .. }))
+                            && let Some(build) = snapshot.worker_build.clone()
+                        {
+                            let profile = session.last_profile.clone();
+                            let state = snapshot.operational.clone();
+                            tokio::spawn(async move {
+                                if let Err(error) = mj_controller::hel_controller::profile_config::observe(profile, build, state).await {
+                                    tracing::warn!(%error, "could not cache observed profile choices");
+                                }
+                            });
+                        }
                         let materialized = snapshot.materialized;
                         let operational_state = snapshot.operational;
                         materialized_activity.insert(
@@ -1704,6 +1721,14 @@ pub(crate) async fn run_server(
                         tokio::task::yield_now().await;
                         continue;
                     }
+                    if let ControllerAction::Close { session_id } = &request.action {
+                        if closing_actions.contains_key(session_id) {
+                            if request.reply.send(ActionOutcome::accepted()).is_err() { tracing::debug!(%session_id, "repeated close reply dropped"); }
+                            continue;
+                        }
+                        request_phone_action_cancellation(session_id, &action_sessions, &action_cancellations);
+                        daemon_runtime.request_close(session_id);
+                    }
                     let session_id = match admit_phone_action(
                         &request.action,
                         action_cancellations.len(),
@@ -1725,6 +1750,7 @@ pub(crate) async fn run_server(
                     let started = action_started_tx.clone();
                     next_action_id = next_action_id.wrapping_add(1).max(1);
                     let action_id = next_action_id;
+                    if let ControllerAction::Close { session_id } = &action { closing_actions.insert(session_id.clone(), action_id); }
                     if let ControllerAction::New { workspace_id, .. } = &action {
                         let workspace_id = if workspace_id.is_empty() && phone_workspaces.len() == 1 {
                             phone_workspaces[0].id.clone()
@@ -1827,7 +1853,9 @@ pub(crate) async fn run_server(
                     };
                     action_cancellations.remove(&action_id);
                     let session_id = action_sessions.remove(&action_id).or(session_id);
-                    if let Some(session_id) = &session_id {
+                    if closing_actions.values().any(|closing_id| *closing_id == action_id) && let Some(id) = &session_id { daemon_runtime.clear_close_request(id); }
+                    closing_actions.retain(|_, closing_id| *closing_id != action_id);
+                    if let Some(session_id) = &session_id && !action_sessions.values().any(|active| active == session_id) {
                         active_actions.remove(session_id);
                     }
                     // A `new` that failed before publishing a session never
@@ -1836,6 +1864,7 @@ pub(crate) async fn run_server(
                     action_replies.resolve(action_id, ActionOutcome::Failed);
                     if let Some(workspace_id) = launch_workspaces.remove(&action_id)
                         && result.is_err()
+                        && !session_id.as_ref().is_some_and(|id| closing_actions.contains_key(id))
                     {
                         record_launch_failure(
                             &mut launch_failures,
@@ -1977,6 +2006,7 @@ pub(crate) async fn run_server(
         move_preparation_jobs.shutdown().await;
         move_recovery_jobs.shutdown().await;
         // Every exit stops in-flight work, whether it was asked for or forced.
+        mj_controller::hel_controller::profile_config::cancel_all();
         for control in action_cancellations.values() {
             control.request_cancel();
         }
@@ -2959,42 +2989,6 @@ fn session_capabilities(
     }
 }
 
-/// The settings this agent advertised, with the values it accepts.
-fn viewer_config_options(
-    config_options: &[agent_client_protocol::schema::v1::SessionConfigOption],
-    facts: &hel::hel_acp::AcpSessionFacts,
-) -> Vec<mj_controller::hel_server::ViewerConfigOption> {
-    use mj_controller::hel_server::{ViewerConfigChoice, ViewerConfigOption};
-
-    ["model", "effort"]
-        .into_iter()
-        .filter_map(|key| {
-            let choices = hel::hel_acp::session_config_choices(config_options, key);
-            if choices.is_empty() {
-                return None;
-            }
-            Some(ViewerConfigOption {
-                key: key.to_owned(),
-                label: key.to_owned(),
-                current: match key {
-                    "model" => facts.current_model(),
-                    "effort" => facts.current_effort(),
-                    _ => None,
-                }
-                .map(str::to_owned),
-                choices: choices
-                    .into_iter()
-                    .map(|choice| ViewerConfigChoice {
-                        value: choice.value,
-                        name: choice.name,
-                        description: choice.description,
-                    })
-                    .collect(),
-            })
-        })
-        .collect()
-}
-
 /// The ACP content blocks one phone prompt becomes: its text, then each
 /// attached image as the image block the prompt path already carries.
 fn phone_prompt_blocks(
@@ -3330,7 +3324,7 @@ fn viewer_snapshot(
                     mj_controller::hel_server::ViewerChatPhase::Closed
                 }
             };
-            session.config_options = viewer_config_options(
+            session.config_options = mj_controller::hel_server::viewer_config_options(
                 &state.config_options,
                 facts
                     .as_ref()
@@ -3511,7 +3505,7 @@ mod tests {
             &options,
             None,
         );
-        let projected = viewer_config_options(&options, &defaults);
+        let projected = mj_controller::hel_server::viewer_config_options(&options, &defaults);
         assert_eq!(
             projected
                 .iter()
@@ -3527,7 +3521,7 @@ mod tests {
             &options,
             None,
         );
-        let projected = viewer_config_options(&options, &updated);
+        let projected = mj_controller::hel_server::viewer_config_options(&options, &updated);
         assert_eq!(projected[0].current.as_deref(), Some("opus"));
         assert_eq!(projected[1].current.as_deref(), Some("max"));
     }
@@ -4378,6 +4372,22 @@ mod tests {
         // A second resolution is a no-op, so a completion after a publication
         // cannot overwrite the answer already sent.
         replies.resolve(7, ActionOutcome::accepted());
+    }
+
+    #[test]
+    fn close_is_admitted_while_provisioning_occupies_a_full_action_pool() {
+        let mut active = std::collections::BTreeSet::from(["session-1".to_owned()]);
+        let close = ControllerAction::Close {
+            session_id: "session-1".into(),
+        };
+        assert_eq!(
+            admit_phone_action(&close, MAX_CONCURRENT_PHONE_ACTIONS, &mut active),
+            Ok(Some("session-1".into()))
+        );
+        assert_eq!(
+            admit_phone_action(&prompt_action(), 0, &mut active),
+            Err(ActionOutcome::SessionBusy)
+        );
     }
 
     #[test]

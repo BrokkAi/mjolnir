@@ -2796,6 +2796,7 @@ fn projection_event_application_is_atomic_ordered_and_idempotent() {
         },
     };
     let first = MaterializedSessionMutation {
+        config_results: vec![],
         active_turn: None,
         last_turn_outcome: None,
         last_activity_at_ms: Some(105),
@@ -4831,5 +4832,39 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
             .unwrap()
             .is_none(),
         "a session with no projection row has no transcript to page"
+    );
+}
+
+#[test]
+fn profile_configuration_cache_survives_reopen_and_expires_or_invalidates() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("cache.sqlite3");
+    let connection = open(&path).unwrap();
+    save_profile_config_cache_with(&connection, "kimi", "model-1", "pin-1", "choices").unwrap();
+    drop(connection);
+    assert_eq!(
+        load_profile_config_cache_from(&path, "kimi", "model-1", "pin-1")
+            .unwrap()
+            .as_deref(),
+        Some("choices")
+    );
+    assert!(
+        load_profile_config_cache_from(&path, "kimi", "model-2", "pin-1")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        load_profile_config_cache_from(&path, "kimi", "model-1", "pin-2")
+            .unwrap()
+            .is_none()
+    );
+    open(&path)
+        .unwrap()
+        .execute("UPDATE profile_config_cache SET observed_at = 0", [])
+        .unwrap();
+    assert!(
+        load_profile_config_cache_from(&path, "kimi", "model-1", "pin-1")
+            .unwrap()
+            .is_none()
     );
 }

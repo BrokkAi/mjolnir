@@ -210,6 +210,8 @@ pub struct ApiSession {
     /// list is built from does not carry turn identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
+    #[serde(default)]
+    pub config_options: Vec<super::ViewerConfigOption>,
 }
 
 impl From<&ViewerSession> for ApiSession {
@@ -230,6 +232,7 @@ impl From<&ViewerSession> for ApiSession {
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             last_turn_outcome: None,
+            config_options: session.config_options.clone(),
         }
     }
 }
@@ -564,6 +567,34 @@ impl From<ExportError> for ApiFailure {
 /// milestones fill in, so that adding those milestones does not change the
 /// shape every implementation has to match.
 pub trait SubagentBackend: Send + Sync {
+    fn profile_config(
+        &self,
+        profile: String,
+        model: Option<String>,
+        refresh: bool,
+    ) -> BoxFuture<'_, AnyResult<hel::hel_worker_launch::ProfileConfig>> {
+        Box::pin(crate::hel_controller::profile_config::discover(
+            profile, model, refresh,
+        ))
+    }
+    fn set_config(
+        &self,
+        session_id: String,
+        key: String,
+        value: String,
+    ) -> BoxFuture<'_, AnyResult<()>> {
+        Box::pin(async move {
+            self.session_handle(session_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("session has no live actor"))?
+                .set_config(key, value)
+                .await
+        })
+    }
+    fn cancel_start(&self, _session_id: String) -> BoxFuture<'_, AnyResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// The live actor for a session, or `None` when none holds it.
     fn session_handle(&self, session_id: String)
     -> BoxFuture<'_, AnyResult<Option<SessionHandle>>>;
@@ -727,10 +758,8 @@ impl WaitDecision {
 ///
 /// The rules run in order, and the order is the point:
 ///
-/// 1. A launch failure for this session, or a failed start, is reported as an
-///    error even if a turn looks like it is still running, because nothing
-///    will finish it.
-/// 2. A stopped, stopping, or failed session ends the wait as `stopped`.
+/// 1. A stopped, stopping, or failed session ends the wait as `stopped`.
+/// 2. A launch failure or failed initialization is reported before a turn.
 /// 3. Otherwise the wait has a target turn: the caller's explicit `turn_id`,
 ///    else the turn a create-with-prompt call submitted, else "the newest
 ///    one", which additionally requires the session to be idle with an empty
@@ -743,18 +772,6 @@ impl WaitDecision {
 /// turn, and an unrecognized stop reason, all come back through the turn record
 /// in rule 3.
 pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Option<WaitDecision> {
-    if observation.launch_failed {
-        return Some(WaitDecision::simple(
-            WaitOutcome::Error,
-            Some("the session failed to launch".to_owned()),
-        ));
-    }
-    if let Some(StartStatus::Failed { message }) = &observation.start_status {
-        return Some(WaitDecision::simple(
-            WaitOutcome::Error,
-            Some(message.clone()),
-        ));
-    }
     let stopping = matches!(
         observation.lifecycle,
         Some(
@@ -770,6 +787,19 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         return Some(WaitDecision::simple(
             WaitOutcome::Stopped,
             Some("the session is stopped or stopping".to_owned()),
+        ));
+    }
+
+    if observation.launch_failed {
+        return Some(WaitDecision::simple(
+            WaitOutcome::Error,
+            Some("the session failed to launch".to_owned()),
+        ));
+    }
+    if let Some(StartStatus::Failed { message }) = &observation.start_status {
+        return Some(WaitDecision::simple(
+            WaitOutcome::Error,
+            Some(message.clone()),
         ));
     }
 
@@ -823,6 +853,11 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
 
 pub(super) fn router(state: ServerState) -> Router<ServerState> {
     Router::new()
+        .route("/profiles/{profile_id}/config", get(profile_config))
+        .route(
+            "/sessions/{session_id}/config",
+            axum::routing::patch(set_config),
+        )
         .route("/sessions", get(list_sessions).post(start_session))
         .route("/sessions/{session_id}", get(get_session))
         .route("/sessions/{session_id}/prompt", post(prompt))
@@ -891,12 +926,111 @@ async fn api_response_headers(request: HttpRequest<axum::body::Body>, next: Next
 // Handlers
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionListQuery {
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileConfigQuery {
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetConfigRequest {
+    pub key: String,
+    pub value: String,
+}
+
+async fn profile_config(
+    State(state): State<ServerState>,
+    Path(profile_id): Path<String>,
+    Query(query): Query<ProfileConfigQuery>,
+) -> Result<Json<hel::hel_worker_launch::ProfileConfig>, ApiFailure> {
+    super::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
+    let choices = backend(&state)?
+        .profile_config(profile_id, query.model, false)
+        .await
+        .map_err(|error| ApiFailure::unavailable(format!("profile discovery failed: {error:#}")))?;
+    Ok(Json(choices))
+}
+
+fn validate_selectors(
+    choices: &hel::hel_worker_launch::ProfileConfig,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<(), ApiFailure> {
+    for (key, value, offered) in [
+        ("model", model, &choices.models),
+        ("effort", effort, &choices.efforts),
+    ] {
+        if let Some(value) = value
+            && !offered.iter().any(|choice| choice.value == value)
+        {
+            return Err(ApiFailure::bad_request(format!(
+                "this profile does not offer {value:?} as {key}; choices: {}",
+                offered
+                    .iter()
+                    .map(|choice| choice.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn set_config(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SetConfigRequest>,
+) -> Result<Json<ApiSession>, ApiFailure> {
+    validate_action(
+        &ControllerAction::SetConfig {
+            session_id: session_id.clone(),
+            key: request.key.clone(),
+            value: request.value.clone(),
+        },
+        &state.snapshot_rx.borrow(),
+    )?;
+    let backend = backend(&state)?;
+    backend
+        .set_config(session_id.clone(), request.key, request.value)
+        .await
+        .map_err(|error| ApiFailure::conflict(format!("configuration failed: {error:#}")))?;
+    let mut session = ApiSession::from(require_session_record(
+        &state.snapshot_rx.borrow(),
+        &session_id,
+    )?);
+    if let Some(handle) = backend.session_handle(session_id).await?
+        && let Some(snapshot) = handle.view().snapshot
+    {
+        session.config_options =
+            super::session_config_view(session.harness_kind.parse()?, &snapshot.operational);
+    }
+    Ok(Json(session))
+}
+
 async fn list_sessions(
     State(state): State<ServerState>,
+    Query(query): Query<SessionListQuery>,
 ) -> Result<Json<SessionListResponse>, ApiFailure> {
     let snapshot = state.snapshot_rx.borrow();
     Ok(Json(SessionListResponse {
-        sessions: snapshot.sessions.iter().map(ApiSession::from).collect(),
+        sessions: snapshot
+            .sessions
+            .iter()
+            .filter(|session| {
+                query
+                    .workspace_id
+                    .as_ref()
+                    .is_none_or(|id| &session.workspace_id == id)
+            })
+            .map(ApiSession::from)
+            .collect(),
     }))
 }
 
@@ -960,6 +1094,35 @@ async fn start_session(
         ));
     }
 
+    super::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
+    super::require_target(&state.snapshot_rx.borrow(), &request.target_id)?;
+    if request.model.is_some() || request.effort.is_some() {
+        let mut choices = backend
+            .profile_config(request.profile_id.clone(), request.model.clone(), false)
+            .await
+            .map_err(|error| {
+                ApiFailure::unavailable(format!("profile discovery failed: {error:#}"))
+            })?;
+        if validate_selectors(
+            &choices,
+            request.model.as_deref(),
+            request.effort.as_deref(),
+        )
+        .is_err()
+        {
+            choices = backend
+                .profile_config(request.profile_id.clone(), request.model.clone(), true)
+                .await
+                .map_err(|error| {
+                    ApiFailure::unavailable(format!("profile discovery failed: {error:#}"))
+                })?;
+        }
+        validate_selectors(
+            &choices,
+            request.model.as_deref(),
+            request.effort.as_deref(),
+        )?;
+    }
     let bundle_id = match (&request.bundle_id, &request.project_directory) {
         (Some(bundle_id), _) => bundle_id.clone(),
         // A caller that names a directory should not have to make a bundle
@@ -1096,6 +1259,7 @@ async fn close(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiFailure> {
+    backend(&state)?.cancel_start(session_id.clone()).await?;
     send_action(&state, ControllerAction::Close { session_id }).await
 }
 
@@ -1455,6 +1619,30 @@ mod tests {
     }
 
     impl SubagentBackend for FakeBackend {
+        fn profile_config(
+            &self,
+            _profile: String,
+            _model: Option<String>,
+            _refresh: bool,
+        ) -> BoxFuture<'_, AnyResult<hel::hel_worker_launch::ProfileConfig>> {
+            Box::pin(async {
+                Ok(hel::hel_worker_launch::ProfileConfig {
+                    model: Some("kimi-code/k3".into()),
+                    models: vec![hel::hel_acp::SessionConfigChoice {
+                        value: "kimi-code/k3".into(),
+                        name: "K3".into(),
+                        description: None,
+                    }],
+                    efforts: vec![hel::hel_acp::SessionConfigChoice {
+                        value: "high".into(),
+                        name: "High".into(),
+                        description: None,
+                    }],
+                    observed_at: 1,
+                })
+            })
+        }
+
         fn session_handle(
             &self,
             _session_id: String,
@@ -1677,6 +1865,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn workspace_filter_excludes_other_workspaces() {
+        let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions[0].workspace_id = "mine".into();
+            let mut other = snapshot.sessions[0].clone();
+            other.id = "other".into();
+            other.workspace_id = "theirs".into();
+            snapshot.sessions.push(other);
+        });
+        let response = app
+            .oneshot(
+                bearer(Request::get("/api/v1/sessions?workspace_id=mine"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(response).await;
+        assert_eq!(body["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(body["sessions"][0]["id"], "session-1");
+    }
+
+    #[tokio::test]
+    async fn invalid_model_is_rejected_before_bundling_or_provisioning() {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, mut actions, _, mut bundles) = api_app(backend.clone(), |_| {});
+        let response = app.oneshot(start_request(r#"{"profile_id":"codex-1","target_id":"raw","project_directory":"/work/hel","model":"k3"}"#.into())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(response).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("kimi-code/k3")
+        );
+        assert!(actions.try_recv().is_err());
+        assert!(bundles.try_recv().is_err());
+        assert!(backend.followups.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn closing_supersedes_a_failed_initial_configuration() {
+        let observation = WaitObservation {
+            lifecycle: Some(ViewerLifecycleCategory::Stopping),
+            start_status: Some(StartStatus::Failed {
+                message: "bad model".into(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_wait(&observation, &WaitRequest::default())
+                .unwrap()
+                .outcome,
+            WaitOutcome::Stopped
+        );
     }
 
     #[tokio::test]

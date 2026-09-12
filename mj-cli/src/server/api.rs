@@ -87,6 +87,7 @@ struct Start {
     /// Kept so the task is cancelled when the entry is pruned; a dropped
     /// handle would leave the task running against a session that is gone.
     task: Option<tokio::task::JoinHandle<()>>,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 /// The backend the `/api/v1` routes drive sessions through.
@@ -123,7 +124,12 @@ impl ApiBackend {
         starts.retain(|session_id, start| {
             let present = (self.session_states)(session_id).is_some();
             if !present && let Some(task) = &start.task {
-                task.abort();
+                start.cancel.cancel();
+                tracing::debug!(
+                    session_id,
+                    task_finished = task.is_finished(),
+                    "cancel forgotten API start"
+                );
             }
             present
         });
@@ -208,7 +214,7 @@ async fn apply_followup(
     // Setting a configuration option needs the harness's own session, not just
     // a connected worker: the options it accepts arrive with it.
     let needs_config = followup.model.is_some() || followup.effort.is_some();
-    let snapshot = loop {
+    loop {
         let view = handle.view();
         if let Some(ViewError::TargetMissing(detail)) = &view.error {
             bail!("session {session_id} lost its target: {detail}");
@@ -218,7 +224,7 @@ async fn apply_followup(
                 if view.connected
                     && (!needs_config || snapshot.operational.native_session_is_ready()) =>
             {
-                break snapshot.clone();
+                break;
             }
             _ => {}
         }
@@ -230,29 +236,26 @@ async fn apply_followup(
         // Bounded so a session that dies quietly is still noticed by the
         // record check above rather than waiting for a change that never comes.
         let _ = tokio::time::timeout(START_POLL, handle.changed()).await;
-    };
+    }
 
     for (key, value) in [("model", followup.model), ("effort", followup.effort)] {
         let Some(value) = value else {
             continue;
         };
+        let snapshot = handle
+            .view()
+            .snapshot
+            .context("session configuration is unavailable")?;
         let choices =
             hel::hel_acp::session_config_choices(&snapshot.operational.config_options, key);
         ensure!(
             choices.iter().any(|choice| choice.value == value),
             "this agent does not offer {value} as a {key}"
         );
-        handle
-            .submit(
-                new_command_id("api-set-config")?,
-                RelayCommand::SetConfig {
-                    key: key.to_owned(),
-                    value,
-                },
-            )
-            .await?;
+        handle.set_config(key.to_owned(), value).await?;
     }
 
+    still_starting(&states, &session_id)?;
     match followup.prompt {
         Some(text) => Ok(Some(submit_prompt(&handle, text).await?)),
         None => Ok(None),
@@ -392,18 +395,68 @@ fn refusal_reason(stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn cancel_start(&self, session_id: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if let Some(start) = self
+                .starts
+                .lock()
+                .expect("api start status mutex poisoned")
+                .remove(&session_id)
+            {
+                start.cancel.cancel();
+            }
+            Ok(())
+        })
+    }
+
+    fn set_config(
+        &self,
+        session_id: String,
+        key: String,
+        value: String,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            ensure!(
+                !matches!(
+                    self.start_status(session_id.clone()).await?,
+                    Some(StartStatus::Pending)
+                ),
+                "session initialization is still running"
+            );
+            let handle = self.sessions.session(session_id.clone()).await?;
+            handle.set_config(key, value).await?;
+            self.starts
+                .lock()
+                .expect("api start status mutex poisoned")
+                .remove(&session_id);
+            Ok(())
+        })
+    }
+
     fn session_handle(&self, session_id: String) -> BoxFuture<'_, Result<Option<SessionHandle>>> {
         Box::pin(async move { Ok(self.sessions.session(session_id).await.ok()) })
     }
 
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, Result<u64>> {
         Box::pin(async move {
+            ensure!(
+                !matches!(
+                    self.start_status(session_id.clone()).await?,
+                    Some(StartStatus::Pending)
+                ),
+                "session initialization is still running"
+            );
             let handle = self
                 .sessions
                 .session(session_id.clone())
                 .await
                 .with_context(|| format!("session {session_id} is not running"))?;
-            submit_prompt(&handle, text).await
+            let turn = submit_prompt(&handle, text).await?;
+            self.starts
+                .lock()
+                .expect("api start status mutex poisoned")
+                .remove(&session_id);
+            Ok(turn)
         })
     }
 
@@ -451,6 +504,7 @@ impl SubagentBackend for ApiBackend {
             let states = self.session_states.clone();
             let starts = Arc::clone(&self.starts);
             let id = session_id.clone();
+            let cancel = tokio_util::sync::CancellationToken::new();
             // Recorded before the work starts: a follow-up that finishes
             // immediately must find its entry to write its outcome into.
             self.starts
@@ -461,9 +515,16 @@ impl SubagentBackend for ApiBackend {
                     Start {
                         status: StartStatus::Pending,
                         task: None,
+                        cancel: cancel.clone(),
                     },
                 );
-            let work = tokio::spawn(apply_followup(sessions, states, id.clone(), followup));
+            let followup_id = session_id.clone();
+            let work = tokio::spawn(async move {
+                tokio::select! {
+                    result = apply_followup(sessions, states, followup_id, followup) => result,
+                    () = cancel.cancelled() => anyhow::bail!("session startup cancelled"),
+                }
+            });
             // A second task supervises the first so a panic in the follow-up
             // becomes a failure the caller's wait reports, rather than an
             // entry that stays Pending for as long as the daemon runs.
@@ -704,6 +765,12 @@ mod tests {
     }
 
     impl SessionHandleBackend for FakeSession {
+        fn config_result(
+            &self,
+            _command_id: String,
+        ) -> BoxFuture<'_, Result<Option<Option<String>>>> {
+            Box::pin(async { Ok(Some(None)) })
+        }
         fn clone_box(&self) -> Box<dyn SessionHandleBackend> {
             Box::new(self.clone())
         }
@@ -975,6 +1042,83 @@ mod tests {
         assert!(
             submitted.try_recv().is_err(),
             "nothing may be submitted once the configuration is refused"
+        );
+        backend
+            .set_config("session-1".into(), "model".into(), "gpt-5-codex".into())
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .start_status("session-1".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            submitted.recv().await.unwrap().1,
+            RelayCommand::SetConfig { .. }
+        ));
+        assert!(
+            submitted.try_recv().is_err(),
+            "repair must not replay the abandoned initial prompt"
+        );
+        assert_eq!(
+            backend
+                .prompt("session-1".into(), "repaired prompt".into())
+                .await
+                .unwrap(),
+            12
+        );
+        assert!(matches!(
+            submitted.recv().await.unwrap().1,
+            RelayCommand::Prompt { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn closing_cancels_the_supervised_start_before_any_prompt() {
+        let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+        let backend = ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "session-1".into(),
+                accepted_ordinal: 1,
+                submitted: submitted_tx,
+                view: None,
+            })),
+            running_states(),
+            Arc::new(NoExports),
+        );
+        backend
+            .start_followup(
+                "session-1".into(),
+                StartFollowup {
+                    prompt: Some("must not run".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let task = backend
+            .starts
+            .lock()
+            .unwrap()
+            .get_mut("session-1")
+            .unwrap()
+            .task
+            .take()
+            .unwrap();
+        backend.cancel_start("session-1".into()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(submitted.try_recv().is_err());
+        assert!(
+            backend
+                .start_status("session-1".into())
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
