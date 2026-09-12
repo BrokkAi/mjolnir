@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 mod api;
+mod api_activity;
 
 use hel::hel_config::{HarnessProfile, HelConfig, PhoneConfig, is_bare_project_target};
 use hel::hel_remote_git::{default_branch, display_url, resolve_repository};
@@ -776,6 +777,7 @@ pub(crate) async fn run_server(
     let mut credential_sync_notices = CredentialSyncNotices::default();
     // Captured before `options` is moved into the server.
     let options_session_ttl = mj_controller::hel_server::default_session_ttl();
+    let activity_snapshots = snapshot_rx.clone();
     let mut options = ServerOptions::new(
         bind,
         snapshot_rx,
@@ -2016,6 +2018,7 @@ pub(crate) async fn run_server(
         }
     };
     let result = tokio::select! {
+        result = api_activity::record_activity_stream(activity_snapshots) => result.context("native API activity recorder stopped"),
         result = serve => result,
         result = control => result,
     };

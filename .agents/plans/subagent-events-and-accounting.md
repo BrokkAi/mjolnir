@@ -10,8 +10,8 @@ Orchestrators must observe every prompt start, completion, error, and explicit q
 
 - [x] (2026-09-12) Inspect existing APIs, projection transactions, shared activity classification, adapter, and release rules; confirm plan with user.
 - [x] (2026-09-12) Adapter 1.11.2 implemented, 575 tests passed, typecheck/build/pack passed, packaged guardian/yolo probes passed; committed 75a7641, pushed and published.
-- [ ] Phase 1 Mjolnir checkpoint: pin and usage scope implemented; full serial tests passed, final Clippy and commit/push pending.
-- [ ] Phase 2: persist typed events and expose SSE and CLI replay, validate, commit and push.
+- [x] (2026-09-12) Phase 1 Mjolnir checkpoint d1688082 pushed to origin/master; full serial tests, Clippy, formatting and diff checks passed.
+- [x] (2026-09-12) Phase 2: implemented durable typed events, filtered SSE replay, CLI, shared activity and question events. Full serial tests, added question/error tests, Clippy, formatting and diff checks pass; committing and pushing this checkpoint.
 - [ ] Phase 3: finish question/activity coverage, documentation, and authorized ticket comments; validate, commit and push.
 
 ## Surprises & Discoveries
@@ -75,3 +75,7 @@ Reuse existing SQLite writer, Axum SSE, Tokio bounded channels, ACP schemas, Ses
 Revision 2026-09-12: created from the user-approved plan before implementation.
 
 Revision 2026-09-12: recorded adapter publication and live validation. Mjolnir parallel validation exposed the pre-existing upgrade fixture executable-copy race (ETXTBSY); the full serial suite passes without modifying unrelated implementation.
+
+Revision 2026-09-12: phase 1 is pushed. Phase 2 retains prompt/input transitions before projection coalescing, using transaction replay checks for deduplication. The SSE reader uses pages of 200 and a channel of 32, checks shutdown even under backpressure, and resumes after durable global IDs. Activity recording observes the existing UI snapshot stream; brief intermediate activity may coalesce, while canonical prompt and input transitions are retained. Event cursors survive session deletion via SQLite AUTOINCREMENT. Focused tests cover rollback, reopening the database, filters, deletion, free-text inputs, activity deduplication, authentication, cursors, live following, slow readers, shutdown, and split UTF-8 frames larger than 64 KiB.
+
+Revision 2026-09-12: full `cargo test -q -- --test-threads=1` and `cargo clippy --all-targets -- -D warnings` pass (logs in target/subagent-events-serial-tests.log and target/subagent-events-clippy.log). The expanded question lifecycle and failed-completion identity tests also pass in target/subagent-events-question-tests.log. Documentation build and 1,843 internal link checks pass; documentation and ticket completion remain for phase 3.

@@ -5,6 +5,8 @@
 //! exports, and print what comes back. Keeping the wire shapes in one crate
 //! means the CLI and the server cannot disagree about them.
 
+pub(crate) mod events;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -248,6 +250,31 @@ impl ApiClient {
             false => format!("/sessions/{session_id}/transcript?{}", query.join("&")),
         };
         self.get_json(&path).await
+    }
+
+    pub(crate) async fn events(
+        &self,
+        filter: &hel::hel_database::ApiEventFilter,
+        after_seq: Option<u64>,
+    ) -> Result<reqwest::Response> {
+        let mut request = self
+            .http
+            .get(self.url("/events"))
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .query(filter);
+        if let Some(after_seq) = after_seq {
+            request = request.query(&[("after_seq", after_seq)]);
+        }
+        let response = self.send(request).await?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !content_type.starts_with("text/event-stream") {
+            bail!("API events endpoint did not return an event stream");
+        }
+        Ok(response)
     }
 
     pub(crate) async fn usage(

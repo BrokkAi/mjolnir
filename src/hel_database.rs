@@ -127,11 +127,14 @@ pub struct MaterializedSessionMutation {
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
     pub config_results: Vec<(String, Option<String>)>,
     pub provider_cost: Option<crate::hel_usage::ProviderCost>,
+    pub api_events: Vec<ApiEventData>,
 }
 
 mod schema;
 mod usage;
 pub use usage::*;
+mod events;
+pub use events::*;
 
 pub use schema::database_path;
 #[cfg(test)]
@@ -3201,6 +3204,7 @@ pub struct ProjectionPage<'a> {
     pending: MaterializedSessionMutation,
     pending_transcript: BTreeMap<String, PendingTranscriptMutation>,
     pending_turns: Vec<MaterializedTurnOutcome>,
+    pending_events: Vec<(i64, ApiEventData)>,
 }
 
 struct PendingTranscriptMutation {
@@ -3331,6 +3335,13 @@ impl ProjectionPage<'_> {
         if let Some(cost) = &mutation.provider_cost {
             self.pending.provider_cost = Some(cost.clone());
         }
+        self.pending_events.extend(
+            mutation
+                .api_events
+                .iter()
+                .cloned()
+                .map(|event| (mutation.last_activity_at_ms.unwrap_or(0), event)),
+        );
         self.applied_ordinal = event_ordinal;
         event_digest.clone_into(&mut self.applied_digest);
         self.dirty = true;
@@ -3400,6 +3411,9 @@ impl ProjectionPage<'_> {
                  SET pending_elicitations_json = ?2 WHERE session_id = ?1",
                 params![session_id, serde_json::to_string(pending_elicitations)?],
             )?;
+        }
+        for (recorded_at_ms, event) in &self.pending_events {
+            events::insert_api_event(tx, session_id, *recorded_at_ms, event)?;
         }
         for turn in &self.pending_turns {
             tx.execute("INSERT OR REPLACE INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body) VALUES (?1, ?2, ?3, ?4, ?5)", params![session_id, turn.command_id, turn.completed_ordinal, turn.turn_start_position, serde_json::to_string(turn)?])?;
@@ -3510,6 +3524,7 @@ fn apply_projection_page_with<T>(
         pending: MaterializedSessionMutation::default(),
         pending_transcript: BTreeMap::new(),
         pending_turns: Vec::new(),
+        pending_events: Vec::new(),
     };
     // Dropping the page on failure rolls the whole transaction back, leaving
     // the projection at the frontier the relay last saw acknowledged.

@@ -92,6 +92,8 @@ enum Command {
     Transcript(api_commands::TranscriptArgs),
     /// Read recorded token usage and coverage.
     Usage(api_commands::UsageArgs),
+    /// Follow durable session events as line-delimited JSON.
+    Events(api_commands::EventsArgs),
     /// Atomically upload a file to an idle session workspace.
     PutFile(api_commands::PutFileArgs),
     /// List structured input requests from a session.
@@ -340,6 +342,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Wait(_)) => "wait",
         Some(Command::Transcript(_)) => "transcript",
         Some(Command::Usage(_)) => "usage",
+        Some(Command::Events(_)) => "events",
         Some(Command::PutFile(_)) => "put-file",
         Some(Command::Elicitations(_)) => "elicitations",
         Some(Command::Respond(_)) => "respond",
@@ -416,6 +419,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Respond(args)) => api_commands::respond(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Events(args)) => api_commands::events(args, requested_workspace)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Usage(args)) => api_commands::usage(args)
