@@ -1243,6 +1243,7 @@ async fn offline_prompt_queue_runs_serially_without_a_controller() {
         .send(RuntimeEvent::PromptFinished {
             request_id: "prompt-1".into(),
             stop_reason: "end_turn".into(),
+            usage: None,
         })
         .unwrap();
     let second = tokio::time::timeout(std::time::Duration::from_secs(1), command_rx.recv())
@@ -1332,6 +1333,7 @@ async fn config_during_a_prompt_waits_but_cancel_dispatches_immediately() {
         .send(RuntimeEvent::PromptFinished {
             request_id: "active-prompt".into(),
             stop_reason: "cancelled".into(),
+            usage: None,
         })
         .unwrap();
     assert!(matches!(
@@ -1437,6 +1439,7 @@ async fn cancel_turn_interrupts_a_running_prompt_without_steering_or_cutting_a_c
         .send(RuntimeEvent::PromptFinished {
             request_id: "active-prompt".into(),
             stop_reason: "cancelled".into(),
+            usage: None,
         })
         .unwrap();
     wait_for_relay_state(&relay, |state| {
@@ -1734,6 +1737,7 @@ async fn out_of_band_sends_cannot_park_the_dispatching_coordinator() {
         .send(RuntimeEvent::PromptFinished {
             request_id: "prompt-warm-up".into(),
             stop_reason: "end_turn".into(),
+            usage: None,
         })
         .unwrap();
     // Idle: the warm-up turn is durable and dispatch holds no capacity.
@@ -2032,6 +2036,7 @@ async fn set_session_mode_waits_for_idle_then_records_a_durable_outcome() {
         .send(RuntimeEvent::PromptFinished {
             request_id: "prompt-1".into(),
             stop_reason: "end_turn".into(),
+            usage: None,
         })
         .unwrap();
     assert!(matches!(
@@ -2175,6 +2180,7 @@ async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
         .send(RuntimeEvent::PromptFinished {
             request_id: "prompt-1".into(),
             stop_reason: "cancelled".into(),
+            usage: None,
         })
         .unwrap();
     wait_for_relay_state(&relay, |state| {
@@ -2671,6 +2677,7 @@ async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
         .send(RuntimeEvent::PromptFinished {
             request_id: "prompt-mid-turn".into(),
             stop_reason: "end_turn".into(),
+            usage: None,
         })
         .unwrap();
     wait_until(
@@ -4975,6 +4982,7 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
         .send(RuntimeEvent::PromptFinished {
             request_id: "capacity-original".into(),
             stop_reason: "EndTurn".into(),
+            usage: None,
         })
         .unwrap();
     for _ in 0..20 {

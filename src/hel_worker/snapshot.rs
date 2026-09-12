@@ -668,15 +668,25 @@ pub enum RelayObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayCommandOutcome {
-    Prompt { stop_reason: String },
-    UserShell { result: UserShellResult },
+    Prompt {
+        stop_reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<crate::hel_usage::TokenUsage>,
+    },
+    UserShell {
+        result: UserShellResult,
+    },
     UserShellCancelled,
     Configured,
     SessionModeSet,
     Cancelled,
-    Steered { queued_command_id: String },
+    Steered {
+        queued_command_id: String,
+    },
     Closed,
-    QueueChanged { removed_command_ids: Vec<String> },
+    QueueChanged {
+        removed_command_ids: Vec<String>,
+    },
     CheckpointCompleted,
     CheckpointReleased,
     RecoveryFloorAdvanced,
@@ -1439,7 +1449,7 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
                 .get_mut(command_id)
                 .ok_or_else(|| anyhow!("completed command {command_id} is not in the ledger"))?
                 .terminal_ordinal = Some(event.ordinal);
-            if let RelayCommandOutcome::Prompt { stop_reason } = outcome {
+            if let RelayCommandOutcome::Prompt { stop_reason, .. } = outcome {
                 let accepted = snapshot.handled_commands[command_id].accepted_ordinal;
                 let superseded = snapshot.handled_commands.values().any(|handled| {
                     handled.accepted_ordinal > accepted && cancels_capacity_retry(&handled.command)

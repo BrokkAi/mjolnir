@@ -2796,6 +2796,8 @@ fn projection_event_application_is_atomic_ordered_and_idempotent() {
         },
     };
     let first = MaterializedSessionMutation {
+        config_results: vec![],
+        provider_cost: None,
         active_turn: None,
         last_turn_outcome: None,
         last_activity_at_ms: Some(105),
@@ -4589,6 +4591,7 @@ fn a_projection_page_persists_the_turn_outcome_and_the_queue_acceptance_ordinal(
         execution: Some(MaterializedExecutionState::Idle),
         active_turn: Some(None),
         last_turn_outcome: Some(MaterializedTurnOutcome {
+            usage: None,
             command_id: "prompt-1".into(),
             accepted_ordinal: Some(1),
             turn_start_position: Some(2),
@@ -4832,4 +4835,116 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
             .is_none(),
         "a session with no projection row has no transcript to page"
     );
+}
+
+#[test]
+fn profile_configuration_cache_survives_reopen_and_expires_or_invalidates() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("cache.sqlite3");
+    let connection = open(&path).unwrap();
+    save_profile_config_cache_with(&connection, "kimi", "model-1", "pin-1", "choices").unwrap();
+    drop(connection);
+    assert_eq!(
+        load_profile_config_cache_from(&path, "kimi", "model-1", "pin-1")
+            .unwrap()
+            .as_deref(),
+        Some("choices")
+    );
+    assert!(
+        load_profile_config_cache_from(&path, "kimi", "model-2", "pin-1")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        load_profile_config_cache_from(&path, "kimi", "model-1", "pin-2")
+            .unwrap()
+            .is_none()
+    );
+    open(&path)
+        .unwrap()
+        .execute("UPDATE profile_config_cache SET observed_at = 0", [])
+        .unwrap();
+    assert!(
+        load_profile_config_cache_from(&path, "kimi", "model-1", "pin-1")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
+    use crate::hel_transcript::TranscriptRole;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hel.sqlite3");
+    save_session_to(&path, &session("session-1", "project-1")).unwrap();
+    apply_projection_page_to(&path, "session-1", |page| {
+        for ordinal in 1..=6 {
+            let mut mutation = agent_message_mutation(ordinal);
+            if ordinal % 2 == 1 {
+                let TranscriptMutation::Upsert(item) = &mut mutation.transcript[0] else {
+                    unreachable!()
+                };
+                item.latest_content_event_ordinal = None;
+                item.body = TranscriptBody::System { text: "gap".into() };
+            }
+            if ordinal == 2 {
+                let TranscriptMutation::Upsert(item) = &mutation.transcript[0] else {
+                    unreachable!()
+                };
+                let mut tied = item.clone();
+                tied.stable_id = "tied-agent".into();
+                mutation.transcript.push(TranscriptMutation::Upsert(tied));
+            }
+            let prior = if ordinal == 1 {
+                RELAY_EVENT_GENESIS_DIGEST.into()
+            } else {
+                event_digest(ordinal - 1)
+            };
+            page.apply(ordinal, &prior, &event_digest(ordinal), &mutation)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let first = load_materialized_transcript_filtered_from(
+        &path,
+        "session-1",
+        0,
+        1,
+        Some(TranscriptRole::Agent),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.items.len(), 2, "a page must not split a sequence tie");
+    assert_eq!(first.next_after_seq, 2);
+    let second = load_materialized_transcript_filtered_from(
+        &path,
+        "session-1",
+        first.next_after_seq,
+        1,
+        Some(TranscriptRole::Agent),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(second.items[0].seq(), 4);
+    let last = load_materialized_transcript_filtered_from(
+        &path,
+        "session-1",
+        4,
+        1,
+        Some(TranscriptRole::Agent),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(last.next_after_seq, 6);
+    let empty = load_materialized_transcript_filtered_from(
+        &path,
+        "session-1",
+        0,
+        1,
+        Some(TranscriptRole::Tool),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.next_after_seq, 6);
 }

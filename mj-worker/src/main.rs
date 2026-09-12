@@ -38,6 +38,11 @@ struct WorkerArgs {
 
 #[derive(Debug, Subcommand)]
 enum WorkerCommand {
+    /// Discover profile model choices without submitting a prompt.
+    DiscoverConfig {
+        #[arg(long)]
+        spec: PathBuf,
+    },
     /// Own an ACP bridge and durable session event log.
     Run {
         #[arg(long)]
@@ -110,6 +115,18 @@ enum WorkerCommand {
         /// Path relative to the workspace root.
         #[arg(long)]
         path: PathBuf,
+    },
+    /// Atomically publish stdin as a file in the session workspace.
+    WriteFile {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        overwrite: bool,
+        /// Expected input length; premature EOF must not publish a partial file.
+        #[arg(long)]
+        length: usize,
     },
     /// Push the repository's current HEAD to a branch on its push remote.
     PushBranch {
@@ -215,6 +232,12 @@ async fn run_command(command: Command) -> Result<()> {
             prepare_managed_harness(WorkerLaunchConfig::read(&config)?).await
         }
         WorkerCommand::Proxy { root } => proxy(root).await,
+        WorkerCommand::DiscoverConfig { spec } => {
+            let spec = serde_json::from_slice(&std::fs::read(spec)?)?;
+            let config = mj_worker::hel_worker_runtime::discover_profile_config(spec).await?;
+            println!("{}", serde_json::to_string(&config)?);
+            Ok(())
+        }
         WorkerCommand::AcpSupervisor { spec } => {
             run_acp_supervisor(AcpSupervisorSpec::read(&spec)?).await
         }
@@ -259,6 +282,23 @@ async fn run_command(command: Command) -> Result<()> {
         }
         WorkerCommand::ReadFile { root, path } => {
             write_stdout(&hel::hel_archive::read_session_file(&root, &path).map_err(export_error)?)
+        }
+        WorkerCommand::WriteFile {
+            root,
+            path,
+            overwrite,
+            length,
+        } => {
+            let bytes = hel::hel_archive::read_session_file_input(std::io::stdin().lock())
+                .map_err(export_error)?;
+            if bytes.len() != length {
+                return Err(export_error(SessionExportError::Refused(format!(
+                    "incomplete file upload: expected {length} bytes, received {}",
+                    bytes.len()
+                ))));
+            }
+            hel::hel_archive::write_session_file(&root, &path, &bytes, overwrite)
+                .map_err(export_error)
         }
         WorkerCommand::PushBranch { repository, branch } => {
             let pushed =
@@ -473,5 +513,70 @@ mod tests {
                 command: WorkerCommand::ExportCheckpoint { spec }
             }) if spec == Path::new("-")
         ));
+    }
+    #[test]
+    fn file_injection_streams_large_stdin_while_draining_worker_output() {
+        use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec};
+        const CHILD_ROOT: &str = "MJ_TEST_FILE_INPUT_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            // A noisy worker must not deadlock the controller's full stdin.
+            write_stdout(&vec![b'x'; 128 * 1024]).unwrap();
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(run_command(Command::Worker(WorkerArgs {
+                    command: WorkerCommand::WriteFile {
+                        root: root.into(),
+                        path: PathBuf::from("nested/input.bin"),
+                        overwrite: false,
+                        length: 512 * 1024,
+                    },
+                })))
+                .unwrap();
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let bytes: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+        let name = format!(
+            "{}::file_injection_streams_large_stdin_while_draining_worker_output",
+            module_path!()
+                .strip_prefix("mj_worker::")
+                .unwrap_or(module_path!())
+        );
+        let mut command = CommandSpec::new(
+            std::env::current_exe().unwrap().to_string_lossy(),
+            ["--exact", &name, "--nocapture"],
+        )
+        .with_sensitive_stdin(bytes.clone());
+        command
+            .env
+            .insert(CHILD_ROOT.into(), root.path().to_string_lossy().into());
+        let output = CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(30))
+            .execute(&command)
+            .unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.len() >= 128 * 1024);
+        assert_eq!(
+            std::fs::read(root.path().join("nested/input.bin")).unwrap(),
+            bytes
+        );
+        let interrupted = tempfile::tempdir().unwrap();
+        command.env.insert(
+            CHILD_ROOT.into(),
+            interrupted.path().to_string_lossy().into(),
+        );
+        let truncated = command.with_sensitive_stdin(vec![0; 128 * 1024]);
+        let output = CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(30))
+            .execute(&truncated)
+            .unwrap();
+        assert_ne!(output.status, 0, "premature EOF must fail");
+        assert!(
+            !interrupted.path().join("nested/input.bin").exists(),
+            "an interrupted upload must not publish a partial file"
+        );
     }
 }

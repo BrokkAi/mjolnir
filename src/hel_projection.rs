@@ -567,7 +567,7 @@ fn project_observation(
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
             match outcome {
-                crate::hel_worker::RelayCommandOutcome::Prompt { stop_reason } => {
+                crate::hel_worker::RelayCommandOutcome::Prompt { stop_reason, usage } => {
                     close_streams(index, mutation, event.recorded_at_ms);
                     mutation.execution = Some(MaterializedExecutionState::Idle);
                     let active = current
@@ -575,6 +575,7 @@ fn project_observation(
                         .as_ref()
                         .filter(|turn| turn.command_id == *command_id);
                     mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                        usage: usage.clone(),
                         command_id: command_id.clone(),
                         accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal),
                         turn_start_position: active.map(|turn| turn.turn_start_position),
@@ -642,8 +643,10 @@ fn project_observation(
                         },
                     );
                 }
-                crate::hel_worker::RelayCommandOutcome::Configured
-                | crate::hel_worker::RelayCommandOutcome::SessionModeSet
+                crate::hel_worker::RelayCommandOutcome::Configured => {
+                    mutation.config_results.push((command_id.clone(), None));
+                }
+                crate::hel_worker::RelayCommandOutcome::SessionModeSet
                 | crate::hel_worker::RelayCommandOutcome::Cancelled
                 | crate::hel_worker::RelayCommandOutcome::CheckpointCompleted
                 | crate::hel_worker::RelayCommandOutcome::CheckpointReleased
@@ -665,6 +668,11 @@ fn project_observation(
             command,
             message,
         } => {
+            if *command == RelayCommandKind::SetConfig {
+                mutation
+                    .config_results
+                    .push((command_id.clone(), Some(message.clone())));
+            }
             let prompt_was_started = index.get(&format!("user:{command_id}")).is_some();
             let queued_entry = current
                 .queued_prompts
@@ -689,6 +697,7 @@ fn project_observation(
                     .filter(|turn| turn.command_id == *command_id);
                 let outcome_text = message.clone();
                 mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                    usage: None,
                     command_id: command_id.clone(),
                     accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal).or_else(|| {
                         queued_entry
@@ -1198,7 +1207,16 @@ fn project_session_update(
                 mutation.session_title = Some(normalize_session_title(title));
             }
         },
-        SessionUpdate::AvailableCommandsUpdate(_) | SessionUpdate::UsageUpdate(_) => {}
+        SessionUpdate::UsageUpdate(update) => {
+            if let Some(cost) = &update.cost {
+                mutation.provider_cost = Some(crate::hel_usage::ProviderCost {
+                    amount: cost.amount,
+                    currency: cost.currency.clone(),
+                    observed_at_ms: event.recorded_at_ms,
+                });
+            }
+        }
+        SessionUpdate::AvailableCommandsUpdate(_) => {}
         _ => {}
     }
     Ok(())
@@ -2329,6 +2347,7 @@ mod tests {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
                     stop_reason: "EndTurn".into(),
+                    usage: None,
                 },
             },
         );
@@ -2421,6 +2440,7 @@ mod tests {
                     command_id: command_id.into(),
                     outcome: RelayCommandOutcome::Prompt {
                         stop_reason: "EndTurn".into(),
+                        usage: None,
                     },
                 },
             );
@@ -2559,6 +2579,7 @@ mod tests {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             },
         );
@@ -2630,6 +2651,7 @@ mod tests {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             },
         );
@@ -2918,6 +2940,7 @@ mod tests {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             },
         );
@@ -3166,6 +3189,7 @@ mod tests {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             },
         );
@@ -3826,6 +3850,7 @@ mod tests {
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             },
         );
@@ -4398,6 +4423,7 @@ mod tests {
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
                 stop_reason: "end_turn".into(),
+                usage: None,
             },
         }
     }

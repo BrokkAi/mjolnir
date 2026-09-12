@@ -828,7 +828,7 @@ async fn scripted_bridge(stream: tokio::io::DuplexStream) -> usize {
                             .await
                             .expect("write scripted session update");
                     }
-                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"stopReason": "end_turn"}})
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"stopReason": "end_turn", "usage": {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10}}})
                 }
             }
             _ => continue,
@@ -1873,6 +1873,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
             RuntimeEvent::PromptFinished {
                 request_id,
                 stop_reason,
+                ..
             } => break (request_id, stop_reason),
             _ => {}
         }
@@ -1899,11 +1900,21 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
             RuntimeEvent::PromptFinished {
                 request_id,
                 stop_reason,
-            } => break (request_id, stop_reason),
+                usage,
+            } => break (request_id, stop_reason, usage),
             _ => {}
         }
     };
-    assert_eq!(completed, ("second".to_owned(), "EndTurn".to_owned()));
+    assert_eq!(
+        (&completed.0, &completed.1),
+        (&"second".to_owned(), &"EndTurn".to_owned())
+    );
+    let usage = completed
+        .2
+        .expect("provider usage must survive ACP completion");
+    assert_eq!(usage.total_tokens, 30);
+    assert_eq!(usage.scope, crate::hel_usage::UsageScope::Turn);
+    assert_eq!(usage.thought_tokens, None);
     assert_eq!(empty_warning.as_deref(), Some(PROMPT_EMPTY_RESPONSE_MARKER));
 
     request_tx
@@ -1922,6 +1933,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
             RuntimeEvent::PromptFinished {
                 request_id,
                 stop_reason,
+                ..
             } => break (request_id, stop_reason),
             _ => {}
         }

@@ -70,6 +70,9 @@ pub(crate) struct PromptArgs {
     /// Seconds to wait for with `--wait`.
     #[arg(long)]
     timeout: Option<u64>,
+    /// Return when the harness asks for structured input.
+    #[arg(long)]
+    return_on_input: bool,
     #[arg(long)]
     json: bool,
 }
@@ -85,6 +88,9 @@ pub(crate) struct WaitArgs {
     /// Seconds to wait before answering `timeout`.
     #[arg(long)]
     timeout: Option<u64>,
+    /// Return when the harness asks for structured input.
+    #[arg(long)]
+    return_on_input: bool,
     #[arg(long)]
     json: bool,
 }
@@ -98,8 +104,117 @@ pub(crate) struct TranscriptArgs {
     after_seq: Option<u64>,
     #[arg(long)]
     limit: Option<usize>,
+    #[arg(long, value_parser = parse_transcript_role)]
+    role: Option<hel::hel_transcript::TranscriptRole>,
     #[arg(long)]
     json: bool,
+}
+
+fn parse_transcript_role(value: &str) -> Result<hel::hel_transcript::TranscriptRole, String> {
+    serde_json::from_value(serde_json::Value::String(value.into())).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UsageArgs {
+    #[arg(long)]
+    session: String,
+    #[arg(long)]
+    after_seq: Option<u64>,
+    #[arg(long)]
+    limit: Option<usize>,
+    #[arg(long)]
+    json: bool,
+}
+
+pub(crate) async fn usage(args: UsageArgs) -> Result<()> {
+    let page = ApiClient::connect()
+        .await?
+        .usage(&args.session, args.after_seq, args.limit)
+        .await?;
+    // Usage is structured even without --json: scope and coverage must travel
+    // with counters so partial provider reports cannot look like full totals.
+    print_json(&page)
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PutFileArgs {
+    #[arg(long)]
+    session: String,
+    /// Destination relative to the session workspace.
+    #[arg(long)]
+    path: String,
+    /// Source file, or - for stdin.
+    source: PathBuf,
+    #[arg(long)]
+    overwrite: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ElicitationsArgs {
+    #[arg(long)]
+    session: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RespondArgs {
+    #[arg(long)]
+    session: String,
+    #[arg(long)]
+    elicitation: String,
+    /// JSON response, or - for stdin.
+    response: Option<String>,
+    #[arg(long)]
+    response_file: Option<PathBuf>,
+}
+
+pub(crate) async fn put_file(args: PutFileArgs) -> Result<()> {
+    let bytes = if args.source == std::path::Path::new("-") {
+        hel::hel_archive::read_session_file_input(std::io::stdin().lock())?
+    } else {
+        hel::hel_archive::read_session_file_input(
+            std::fs::File::open(&args.source)
+                .with_context(|| format!("open {}", args.source.display()))?,
+        )?
+    };
+    let written = ApiClient::connect()
+        .await?
+        .put_file(&args.session, &args.path, bytes, args.overwrite)
+        .await?;
+    if args.json {
+        print_json(&written)
+    } else {
+        println!(
+            "wrote {} bytes to {}",
+            written.bytes,
+            written.path.display()
+        );
+        Ok(())
+    }
+}
+
+pub(crate) async fn elicitations(args: ElicitationsArgs) -> Result<()> {
+    print_json(
+        &ApiClient::connect()
+            .await?
+            .elicitations(&args.session)
+            .await?,
+    )
+}
+
+pub(crate) async fn respond(args: RespondArgs) -> Result<()> {
+    let text = read_prompt(args.response, args.response_file)?
+        .context("provide a JSON response or --response-file")?;
+    let response = serde_json::from_str(&text).context("parse elicitation response JSON")?;
+    ApiClient::connect()
+        .await?
+        .respond_elicitation(&args.session, &args.elicitation, &response)
+        .await?;
+    println!("response accepted");
+    Ok(())
 }
 
 #[derive(Debug, Args)]
@@ -217,6 +332,7 @@ pub(crate) async fn prompt(args: PromptArgs) -> Result<()> {
         .wait(
             &args.session,
             &WaitRequest {
+                return_on_input: args.return_on_input,
                 turn_id: Some(accepted.turn_id),
                 timeout_secs: args.timeout,
             },
@@ -231,6 +347,7 @@ pub(crate) async fn wait(args: WaitArgs) -> Result<()> {
         .wait(
             &args.session,
             &WaitRequest {
+                return_on_input: args.return_on_input,
                 turn_id: args.turn,
                 timeout_secs: args.timeout,
             },
@@ -256,6 +373,9 @@ fn report_wait(response: &WaitResponse, json: bool) -> Result<()> {
             line.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
         }
         println!("{line}");
+        if !response.pending_elicitations.is_empty() {
+            print_json(&response.pending_elicitations)?;
+        }
         if let Some(message) = &response.message {
             println!("{message}");
         }
@@ -287,7 +407,7 @@ fn report_wait(response: &WaitResponse, json: bool) -> Result<()> {
         }
     }
     match response.outcome {
-        WaitOutcome::Finished => Ok(()),
+        WaitOutcome::Finished | WaitOutcome::InputRequired => Ok(()),
         outcome => bail!("the turn ended as {}", outcome_name(outcome)),
     }
 }
@@ -305,6 +425,7 @@ fn relay_state_name(state: RelayState) -> &'static str {
 fn outcome_name(outcome: WaitOutcome) -> &'static str {
     match outcome {
         WaitOutcome::Finished => "finished",
+        WaitOutcome::InputRequired => "input_required",
         WaitOutcome::Error => "error",
         WaitOutcome::Cancelled => "cancelled",
         WaitOutcome::QuotaLimit => "quota_limit",
@@ -316,7 +437,7 @@ fn outcome_name(outcome: WaitOutcome) -> &'static str {
 pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
     let page = client
-        .transcript(&args.session, args.after_seq, args.limit)
+        .transcript(&args.session, args.after_seq, args.limit, args.role)
         .await?;
     if args.json {
         return print_json(&page);
@@ -328,7 +449,10 @@ pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
         }
         println!();
     }
-    println!("latest seq {}", page.latest_seq);
+    println!(
+        "next after seq {}; latest seq {}",
+        page.next_after_seq, page.latest_seq
+    );
     Ok(())
 }
 
@@ -375,7 +499,10 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
     }
 }
 
-pub(crate) async fn sessions(args: SessionsArgs) -> Result<()> {
+pub(crate) async fn sessions(
+    args: SessionsArgs,
+    requested_workspace: Option<String>,
+) -> Result<()> {
     let client = ApiClient::connect().await?;
     if let Some(session_id) = &args.session {
         let session = client.session(session_id).await?;
@@ -388,7 +515,11 @@ pub(crate) async fn sessions(args: SessionsArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let list = client.sessions().await?;
+    let workspace = match requested_workspace {
+        Some(name) => Some(crate::resolve_store_workspace(Some(&name)).await?),
+        None => None,
+    };
+    let list = client.sessions_in_workspace(workspace).await?;
     if args.json {
         return print_json(&list);
     }
@@ -506,6 +637,73 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
         "{}",
         serde_json::to_string_pretty(value).context("serialize the API response")?
     );
+    Ok(())
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ModelsArgs {
+    #[arg(long)]
+    profile: String,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+pub(crate) struct SetConfigArgs {
+    #[arg(long)]
+    session: String,
+    #[arg(long)]
+    key: String,
+    #[arg(long)]
+    value: String,
+    #[arg(long)]
+    json: bool,
+}
+pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
+    let choices = ApiClient::connect()
+        .await?
+        .models(&args.profile, args.model)
+        .await?;
+    if args.json {
+        return print_json(&choices);
+    }
+    for model in choices.models {
+        println!("{}  {}", model.value, model.name);
+    }
+    println!(
+        "effort ({}): {}",
+        choices.model.as_deref().unwrap_or("default"),
+        choices
+            .efforts
+            .iter()
+            .map(|c| c.value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(())
+}
+pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
+    let session = ApiClient::connect()
+        .await?
+        .set_config(
+            &args.session,
+            &mj_controller::hel_server::api::SetConfigRequest {
+                key: args.key,
+                value: args.value,
+            },
+        )
+        .await?;
+    if args.json {
+        return print_json(&session);
+    }
+    for option in session.config_options {
+        println!(
+            "{} {}",
+            option.key,
+            option.current.as_deref().unwrap_or("unknown")
+        );
+    }
     Ok(())
 }
 

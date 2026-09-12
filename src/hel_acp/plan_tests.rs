@@ -291,6 +291,7 @@ impl PlanProbe {
             if let RuntimeEvent::PromptFinished {
                 request_id,
                 stop_reason,
+                ..
             } = self.event().await
             {
                 assert_eq!(request_id, "original-prompt");

@@ -210,6 +210,10 @@ pub struct ApiSession {
     /// list is built from does not carry turn identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
+    #[serde(default)]
+    pub config_options: Vec<super::ViewerConfigOption>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_elicitations: Vec<hel::hel_elicitation::ElicitationRequest>,
 }
 
 impl From<&ViewerSession> for ApiSession {
@@ -230,6 +234,8 @@ impl From<&ViewerSession> for ApiSession {
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             last_turn_outcome: None,
+            config_options: session.config_options.clone(),
+            pending_elicitations: session.pending_elicitations.clone(),
         }
     }
 }
@@ -288,6 +294,9 @@ pub struct PromptResponse {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WaitRequest {
+    /// Return when the harness presents a structured input request.
+    #[serde(default)]
+    pub return_on_input: bool,
     /// Wait for this specific prompt. Absent means "wait until the session is
     /// idle with nothing queued", which is what a caller that lost its turn id
     /// wants.
@@ -301,6 +310,8 @@ pub struct WaitRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitOutcome {
+    /// A structured elicitation needs an answer; only returned by opt-in waits.
+    InputRequired,
     /// The turn completed normally.
     Finished,
     /// The turn failed, was rejected, or the session reported an error.
@@ -386,6 +397,10 @@ impl From<&mj_client::session::ManagedSessionView> for RelayHealth {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaitResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_elicitations: Vec<hel::hel_elicitation::ElicitationRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<hel::hel_usage::TokenUsage>,
     pub outcome: WaitOutcome,
     /// The harness's own stop reason, when the turn reached one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +439,8 @@ pub const MAX_TRANSCRIPT_LIMIT: usize = 1_000;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptQuery {
+    #[serde(default)]
+    pub role: Option<hel::hel_transcript::TranscriptRole>,
     /// Resume from the highest sequence the caller has already seen.
     #[serde(default)]
     pub after_seq: Option<u64>,
@@ -449,6 +466,8 @@ pub struct TranscriptItemView {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptResponse {
+    #[serde(default)]
+    pub next_after_seq: u64,
     pub session_id: String,
     /// The newest sequence in the whole transcript. A page whose last item
     /// reaches this is up to date.
@@ -564,6 +583,34 @@ impl From<ExportError> for ApiFailure {
 /// milestones fill in, so that adding those milestones does not change the
 /// shape every implementation has to match.
 pub trait SubagentBackend: Send + Sync {
+    fn profile_config(
+        &self,
+        profile: String,
+        model: Option<String>,
+        refresh: bool,
+    ) -> BoxFuture<'_, AnyResult<hel::hel_worker_launch::ProfileConfig>> {
+        Box::pin(crate::hel_controller::profile_config::discover(
+            profile, model, refresh,
+        ))
+    }
+    fn set_config(
+        &self,
+        session_id: String,
+        key: String,
+        value: String,
+    ) -> BoxFuture<'_, AnyResult<()>> {
+        Box::pin(async move {
+            self.session_handle(session_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("session has no live actor"))?
+                .set_config(key, value)
+                .await
+        })
+    }
+    fn cancel_start(&self, _session_id: String) -> BoxFuture<'_, AnyResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// The live actor for a session, or `None` when none holds it.
     fn session_handle(&self, session_id: String)
     -> BoxFuture<'_, AnyResult<Option<SessionHandle>>>;
@@ -603,7 +650,22 @@ pub trait SubagentBackend: Send + Sync {
         session_id: String,
         after_seq: u64,
         limit: usize,
+        role: Option<hel::hel_transcript::TranscriptRole>,
     ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>>;
+
+    fn usage(
+        &self,
+        session_id: String,
+        after_seq: u64,
+        limit: usize,
+    ) -> BoxFuture<'_, AnyResult<Option<hel::hel_database::UsagePage>>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                hel::hel_database::load_session_usage(&session_id, after_seq, limit)
+            })
+            .await?
+        })
+    }
 
     /// A unified diff of the session's work.
     fn diff(&self, session_id: String) -> BoxFuture<'_, Result<String, ExportError>>;
@@ -614,6 +676,16 @@ pub trait SubagentBackend: Send + Sync {
         session_id: String,
         path: PathBuf,
     ) -> BoxFuture<'_, Result<Vec<u8>, ExportError>>;
+
+    fn write_file(
+        &self,
+        _session_id: String,
+        _path: PathBuf,
+        _bytes: Vec<u8>,
+        _overwrite: bool,
+    ) -> BoxFuture<'_, Result<(), ExportError>> {
+        Box::pin(async { Err(ExportError::Refused("file injection is unavailable".into())) })
+    }
 
     /// Push the session's branch to its repository's default remote.
     fn push_branch(
@@ -661,6 +733,7 @@ pub fn map_stop_reason(stop_reason: &str) -> (WaitOutcome, Option<String>) {
 /// Everything one pass of the wait loop knows about a session.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WaitObservation {
+    pub pending_elicitations: Vec<hel::hel_elicitation::ElicitationRequest>,
     pub lifecycle: Option<ViewerLifecycleCategory>,
     /// A recorded launch failure names this session.
     pub launch_failed: bool,
@@ -727,10 +800,8 @@ impl WaitDecision {
 ///
 /// The rules run in order, and the order is the point:
 ///
-/// 1. A launch failure for this session, or a failed start, is reported as an
-///    error even if a turn looks like it is still running, because nothing
-///    will finish it.
-/// 2. A stopped, stopping, or failed session ends the wait as `stopped`.
+/// 1. A stopped, stopping, or failed session ends the wait as `stopped`.
+/// 2. A launch failure or failed initialization is reported before a turn.
 /// 3. Otherwise the wait has a target turn: the caller's explicit `turn_id`,
 ///    else the turn a create-with-prompt call submitted, else "the newest
 ///    one", which additionally requires the session to be idle with an empty
@@ -743,18 +814,6 @@ impl WaitDecision {
 /// turn, and an unrecognized stop reason, all come back through the turn record
 /// in rule 3.
 pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Option<WaitDecision> {
-    if observation.launch_failed {
-        return Some(WaitDecision::simple(
-            WaitOutcome::Error,
-            Some("the session failed to launch".to_owned()),
-        ));
-    }
-    if let Some(StartStatus::Failed { message }) = &observation.start_status {
-        return Some(WaitDecision::simple(
-            WaitOutcome::Error,
-            Some(message.clone()),
-        ));
-    }
     let stopping = matches!(
         observation.lifecycle,
         Some(
@@ -773,6 +832,19 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         ));
     }
 
+    if observation.launch_failed {
+        return Some(WaitDecision::simple(
+            WaitOutcome::Error,
+            Some("the session failed to launch".to_owned()),
+        ));
+    }
+    if let Some(StartStatus::Failed { message }) = &observation.start_status {
+        return Some(WaitDecision::simple(
+            WaitOutcome::Error,
+            Some(message.clone()),
+        ));
+    }
+
     let retry_pending = |outcome: &MaterializedTurnOutcome| {
         observation.capacity_retry.is_some()
             && matches!(
@@ -784,6 +856,29 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
         _ => None,
     });
+    let target_finished = target.is_some_and(|target| {
+        observation
+            .last_turn_outcome
+            .as_ref()
+            .is_some_and(|outcome| {
+                outcome
+                    .accepted_ordinal
+                    .is_some_and(|ordinal| ordinal >= target)
+                    && !retry_pending(outcome)
+            })
+    });
+    if request.return_on_input && !target_finished && !observation.pending_elicitations.is_empty() {
+        return Some(WaitDecision {
+            outcome: WaitOutcome::InputRequired,
+            stop_reason: None,
+            message: Some("the harness needs a response to a structured input request".into()),
+            turn_id: observation
+                .active_turn
+                .as_ref()
+                .and_then(|turn| turn.accepted_ordinal),
+            turn_start_position: None,
+        });
+    }
     match target {
         Some(target) => {
             let outcome = observation.last_turn_outcome.as_ref()?;
@@ -823,15 +918,33 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
 
 pub(super) fn router(state: ServerState) -> Router<ServerState> {
     Router::new()
+        .route("/profiles/{profile_id}/config", get(profile_config))
+        .route(
+            "/sessions/{session_id}/config",
+            axum::routing::patch(set_config),
+        )
         .route("/sessions", get(list_sessions).post(start_session))
         .route("/sessions/{session_id}", get(get_session))
         .route("/sessions/{session_id}/prompt", post(prompt))
         .route("/sessions/{session_id}/transcript", get(transcript))
+        .route("/sessions/{session_id}/usage", get(usage))
         .route("/sessions/{session_id}/wait", post(wait))
         .route("/sessions/{session_id}/close", post(close))
         .route("/sessions/{session_id}/cancel-turn", post(cancel_turn))
         .route("/sessions/{session_id}/diff", get(diff))
-        .route("/sessions/{session_id}/files", get(read_file))
+        .route(
+            "/sessions/{session_id}/files",
+            get(read_file)
+                .put(write_file)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    hel::hel_archive::MAX_SESSION_FILE_BYTES as usize,
+                )),
+        )
+        .route("/sessions/{session_id}/elicitations", get(elicitations))
+        .route(
+            "/sessions/{session_id}/elicitations/{elicitation_id}",
+            post(respond_elicitation),
+        )
         .route("/sessions/{session_id}/export", post(export))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
@@ -891,12 +1004,111 @@ async fn api_response_headers(request: HttpRequest<axum::body::Body>, next: Next
 // Handlers
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionListQuery {
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileConfigQuery {
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetConfigRequest {
+    pub key: String,
+    pub value: String,
+}
+
+async fn profile_config(
+    State(state): State<ServerState>,
+    Path(profile_id): Path<String>,
+    Query(query): Query<ProfileConfigQuery>,
+) -> Result<Json<hel::hel_worker_launch::ProfileConfig>, ApiFailure> {
+    super::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
+    let choices = backend(&state)?
+        .profile_config(profile_id, query.model, false)
+        .await
+        .map_err(|error| ApiFailure::unavailable(format!("profile discovery failed: {error:#}")))?;
+    Ok(Json(choices))
+}
+
+fn validate_selectors(
+    choices: &hel::hel_worker_launch::ProfileConfig,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<(), ApiFailure> {
+    for (key, value, offered) in [
+        ("model", model, &choices.models),
+        ("effort", effort, &choices.efforts),
+    ] {
+        if let Some(value) = value
+            && !offered.iter().any(|choice| choice.value == value)
+        {
+            return Err(ApiFailure::bad_request(format!(
+                "this profile does not offer {value:?} as {key}; choices: {}",
+                offered
+                    .iter()
+                    .map(|choice| choice.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn set_config(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SetConfigRequest>,
+) -> Result<Json<ApiSession>, ApiFailure> {
+    validate_action(
+        &ControllerAction::SetConfig {
+            session_id: session_id.clone(),
+            key: request.key.clone(),
+            value: request.value.clone(),
+        },
+        &state.snapshot_rx.borrow(),
+    )?;
+    let backend = backend(&state)?;
+    backend
+        .set_config(session_id.clone(), request.key, request.value)
+        .await
+        .map_err(|error| ApiFailure::conflict(format!("configuration failed: {error:#}")))?;
+    let mut session = ApiSession::from(require_session_record(
+        &state.snapshot_rx.borrow(),
+        &session_id,
+    )?);
+    if let Some(handle) = backend.session_handle(session_id).await?
+        && let Some(snapshot) = handle.view().snapshot
+    {
+        session.config_options =
+            super::session_config_view(session.harness_kind.parse()?, &snapshot.operational);
+    }
+    Ok(Json(session))
+}
+
 async fn list_sessions(
     State(state): State<ServerState>,
+    Query(query): Query<SessionListQuery>,
 ) -> Result<Json<SessionListResponse>, ApiFailure> {
     let snapshot = state.snapshot_rx.borrow();
     Ok(Json(SessionListResponse {
-        sessions: snapshot.sessions.iter().map(ApiSession::from).collect(),
+        sessions: snapshot
+            .sessions
+            .iter()
+            .filter(|session| {
+                query
+                    .workspace_id
+                    .as_ref()
+                    .is_none_or(|id| &session.workspace_id == id)
+            })
+            .map(ApiSession::from)
+            .collect(),
     }))
 }
 
@@ -911,7 +1123,7 @@ async fn get_session(
     if let Ok(backend) = backend(&state)
         && let Some(turn) = backend.turn_state(session_id).await?
     {
-        session.last_turn_outcome = turn.last_turn_outcome;
+        session.last_turn_outcome = turn.last_turn_outcome.map(api_turn_outcome);
     }
     Ok(Json(session))
 }
@@ -960,6 +1172,35 @@ async fn start_session(
         ));
     }
 
+    super::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
+    super::require_target(&state.snapshot_rx.borrow(), &request.target_id)?;
+    if request.model.is_some() || request.effort.is_some() {
+        let mut choices = backend
+            .profile_config(request.profile_id.clone(), request.model.clone(), false)
+            .await
+            .map_err(|error| {
+                ApiFailure::unavailable(format!("profile discovery failed: {error:#}"))
+            })?;
+        if validate_selectors(
+            &choices,
+            request.model.as_deref(),
+            request.effort.as_deref(),
+        )
+        .is_err()
+        {
+            choices = backend
+                .profile_config(request.profile_id.clone(), request.model.clone(), true)
+                .await
+                .map_err(|error| {
+                    ApiFailure::unavailable(format!("profile discovery failed: {error:#}"))
+                })?;
+        }
+        validate_selectors(
+            &choices,
+            request.model.as_deref(),
+            request.effort.as_deref(),
+        )?;
+    }
     let bundle_id = match (&request.bundle_id, &request.project_directory) {
         (Some(bundle_id), _) => bundle_id.clone(),
         // A caller that names a directory should not have to make a bundle
@@ -1057,6 +1298,28 @@ async fn prompt(
 ///
 /// It reads the durable projection rather than the live actor, so it answers
 /// the same way while a session runs and long after it stopped.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageQuery {
+    pub after_seq: Option<u64>,
+    pub limit: Option<usize>,
+}
+
+async fn usage(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<UsageQuery>,
+) -> Result<Json<hel::hel_database::UsagePage>, ApiFailure> {
+    let page = backend(&state)?
+        .usage(
+            session_id,
+            query.after_seq.unwrap_or(0),
+            query.limit.unwrap_or(200).clamp(1, 1000),
+        )
+        .await?
+        .ok_or_else(|| ApiFailure::not_found("no usage history is recorded for that session"))?;
+    Ok(Json(page))
+}
+
 async fn transcript(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -1068,10 +1331,16 @@ async fn transcript(
         .unwrap_or(DEFAULT_TRANSCRIPT_LIMIT)
         .clamp(1, MAX_TRANSCRIPT_LIMIT);
     let page = backend
-        .transcript(session_id.clone(), query.after_seq.unwrap_or(0), limit)
+        .transcript(
+            session_id.clone(),
+            query.after_seq.unwrap_or(0),
+            limit,
+            query.role,
+        )
         .await?
         .ok_or_else(|| ApiFailure::not_found("no transcript is recorded for that session"))?;
     Ok(Json(TranscriptResponse {
+        next_after_seq: page.next_after_seq,
         session_id,
         latest_seq: page.latest_seq,
         execution: page.execution,
@@ -1096,6 +1365,7 @@ async fn close(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiFailure> {
+    backend(&state)?.cancel_start(session_id.clone()).await?;
     send_action(&state, ControllerAction::Close { session_id }).await
 }
 
@@ -1141,6 +1411,79 @@ async fn diff(
 /// The path is checked here as well as on the target: a caller that spells an
 /// absolute or escaping path has made a mistake worth naming, and there is no
 /// reason to spend a round trip to the target discovering it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteFileQuery {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteFileResponse {
+    pub path: PathBuf,
+    pub bytes: usize,
+}
+
+async fn write_file(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<WriteFileQuery>,
+    bytes: axum::body::Bytes,
+) -> Result<Json<WriteFileResponse>, ApiFailure> {
+    hel::hel_config::validate_relative_destination(&query.path)
+        .map_err(|error| ApiFailure::bad_request(format!("{error:#}")))?;
+    {
+        let snapshot = state.snapshot_rx.borrow();
+        let session = require_session_record(&snapshot, &session_id)?;
+        if !session.is_idle || session.lifecycle != ViewerLifecycleCategory::Live {
+            return Err(ApiFailure::conflict(
+                "session must be live and idle for file injection",
+            ));
+        }
+    }
+    let count = bytes.len();
+    backend(&state)?
+        .write_file(
+            session_id,
+            query.path.clone(),
+            bytes.to_vec(),
+            query.overwrite,
+        )
+        .await?;
+    Ok(Json(WriteFileResponse {
+        path: query.path,
+        bytes: count,
+    }))
+}
+
+async fn elicitations(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<hel::hel_elicitation::ElicitationRequest>>, ApiFailure> {
+    let snapshot = state.snapshot_rx.borrow();
+    Ok(Json(
+        require_session_record(&snapshot, &session_id)?
+            .pending_elicitations
+            .clone(),
+    ))
+}
+
+async fn respond_elicitation(
+    State(state): State<ServerState>,
+    Path((session_id, elicitation_id)): Path<(String, String)>,
+    Json(response): Json<hel::hel_elicitation::ElicitationResponse>,
+) -> Result<StatusCode, ApiFailure> {
+    send_action(
+        &state,
+        ControllerAction::RespondElicitation {
+            session_id,
+            elicitation_id,
+            response,
+        },
+    )
+    .await
+}
+
 async fn read_file(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -1291,6 +1634,8 @@ async fn wait(
                 let snapshot = snapshot_rx.borrow();
                 let session = require_session_record(&snapshot, &session_id)?;
                 return Ok(Json(WaitResponse {
+                    pending_elicitations: Vec::new(),
+                    usage: None,
                     outcome: WaitOutcome::Timeout,
                     stop_reason: None,
                     message: Some(format!("the turn was still running after {timeout} seconds")),
@@ -1326,6 +1671,7 @@ fn build_observation(
     start_status: Option<StartStatus>,
 ) -> WaitObservation {
     let mut observation = WaitObservation {
+        pending_elicitations: session.pending_elicitations.clone(),
         lifecycle: Some(session.lifecycle),
         launch_failed: snapshot
             .launch_failures
@@ -1336,6 +1682,9 @@ fn build_observation(
         ..WaitObservation::default()
     };
     if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {
+        observation
+            .pending_elicitations
+            .clone_from(&snapshot.materialized.pending_elicitations);
         observation.execution = snapshot.materialized.execution;
         observation.active_turn = snapshot.materialized.active_turn.clone();
         observation
@@ -1355,6 +1704,13 @@ fn build_observation(
     observation
 }
 
+// Older v1 clients reject unknown fields inside this shared turn type. Usage
+// travels in the new top-level wait field and the dedicated usage endpoint.
+fn api_turn_outcome(mut turn: MaterializedTurnOutcome) -> MaterializedTurnOutcome {
+    turn.usage = None;
+    turn
+}
+
 async fn finish_wait(
     backend: &Arc<dyn SubagentBackend>,
     session_id: &str,
@@ -1366,6 +1722,7 @@ async fn finish_wait(
     session
         .last_turn_outcome
         .clone_from(&observation.last_turn_outcome);
+    session.last_turn_outcome = session.last_turn_outcome.map(api_turn_outcome);
     let summary = match decision.turn_start_position {
         Some(position) => Some(
             backend
@@ -1375,6 +1732,19 @@ async fn finish_wait(
         None => None,
     };
     Ok(WaitResponse {
+        pending_elicitations: if decision.outcome == WaitOutcome::InputRequired {
+            observation.pending_elicitations.clone()
+        } else {
+            Vec::new()
+        },
+        usage: observation
+            .last_turn_outcome
+            .as_ref()
+            .filter(|turn| {
+                turn.turn_start_position.is_some()
+                    && turn.turn_start_position == decision.turn_start_position
+            })
+            .and_then(|turn| turn.usage.clone()),
         outcome: decision.outcome,
         stop_reason: decision.stop_reason,
         message: decision.message,
@@ -1441,6 +1811,7 @@ mod tests {
         diff_fails: bool,
         /// The path the file handler asked the backend for.
         file_paths: Mutex<Vec<PathBuf>>,
+        file_writes: Mutex<Vec<(PathBuf, Vec<u8>, bool)>>,
     }
 
     impl FakeBackend {
@@ -1455,6 +1826,30 @@ mod tests {
     }
 
     impl SubagentBackend for FakeBackend {
+        fn profile_config(
+            &self,
+            _profile: String,
+            _model: Option<String>,
+            _refresh: bool,
+        ) -> BoxFuture<'_, AnyResult<hel::hel_worker_launch::ProfileConfig>> {
+            Box::pin(async {
+                Ok(hel::hel_worker_launch::ProfileConfig {
+                    model: Some("kimi-code/k3".into()),
+                    models: vec![hel::hel_acp::SessionConfigChoice {
+                        value: "kimi-code/k3".into(),
+                        name: "K3".into(),
+                        description: None,
+                    }],
+                    efforts: vec![hel::hel_acp::SessionConfigChoice {
+                        value: "high".into(),
+                        name: "High".into(),
+                        description: None,
+                    }],
+                    observed_at: 1,
+                })
+            })
+        }
+
         fn session_handle(
             &self,
             _session_id: String,
@@ -1515,6 +1910,7 @@ mod tests {
             _session_id: String,
             _after_seq: u64,
             limit: usize,
+            _role: Option<hel::hel_transcript::TranscriptRole>,
         ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>> {
             Box::pin(async move {
                 self.transcript_limits.lock().unwrap().push(limit);
@@ -1541,6 +1937,21 @@ mod tests {
                 self.file
                     .clone()
                     .ok_or_else(|| ExportError::Refused("this session has no live target".into()))
+            })
+        }
+        fn write_file(
+            &self,
+            _session_id: String,
+            path: PathBuf,
+            bytes: Vec<u8>,
+            overwrite: bool,
+        ) -> BoxFuture<'_, Result<(), ExportError>> {
+            Box::pin(async move {
+                self.file_writes
+                    .lock()
+                    .unwrap()
+                    .push((path, bytes, overwrite));
+                Ok(())
             })
         }
         fn push_branch(
@@ -1677,6 +2088,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn workspace_filter_excludes_other_workspaces() {
+        let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions[0].workspace_id = "mine".into();
+            let mut other = snapshot.sessions[0].clone();
+            other.id = "other".into();
+            other.workspace_id = "theirs".into();
+            snapshot.sessions.push(other);
+        });
+        let response = app
+            .oneshot(
+                bearer(Request::get("/api/v1/sessions?workspace_id=mine"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(response).await;
+        assert_eq!(body["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(body["sessions"][0]["id"], "session-1");
+    }
+
+    #[tokio::test]
+    async fn invalid_model_is_rejected_before_bundling_or_provisioning() {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, mut actions, _, mut bundles) = api_app(backend.clone(), |_| {});
+        let response = app.oneshot(start_request(r#"{"profile_id":"codex-1","target_id":"raw","project_directory":"/work/hel","model":"k3"}"#.into())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(response).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("kimi-code/k3")
+        );
+        assert!(actions.try_recv().is_err());
+        assert!(bundles.try_recv().is_err());
+        assert!(backend.followups.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn closing_supersedes_a_failed_initial_configuration() {
+        let observation = WaitObservation {
+            lifecycle: Some(ViewerLifecycleCategory::Stopping),
+            start_status: Some(StartStatus::Failed {
+                message: "bad model".into(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_wait(&observation, &WaitRequest::default())
+                .unwrap()
+                .outcome,
+            WaitOutcome::Stopped
+        );
     }
 
     #[tokio::test]
@@ -1938,6 +2405,7 @@ mod tests {
     async fn the_transcript_clamps_its_limit_and_reads_items_as_text() {
         let backend = Arc::new(FakeBackend {
             transcript: Mutex::new(Some(TranscriptPage {
+                next_after_seq: 9,
                 items: vec![Arc::new(hel::hel_transcript::TranscriptItem {
                     stable_id: "item-1".into(),
                     position: 4,
@@ -2073,6 +2541,10 @@ mod tests {
                     execution: MaterializedExecutionState::Idle,
                     active_turn: None,
                     last_turn_outcome: Some(MaterializedTurnOutcome {
+                        usage: Some(hel::hel_usage::TokenUsage::from_acp(
+                            hel::hel_config::HarnessKind::Codex,
+                            agent_client_protocol::schema::v1::Usage::new(30, 20, 10),
+                        )),
                         command_id: "prompt-1".into(),
                         accepted_ordinal: Some(5),
                         turn_start_position: Some(6),
@@ -2111,6 +2583,10 @@ mod tests {
         assert_eq!(body["elapsed_ms"], 800);
         assert_eq!(body["final_message"], "added the line");
         assert_eq!(body["stop_reason"], "end_turn");
+        assert_eq!(body["usage"]["scope"], "last_request");
+        assert_eq!(body["usage"]["total_tokens"], 30);
+        assert!(body["usage"].get("thought_tokens").is_none());
+        assert!(body["session"]["last_turn_outcome"].get("usage").is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -2182,6 +2658,7 @@ mod tests {
 
     fn completed(accepted_ordinal: u64, stop_reason: &str) -> MaterializedTurnOutcome {
         MaterializedTurnOutcome {
+            usage: None,
             command_id: format!("prompt-{accepted_ordinal}"),
             accepted_ordinal: Some(accepted_ordinal),
             turn_start_position: Some(accepted_ordinal + 1),
@@ -2205,6 +2682,7 @@ mod tests {
     #[test]
     fn an_earlier_prompt_s_outcome_never_answers_a_later_prompt_s_wait() {
         let request = WaitRequest {
+            return_on_input: false,
             turn_id: Some(12),
             timeout_secs: None,
         };
@@ -2223,6 +2701,7 @@ mod tests {
     #[test]
     fn a_capacity_outcome_only_ends_the_wait_once_no_retry_is_armed() {
         let request = WaitRequest {
+            return_on_input: false,
             turn_id: Some(10),
             timeout_secs: None,
         };
@@ -2252,6 +2731,7 @@ mod tests {
 
         let mut rejected = idle(None);
         rejected.last_turn_outcome = Some(MaterializedTurnOutcome {
+            usage: None,
             command_id: "prompt-1".into(),
             accepted_ordinal: Some(4),
             turn_start_position: None,
@@ -2331,6 +2811,7 @@ mod tests {
             resolve_wait(
                 &running,
                 &WaitRequest {
+                    return_on_input: false,
                     turn_id: Some(12),
                     timeout_secs: None,
                 }
@@ -2629,5 +3110,185 @@ mod tests {
             json_body(response).await["error"],
             "no commits beyond the session base"
         );
+    }
+    fn input_request() -> hel::hel_elicitation::ElicitationRequest {
+        hel::hel_elicitation::ElicitationRequest::from_acp_params("question-1", serde_json::json!({
+            "sessionId": "session-1", "mode": "form", "message": "Choose a name", "requestedSchema": {
+                "type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}
+            }
+        })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn file_upload_accepts_large_binary_bodies_and_rejects_unsafe_paths_and_limits() {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, _actions, snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+            snapshot.sessions[0].is_idle = true;
+            snapshot.sessions[0].lifecycle = ViewerLifecycleCategory::Live;
+        });
+        let payload: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::put(
+                    "/api/v1/sessions/session-1/files?path=input/data.bin&overwrite=true",
+                ))
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["bytes"], payload.len());
+        assert_eq!(
+            backend.file_writes.lock().unwrap()[0],
+            (PathBuf::from("input/data.bin"), payload, true)
+        );
+        for path in ["../outside", "/absolute", "nested/../../outside"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    bearer(Request::put(format!(
+                        "/api/v1/sessions/session-1/files?path={path}"
+                    )))
+                    .body(Body::from("bad"))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::put("/api/v1/sessions/session-1/files?path=large"))
+                    .body(Body::from(vec![
+                        0;
+                        hel::hel_archive::MAX_SESSION_FILE_BYTES
+                            as usize
+                            + 1
+                    ]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        snapshots.send_modify(|s| s.sessions[0].is_idle = false);
+        let response = app
+            .oneshot(
+                bearer(Request::put("/api/v1/sessions/session-1/files?path=busy"))
+                    .body(Body::from("bad"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(backend.file_writes.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn structured_inputs_are_listed_validated_and_forwarded() {
+        let (app, mut actions, _snapshots, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |s| {
+                s.sessions[0].pending_elicitations = vec![input_request()]
+            });
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::get("/api/v1/sessions/session-1/elicitations"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(response).await[0]["id"], "question-1");
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::post(
+                    "/api/v1/sessions/session-1/elicitations/question-1",
+                ))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"action":"accept","content":{}}"#))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(actions.try_recv().is_err());
+        let response = tokio::spawn(
+            app.oneshot(
+                bearer(Request::post(
+                    "/api/v1/sessions/session-1/elicitations/question-1",
+                ))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"action":"accept","content":{"name":"example"}}"#,
+                ))
+                .unwrap(),
+            ),
+        );
+        let action = actions.recv().await.unwrap();
+        assert!(
+            matches!(action.action, ControllerAction::RespondElicitation { elicitation_id, .. } if elicitation_id == "question-1")
+        );
+        action
+            .reply
+            .send(ActionOutcome::Accepted { session_id: None })
+            .unwrap();
+        assert_eq!(
+            response.await.unwrap().unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[test]
+    fn input_aware_wait_is_opt_in_and_respects_completed_turns_and_stopping() {
+        let mut observation = WaitObservation {
+            pending_elicitations: vec![input_request()],
+            execution: MaterializedExecutionState::Running { started_at_ms: 1 },
+            ..Default::default()
+        };
+        assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
+        let mut request = WaitRequest {
+            return_on_input: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_wait(&observation, &request).unwrap().outcome,
+            WaitOutcome::InputRequired
+        );
+        observation.last_turn_outcome = Some(completed(5, "end_turn"));
+        request.turn_id = Some(5);
+        assert_eq!(
+            resolve_wait(&observation, &request).unwrap().outcome,
+            WaitOutcome::Finished
+        );
+        observation.lifecycle = Some(ViewerLifecycleCategory::Stopping);
+        assert_eq!(
+            resolve_wait(&observation, &request).unwrap().outcome,
+            WaitOutcome::Stopped
+        );
+    }
+
+    #[tokio::test]
+    async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
+        let (app, _actions, _snapshots, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |s| {
+                s.sessions[0].pending_elicitations = vec![input_request()]
+            });
+        let response = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/wait"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"return_on_input":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["outcome"], "input_required");
+        assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
     }
 }

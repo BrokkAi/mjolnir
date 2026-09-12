@@ -46,6 +46,13 @@ pub trait ExportRuntime: Send + Sync {
     /// none.
     fn session_record(&self, session_id: &str) -> Option<hel::hel_state::SessionRecord>;
 
+    fn workspace_session(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, Result<mj_controller::hel_session_manager::ManagedSessionHandle>> {
+        Box::pin(async { anyhow::bail!("workspace file injection is unavailable") })
+    }
+
     /// Checkpoint a session now, returning the archive it wrote.
     fn checkpoint_now(
         &self,
@@ -56,6 +63,13 @@ pub trait ExportRuntime: Send + Sync {
 impl ExportRuntime for RuntimeState {
     fn session_record(&self, session_id: &str) -> Option<hel::hel_state::SessionRecord> {
         RuntimeState::session_record(self, session_id)
+    }
+
+    fn workspace_session(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<mj_controller::hel_session_manager::ManagedSessionHandle>> {
+        Box::pin(async move { self.workspace_session_handle(&session_id).await })
     }
 
     fn checkpoint_now(
@@ -87,6 +101,7 @@ struct Start {
     /// Kept so the task is cancelled when the entry is pruned; a dropped
     /// handle would leave the task running against a session that is gone.
     task: Option<tokio::task::JoinHandle<()>>,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 /// The backend the `/api/v1` routes drive sessions through.
@@ -123,7 +138,12 @@ impl ApiBackend {
         starts.retain(|session_id, start| {
             let present = (self.session_states)(session_id).is_some();
             if !present && let Some(task) = &start.task {
-                task.abort();
+                start.cancel.cancel();
+                tracing::debug!(
+                    session_id,
+                    task_finished = task.is_finished(),
+                    "cancel forgotten API start"
+                );
             }
             present
         });
@@ -208,7 +228,7 @@ async fn apply_followup(
     // Setting a configuration option needs the harness's own session, not just
     // a connected worker: the options it accepts arrive with it.
     let needs_config = followup.model.is_some() || followup.effort.is_some();
-    let snapshot = loop {
+    loop {
         let view = handle.view();
         if let Some(ViewError::TargetMissing(detail)) = &view.error {
             bail!("session {session_id} lost its target: {detail}");
@@ -218,7 +238,7 @@ async fn apply_followup(
                 if view.connected
                     && (!needs_config || snapshot.operational.native_session_is_ready()) =>
             {
-                break snapshot.clone();
+                break;
             }
             _ => {}
         }
@@ -230,29 +250,26 @@ async fn apply_followup(
         // Bounded so a session that dies quietly is still noticed by the
         // record check above rather than waiting for a change that never comes.
         let _ = tokio::time::timeout(START_POLL, handle.changed()).await;
-    };
+    }
 
     for (key, value) in [("model", followup.model), ("effort", followup.effort)] {
         let Some(value) = value else {
             continue;
         };
+        let snapshot = handle
+            .view()
+            .snapshot
+            .context("session configuration is unavailable")?;
         let choices =
             hel::hel_acp::session_config_choices(&snapshot.operational.config_options, key);
         ensure!(
             choices.iter().any(|choice| choice.value == value),
             "this agent does not offer {value} as a {key}"
         );
-        handle
-            .submit(
-                new_command_id("api-set-config")?,
-                RelayCommand::SetConfig {
-                    key: key.to_owned(),
-                    value,
-                },
-            )
-            .await?;
+        handle.set_config(key.to_owned(), value).await?;
     }
 
+    still_starting(&states, &session_id)?;
     match followup.prompt {
         Some(text) => Ok(Some(submit_prompt(&handle, text).await?)),
         None => Ok(None),
@@ -338,6 +355,90 @@ fn target_join(root: &str, relative: &Path) -> String {
     path
 }
 
+async fn write_workspace_file(
+    exports: Arc<dyn ExportRuntime>,
+    session_id: String,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    overwrite: bool,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), ExportError> {
+    use std::sync::atomic::Ordering;
+    let record = exports
+        .session_record(&session_id)
+        .ok_or_else(|| ExportError::Refused("unknown session".into()))?;
+    let handle = exports
+        .workspace_session(session_id.clone())
+        .await
+        .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
+    let layout = export_layout(session_id.clone()).await?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(ExportError::Refused("file upload cancelled".into()));
+    }
+    let mut lease =
+        mj_controller::hel_controller::IdleWorkspaceLease::acquire(&handle, record.harness_kind)
+            .await
+            .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(ExportError::Refused("file upload cancelled".into()));
+    }
+    let worker_cancelled = cancelled.clone();
+    let mut transfer = tokio::task::spawn_blocking(move || {
+        let binary = format!(
+            "{}/hel",
+            hel_targets::worker_root(&layout.backend, &session_id)?
+        );
+        let mut argv = vec![
+            binary,
+            "worker".into(),
+            "write-file".into(),
+            "--length".into(),
+            bytes.len().to_string(),
+            "--root".into(),
+            layout.workspace_root,
+            "--path".into(),
+            target_join("", &path).trim_start_matches('/').into(),
+        ];
+        if overwrite {
+            argv.push("--overwrite".into());
+        }
+        let command = hel_targets::command_on_locator(
+            &layout.backend,
+            &session_id,
+            argv,
+            "session file write",
+        )?
+        .with_sensitive_stdin(bytes);
+        CancellableProcessExecutor::new(worker_cancelled)
+            .with_deadline(EXPORT_TIMEOUT)
+            .execute(&command)
+    });
+    let output = loop {
+        tokio::select! {
+            output = &mut transfer => break output.map_err(|e| ExportError::Failed(e.into()))?.map_err(ExportError::Failed)?,
+            () = tokio::time::sleep(Duration::from_millis(250)) => {
+                if let Err(error) = tokio::time::timeout(Duration::from_secs(10), lease.verify()).await.context("checking file write barrier timed out").and_then(|r| r) {
+                    cancelled.store(true, Ordering::Release);
+                    // Do not release ownership while a subprocess can still write.
+                    match transfer.await {
+                        Ok(Ok(_)) => {},
+                        Ok(Err(failure)) => tracing::warn!("cancelled file transfer: {failure:#}"),
+                        Err(failure) => tracing::warn!("file transfer task failed: {failure}"),
+                    }
+                    return Err(ExportError::Failed(error));
+                }
+            }
+        }
+    };
+    let result = worker_output(output, "session file write").map(|_| ());
+    lease.release().await.map_err(|e| {
+        ExportError::Failed(
+            e.context("file transfer ended but the workspace barrier could not be released"),
+        )
+    })?;
+    result
+}
+
 /// Run one `hel worker ...` command on the session's target and return its
 /// standard output.
 async fn worker_command(
@@ -357,14 +458,18 @@ async fn worker_command(
         CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT).execute(&command)
     })
     .await?;
+    worker_output(output, purpose)
+}
+
+fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, ExportError> {
     match output.status {
         0 => Ok(output.stdout),
         // A worker installed before these subcommands existed answers clap's
         // usage failure. That is not a failed export: resuming the session
         // reinstalls the worker and the same call then works.
-        CLAP_USAGE_EXIT_CODE => Err(ExportError::Refused(
-            "worker on this target predates export support; resume the session to upgrade".into(),
-        )),
+        CLAP_USAGE_EXIT_CODE => Err(ExportError::Refused(format!(
+            "worker on this target does not support {purpose}; resume the session to upgrade"
+        ))),
         // The worker met a precondition it could not satisfy — no recorded
         // base, no push remote, a path outside the workspace — and printed the
         // reason. That is the caller's to fix, so it is a refusal, not a
@@ -392,18 +497,68 @@ fn refusal_reason(stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn cancel_start(&self, session_id: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if let Some(start) = self
+                .starts
+                .lock()
+                .expect("api start status mutex poisoned")
+                .remove(&session_id)
+            {
+                start.cancel.cancel();
+            }
+            Ok(())
+        })
+    }
+
+    fn set_config(
+        &self,
+        session_id: String,
+        key: String,
+        value: String,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            ensure!(
+                !matches!(
+                    self.start_status(session_id.clone()).await?,
+                    Some(StartStatus::Pending)
+                ),
+                "session initialization is still running"
+            );
+            let handle = self.sessions.session(session_id.clone()).await?;
+            handle.set_config(key, value).await?;
+            self.starts
+                .lock()
+                .expect("api start status mutex poisoned")
+                .remove(&session_id);
+            Ok(())
+        })
+    }
+
     fn session_handle(&self, session_id: String) -> BoxFuture<'_, Result<Option<SessionHandle>>> {
         Box::pin(async move { Ok(self.sessions.session(session_id).await.ok()) })
     }
 
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, Result<u64>> {
         Box::pin(async move {
+            ensure!(
+                !matches!(
+                    self.start_status(session_id.clone()).await?,
+                    Some(StartStatus::Pending)
+                ),
+                "session initialization is still running"
+            );
             let handle = self
                 .sessions
                 .session(session_id.clone())
                 .await
                 .with_context(|| format!("session {session_id} is not running"))?;
-            submit_prompt(&handle, text).await
+            let turn = submit_prompt(&handle, text).await?;
+            self.starts
+                .lock()
+                .expect("api start status mutex poisoned")
+                .remove(&session_id);
+            Ok(turn)
         })
     }
 
@@ -451,6 +606,7 @@ impl SubagentBackend for ApiBackend {
             let states = self.session_states.clone();
             let starts = Arc::clone(&self.starts);
             let id = session_id.clone();
+            let cancel = tokio_util::sync::CancellationToken::new();
             // Recorded before the work starts: a follow-up that finishes
             // immediately must find its entry to write its outcome into.
             self.starts
@@ -461,9 +617,16 @@ impl SubagentBackend for ApiBackend {
                     Start {
                         status: StartStatus::Pending,
                         task: None,
+                        cancel: cancel.clone(),
                     },
                 );
-            let work = tokio::spawn(apply_followup(sessions, states, id.clone(), followup));
+            let followup_id = session_id.clone();
+            let work = tokio::spawn(async move {
+                tokio::select! {
+                    result = apply_followup(sessions, states, followup_id, followup) => result,
+                    () = cancel.cancelled() => anyhow::bail!("session startup cancelled"),
+                }
+            });
             // A second task supervises the first so a panic in the follow-up
             // becomes a failure the caller's wait reports, rather than an
             // entry that stays Pending for as long as the daemon runs.
@@ -538,10 +701,16 @@ impl SubagentBackend for ApiBackend {
         session_id: String,
         after_seq: u64,
         limit: usize,
+        role: Option<hel::hel_transcript::TranscriptRole>,
     ) -> BoxFuture<'_, Result<Option<TranscriptPage>>> {
         Box::pin(async move {
             blocking("load transcript page", move || {
-                hel::hel_database::load_materialized_transcript_after(&session_id, after_seq, limit)
+                hel::hel_database::load_materialized_transcript_filtered(
+                    &session_id,
+                    after_seq,
+                    limit,
+                    role,
+                )
             })
             .await
         })
@@ -590,6 +759,47 @@ impl SubagentBackend for ApiBackend {
                 target_join("", &path).trim_start_matches('/').to_owned(),
             ];
             worker_command(layout, session_id, arguments, "session file read").await
+        })
+    }
+
+    fn write_file(
+        &self,
+        session_id: String,
+        path: PathBuf,
+        bytes: Vec<u8>,
+        overwrite: bool,
+    ) -> BoxFuture<'_, Result<(), ExportError>> {
+        let exports = self.exports.clone();
+        Box::pin(async move {
+            if matches!(
+                self.start_status(session_id.clone())
+                    .await
+                    .map_err(ExportError::Failed)?,
+                Some(StartStatus::Pending)
+            ) {
+                return Err(ExportError::Refused(
+                    "session initialization is still running".into(),
+                ));
+            }
+            // The supervised task owns the lease until the subprocess exits,
+            // even if the request is cancelled while stdin is streaming.
+            let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let _cancel_on_drop = super::ProcessCancellationGuard(cancelled.clone());
+            let task = tokio::spawn(write_workspace_file(
+                exports, session_id, path, bytes, overwrite, cancelled,
+            ));
+            tokio::spawn(async move {
+                let result = task
+                    .await
+                    .map_err(|error| ExportError::Failed(error.into()))
+                    .and_then(|result| result);
+                if let Err(error) = &result {
+                    tracing::warn!(?error, "API file injection failed");
+                }
+                result
+            })
+            .await
+            .map_err(|error| ExportError::Failed(error.into()))?
         })
     }
 
@@ -704,6 +914,12 @@ mod tests {
     }
 
     impl SessionHandleBackend for FakeSession {
+        fn config_result(
+            &self,
+            _command_id: String,
+        ) -> BoxFuture<'_, Result<Option<Option<String>>>> {
+            Box::pin(async { Ok(Some(None)) })
+        }
         fn clone_box(&self) -> Box<dyn SessionHandleBackend> {
             Box::new(self.clone())
         }
@@ -976,6 +1192,83 @@ mod tests {
         assert!(
             submitted.try_recv().is_err(),
             "nothing may be submitted once the configuration is refused"
+        );
+        backend
+            .set_config("session-1".into(), "model".into(), "gpt-5-codex".into())
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .start_status("session-1".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            submitted.recv().await.unwrap().1,
+            RelayCommand::SetConfig { .. }
+        ));
+        assert!(
+            submitted.try_recv().is_err(),
+            "repair must not replay the abandoned initial prompt"
+        );
+        assert_eq!(
+            backend
+                .prompt("session-1".into(), "repaired prompt".into())
+                .await
+                .unwrap(),
+            12
+        );
+        assert!(matches!(
+            submitted.recv().await.unwrap().1,
+            RelayCommand::Prompt { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn closing_cancels_the_supervised_start_before_any_prompt() {
+        let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+        let backend = ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "session-1".into(),
+                accepted_ordinal: 1,
+                submitted: submitted_tx,
+                view: None,
+            })),
+            running_states(),
+            Arc::new(NoExports),
+        );
+        backend
+            .start_followup(
+                "session-1".into(),
+                StartFollowup {
+                    prompt: Some("must not run".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let task = backend
+            .starts
+            .lock()
+            .unwrap()
+            .get_mut("session-1")
+            .unwrap()
+            .task
+            .take()
+            .unwrap();
+        backend.cancel_start("session-1".into()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(submitted.try_recv().is_err());
+        assert!(
+            backend
+                .start_status("session-1".into())
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

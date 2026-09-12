@@ -125,9 +125,13 @@ pub struct MaterializedSessionMutation {
     pub active_turn: Option<Option<MaterializedTurn>>,
     /// A finished turn is only ever replaced, never cleared.
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
+    pub config_results: Vec<(String, Option<String>)>,
+    pub provider_cost: Option<crate::hel_usage::ProviderCost>,
 }
 
 mod schema;
+mod usage;
+pub use usage::*;
 
 pub use schema::database_path;
 #[cfg(test)]
@@ -2473,6 +2477,7 @@ pub struct TranscriptPage {
     /// The newest sequence in the whole transcript, so a caller can tell
     /// whether this page reached the end without asking for another one.
     pub latest_seq: u64,
+    pub next_after_seq: u64,
     pub execution: MaterializedExecutionState,
 }
 
@@ -2499,30 +2504,57 @@ fn load_materialized_transcript_after_from(
     after_seq: u64,
     limit: usize,
 ) -> Result<Option<TranscriptPage>> {
-    let connection = open_reader(path)?;
+    load_materialized_transcript_filtered_from(path, session_id, after_seq, limit, None)
+}
+
+pub fn load_materialized_transcript_filtered(
+    session_id: &str,
+    after_seq: u64,
+    limit: usize,
+    role: Option<crate::hel_transcript::TranscriptRole>,
+) -> Result<Option<TranscriptPage>> {
+    load_materialized_transcript_filtered_from(&database_path(), session_id, after_seq, limit, role)
+}
+
+fn load_materialized_transcript_filtered_from(
+    path: &Path,
+    session_id: &str,
+    after_seq: u64,
+    limit: usize,
+    role: Option<crate::hel_transcript::TranscriptRole>,
+) -> Result<Option<TranscriptPage>> {
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
     let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
         return Ok(None);
     };
+    let role = role.map(|r| r.storage_kind());
     let mut statement = connection.prepare(
-        "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
+        "WITH matches AS (
+             SELECT *, COALESCE(latest_content_event_ordinal, position) AS seq
+             FROM materialized_transcript_items WHERE session_id = ?1
+             AND COALESCE(latest_content_event_ordinal, position) > ?2
+             AND (?4 IS NULL OR json_extract(body_json, '$.kind') = ?4)
+         ), boundary AS (SELECT MAX(seq) AS seq FROM (SELECT seq FROM matches ORDER BY seq LIMIT ?3))
+         SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
                 last_changed_at_ms, body_json
-         FROM materialized_transcript_items
-         WHERE session_id = ?1
-           AND COALESCE(latest_content_event_ordinal, position) > ?2
-         ORDER BY COALESCE(latest_content_event_ordinal, position), stable_id
-         LIMIT ?3",
+         FROM matches WHERE seq <= (SELECT seq FROM boundary)
+         ORDER BY seq, stable_id",
     )?;
     let rows = statement
-        .query_map(params![session_id, after_seq, limit as i64], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, u64>(1)?,
-                row.get::<_, Option<u64>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        })?
+        .query_map(
+            params![session_id, after_seq, limit.clamp(1, 1000) as i64, role],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, Option<u64>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let items = rows
         .into_iter()
@@ -2555,7 +2587,14 @@ fn load_materialized_transcript_after_from(
         [session_id],
         |row| row.get::<_, u64>(0),
     )?;
+    let last_seq = items.last().map_or(after_seq, |item| item.seq());
+    let more: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM materialized_transcript_items WHERE session_id = ?1 AND COALESCE(latest_content_event_ordinal, position) > ?2 AND (?3 IS NULL OR json_extract(body_json, '$.kind') = ?3))", params![session_id, last_seq, role], |r| r.get(0))?;
     Ok(Some(TranscriptPage {
+        next_after_seq: if more {
+            last_seq
+        } else {
+            latest_seq.max(after_seq)
+        },
         items,
         latest_seq,
         execution: fields.execution,
@@ -3161,6 +3200,7 @@ pub struct ProjectionPage<'a> {
     dirty: bool,
     pending: MaterializedSessionMutation,
     pending_transcript: BTreeMap<String, PendingTranscriptMutation>,
+    pending_turns: Vec<MaterializedTurnOutcome>,
 }
 
 struct PendingTranscriptMutation {
@@ -3278,11 +3318,18 @@ impl ProjectionPage<'_> {
         if let Some(pending_elicitations) = &mutation.pending_elicitations {
             self.pending.pending_elicitations = Some(pending_elicitations.clone());
         }
+        self.pending
+            .config_results
+            .extend(mutation.config_results.clone());
         if let Some(active_turn) = &mutation.active_turn {
             self.pending.active_turn = Some(active_turn.clone());
         }
         if let Some(last_turn_outcome) = &mutation.last_turn_outcome {
+            self.pending_turns.push(last_turn_outcome.clone());
             self.pending.last_turn_outcome = Some(last_turn_outcome.clone());
+        }
+        if let Some(cost) = &mutation.provider_cost {
+            self.pending.provider_cost = Some(cost.clone());
         }
         self.applied_ordinal = event_ordinal;
         event_digest.clone_into(&mut self.applied_digest);
@@ -3353,6 +3400,18 @@ impl ProjectionPage<'_> {
                  SET pending_elicitations_json = ?2 WHERE session_id = ?1",
                 params![session_id, serde_json::to_string(pending_elicitations)?],
             )?;
+        }
+        for turn in &self.pending_turns {
+            tx.execute("INSERT OR REPLACE INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body) VALUES (?1, ?2, ?3, ?4, ?5)", params![session_id, turn.command_id, turn.completed_ordinal, turn.turn_start_position, serde_json::to_string(turn)?])?;
+        }
+        if let Some(cost) = &self.pending.provider_cost {
+            tx.execute(
+                "INSERT OR REPLACE INTO session_provider_cost(session_id, body) VALUES (?1, ?2)",
+                params![session_id, serde_json::to_string(cost)?],
+            )?;
+        }
+        for (command_id, error) in &self.pending.config_results {
+            tx.execute("INSERT OR REPLACE INTO api_config_results(session_id, command_id, error) VALUES (?1, ?2, ?3)", params![session_id, command_id, error])?;
         }
         if let Some(active_turn) = &self.pending.active_turn {
             tx.execute(
@@ -3450,6 +3509,7 @@ fn apply_projection_page_with<T>(
         dirty: false,
         pending: MaterializedSessionMutation::default(),
         pending_transcript: BTreeMap::new(),
+        pending_turns: Vec::new(),
     };
     // Dropping the page on failure rolls the whole transaction back, leaving
     // the projection at the frontier the relay last saw acknowledged.
@@ -5159,6 +5219,59 @@ impl<'a> ValueRefExt<'a> for rusqlite::types::ValueRef<'a> {
             value => Ok(Some(value.as_blob()?)),
         }
     }
+}
+
+/// The exact result of a configuration command, once durably projected.
+pub fn load_config_result(session_id: &str, command_id: &str) -> Result<Option<Option<String>>> {
+    Ok(open_reader(&database_path())?
+        .query_row(
+            "SELECT error FROM api_config_results WHERE session_id = ?1 AND command_id = ?2",
+            params![session_id, command_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+pub fn load_profile_config_cache(
+    profile: &str,
+    model: &str,
+    fingerprint: &str,
+) -> Result<Option<String>> {
+    load_profile_config_cache_from(&database_path(), profile, model, fingerprint)
+}
+
+fn load_profile_config_cache_from(
+    path: &Path,
+    profile: &str,
+    model: &str,
+    fingerprint: &str,
+) -> Result<Option<String>> {
+    Ok(open_reader(path)?.query_row(
+        "SELECT body FROM profile_config_cache WHERE profile = ?1 AND model = ?2 AND fingerprint = ?3 AND observed_at > ?4",
+        params![profile, model, fingerprint, Utc::now().timestamp() - 86400], |row| row.get(0),
+    ).optional()?)
+}
+
+pub fn save_profile_config_cache(
+    profile: String,
+    model: String,
+    fingerprint: String,
+    body: String,
+) -> Result<()> {
+    submit_database_write("save profile configuration cache", move |connection| {
+        save_profile_config_cache_with(connection, &profile, &model, &fingerprint, &body)
+    })
+}
+
+fn save_profile_config_cache_with(
+    connection: &Connection,
+    profile: &str,
+    model: &str,
+    fingerprint: &str,
+    body: &str,
+) -> Result<()> {
+    connection.execute("INSERT OR REPLACE INTO profile_config_cache(profile, model, fingerprint, observed_at, body) VALUES (?1, ?2, ?3, ?4, ?5)", params![profile, model, fingerprint, Utc::now().timestamp(), body])?;
+    Ok(())
 }
 
 #[cfg(test)]

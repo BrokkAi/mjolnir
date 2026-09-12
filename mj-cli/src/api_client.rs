@@ -57,11 +57,12 @@ impl ApiClient {
                 bail!("the web viewer failed to start: {message}; run `mj daemon restart`")
             }
         };
+        probe_api(&viewer_url).await?;
         let token_path = api_token_path();
         let token = std::fs::read_to_string(&token_path)
             .with_context(|| {
                 format!(
-                    "read the API token {}; the daemon writes it when the web viewer starts",
+                    "read the API token {}; this daemon supports the API, but its token is missing or unreadable; check permissions or run `mj daemon restart`",
                     token_path.display()
                 )
             })?
@@ -144,8 +145,51 @@ impl ApiClient {
         decode(response).await
     }
 
-    pub(crate) async fn sessions(&self) -> Result<SessionListResponse> {
-        self.get_json("/sessions").await
+    pub(crate) async fn sessions_in_workspace(
+        &self,
+        workspace_id: Option<String>,
+    ) -> Result<SessionListResponse> {
+        let response = self
+            .send(
+                self.http
+                    .get(self.url("/sessions"))
+                    .query(&mj_controller::hel_server::api::SessionListQuery { workspace_id })
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .await?;
+        decode(response).await
+    }
+
+    pub(crate) async fn models(
+        &self,
+        profile: &str,
+        model: Option<String>,
+    ) -> Result<hel::hel_worker_launch::ProfileConfig> {
+        let mut request = self
+            .http
+            .get(self.url(&format!("/profiles/{profile}/config")))
+            .timeout(Duration::from_secs(330));
+        if let Some(model) = model {
+            request = request.query(&[("model", model)]);
+        }
+        decode(self.send(request).await?).await
+    }
+
+    pub(crate) async fn set_config(
+        &self,
+        session: &str,
+        request: &mj_controller::hel_server::api::SetConfigRequest,
+    ) -> Result<ApiSession> {
+        decode(
+            self.send(
+                self.http
+                    .patch(self.url(&format!("/sessions/{session}/config")))
+                    .json(request)
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .await?,
+        )
+        .await
     }
 
     pub(crate) async fn session(&self, session_id: &str) -> Result<ApiSession> {
@@ -156,7 +200,8 @@ impl ApiClient {
         &self,
         request: &StartSessionRequest,
     ) -> Result<StartSessionResponse> {
-        self.post_json("/sessions", request, REQUEST_TIMEOUT).await
+        self.post_json("/sessions", request, Duration::from_secs(660))
+            .await
     }
 
     pub(crate) async fn prompt(&self, session_id: &str, text: String) -> Result<PromptResponse> {
@@ -186,8 +231,12 @@ impl ApiClient {
         session_id: &str,
         after_seq: Option<u64>,
         limit: Option<usize>,
+        role: Option<hel::hel_transcript::TranscriptRole>,
     ) -> Result<TranscriptResponse> {
         let mut query = Vec::new();
+        if let Some(role) = role {
+            query.push(format!("role={}", role.as_str()));
+        }
         if let Some(after_seq) = after_seq {
             query.push(format!("after_seq={after_seq}"));
         }
@@ -201,6 +250,20 @@ impl ApiClient {
         self.get_json(&path).await
     }
 
+    pub(crate) async fn usage(
+        &self,
+        session_id: &str,
+        after_seq: Option<u64>,
+        limit: Option<usize>,
+    ) -> Result<hel::hel_database::UsagePage> {
+        self.get_json(&format!(
+            "/sessions/{session_id}/usage?after_seq={}&limit={}",
+            after_seq.unwrap_or(0),
+            limit.unwrap_or(200)
+        ))
+        .await
+    }
+
     pub(crate) async fn diff(&self, session_id: &str) -> Result<String> {
         let response = self
             .send(
@@ -210,6 +273,56 @@ impl ApiClient {
             )
             .await?;
         response.text().await.context("read the session diff")
+    }
+
+    pub(crate) async fn put_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        bytes: Vec<u8>,
+        overwrite: bool,
+    ) -> Result<mj_controller::hel_server::api::WriteFileResponse> {
+        self.send(
+            self.http
+                .put(self.url(&format!("/sessions/{session_id}/files")))
+                .query(&[
+                    ("path", path),
+                    ("overwrite", if overwrite { "true" } else { "false" }),
+                ])
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(bytes)
+                .timeout(EXPORT_TIMEOUT),
+        )
+        .await?
+        .json()
+        .await
+        .context("read file injection result")
+    }
+
+    pub(crate) async fn elicitations(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<hel::hel_elicitation::ElicitationRequest>> {
+        self.get_json(&format!("/sessions/{session_id}/elicitations"))
+            .await
+    }
+
+    pub(crate) async fn respond_elicitation(
+        &self,
+        session_id: &str,
+        elicitation_id: &str,
+        response: &hel::hel_elicitation::ElicitationResponse,
+    ) -> Result<()> {
+        self.send(
+            self.http
+                .post(self.url(&format!(
+                    "/sessions/{session_id}/elicitations/{elicitation_id}"
+                )))
+                .json(response)
+                .timeout(REQUEST_TIMEOUT),
+        )
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn read_file(&self, session_id: &str, path: &str) -> Result<Vec<u8>> {
@@ -278,6 +391,32 @@ impl ApiClient {
         .await
         .map(|_| ())
     }
+}
+
+/// An unauthenticated versioned 401 proves the route exists before a token is read.
+async fn probe_api(base_url: &str) -> Result<()> {
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/api/v1/sessions",
+            base_url.trim_end_matches('/')
+        ))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .context("reach the daemon API; check `mj daemon status`")?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND
+        && !response.headers().contains_key(API_VERSION_HEADER)
+    {
+        bail!("this daemon predates the Mjolnir API; run `mj daemon restart`");
+    }
+    check_version(&response)?;
+    if response.status().is_success() || response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(());
+    }
+    bail!(
+        "the daemon API is unavailable ({}); check `mj daemon status`",
+        response.status()
+    )
 }
 
 /// What an export answered with.
@@ -429,7 +568,7 @@ mod tests {
         let (url, seen) = serve(Some("1")).await;
         let client = ApiClient::new(url, "secret-token".to_owned()).unwrap();
 
-        let sessions = client.sessions().await.unwrap();
+        let sessions = client.sessions_in_workspace(None).await.unwrap();
         assert_eq!(sessions.sessions[0].id, "session-1");
         let session = client.session("session-2").await.unwrap();
         assert_eq!(session.id, "session-2");
@@ -463,11 +602,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_probe_succeeds_without_reading_a_token() {
+        let (url, seen) = serve(Some("1")).await;
+        probe_api(&url).await.unwrap();
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "the support probe must not need authentication"
+        );
+        let (url, _) = serve(Some("2")).await;
+        assert!(
+            probe_api(&url)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("version 2")
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, Router::new()).await.unwrap();
+        });
+        assert!(
+            probe_api(&url)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("mj daemon restart")
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn a_response_without_this_contract_version_is_refused() {
         let (url, _seen) = serve(None).await;
         let error = ApiClient::new(url, "secret-token".to_owned())
             .unwrap()
-            .sessions()
+            .sessions_in_workspace(None)
             .await
             .unwrap_err();
         assert!(
@@ -478,7 +648,7 @@ mod tests {
         let (url, _seen) = serve(Some("2")).await;
         let error = ApiClient::new(url, "secret-token".to_owned())
             .unwrap()
-            .sessions()
+            .sessions_in_workspace(None)
             .await
             .unwrap_err();
         assert!(
