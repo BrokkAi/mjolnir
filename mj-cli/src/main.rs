@@ -92,6 +92,12 @@ enum Command {
     Transcript(api_commands::TranscriptArgs),
     /// Read recorded token usage and coverage.
     Usage(api_commands::UsageArgs),
+    /// Atomically upload a file to an idle session workspace.
+    PutFile(api_commands::PutFileArgs),
+    /// List structured input requests from a session.
+    Elicitations(api_commands::ElicitationsArgs),
+    /// Respond to a structured input request.
+    Respond(api_commands::RespondArgs),
     /// Print a unified diff of a session's work.
     Diff(api_commands::DiffArgs),
     /// Get a session's work out as a patch, a pushed branch, or a git bundle.
@@ -334,6 +340,9 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Wait(_)) => "wait",
         Some(Command::Transcript(_)) => "transcript",
         Some(Command::Usage(_)) => "usage",
+        Some(Command::PutFile(_)) => "put-file",
+        Some(Command::Elicitations(_)) => "elicitations",
+        Some(Command::Respond(_)) => "respond",
         Some(Command::Diff(_)) => "diff",
         Some(Command::Export(_)) => "export",
         Some(Command::Sessions(_)) => "sessions",
@@ -398,6 +407,15 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Wait(args)) => api_commands::wait(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::PutFile(args)) => api_commands::put_file(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Elicitations(args)) => api_commands::elicitations(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Respond(args)) => api_commands::respond(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Usage(args)) => api_commands::usage(args)

@@ -275,6 +275,56 @@ impl ApiClient {
         response.text().await.context("read the session diff")
     }
 
+    pub(crate) async fn put_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        bytes: Vec<u8>,
+        overwrite: bool,
+    ) -> Result<mj_controller::hel_server::api::WriteFileResponse> {
+        self.send(
+            self.http
+                .put(self.url(&format!("/sessions/{session_id}/files")))
+                .query(&[
+                    ("path", path),
+                    ("overwrite", if overwrite { "true" } else { "false" }),
+                ])
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(bytes)
+                .timeout(EXPORT_TIMEOUT),
+        )
+        .await?
+        .json()
+        .await
+        .context("read file injection result")
+    }
+
+    pub(crate) async fn elicitations(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<hel::hel_elicitation::ElicitationRequest>> {
+        self.get_json(&format!("/sessions/{session_id}/elicitations"))
+            .await
+    }
+
+    pub(crate) async fn respond_elicitation(
+        &self,
+        session_id: &str,
+        elicitation_id: &str,
+        response: &hel::hel_elicitation::ElicitationResponse,
+    ) -> Result<()> {
+        self.send(
+            self.http
+                .post(self.url(&format!(
+                    "/sessions/{session_id}/elicitations/{elicitation_id}"
+                )))
+                .json(response)
+                .timeout(REQUEST_TIMEOUT),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub(crate) async fn read_file(&self, session_id: &str, path: &str) -> Result<Vec<u8>> {
         let response = self
             .send(

@@ -1815,6 +1815,99 @@ pub fn checkpoint_was_deferred(error: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<CheckpointDeferred>().is_some())
 }
 
+/// An idle workspace operation holds the managed connection and a worker
+/// barrier. Dropping this value disconnects and cancels the barrier; releasing
+/// it resumes dispatch without claiming that an archive covers the journal.
+pub struct IdleWorkspaceLease {
+    lease: ManagedSessionLease,
+    command_id: String,
+    harness: HarnessKind,
+}
+
+impl IdleWorkspaceLease {
+    pub async fn acquire(handle: &ManagedSessionHandle, harness: HarnessKind) -> Result<Self> {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut lease = handle.lease_connection().await?;
+            let snapshot = lease.connection_mut().sync().await?;
+            ensure!(
+                snapshot.operational.safe_to_replace(harness),
+                "session must be live and idle with no queued or background work"
+            );
+            let command_id = new_command_id("workspace-write")?;
+            lease
+                .connection_mut()
+                .submit(
+                    command_id.clone(),
+                    RelayCommand::BeginCheckpoint {
+                        reason: Some("API workspace file write".into()),
+                    },
+                )
+                .await?;
+            loop {
+                let snapshot = lease.connection_mut().sync().await?;
+                if checkpoint_barrier_is_ready(&snapshot, &command_id) {
+                    let mut operation = Self {
+                        lease,
+                        command_id,
+                        harness,
+                    };
+                    operation.verify().await?;
+                    return Ok(operation);
+                }
+                ensure!(
+                    snapshot.operational.execution != RelayExecutionState::Running,
+                    "session started work before the file barrier was ready"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .context("session did not become available for a file write within 30 seconds")?
+    }
+
+    pub async fn verify(&mut self) -> Result<()> {
+        let mut snapshot = self.lease.connection_mut().sync().await?;
+        ensure!(
+            checkpoint_barrier_is_ready(&snapshot, &self.command_id),
+            "file write lost its workspace barrier"
+        );
+        snapshot.operational.checkpoint_barrier = None;
+        // Commands may queue behind this barrier, but cannot begin until it
+        // releases. Their arrival does not invalidate an in-progress write.
+        snapshot.operational.queued_prompts.clear();
+        ensure!(
+            snapshot.operational.safe_to_replace(self.harness),
+            "session is no longer idle for the file write"
+        );
+        Ok(())
+    }
+
+    pub async fn release(mut self) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            self.lease
+                .connection_mut()
+                .submit(
+                    new_command_id("workspace-release")?,
+                    RelayCommand::ReleaseCheckpoint {
+                        barrier_command_id: self.command_id.clone(),
+                    },
+                )
+                .await?;
+            loop {
+                let snapshot = self.lease.connection_mut().sync().await?;
+                if snapshot.operational.checkpoint_barrier.as_deref() != Some(&self.command_id) {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .context("release file write barrier timed out")??;
+        self.lease.release();
+        Ok(())
+    }
+}
+
 fn checkpoint_barrier_is_ready(snapshot: &ManagedSessionSnapshot, command_id: &str) -> bool {
     snapshot.operational.checkpoint_barrier.as_deref() == Some(command_id)
         && snapshot.operational.checkpoint_ready.is_some()
@@ -4680,5 +4773,117 @@ mod tests {
 
         std::fs::write(&checkpoint.archive_path, b"not an archive any more").unwrap();
         assert!(reuse(Some(&checkpoint), latched.event_frontier, &latched).is_none());
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery() {
+        if std::env::var_os(LATCH_TEST_CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let name = format!(
+                "{}::workspace_lease_blocks_prompts_and_releases_without_advancing_recovery",
+                module_path!()
+                    .strip_prefix("mj_controller::")
+                    .unwrap_or(module_path!())
+            );
+            let mut command = hel::hel_targets::CommandSpec::new(
+                std::env::current_exe().unwrap().to_string_lossy(),
+                ["--exact", &name, "--nocapture"],
+            );
+            command.env.insert(LATCH_TEST_CHILD.into(), "1".into());
+            command.env.insert(
+                "MJ_DATA_DIR".into(),
+                directory.path().to_string_lossy().into(),
+            );
+            let result =
+                hel::hel_targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(60))
+                    .execute(&command)
+                    .unwrap();
+            assert_eq!(
+                result.status,
+                0,
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+                "child did not run its test"
+            );
+            return;
+        }
+        let _writer = hel::hel_database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let (_channels, handle, mut relay, barrier, _cursor) =
+            latch_a_live_checkpoint(root.path(), None, ReleaseSupport::Supported, false).await;
+        relay
+            .connection_mut()
+            .submit(
+                new_command_id("release-initial").unwrap(),
+                RelayCommand::ReleaseCheckpoint {
+                    barrier_command_id: barrier,
+                },
+            )
+            .await
+            .unwrap();
+        relay.release();
+        wait_until_the_actor_serves_again(&handle).await;
+        let before = handle
+            .view()
+            .snapshot
+            .unwrap()
+            .operational
+            .recovery_floor_ordinal;
+        let mut workspace = IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
+            .await
+            .unwrap();
+        workspace.verify().await.unwrap();
+        drop(workspace);
+        wait_until_the_actor_serves_again(&handle).await;
+        assert!(
+            handle
+                .view()
+                .snapshot
+                .unwrap()
+                .operational
+                .checkpoint_barrier
+                .is_none()
+        );
+        let mut workspace = IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
+            .await
+            .unwrap();
+        let submitting = handle.clone();
+        let mut prompt = tokio::spawn(async move {
+            submitting
+                .submit(
+                    new_command_id("after-write").unwrap(),
+                    RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::Text(TextContent::new("go"))],
+                    },
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut prompt)
+                .await
+                .is_err(),
+            "prompt must wait for the workspace owner"
+        );
+        workspace.verify().await.unwrap();
+        workspace.release().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), prompt)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        wait_until_the_actor_serves_again(&handle).await;
+        let after = handle.view().snapshot.unwrap();
+        assert!(after.operational.checkpoint_barrier.is_none());
+        assert_eq!(after.operational.recovery_floor_ordinal, before);
+        assert!(
+            IdleWorkspaceLease::acquire(&handle, HarnessKind::Codex)
+                .await
+                .is_err(),
+            "a queued or running prompt must prevent file injection"
+        );
     }
 }

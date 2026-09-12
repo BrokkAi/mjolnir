@@ -46,6 +46,13 @@ pub trait ExportRuntime: Send + Sync {
     /// none.
     fn session_record(&self, session_id: &str) -> Option<hel::hel_state::SessionRecord>;
 
+    fn workspace_session(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, Result<mj_controller::hel_session_manager::ManagedSessionHandle>> {
+        Box::pin(async { anyhow::bail!("workspace file injection is unavailable") })
+    }
+
     /// Checkpoint a session now, returning the archive it wrote.
     fn checkpoint_now(
         &self,
@@ -56,6 +63,13 @@ pub trait ExportRuntime: Send + Sync {
 impl ExportRuntime for RuntimeState {
     fn session_record(&self, session_id: &str) -> Option<hel::hel_state::SessionRecord> {
         RuntimeState::session_record(self, session_id)
+    }
+
+    fn workspace_session(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<mj_controller::hel_session_manager::ManagedSessionHandle>> {
+        Box::pin(async move { self.workspace_session_handle(&session_id).await })
     }
 
     fn checkpoint_now(
@@ -341,6 +355,90 @@ fn target_join(root: &str, relative: &Path) -> String {
     path
 }
 
+async fn write_workspace_file(
+    exports: Arc<dyn ExportRuntime>,
+    session_id: String,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    overwrite: bool,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), ExportError> {
+    use std::sync::atomic::Ordering;
+    let record = exports
+        .session_record(&session_id)
+        .ok_or_else(|| ExportError::Refused("unknown session".into()))?;
+    let handle = exports
+        .workspace_session(session_id.clone())
+        .await
+        .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
+    let layout = export_layout(session_id.clone()).await?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(ExportError::Refused("file upload cancelled".into()));
+    }
+    let mut lease =
+        mj_controller::hel_controller::IdleWorkspaceLease::acquire(&handle, record.harness_kind)
+            .await
+            .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(ExportError::Refused("file upload cancelled".into()));
+    }
+    let worker_cancelled = cancelled.clone();
+    let mut transfer = tokio::task::spawn_blocking(move || {
+        let binary = format!(
+            "{}/hel",
+            hel_targets::worker_root(&layout.backend, &session_id)?
+        );
+        let mut argv = vec![
+            binary,
+            "worker".into(),
+            "write-file".into(),
+            "--length".into(),
+            bytes.len().to_string(),
+            "--root".into(),
+            layout.workspace_root,
+            "--path".into(),
+            target_join("", &path).trim_start_matches('/').into(),
+        ];
+        if overwrite {
+            argv.push("--overwrite".into());
+        }
+        let command = hel_targets::command_on_locator(
+            &layout.backend,
+            &session_id,
+            argv,
+            "session file write",
+        )?
+        .with_sensitive_stdin(bytes);
+        CancellableProcessExecutor::new(worker_cancelled)
+            .with_deadline(EXPORT_TIMEOUT)
+            .execute(&command)
+    });
+    let output = loop {
+        tokio::select! {
+            output = &mut transfer => break output.map_err(|e| ExportError::Failed(e.into()))?.map_err(ExportError::Failed)?,
+            () = tokio::time::sleep(Duration::from_millis(250)) => {
+                if let Err(error) = tokio::time::timeout(Duration::from_secs(10), lease.verify()).await.context("checking file write barrier timed out").and_then(|r| r) {
+                    cancelled.store(true, Ordering::Release);
+                    // Do not release ownership while a subprocess can still write.
+                    match transfer.await {
+                        Ok(Ok(_)) => {},
+                        Ok(Err(failure)) => tracing::warn!("cancelled file transfer: {failure:#}"),
+                        Err(failure) => tracing::warn!("file transfer task failed: {failure}"),
+                    }
+                    return Err(ExportError::Failed(error));
+                }
+            }
+        }
+    };
+    let result = worker_output(output, "session file write").map(|_| ());
+    lease.release().await.map_err(|e| {
+        ExportError::Failed(
+            e.context("file transfer ended but the workspace barrier could not be released"),
+        )
+    })?;
+    result
+}
+
 /// Run one `hel worker ...` command on the session's target and return its
 /// standard output.
 async fn worker_command(
@@ -360,14 +458,18 @@ async fn worker_command(
         CancellableProcessExecutor::with_timeout(EXPORT_TIMEOUT).execute(&command)
     })
     .await?;
+    worker_output(output, purpose)
+}
+
+fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, ExportError> {
     match output.status {
         0 => Ok(output.stdout),
         // A worker installed before these subcommands existed answers clap's
         // usage failure. That is not a failed export: resuming the session
         // reinstalls the worker and the same call then works.
-        CLAP_USAGE_EXIT_CODE => Err(ExportError::Refused(
-            "worker on this target predates export support; resume the session to upgrade".into(),
-        )),
+        CLAP_USAGE_EXIT_CODE => Err(ExportError::Refused(format!(
+            "worker on this target does not support {purpose}; resume the session to upgrade"
+        ))),
         // The worker met a precondition it could not satisfy — no recorded
         // base, no push remote, a path outside the workspace — and printed the
         // reason. That is the caller's to fix, so it is a refusal, not a
@@ -657,6 +759,47 @@ impl SubagentBackend for ApiBackend {
                 target_join("", &path).trim_start_matches('/').to_owned(),
             ];
             worker_command(layout, session_id, arguments, "session file read").await
+        })
+    }
+
+    fn write_file(
+        &self,
+        session_id: String,
+        path: PathBuf,
+        bytes: Vec<u8>,
+        overwrite: bool,
+    ) -> BoxFuture<'_, Result<(), ExportError>> {
+        let exports = self.exports.clone();
+        Box::pin(async move {
+            if matches!(
+                self.start_status(session_id.clone())
+                    .await
+                    .map_err(ExportError::Failed)?,
+                Some(StartStatus::Pending)
+            ) {
+                return Err(ExportError::Refused(
+                    "session initialization is still running".into(),
+                ));
+            }
+            // The supervised task owns the lease until the subprocess exits,
+            // even if the request is cancelled while stdin is streaming.
+            let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let _cancel_on_drop = super::ProcessCancellationGuard(cancelled.clone());
+            let task = tokio::spawn(write_workspace_file(
+                exports, session_id, path, bytes, overwrite, cancelled,
+            ));
+            tokio::spawn(async move {
+                let result = task
+                    .await
+                    .map_err(|error| ExportError::Failed(error.into()))
+                    .and_then(|result| result);
+                if let Err(error) = &result {
+                    tracing::warn!(?error, "API file injection failed");
+                }
+                result
+            })
+            .await
+            .map_err(|error| ExportError::Failed(error.into()))?
         })
     }
 

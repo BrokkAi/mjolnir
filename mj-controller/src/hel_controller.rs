@@ -69,8 +69,8 @@ pub(crate) use worker_binary::refresh_remote_worker_binary_if_stale;
 pub(crate) use worktree::path_exists_on_managed_target;
 
 pub use checkpoint::{
-    CheckpointArtifact, CheckpointDeferred, SessionExportLayout, checkpoint_was_deferred,
-    reconcile_managed_checkpoint_archives,
+    CheckpointArtifact, CheckpointDeferred, IdleWorkspaceLease, SessionExportLayout,
+    checkpoint_was_deferred, reconcile_managed_checkpoint_archives,
 };
 pub use recovery_scan::{RecoveryCandidate, RecoveryScan};
 pub use resume::{

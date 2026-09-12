@@ -500,3 +500,61 @@ their sequence advances.
 mj usage --session SESSION --json
 mj transcript --session SESSION --role agent --limit 20 --json
 ```
+
+
+## Upload files and answer structured questions
+
+`PUT /api/v1/sessions/{id}/files?path=project/input.json` accepts a raw binary
+body up to 16 MiB and returns `{ "path": "project/input.json", "bytes": 123 }`.
+The path is relative to the session workspace, as with file reads. Parent
+directories are created. Absolute paths, traversal, and symlink paths are
+refused. Existing files require `overwrite=true`; publication is atomic.
+The worker verifies the expected byte count before publication, so interrupted
+transfers cannot publish truncated files.
+
+The session must have a live idle worker, with no initialization, queued work,
+or active background work. The controller holds a worker barrier through the
+transfer, then releases it without making a checkpoint. Transfers have a
+five-minute deadline. Cancelling the request signals the subprocess to stop;
+the supervised transfer keeps its ownership until the subprocess exits. A
+complete file published before cancellation remains in place. An older installed worker
+must be upgraded by resuming the session before this command is available.
+
+`GET /api/v1/sessions/{id}/elicitations` lists pending structured input requests.
+They also appear as `pending_elicitations` in session detail. Respond with
+`POST /api/v1/sessions/{id}/elicitations/{request_id}` and one of:
+
+```json
+{"action":"accept","content":{"name":"example"}}
+```
+
+```json
+{"action":"decline"}
+```
+
+```json
+{"action":"cancel"}
+```
+
+The response is checked against the actual request, including required fields
+and allowed choices, before dispatch. Successful dispatch returns 202; an
+unknown request returns 404 and an invalid answer returns 400.
+
+Add `"return_on_input": true` to a wait request to return `input_required` with
+`pending_elicitations` when a structured answer is needed. This does not mean
+the turn finished. Send the response, then wait again. Ordinary waits retain
+their existing behavior. Plain-text questions are not classified as structured
+input requests.
+
+```sh
+mj put-file --session SESSION --path project/input.json ./input.json
+mj put-file --session SESSION --path project/input.json --overwrite ./input.json
+mj wait --session SESSION --return-on-input --json
+mj elicitations --session SESSION --json
+mj respond --session SESSION --elicitation REQUEST --response-file answer.json
+```
+
+`mj put-file` accepts `-` as the source for binary stdin. `mj respond` accepts a
+positional JSON response or `-` for stdin. `mj prompt --wait` also accepts
+`--return-on-input`. The CLI exits successfully on opted-in `input_required`
+results so an orchestrator can answer and resume waiting.

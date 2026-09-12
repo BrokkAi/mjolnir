@@ -1489,7 +1489,7 @@ pub(crate) async fn run_server(
                     let task_termination = termination.clone();
                     preflight_jobs.spawn(async move {
                         let cancelled = Arc::new(AtomicBool::new(false));
-                        let cancellation_guard = PreflightCancellationGuard(cancelled.clone());
+                        let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
                         let mut blocking = tokio::task::spawn_blocking(move || {
                             run_new_preflight_with_cancellation(
                                 config,
@@ -2091,6 +2091,15 @@ fn flatten_stored<T>(
     }
 }
 
+/// Cancel the shared subprocess executor when its request owner goes away.
+struct ProcessCancellationGuard(Arc<AtomicBool>);
+
+impl Drop for ProcessCancellationGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 /// Perform the preflight for a new session.
 ///
 /// This runs on the blocking task owned by the phone server. Bare targets
@@ -2098,14 +2107,6 @@ fn flatten_stored<T>(
 /// targets resolve every bundle repository to a network source and report the
 /// exact fetch branch and publication destinations. Local working-tree
 /// contents are never copied for this path.
-struct PreflightCancellationGuard(Arc<AtomicBool>);
-
-impl Drop for PreflightCancellationGuard {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
 #[cfg(test)]
 fn run_new_preflight(
     config: HelConfig,

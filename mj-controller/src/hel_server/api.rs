@@ -212,6 +212,8 @@ pub struct ApiSession {
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
     #[serde(default)]
     pub config_options: Vec<super::ViewerConfigOption>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_elicitations: Vec<hel::hel_elicitation::ElicitationRequest>,
 }
 
 impl From<&ViewerSession> for ApiSession {
@@ -233,6 +235,7 @@ impl From<&ViewerSession> for ApiSession {
             updated_at: session.updated_at.clone(),
             last_turn_outcome: None,
             config_options: session.config_options.clone(),
+            pending_elicitations: session.pending_elicitations.clone(),
         }
     }
 }
@@ -291,6 +294,9 @@ pub struct PromptResponse {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WaitRequest {
+    /// Return when the harness presents a structured input request.
+    #[serde(default)]
+    pub return_on_input: bool,
     /// Wait for this specific prompt. Absent means "wait until the session is
     /// idle with nothing queued", which is what a caller that lost its turn id
     /// wants.
@@ -304,6 +310,8 @@ pub struct WaitRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitOutcome {
+    /// A structured elicitation needs an answer; only returned by opt-in waits.
+    InputRequired,
     /// The turn completed normally.
     Finished,
     /// The turn failed, was rejected, or the session reported an error.
@@ -389,6 +397,8 @@ impl From<&mj_client::session::ManagedSessionView> for RelayHealth {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaitResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_elicitations: Vec<hel::hel_elicitation::ElicitationRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<hel::hel_usage::TokenUsage>,
     pub outcome: WaitOutcome,
@@ -667,6 +677,16 @@ pub trait SubagentBackend: Send + Sync {
         path: PathBuf,
     ) -> BoxFuture<'_, Result<Vec<u8>, ExportError>>;
 
+    fn write_file(
+        &self,
+        _session_id: String,
+        _path: PathBuf,
+        _bytes: Vec<u8>,
+        _overwrite: bool,
+    ) -> BoxFuture<'_, Result<(), ExportError>> {
+        Box::pin(async { Err(ExportError::Refused("file injection is unavailable".into())) })
+    }
+
     /// Push the session's branch to its repository's default remote.
     fn push_branch(
         &self,
@@ -713,6 +733,7 @@ pub fn map_stop_reason(stop_reason: &str) -> (WaitOutcome, Option<String>) {
 /// Everything one pass of the wait loop knows about a session.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WaitObservation {
+    pub pending_elicitations: Vec<hel::hel_elicitation::ElicitationRequest>,
     pub lifecycle: Option<ViewerLifecycleCategory>,
     /// A recorded launch failure names this session.
     pub launch_failed: bool,
@@ -835,6 +856,29 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
         _ => None,
     });
+    let target_finished = target.is_some_and(|target| {
+        observation
+            .last_turn_outcome
+            .as_ref()
+            .is_some_and(|outcome| {
+                outcome
+                    .accepted_ordinal
+                    .is_some_and(|ordinal| ordinal >= target)
+                    && !retry_pending(outcome)
+            })
+    });
+    if request.return_on_input && !target_finished && !observation.pending_elicitations.is_empty() {
+        return Some(WaitDecision {
+            outcome: WaitOutcome::InputRequired,
+            stop_reason: None,
+            message: Some("the harness needs a response to a structured input request".into()),
+            turn_id: observation
+                .active_turn
+                .as_ref()
+                .and_then(|turn| turn.accepted_ordinal),
+            turn_start_position: None,
+        });
+    }
     match target {
         Some(target) => {
             let outcome = observation.last_turn_outcome.as_ref()?;
@@ -888,7 +932,19 @@ pub(super) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions/{session_id}/close", post(close))
         .route("/sessions/{session_id}/cancel-turn", post(cancel_turn))
         .route("/sessions/{session_id}/diff", get(diff))
-        .route("/sessions/{session_id}/files", get(read_file))
+        .route(
+            "/sessions/{session_id}/files",
+            get(read_file)
+                .put(write_file)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    hel::hel_archive::MAX_SESSION_FILE_BYTES as usize,
+                )),
+        )
+        .route("/sessions/{session_id}/elicitations", get(elicitations))
+        .route(
+            "/sessions/{session_id}/elicitations/{elicitation_id}",
+            post(respond_elicitation),
+        )
         .route("/sessions/{session_id}/export", post(export))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
@@ -1355,6 +1411,79 @@ async fn diff(
 /// The path is checked here as well as on the target: a caller that spells an
 /// absolute or escaping path has made a mistake worth naming, and there is no
 /// reason to spend a round trip to the target discovering it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteFileQuery {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteFileResponse {
+    pub path: PathBuf,
+    pub bytes: usize,
+}
+
+async fn write_file(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<WriteFileQuery>,
+    bytes: axum::body::Bytes,
+) -> Result<Json<WriteFileResponse>, ApiFailure> {
+    hel::hel_config::validate_relative_destination(&query.path)
+        .map_err(|error| ApiFailure::bad_request(format!("{error:#}")))?;
+    {
+        let snapshot = state.snapshot_rx.borrow();
+        let session = require_session_record(&snapshot, &session_id)?;
+        if !session.is_idle || session.lifecycle != ViewerLifecycleCategory::Live {
+            return Err(ApiFailure::conflict(
+                "session must be live and idle for file injection",
+            ));
+        }
+    }
+    let count = bytes.len();
+    backend(&state)?
+        .write_file(
+            session_id,
+            query.path.clone(),
+            bytes.to_vec(),
+            query.overwrite,
+        )
+        .await?;
+    Ok(Json(WriteFileResponse {
+        path: query.path,
+        bytes: count,
+    }))
+}
+
+async fn elicitations(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Vec<hel::hel_elicitation::ElicitationRequest>>, ApiFailure> {
+    let snapshot = state.snapshot_rx.borrow();
+    Ok(Json(
+        require_session_record(&snapshot, &session_id)?
+            .pending_elicitations
+            .clone(),
+    ))
+}
+
+async fn respond_elicitation(
+    State(state): State<ServerState>,
+    Path((session_id, elicitation_id)): Path<(String, String)>,
+    Json(response): Json<hel::hel_elicitation::ElicitationResponse>,
+) -> Result<StatusCode, ApiFailure> {
+    send_action(
+        &state,
+        ControllerAction::RespondElicitation {
+            session_id,
+            elicitation_id,
+            response,
+        },
+    )
+    .await
+}
+
 async fn read_file(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -1505,6 +1634,7 @@ async fn wait(
                 let snapshot = snapshot_rx.borrow();
                 let session = require_session_record(&snapshot, &session_id)?;
                 return Ok(Json(WaitResponse {
+                    pending_elicitations: Vec::new(),
                     usage: None,
                     outcome: WaitOutcome::Timeout,
                     stop_reason: None,
@@ -1541,6 +1671,7 @@ fn build_observation(
     start_status: Option<StartStatus>,
 ) -> WaitObservation {
     let mut observation = WaitObservation {
+        pending_elicitations: session.pending_elicitations.clone(),
         lifecycle: Some(session.lifecycle),
         launch_failed: snapshot
             .launch_failures
@@ -1551,6 +1682,9 @@ fn build_observation(
         ..WaitObservation::default()
     };
     if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {
+        observation
+            .pending_elicitations
+            .clone_from(&snapshot.materialized.pending_elicitations);
         observation.execution = snapshot.materialized.execution;
         observation.active_turn = snapshot.materialized.active_turn.clone();
         observation
@@ -1598,6 +1732,11 @@ async fn finish_wait(
         None => None,
     };
     Ok(WaitResponse {
+        pending_elicitations: if decision.outcome == WaitOutcome::InputRequired {
+            observation.pending_elicitations.clone()
+        } else {
+            Vec::new()
+        },
         usage: observation
             .last_turn_outcome
             .as_ref()
@@ -1672,6 +1811,7 @@ mod tests {
         diff_fails: bool,
         /// The path the file handler asked the backend for.
         file_paths: Mutex<Vec<PathBuf>>,
+        file_writes: Mutex<Vec<(PathBuf, Vec<u8>, bool)>>,
     }
 
     impl FakeBackend {
@@ -1797,6 +1937,21 @@ mod tests {
                 self.file
                     .clone()
                     .ok_or_else(|| ExportError::Refused("this session has no live target".into()))
+            })
+        }
+        fn write_file(
+            &self,
+            _session_id: String,
+            path: PathBuf,
+            bytes: Vec<u8>,
+            overwrite: bool,
+        ) -> BoxFuture<'_, Result<(), ExportError>> {
+            Box::pin(async move {
+                self.file_writes
+                    .lock()
+                    .unwrap()
+                    .push((path, bytes, overwrite));
+                Ok(())
             })
         }
         fn push_branch(
@@ -2527,6 +2682,7 @@ mod tests {
     #[test]
     fn an_earlier_prompt_s_outcome_never_answers_a_later_prompt_s_wait() {
         let request = WaitRequest {
+            return_on_input: false,
             turn_id: Some(12),
             timeout_secs: None,
         };
@@ -2545,6 +2701,7 @@ mod tests {
     #[test]
     fn a_capacity_outcome_only_ends_the_wait_once_no_retry_is_armed() {
         let request = WaitRequest {
+            return_on_input: false,
             turn_id: Some(10),
             timeout_secs: None,
         };
@@ -2654,6 +2811,7 @@ mod tests {
             resolve_wait(
                 &running,
                 &WaitRequest {
+                    return_on_input: false,
                     turn_id: Some(12),
                     timeout_secs: None,
                 }
@@ -2952,5 +3110,185 @@ mod tests {
             json_body(response).await["error"],
             "no commits beyond the session base"
         );
+    }
+    fn input_request() -> hel::hel_elicitation::ElicitationRequest {
+        hel::hel_elicitation::ElicitationRequest::from_acp_params("question-1", serde_json::json!({
+            "sessionId": "session-1", "mode": "form", "message": "Choose a name", "requestedSchema": {
+                "type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}
+            }
+        })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn file_upload_accepts_large_binary_bodies_and_rejects_unsafe_paths_and_limits() {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, _actions, snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+            snapshot.sessions[0].is_idle = true;
+            snapshot.sessions[0].lifecycle = ViewerLifecycleCategory::Live;
+        });
+        let payload: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::put(
+                    "/api/v1/sessions/session-1/files?path=input/data.bin&overwrite=true",
+                ))
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["bytes"], payload.len());
+        assert_eq!(
+            backend.file_writes.lock().unwrap()[0],
+            (PathBuf::from("input/data.bin"), payload, true)
+        );
+        for path in ["../outside", "/absolute", "nested/../../outside"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    bearer(Request::put(format!(
+                        "/api/v1/sessions/session-1/files?path={path}"
+                    )))
+                    .body(Body::from("bad"))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::put("/api/v1/sessions/session-1/files?path=large"))
+                    .body(Body::from(vec![
+                        0;
+                        hel::hel_archive::MAX_SESSION_FILE_BYTES
+                            as usize
+                            + 1
+                    ]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        snapshots.send_modify(|s| s.sessions[0].is_idle = false);
+        let response = app
+            .oneshot(
+                bearer(Request::put("/api/v1/sessions/session-1/files?path=busy"))
+                    .body(Body::from("bad"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(backend.file_writes.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn structured_inputs_are_listed_validated_and_forwarded() {
+        let (app, mut actions, _snapshots, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |s| {
+                s.sessions[0].pending_elicitations = vec![input_request()]
+            });
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::get("/api/v1/sessions/session-1/elicitations"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(response).await[0]["id"], "question-1");
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::post(
+                    "/api/v1/sessions/session-1/elicitations/question-1",
+                ))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"action":"accept","content":{}}"#))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(actions.try_recv().is_err());
+        let response = tokio::spawn(
+            app.oneshot(
+                bearer(Request::post(
+                    "/api/v1/sessions/session-1/elicitations/question-1",
+                ))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"action":"accept","content":{"name":"example"}}"#,
+                ))
+                .unwrap(),
+            ),
+        );
+        let action = actions.recv().await.unwrap();
+        assert!(
+            matches!(action.action, ControllerAction::RespondElicitation { elicitation_id, .. } if elicitation_id == "question-1")
+        );
+        action
+            .reply
+            .send(ActionOutcome::Accepted { session_id: None })
+            .unwrap();
+        assert_eq!(
+            response.await.unwrap().unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[test]
+    fn input_aware_wait_is_opt_in_and_respects_completed_turns_and_stopping() {
+        let mut observation = WaitObservation {
+            pending_elicitations: vec![input_request()],
+            execution: MaterializedExecutionState::Running { started_at_ms: 1 },
+            ..Default::default()
+        };
+        assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
+        let mut request = WaitRequest {
+            return_on_input: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_wait(&observation, &request).unwrap().outcome,
+            WaitOutcome::InputRequired
+        );
+        observation.last_turn_outcome = Some(completed(5, "end_turn"));
+        request.turn_id = Some(5);
+        assert_eq!(
+            resolve_wait(&observation, &request).unwrap().outcome,
+            WaitOutcome::Finished
+        );
+        observation.lifecycle = Some(ViewerLifecycleCategory::Stopping);
+        assert_eq!(
+            resolve_wait(&observation, &request).unwrap().outcome,
+            WaitOutcome::Stopped
+        );
+    }
+
+    #[tokio::test]
+    async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
+        let (app, _actions, _snapshots, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |s| {
+                s.sessions[0].pending_elicitations = vec![input_request()]
+            });
+        let response = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/wait"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"return_on_input":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["outcome"], "input_required");
+        assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
     }
 }

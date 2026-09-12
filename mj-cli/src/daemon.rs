@@ -2381,6 +2381,20 @@ impl RuntimeState {
             .cloned()
     }
 
+    pub(crate) async fn workspace_session_handle(
+        &self,
+        session_id: &str,
+    ) -> Result<mj_controller::hel_session_manager::ManagedSessionHandle> {
+        let record = self.session_record(session_id).context("unknown session")?;
+        ensure!(
+            record.target.is_some()
+                && record.state == SessionState::Running
+                && !self.close_is_requested(session_id),
+            "session must have a live running target for file injection"
+        );
+        self.session_manager.session(session_id.to_owned()).await
+    }
+
     /// Checkpoint a session now and publish the result, the way the daemon's
     /// own checkpoint action does.
     ///
