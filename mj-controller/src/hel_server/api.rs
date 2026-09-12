@@ -579,7 +579,7 @@ impl WaitDecision {
                 (WaitOutcome::Error, None, Some(message.clone()))
             }
             TurnOutcomeKind::Interrupted { message } => {
-                (WaitOutcome::Cancelled, None, Some(message.clone()))
+                (WaitOutcome::Error, None, Some(message.clone()))
             }
         };
         Self {
