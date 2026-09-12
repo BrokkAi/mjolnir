@@ -3723,6 +3723,7 @@ mod tests {
                 command_id: command_id.to_owned(),
                 outcome: RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".to_owned(),
+                    usage: None,
                 },
             },
         };

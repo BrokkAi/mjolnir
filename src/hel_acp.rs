@@ -628,6 +628,8 @@ pub enum RuntimeEvent {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         request_id: String,
         stop_reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<crate::hel_usage::TokenUsage>,
     },
     Warning {
         message: String,
@@ -2868,8 +2870,10 @@ async fn serve_session(
                             // error stays on this connection; a dead transport
                             // is recovered by `run_bridge` via child exit or a
                             // protocol error after the session is open.
+                            let mut usage = None;
                             let stop_reason = match response {
                                 Ok(response) => {
+                                    usage = response.usage.map(|usage| crate::hel_usage::TokenUsage::from_acp(spec.harness, usage));
                                     if prompt_returned_without_updates(
                                         &response.stop_reason,
                                         updates_before,
@@ -2905,6 +2909,7 @@ async fn serve_session(
                                 RuntimeEvent::PromptFinished {
                                     request_id,
                                     stop_reason,
+                                    usage,
                                 },
                             )
                             .await?;
@@ -2981,8 +2986,7 @@ async fn serve_session(
                                 if !prompt_running {
                                     apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
                                     emit_runtime_event(events, RuntimeEvent::PromptFinished {
-                                        request_id, stop_reason: "Cancelled".into(),
-                                    }).await?;
+                                        request_id, stop_reason: "Cancelled".into(), usage: None }).await?;
                                     break;
                                 }
                                 if steering_supported
@@ -3167,7 +3171,7 @@ async fn serve_session(
                                 }
                                 Err(error) => {
                                     emit_runtime_event(events, RuntimeEvent::Warning { message: format!("Plan implementation stopped: could not restore bypassPermissions: {error:#}") }).await?;
-                                    emit_runtime_event(events, RuntimeEvent::PromptFinished { request_id, stop_reason: PROMPT_ERROR_STOP_REASON.into() }).await?;
+                                    emit_runtime_event(events, RuntimeEvent::PromptFinished { request_id, stop_reason: PROMPT_ERROR_STOP_REASON.into(), usage: None }).await?;
                                     break;
                                 }
                             }

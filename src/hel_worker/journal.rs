@@ -1596,6 +1596,7 @@ mod tests {
                 "checkpointed-command",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             )
             .unwrap();
@@ -2088,6 +2089,7 @@ mod tests {
                 "keep-idempotent",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             )
             .unwrap();

@@ -466,3 +466,37 @@ The CLI and `mj api-info` probe API support before reading the token file. A
 daemon predating this API produces an explicit `mj daemon restart` instruction;
 no restart is performed automatically. Disabled viewers, connection failures,
 incompatible API versions, and missing tokens have separate diagnostics.
+
+
+## Usage and filtered transcripts
+
+`GET /api/v1/sessions/{id}/usage?after_seq=0&limit=200` returns recorded
+`turns`, `next_after_seq`, `latest_seq`, `totals`, and `coverage`. Resume with
+`next_after_seq`. Each turn includes command identity, completion sequence,
+outcome, and optional `usage`. Wait responses also include that turn's usage
+when reported. Records persist after stopping and daemon restart. History starts
+with events projected by this version; older usage is not backfilled.
+
+Usage scope is `turn`, `last_request`, or `unspecified`. The managed Claude
+adapter reports the whole turn; the managed Codex adapter reports only its last
+model request. Other adapters' reports retain unspecified scope. Only known
+whole-turn reports contribute to `totals`. Each counter includes `tokens` and
+`reported_turns`; `coverage` counts recorded turns, full reports, partial
+last-request reports, unspecified reports, and missing reports. An absent counter
+stays absent. These are reported totals for covered turns, not a billing estimate.
+`provider_session_cost`, when present, is the latest provider-reported cumulative
+session amount, currency, and observation timestamp. It is not summed across
+provider session resets. Context-window occupancy is not consumed tokens.
+
+`GET /api/v1/sessions/{id}/transcript?role=agent&after_seq=0&limit=200`
+filters before applying the limit. Roles are `user`, `agent`, `thought`, `tool`,
+`terminal`, `plan`, `plan_proposal`, and `system`. Omit `role` for all items.
+Use `next_after_seq` to resume, including empty filtered pages. The requested
+limit is soft when several items share an event sequence: all tied items travel
+together so paging cannot skip them. Streaming updates are still returned when
+their sequence advances.
+
+```sh
+mj usage --session SESSION --json
+mj transcript --session SESSION --role agent --limit 20 --json
+```

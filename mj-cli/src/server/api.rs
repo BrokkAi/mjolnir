@@ -599,10 +599,16 @@ impl SubagentBackend for ApiBackend {
         session_id: String,
         after_seq: u64,
         limit: usize,
+        role: Option<hel::hel_transcript::TranscriptRole>,
     ) -> BoxFuture<'_, Result<Option<TranscriptPage>>> {
         Box::pin(async move {
             blocking("load transcript page", move || {
-                hel::hel_database::load_materialized_transcript_after(&session_id, after_seq, limit)
+                hel::hel_database::load_materialized_transcript_filtered(
+                    &session_id,
+                    after_seq,
+                    limit,
+                    role,
+                )
             })
             .await
         })

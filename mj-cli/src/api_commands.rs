@@ -98,8 +98,36 @@ pub(crate) struct TranscriptArgs {
     after_seq: Option<u64>,
     #[arg(long)]
     limit: Option<usize>,
+    #[arg(long, value_parser = parse_transcript_role)]
+    role: Option<hel::hel_transcript::TranscriptRole>,
     #[arg(long)]
     json: bool,
+}
+
+fn parse_transcript_role(value: &str) -> Result<hel::hel_transcript::TranscriptRole, String> {
+    serde_json::from_value(serde_json::Value::String(value.into())).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UsageArgs {
+    #[arg(long)]
+    session: String,
+    #[arg(long)]
+    after_seq: Option<u64>,
+    #[arg(long)]
+    limit: Option<usize>,
+    #[arg(long)]
+    json: bool,
+}
+
+pub(crate) async fn usage(args: UsageArgs) -> Result<()> {
+    let page = ApiClient::connect()
+        .await?
+        .usage(&args.session, args.after_seq, args.limit)
+        .await?;
+    // Usage is structured even without --json: scope and coverage must travel
+    // with counters so partial provider reports cannot look like full totals.
+    print_json(&page)
 }
 
 #[derive(Debug, Args)]
@@ -316,7 +344,7 @@ fn outcome_name(outcome: WaitOutcome) -> &'static str {
 pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
     let page = client
-        .transcript(&args.session, args.after_seq, args.limit)
+        .transcript(&args.session, args.after_seq, args.limit, args.role)
         .await?;
     if args.json {
         return print_json(&page);
@@ -328,7 +356,10 @@ pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
         }
         println!();
     }
-    println!("latest seq {}", page.latest_seq);
+    println!(
+        "next after seq {}; latest seq {}",
+        page.next_after_seq, page.latest_seq
+    );
     Ok(())
 }
 

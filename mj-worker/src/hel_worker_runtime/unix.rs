@@ -1062,11 +1062,12 @@ pub(super) fn record_runtime_event(
         RuntimeEvent::PromptFinished {
             request_id,
             stop_reason,
+            usage,
         } => {
             in_flight.remove(&request_id);
             relay.record_command_completed(
                 &request_id,
-                RelayCommandOutcome::Prompt { stop_reason },
+                RelayCommandOutcome::Prompt { stop_reason, usage },
             )?;
         }
         RuntimeEvent::ConfigApplied {

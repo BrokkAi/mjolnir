@@ -231,8 +231,12 @@ impl ApiClient {
         session_id: &str,
         after_seq: Option<u64>,
         limit: Option<usize>,
+        role: Option<hel::hel_transcript::TranscriptRole>,
     ) -> Result<TranscriptResponse> {
         let mut query = Vec::new();
+        if let Some(role) = role {
+            query.push(format!("role={}", role.as_str()));
+        }
         if let Some(after_seq) = after_seq {
             query.push(format!("after_seq={after_seq}"));
         }
@@ -244,6 +248,20 @@ impl ApiClient {
             false => format!("/sessions/{session_id}/transcript?{}", query.join("&")),
         };
         self.get_json(&path).await
+    }
+
+    pub(crate) async fn usage(
+        &self,
+        session_id: &str,
+        after_seq: Option<u64>,
+        limit: Option<usize>,
+    ) -> Result<hel::hel_database::UsagePage> {
+        self.get_json(&format!(
+            "/sessions/{session_id}/usage?after_seq={}&limit={}",
+            after_seq.unwrap_or(0),
+            limit.unwrap_or(200)
+        ))
+        .await
     }
 
     pub(crate) async fn diff(&self, session_id: &str) -> Result<String> {

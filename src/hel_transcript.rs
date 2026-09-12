@@ -1836,17 +1836,52 @@ pub fn materialized_content_text(content: &[serde_json::Value]) -> String {
 /// The chat view has its own role enum shaped around how it renders; this is
 /// the name the HTTP API publishes, so it changes only when the transcript
 /// model does.
-pub fn transcript_item_role(body: &TranscriptBody) -> &'static str {
-    match body {
-        TranscriptBody::User { .. } => "user",
-        TranscriptBody::Agent { .. } => "agent",
-        TranscriptBody::Thought { .. } => "thought",
-        TranscriptBody::Tool { .. } => "tool",
-        TranscriptBody::TerminalOutput { .. } => "terminal",
-        TranscriptBody::Plan { .. } => "plan",
-        TranscriptBody::PlanProposal { .. } => "plan_proposal",
-        TranscriptBody::System { .. } => "system",
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptRole {
+    User,
+    Agent,
+    Thought,
+    Tool,
+    Terminal,
+    Plan,
+    PlanProposal,
+    System,
+}
+
+impl TranscriptRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+            Self::Thought => "thought",
+            Self::Tool => "tool",
+            Self::Terminal => "terminal",
+            Self::Plan => "plan",
+            Self::PlanProposal => "plan_proposal",
+            Self::System => "system",
+        }
     }
+    pub fn storage_kind(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal_output",
+            other => other.as_str(),
+        }
+    }
+}
+
+pub fn transcript_item_role(body: &TranscriptBody) -> &'static str {
+    let role = match body {
+        TranscriptBody::User { .. } => TranscriptRole::User,
+        TranscriptBody::Agent { .. } => TranscriptRole::Agent,
+        TranscriptBody::Thought { .. } => TranscriptRole::Thought,
+        TranscriptBody::Tool { .. } => TranscriptRole::Tool,
+        TranscriptBody::TerminalOutput { .. } => TranscriptRole::Terminal,
+        TranscriptBody::Plan { .. } => TranscriptRole::Plan,
+        TranscriptBody::PlanProposal { .. } => TranscriptRole::PlanProposal,
+        TranscriptBody::System { .. } => TranscriptRole::System,
+    };
+    role.as_str()
 }
 
 /// One transcript item flattened to the text a reader would see.

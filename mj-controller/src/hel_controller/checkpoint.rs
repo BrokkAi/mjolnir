@@ -3527,6 +3527,7 @@ mod tests {
                                 &prompt_id,
                                 RelayCommandOutcome::Prompt {
                                     stop_reason: "cancelled".into(),
+                                    usage: None,
                                 },
                             )
                             .expect("complete the cancelled prompt");

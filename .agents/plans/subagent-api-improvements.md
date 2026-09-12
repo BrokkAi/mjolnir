@@ -10,7 +10,7 @@ An orchestrator must discover a profile's models without creating a project cont
 
 - [x] (2026-09-12) Inspect existing API, startup follow-up, lifecycle admission, worker harness installation, transcript projection, and ACP usage.
 - [x] (2026-09-12) Phase 1: automatic persistent profile discovery, configuration repair, provisioning cancellation, workspace filtering, API diagnostics. Full workspace tests passed, followed by the added close and startup repair regressions; Clippy passed.
-- [ ] Phase 2: durable usage and role-filtered transcript paging.
+- [x] (2026-09-12) Phase 2 implementation: durable usage and role-filtered transcript paging. Full tests, the final HTTP compatibility regression, and Clippy passed.
 - [ ] Phase 3: bounded atomic file injection and explicit elicitation interfaces.
 - [ ] Validate, document, and commit coherent checkpoints on the current branch.
 
@@ -63,7 +63,7 @@ Work in `/home/jonathan/Projects/hel2`. After each coherent implementation check
     cargo fmt --all -- --check
     git diff --check
 
-Every cargo test invocation runs with elevated sandbox permissions. Keep normal target storage; never redirect builds to /tmp. Stage explicit changed paths, commit on the current branch, and do not push.
+Every cargo test invocation runs with elevated sandbox permissions. Keep normal target storage; never redirect builds to /tmp. Stage explicit changed paths, commit on the current branch, and push each completed phase to origin/master as the user requested.
 
 ## Validation and Acceptance
 
@@ -84,3 +84,7 @@ Extend `SubagentBackend` and shared HTTP request/response structs rather than in
 Revision 2026-09-12: Created from the approved three-phase plan, including automatic cold-cache discovery requested by the user.
 
 Revision 2026-09-12: Phase 1 adds backward-compatible auxiliary SQLite tables for profile capabilities and exact configuration command results. Live observations update model-specific cache entries only for managed workers matching the local probe binary. Discovery has a shared shutdown cancellation flag and a five-minute subprocess deadline. Close requests publish stopping state immediately and wait for cancellation or an already committed create before cleanup. User additionally authorized pushing each completed phase to the configured upstream (`origin/master` from branch `hel2`).
+
+Revision 2026-09-12: Phase 1 merged upstream without conflicts, passed full tests and Clippy again, and was pushed at b0d84727. Phase 2 preserves Claude 0.73.0 full-turn usage and Codex 1.11.1 last-request usage as distinct scopes, verified from the installed managed adapter sources. Unknown adapters retain unspecified scope. Totals include only known full-turn reports and carry per-counter coverage. Context occupancy is excluded; provider session cost is the latest cumulative observation with its timestamp. Records begin when upgraded events are projected; historical missing reports are not fabricated. Transcript role filters execute in SQL before a soft page limit that retains whole sequence ties; next_after_seq advances through filtered gaps.
+
+Revision 2026-09-12: Phase 2 full default-member tests passed after correcting the new pagination fixture's non-agent content ordinal. The durable usage regression projects four turns in one transaction, replays them, reopens the database, and checks paginated records, covered totals, missing counters, and provider cost. ACP forwarding is tested with a scripted bridge. A final HTTP regression checks partial Codex usage and keeps usage out of the existing last_turn_outcome wire shape because older clients reject unknown fields there. An exploratory check of all workspace members reached optional desktop GTK dependencies absent on this host; the required default-member tests/checks do not need those libraries.

@@ -137,6 +137,7 @@ mod tests {
                 id,
                 RelayCommandOutcome::Prompt {
                     stop_reason: stop.into(),
+                    usage: None,
                 },
             )
             .unwrap()
@@ -299,6 +300,7 @@ mod tests {
                 "following-prompt",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "EndTurn".into(),
+                    usage: None,
                 },
             )
             .unwrap();
@@ -329,6 +331,7 @@ mod tests {
                 "original-prompt",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "EndTurn".into(),
+                    usage: None,
                 },
             )
             .unwrap();

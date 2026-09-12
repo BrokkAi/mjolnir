@@ -2613,7 +2613,7 @@ impl DurableRelay {
             bail!("checkpoint barriers complete through record_checkpoint_ready");
         }
         let mut outcome = outcome;
-        if let RelayCommandOutcome::Prompt { stop_reason } = &mut outcome {
+        if let RelayCommandOutcome::Prompt { stop_reason, .. } = &mut outcome {
             if self.background_work == BackgroundWorkPolicy::CodexExecCards
                 && matches!(
                     stop_reason.as_str(),
@@ -3435,6 +3435,7 @@ pub(crate) mod test_support {
                 command_id,
                 RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             )
             .unwrap();
@@ -3852,6 +3853,7 @@ mod tests {
                 "second-prompt",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             )
             .unwrap();
@@ -4119,6 +4121,7 @@ mod tests {
                 "command-one",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             )
             .unwrap();
@@ -4216,6 +4219,7 @@ mod tests {
                 "prompt-command-1",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             )
             .unwrap();
@@ -4261,6 +4265,7 @@ mod tests {
                 "prompt-command-1",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             )
             .unwrap();
@@ -4915,6 +4920,7 @@ mod tests {
                 "next-prompt",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             )
             .unwrap();
@@ -5248,6 +5254,7 @@ mod tests {
                 "parent-command",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             )
             .unwrap();
@@ -5382,6 +5389,7 @@ mod tests {
                     "review-prompt",
                     RelayCommandOutcome::Prompt {
                         stop_reason: "end_turn".into(),
+                        usage: None,
                     },
                 ),
                 "rejected" => relay.record_command_rejected("review-prompt", "adapter failed"),
@@ -5673,6 +5681,7 @@ mod tests {
                     "memory-prompt",
                     RelayCommandOutcome::Prompt {
                         stop_reason: "end_turn".into(),
+                        usage: None,
                     },
                 )
                 .unwrap();
@@ -5736,6 +5745,7 @@ mod tests {
                     "boundary-prompt",
                     RelayCommandOutcome::Prompt {
                         stop_reason: "end_turn".into(),
+                        usage: None,
                     },
                 ),
                 "rejected" => relay.record_command_rejected("boundary-prompt", "adapter failed"),
@@ -5830,6 +5840,7 @@ mod tests {
                 "parent-prompt",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "end_turn".into(),
+                    usage: None,
                 },
             )
             .unwrap();
@@ -6129,6 +6140,7 @@ mod tests {
                 "active-prompt",
                 RelayCommandOutcome::Prompt {
                     stop_reason: "cancelled".into(),
+                    usage: None,
                 },
             )
             .unwrap();

@@ -34,6 +34,7 @@ pub mod hel_targets;
 pub mod hel_terminal;
 pub mod hel_test_hooks;
 pub mod hel_transcript;
+pub mod hel_usage;
 pub mod hel_worker;
 pub mod hel_worker_launch;
 pub mod hel_worker_protocol;
