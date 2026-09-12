@@ -133,6 +133,9 @@ enum WorkerCommand {
     },
     /// Push the repository's current HEAD to a branch on its push remote.
     PushBranch {
+        /// Worker root containing the session's existing Git authentication.
+        #[arg(long)]
+        root: PathBuf,
         #[arg(long)]
         repository: PathBuf,
         #[arg(long)]
@@ -226,6 +229,14 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
             &args.command
         {
             environment.extend(WorkerLaunchConfig::read(config)?.target_environment);
+        }
+        if let WorkerCommand::PushBranch { root, .. } = &args.command {
+            environment.extend(
+                WorkerLaunchConfig::read(&root.join("launch.json"))
+                    .context("load branch export target settings; resume the session to restore its setup")?
+                    .target_environment,
+            );
+            mj_worker::worker_runtime::attach_session_git_environment(root, &mut environment)?;
         }
         let executable = if cfg!(target_os = "linux") {
             PathBuf::from("/proc/self/exe")
@@ -368,7 +379,9 @@ async fn run_command(command: Command) -> Result<()> {
             mj_core::archive::write_session_file(&root, &path, &bytes, overwrite)
                 .map_err(export_error)
         }
-        WorkerCommand::PushBranch { repository, branch } => {
+        WorkerCommand::PushBranch {
+            repository, branch, ..
+        } => {
             let pushed =
                 mj_core::archive::push_branch(&mj_core::archive::SystemGit, &repository, &branch)
                     .map_err(push_error)?;
@@ -517,6 +530,8 @@ mod tests {
             "hel",
             "worker",
             "push-branch",
+            "--root",
+            "/worker/session",
             "--repository",
             "/workspace/app",
             "--branch",
@@ -526,8 +541,8 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Worker(WorkerArgs {
-                command: WorkerCommand::PushBranch { repository, branch },
-            }) if repository == Path::new("/workspace/app") && branch == "review/one"
+                command: WorkerCommand::PushBranch { root, repository, branch },
+            }) if root == Path::new("/worker/session") && repository == Path::new("/workspace/app") && branch == "review/one"
         ));
     }
 

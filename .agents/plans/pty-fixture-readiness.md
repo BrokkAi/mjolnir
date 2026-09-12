@@ -12,7 +12,9 @@ Keep real pseudo-terminal (PTY) coverage for terminal restoration and prompt exi
 - [x] Measured six concurrent worker snapshots at 3107–3426 ms each.
 - [x] Implemented separate startup readiness, child-exit diagnostics, bounded log tails, PTY ownership, descriptor close-on-exec, and an explicit failing fixture worker. Added immediate startup-failure regression.
 - [x] Eight tests passed in five repeated runs with eight parallel threads (5.47–6.86 seconds); strict clippy and formatting passed.
-- [ ] Finish full workspace tests, commit, merge upstream changes, and push.
+- [x] Full pre-merge workspace tests passed; committed PTY changes as `8c5f30c0`.
+- [x] Merged upstream `f23c1196` and resolved its old module references against the ownership refactor.
+- [x] Merged-tree cargo test and strict clippy passed; interactive-terminal PTY run passed all eight cases in 5.74 seconds. Merge resolution is ready for commit and push to origin/master.
 
 ## Surprises & Discoveries
 
@@ -24,7 +26,7 @@ Keep the five-second interaction/shutdown requirement. Give fixture setup a sepa
 
 ## Outcomes & Retrospective
 
-All existing terminal behaviors and the new startup-exit regression pass concurrently. Fixture worker snapshots dropped to tens of milliseconds. The full workspace suite remains in progress; upstream added a branch-export authentication fix requiring a merge before pushing.
+All existing terminal behaviors and the new startup-exit regression pass concurrently. Fixture worker snapshots dropped to tens of milliseconds. The pre-merge full workspace suite passed. Upstream branch-export authentication commit `f23c1196` required adapting `hel` module references to `mj_core`, `worker_runtime`, and the controller targets module. Combined-tree cargo test and strict clippy passed. An additional interactive-terminal run passed all eight PTY tests in 5.74 seconds. No implementation work remains; publish the validated merge to origin/master.
 
 ## Context and Orientation
 
@@ -59,3 +61,7 @@ Initial plan records investigation and validation scope.
 Revision: measured worker snapshot overhead and recorded the first successful concurrent readiness run; added fixture worker isolation to remove the unrelated host dependency.
 
 Revision: recorded five parallel passes, strict checks, and the additional upstream merge needed before publication.
+
+Revision: full pre-merge validation passed; recorded upstream authentication merge and the required post-merge checks.
+
+Final revision: recorded successful full merged-tree validation and the interactive-terminal regression run.

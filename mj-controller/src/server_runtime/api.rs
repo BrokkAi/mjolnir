@@ -834,6 +834,8 @@ impl SubagentBackend for ApiBackend {
             let repository = primary_repository_path(&layout)?;
             let arguments = vec![
                 "push-branch".to_owned(),
+                "--root".to_owned(),
+                targets::worker_root(&layout.backend, &session_id).map_err(ExportError::Failed)?,
                 "--repository".to_owned(),
                 repository,
                 "--branch".to_owned(),
