@@ -7,6 +7,9 @@
 use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;
 mod goal;
+mod grok_usage;
+#[cfg(test)]
+mod grok_usage_tests;
 mod kimi_tasks;
 pub use kimi_tasks::resolve_session_dir as resolve_kimi_session_dir;
 pub use kimi_tasks::*;
@@ -202,6 +205,14 @@ struct ClaudeSdkMessageNotification {
     #[serde(rename = "sessionId")]
     session_id: SessionId,
     message: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcNotification)]
+#[notification(method = "_x.ai/session/update")]
+struct GrokUsageNotification {
+    #[serde(rename = "sessionId")]
+    session_id: SessionId,
+    update: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcNotification)]
@@ -1022,6 +1033,10 @@ async fn drive<T>(
 where
     T: ConnectTo<Client>,
 {
+    let grok_usage = grok_usage::Collector::default();
+    let grok_notification_usage = grok_usage.clone();
+    let grok_notification_events = events.clone();
+    let grok_notification_harness = spec.harness;
     let notification_events = events.clone();
     let notification_activity = spec.acp_activity.clone();
     let notification_step_clock = spec.step_clock.clone();
@@ -1183,6 +1198,18 @@ where
                     .send(RuntimeEvent::ClaudeBackgroundTasksChanged { tasks })
                     .await
                     .map_err(|_| relay_event_channel_error())?;
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_notification(
+            async move |notification: GrokUsageNotification, _cx| {
+                if grok_notification_harness == HarnessKind::Grok
+                    && let Err(error) = grok_notification_usage.observe(&notification.session_id.to_string(), &notification.update) {
+                    grok_notification_events.send(RuntimeEvent::Warning {
+                        message: format!("Grok usage report was not recorded: {error:#}"),
+                    }).await.map_err(|_| relay_event_channel_error())?;
+                }
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -1745,6 +1772,7 @@ where
                 session_updates_enabled,
                 resume_required,
                 replacing_previous_bridge,
+                grok_usage,
             )
             .await
             {
@@ -1803,6 +1831,7 @@ async fn drive_connection(
     session_updates_enabled: Arc<AtomicBool>,
     resume_required: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
+    grok_usage: grok_usage::Collector,
 ) -> Result<Option<String>> {
     // Terminals belong to the connection. However the session ends — closed,
     // failed, or with its command channel dropped — their process groups must
@@ -1820,6 +1849,7 @@ async fn drive_connection(
         &session_updates_enabled,
         resume_required,
         replacing_previous_bridge,
+        &grok_usage,
     )
     .await;
     pending_elicitations
@@ -2068,6 +2098,7 @@ async fn serve_session(
     session_updates_enabled: &AtomicBool,
     resume_required: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
+    grok_usage: &grok_usage::Collector,
 ) -> Result<Option<String>> {
     let mut meta = serde_json::Map::new();
     meta.insert("terminal_output".into(), serde_json::Value::Bool(true));
@@ -2426,6 +2457,9 @@ async fn serve_session(
                     opened.resume_required.store(true, Ordering::Release);
                 }
                 spec.step_clock.begin_turn();
+                if spec.harness == HarnessKind::Grok {
+                    grok_usage.begin(session_id.to_string());
+                }
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
                         .send_request(PromptRequest::new(session_id.clone(), prompt))
@@ -2509,6 +2543,14 @@ async fn serve_session(
                             let stop_reason = match response {
                                 Ok(response) => {
                                     usage = response.usage.map(|usage| mj_core::usage::TokenUsage::from_acp(spec.harness, usage));
+                                    if spec.harness == HarnessKind::Grok {
+                                        match grok_usage.complete(response.meta.as_ref(), usage.clone()).await {
+                                            Ok(reported) => usage = reported,
+                                            Err(error) => emit_runtime_event(events, RuntimeEvent::Warning {
+                                                message: format!("Grok usage report was not recorded: {error:#}"),
+                                            }).await?,
+                                        }
+                                    }
                                     if prompt_returned_without_updates(
                                         &response.stop_reason,
                                         updates_before,
@@ -2525,6 +2567,7 @@ async fn serve_session(
                                     format!("{:?}", response.stop_reason)
                                 }
                                 Err(error) => {
+                                    grok_usage.clear();
                                     diagnostic = Some(mj_core::diagnostic::TurnDiagnostic::from_acp(&error));
                                     emit_runtime_event(
                                         events,

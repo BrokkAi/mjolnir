@@ -11,6 +11,8 @@ pub enum UsageScope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_details: Option<Box<ProviderTurnUsage>>,
     pub scope: UsageScope,
     pub total_tokens: u64,
     pub input_tokens: u64,
@@ -43,6 +45,7 @@ impl TokenUsage {
             _ => UsageScope::Unspecified,
         };
         Self {
+            provider_details: None,
             scope,
             total_tokens: usage.total_tokens,
             input_tokens: usage.input_tokens,
@@ -87,4 +90,41 @@ pub struct ProviderCost {
     pub amount: f64,
     pub currency: String,
     pub observed_at_ms: i64,
+}
+
+/// Provider-reported accounting for this turn, separate from session cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderTurnUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ProviderTurnCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_calls: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_usage: std::collections::BTreeMap<String, TokenUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderTurnCost {
+    pub usd_ticks: u64,
+    /// Exact decimal USD amount: 10^10 ticks per USD, without float rounding.
+    pub usd: String,
+    pub is_partial: bool,
+}
+
+impl ProviderTurnCost {
+    pub fn from_usd_ticks(usd_ticks: u64, is_partial: bool) -> Self {
+        Self {
+            usd_ticks,
+            usd: format!(
+                "{}.{:010}",
+                usd_ticks / 10_000_000_000,
+                usd_ticks % 10_000_000_000
+            ),
+            is_partial,
+        }
+    }
 }

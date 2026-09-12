@@ -12,8 +12,8 @@ Remediate the two latest #986 comments (branch-export authentication and lost Ki
 - [x] (2026-09-12) Existing real-worker authentication suite: 5 passed.
 - [x] (2026-09-12) Installer suite: 11 passed; disposable real Grok install: 1 passed, both final launchers execute.
 - [x] (2026-09-12) Kimi diagnostics validated through native follower, durable relay reopening, HTTP wait, quota policy, protocol negotiation, and database replay.
-- [ ] Ingest Grok turn usage and preserve provider accounting details.
-- [ ] Validate, document, and commit coherent phases on the current branch.
+- [x] (2026-09-12) Grok metadata/notification ingestion passes parser and real ACP transport tests, plus a live turn through Mjolnir runtime; final boxed representation passed the full suite and strict Clippy.
+- [x] (2026-09-12) Full serial suite: 3,173 passed, zero failed, 22 ignored across 22 result groups. Strict Clippy, formatting/diff, architecture, package assets and documentation checks passed. Final validated Grok phase is included in this commit.
 
 ## Surprises & Discoveries
 
@@ -25,7 +25,9 @@ User selected reporting quota and stopping, without automatic quota retries, and
 
 ## Outcomes & Retrospective
 
-Implementation is pending. Record validation and material limitations here as milestones complete.
+All requested remediations are implemented and validated. Branch authentication required verification only. Managed runtime relocation is committed in 6c53d744; Kimi diagnostics and protocol compatibility are committed in 73ff8a30; the final Grok accounting phase and this record are committed together. The full serial suite passed 3,173 tests with no failures, and strict Clippy passed. Both fresh-cache real Grok installation and a live minimal Grok prompt through Mjolnir passed. Documentation checked 1,846 internal links. Disposable probe credentials were removed after process shutdown.
+
+Future turns gain accounting; old missing usage is deliberately not backfilled. Kimi quota exhaustion reports and stops, without scheduling retries. Grok response-only metadata supplies API duration but can omit provider elapsed time; that optional field is retained when a matching completion notification supplies it. Controller upgrades must precede worker upgrades because new writers require protocol 10 readers; new controllers still read old workers. No harness version, live session, host mount, or user credential source was changed.
 
 ## Context and Orientation
 
@@ -55,12 +57,16 @@ Optional fields deserialize absent historical values. Preserve relay compatibili
 
 ## Interfaces and Dependencies
 
-Add shared optional TurnDiagnostic and provider accounting types without new crates. QuotaLimit is a distinct stop reason from ModelCapacity. Extend current runtime/relay/outcome serialization and API responses with serde defaults. Reuse native Kimi follower, ACP typed notification registration, usage database projection, installer locks and runtime leases.
+`mj-core/src/diagnostic.rs` defines TurnDiagnostic with message, optional provider code, HTTP status and raw reset value. RuntimeEvent::PromptFinished, RelayCommandOutcome::Prompt and MaterializedTurnOutcome carry optional diagnostics. WaitResponse exposes diagnostic and its message; ApiSession exposes last_turn_diagnostic while preserving its legacy nested outcome shape. TokenUsage.provider_details is Option<Box<ProviderTurnUsage>>, carrying optional exact ProviderTurnCost (usd_ticks, decimal-string usd, is_partial), model_calls, api_duration_ms, elapsed_ms and normalized per-model usage. `mj-worker/src/acp/grok_usage.rs` decodes provider reports and correlates notifications with response prompt IDs; `grok_usage_tests.rs` exercises actual ACP transport and contains the opt-in live test. No new crate or dependency was needed. QuotaLimit is a distinct stop reason from ModelCapacity. Extend current runtime/relay/outcome serialization and API responses with serde defaults. Reuse native Kimi follower, ACP typed notification registration, usage database projection, installer locks and runtime leases.
 
 ## Artifacts and Notes
 
-Initial plan recorded 2026-09-12 from the approved conversational plan. No implementation checks have run yet.
+Logs are in target/provider-full-tests.log, target/provider-clippy.log, target/provider-docs.log, target/provider-grok-tests.log, target/provider-grok-runtime-live.log and the earlier focused logs. The ignored live checks were run explicitly; normal CI does not require credentials or downloads. Initial plan recorded 2026-09-12 from the approved conversational plan.
 
 Revision: runtime relocation and lease-safe repair validated with fixtures and the pinned real installer. Logs: target/provider-installer-tests.log, target/provider-grok-install-live.log, target/provider-branch-auth-tests.log. Slow tool startup prompted runbook inspection; TEST_STATEID remained 86 to 86, no host changes.
 
 Revision: diagnostics use optional TurnDiagnostic throughout completion storage; API compatibility keeps nested legacy session outcomes unchanged and adds top-level last_turn_diagnostic. Writer protocol 10 rejects readers that would drop provider fields and corrupt digest checks; new controllers retain old-worker read support. Focused diagnostic, quota, protocol, and persistence checks passed. The live Grok probe additionally proved response _meta.usage already contains the full prompt ledger, with the same promptId as the native completion extension. Ingest both and deduplicate by that identity. Logs are target/provider-*-tests.log and target/provider-diagnostic-final.log.
+
+Revision: Grok response metadata is the primary available full-prompt ledger; matching extension notifications add provider elapsed time. The collector accepts only live-session reports, correlates prompt_id against response promptId/requestId, deduplicates, and waits at most one second for extension-only reports that follow the response. Unmatched, malformed and conflicting telemetry never becomes a fabricated full report. Optional provider details are boxed to avoid inflating every common event. USD cost is represented by original ticks and an exact decimal string, with partial-cost flags preserved independently of token completeness. The live runtime test reported 13,008 full tokens and 88,876,000 ticks (0.0088876000 USD); response-only accounting legitimately omitted provider elapsed time. Documentation build checked 1,846 internal links. Full suite and strict Clippy remain in progress.
+
+Revision: all implementation and validation milestones complete. Full-suite process exited 0; Clippy exited 0. The final diff is limited to this task. Commit on hel2 as authorized; no deployment or new release is part of this request.

@@ -129,6 +129,15 @@ mod tests {
                     stop_reason: "EndTurn".into(),
                 },
                 usage: scope.map(|scope| TokenUsage {
+                    provider_details: Some(Box::new(mj_core::usage::ProviderTurnUsage {
+                        cost: Some(mj_core::usage::ProviderTurnCost::from_usd_ticks(
+                            88_767_200, false,
+                        )),
+                        model_calls: Some(2),
+                        api_duration_ms: Some(1700),
+                        elapsed_ms: Some(2377),
+                        model_usage: BTreeMap::new(),
+                    })),
                     scope,
                     total_tokens: 30,
                     input_tokens: 20,
@@ -168,6 +177,15 @@ mod tests {
         }
         let first = load_session_usage_from(&path, "usage", 0, 2)?.unwrap();
         assert_eq!(first.turns.len(), 2);
+        let details = first.turns[0]
+            .usage
+            .as_ref()
+            .unwrap()
+            .provider_details
+            .as_ref()
+            .unwrap();
+        assert_eq!(details.cost.as_ref().unwrap().usd, "0.0088767200");
+        assert_eq!(details.elapsed_ms, Some(2377));
         assert_eq!(
             first.turns[0].diagnostic.as_ref().unwrap().http_status,
             Some(403)

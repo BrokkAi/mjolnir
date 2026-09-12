@@ -523,11 +523,31 @@ Usage scope is `turn`, `last_request`, or `unspecified`. The managed Claude
 adapter reports the whole turn. Managed Codex adapter 1.11.2 reports consumption
 across a prompt’s model requests, including cancellation. Unknown resumed baselines,
 missing reports, or counter resets retain incomplete (`unspecified`) coverage. Older
-Codex adapters and historical reports retain `last_request` scope. Other adapters' reports retain unspecified scope. Only known
+Codex adapters and historical reports retain `last_request` scope. Grok's native
+prompt-ledger metadata and matching completion notifications report whole-turn
+consumption; explicitly incomplete reports retain `unspecified` scope. Other
+adapters' reports retain unspecified scope. Only known
 whole-turn reports contribute to `totals`. Each counter includes `tokens` and
 `reported_turns`; `coverage` counts recorded turns, full reports, partial
 last-request reports, unspecified reports, and missing reports. An absent counter
 stays absent. These are reported totals for covered turns, not a billing estimate.
+Grok usage may also carry `provider_details`: optional `model_calls`,
+`api_duration_ms`, provider `elapsed_ms`, `cost`, and a `model_usage` map keyed by
+the provider's exact model IDs (for example, `grok-4.6-build`). Each model row uses
+the same normalized token fields. Full input already includes cache reads and
+cache creation; output already includes reasoning. Do not add those subsets to
+input/output again, or add model rows to the top-level turn total.
+
+Turn `cost` carries exact integer `usd_ticks` (10¹⁰ ticks per USD), its exact
+`usd` decimal **string**, and `is_partial`. Partial cost is a reported subtotal,
+not a complete bill. Missing cost means unknown, not free. Provider elapsed time
+is separate from Mjolnir's top-level wait `elapsed_ms`. Duplicate response and
+notification reports are reconciled by native prompt identity, not summed.
+These details are collected for future turns; historical missing usage remains
+missing. Upgrade the controller before workers: new workers require relay
+protocol 10 readers to preserve provider details when verifying event hashes.
+New controllers can still read older workers and records.
+
 `provider_session_cost`, when present, is the latest provider-reported cumulative
 session amount, currency, and observation timestamp. It is not summed across
 provider session resets. Context-window occupancy is not consumed tokens.
