@@ -3544,6 +3544,9 @@ pub(crate) async fn connect_or_start() -> Result<DaemonClient> {
     // Serialize replacement and publication across clients, then re-read the
     // endpoint. A client waiting here must reuse the winner's daemon.
     let _startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    if let Ok(metadata) = read_metadata_any() {
+        ensure_supported_daemon_protocol(metadata.protocol_version)?;
+    }
     maybe_replace_stale_development_daemon().await?;
     if let Ok(metadata) = read_metadata_any()
         && metadata.protocol_version != PROTOCOL_VERSION
@@ -3588,7 +3591,7 @@ pub(crate) async fn connect_or_start() -> Result<DaemonClient> {
     }
 
     tokio::task::spawn_blocking(|| -> Result<u32> {
-        let executable = std::env::current_exe().context("find current mj executable")?;
+        let executable = daemon_launch_executable()?;
         let mut command = std::process::Command::new(executable);
         command
             .arg("daemon-run")
@@ -3621,6 +3624,27 @@ pub(crate) async fn connect_or_start() -> Result<DaemonClient> {
             )
         },
     )
+}
+
+fn ensure_supported_daemon_protocol(version: u32) -> Result<()> {
+    ensure!(
+        version <= PROTOCOL_VERSION,
+        "the daemon uses a newer protocol ({version}) than this client ({PROTOCOL_VERSION}); restart this client with the updated mj binary"
+    );
+    Ok(())
+}
+
+fn daemon_launch_executable() -> Result<PathBuf> {
+    // current_exe resolves the old pathname, which can disappear on upgrade.
+    // Execute the running inode so the daemon also matches this client's protocol.
+    #[cfg(target_os = "linux")]
+    {
+        Ok(PathBuf::from("/proc/self/exe"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::current_exe().context("find current mj executable")
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -5216,6 +5240,52 @@ fn session_state_label(state: SessionState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newer_daemon_protocol_requires_updating_the_client() {
+        assert!(ensure_supported_daemon_protocol(PROTOCOL_VERSION).is_ok());
+        assert!(ensure_supported_daemon_protocol(PROTOCOL_VERSION - 1).is_ok());
+        let error = ensure_supported_daemon_protocol(PROTOCOL_VERSION + 1).unwrap_err();
+        assert!(error.to_string().contains("restart this client"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detached_daemon_can_launch_after_its_client_binary_is_removed() {
+        const STAGE: &str = "MJ_TEST_REMOVED_DAEMON_EXECUTABLE";
+        const TEST: &str =
+            "daemon::tests::detached_daemon_can_launch_after_its_client_binary_is_removed";
+        if let Some(directory) = std::env::var_os(STAGE) {
+            let directory = PathBuf::from(directory);
+            if directory.join("client").exists() {
+                fs::remove_file(directory.join("client")).unwrap();
+                let mut command = std::process::Command::new(daemon_launch_executable().unwrap());
+                command.args(["--exact", TEST]);
+                hel::hel_subprocess::spawn_detached(&mut command, &directory.join("child.log"))
+                    .unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !directory.join("launched").exists() {
+                    assert!(Instant::now() < deadline, "detached child did not launch");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            } else {
+                fs::write(directory.join("launched"), b"ok").unwrap();
+            }
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("client");
+        fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let mut command = std::process::Command::new(&executable);
+        command.args(["--exact", TEST]).env(STAGE, directory.path());
+        let output = hel::hel_subprocess::run_with_input(&mut command, b"").unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(directory.path().join("launched").exists());
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
