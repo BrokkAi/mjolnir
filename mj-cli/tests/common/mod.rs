@@ -1,5 +1,6 @@
 use std::{
     fs::{OpenOptions, TryLockError},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -223,6 +224,28 @@ impl Drop for DaemonStorage {
                 eprintln!("{message}");
             } else {
                 panic!("{message}");
+            }
+        }
+        if thread::panicking() {
+            match std::fs::read_dir(self.data.join("logs")) {
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry.and_then(|entry| {
+                            let mut file = std::fs::File::open(entry.path())?;
+                            let length = file.metadata()?.len();
+                            file.seek(SeekFrom::Start(length.saturating_sub(8192)))?;
+                            let mut bytes = Vec::new();
+                            file.take(8192).read_to_end(&mut bytes)?;
+                            Ok(bytes)
+                        }) {
+                            Ok(bytes) => {
+                                eprintln!("fixture log tail: {}", String::from_utf8_lossy(&bytes))
+                            }
+                            Err(error) => eprintln!("read fixture log: {error}"),
+                        }
+                    }
+                }
+                Err(error) => eprintln!("read fixture logs: {error}"),
             }
         }
     }

@@ -921,9 +921,14 @@ pub fn pin_worker_binary_sources() -> Result<()> {
     }
     let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
     let cache_root = data_dir().join("workers").join("pinned");
+    let started = std::time::Instant::now();
     let snapshot = WorkerBinarySourceSnapshot::capture(&cache_root, |arch, requirement| {
         worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file())
     });
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "worker sources pinned"
+    );
     // The daemon boot path calls this once. If a second caller races it, keep
     // the first complete snapshot and never replace paths it may already use.
     let _ = PINNED_WORKER_BINARY_SOURCES.set(snapshot);
