@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Build the current checkout's portable worker using the standard agent image,
 # which includes the pinned Rust toolchain, musl target, and native build tools.
+# The worker lands at target/worker/<triple>/<profile>/mj-worker, and the
+# script prints that target triple on stdout, since the engine decides it.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -54,3 +56,4 @@ mkdir -p "$output"
     /output/mj-worker.next --version >&2
     mv -f /output/mj-worker.next /output/mj-worker
   ' sh "$triple" "$profile" ${profile_flag:+"$profile_flag"}
+printf '%s\n' "$triple"

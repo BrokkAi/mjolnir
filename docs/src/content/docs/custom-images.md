@@ -30,6 +30,14 @@ package manager, bake `git` and `gh` into the image yourself. Either way,
 `gh` is what lets HTTPS Git pushes work using the GitHub token Mjolnir syncs into
 the session (see [Container targets](/containers/)).
 
+Mjolnir gives the harness its Git settings through a worker-owned configuration
+file, named by `GIT_CONFIG_GLOBAL`. That file includes the session user's own
+global configuration first, so image and user settings still apply, and then
+points the `github.com` and `gist.github.com` credential helpers at the
+worker's `gh` wrapper. A file is used because some harnesses drop
+credential-shaped variable names from the processes they start, which would
+deliver only part of an equivalent environment setting.
+
 ## ACP bridges
 
 For each harness, Mjolnir first looks for an image-baked bridge binary on

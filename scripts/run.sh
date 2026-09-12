@@ -66,7 +66,7 @@ case "$(uname -s)" in
       fi
     done
     if [ -n "$engine" ]; then
-      "$repo_root/scripts/build-linux-worker.sh" "$engine" ${profile_flag:+"$profile_flag"}
+      "$repo_root/scripts/build-linux-worker.sh" "$engine" ${profile_flag:+"$profile_flag"} >/dev/null
     else
       echo "No running Docker or Podman engine; built the native worker for local sessions only." >&2
     fi
