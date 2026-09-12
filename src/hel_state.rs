@@ -182,6 +182,31 @@ pub enum TurnOutcomeKind {
     Interrupted { message: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptCompletion {
+    Finished,
+    Cancelled,
+    QuotaLimit,
+    Error,
+}
+
+/// Shared interpretation for wait responses and durable completion events.
+pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
+    let normalized = stop_reason
+        .chars()
+        .filter(|character| *character != '_' && *character != '-')
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    match normalized.as_str() {
+        "endturn" => PromptCompletion::Finished,
+        "cancelled" | "canceled" => PromptCompletion::Cancelled,
+        _ if crate::hel_worker::is_capacity_stop_reason(stop_reason) => {
+            PromptCompletion::QuotaLimit
+        }
+        _ => PromptCompletion::Error,
+    }
+}
+
 /// The most recent finished prompt on a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

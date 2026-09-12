@@ -1,5 +1,7 @@
 //! Controller-owned projection of the durable ACP relay stream.
 
+mod api_events;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -210,6 +212,7 @@ pub fn project_relay_event_indexed(
         ..MaterializedSessionMutation::default()
     };
     project_observation(current, index, event, &mut mutation)?;
+    mutation.api_events = api_events::derive(current, event, &mutation);
     Ok(ProjectedRelayEvent { mutation })
 }
 

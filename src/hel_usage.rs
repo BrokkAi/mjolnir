@@ -29,12 +29,17 @@ impl TokenUsage {
         usage: agent_client_protocol::schema::v1::Usage,
     ) -> Self {
         use crate::hel_config::HarnessKind;
-        // Verified against the managed Claude 0.73.0 and Codex 1.11.1 adapters.
-        // Recheck these semantics when changing harness pins. Other adapters
-        // are preserved without guessing whether they report cumulative counts.
-        let scope = match harness {
-            HarnessKind::Claude => UsageScope::Turn,
-            HarnessKind::Codex => UsageScope::LastRequest,
+        // Explicit adapter metadata takes precedence over legacy defaults. In
+        // particular, an incomplete Codex report must never enter turn totals.
+        let declared_scope = usage.meta.as_ref().and_then(|meta| {
+            meta.get("mjolnir.dev/usage-scope")
+                .and_then(|value| value.as_str())
+        });
+        let scope = match (harness, declared_scope) {
+            (HarnessKind::Codex, Some("turn")) => UsageScope::Turn,
+            (HarnessKind::Codex, Some(_)) => UsageScope::Unspecified,
+            (HarnessKind::Claude, _) => UsageScope::Turn,
+            (HarnessKind::Codex, None) => UsageScope::LastRequest,
             _ => UsageScope::Unspecified,
         };
         Self {
@@ -45,6 +50,33 @@ impl TokenUsage {
             thought_tokens: usage.thought_tokens,
             cached_read_tokens: usage.cached_read_tokens,
             cached_write_tokens: usage.cached_write_tokens,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hel_config::HarnessKind;
+    use agent_client_protocol::schema::v1::Usage;
+
+    #[test]
+    fn codex_scope_distinguishes_complete_partial_and_legacy_reports() {
+        let legacy = TokenUsage::from_acp(HarnessKind::Codex, Usage::new(100, 80, 20));
+        assert_eq!(legacy.scope, UsageScope::LastRequest);
+        for (declared, expected) in [
+            ("turn", UsageScope::Turn),
+            ("unspecified", UsageScope::Unspecified),
+            ("future_scope", UsageScope::Unspecified),
+        ] {
+            let mut report = Usage::new(100, 80, 20);
+            report.meta = Some(serde_json::Map::from_iter([(
+                "mjolnir.dev/usage-scope".into(),
+                serde_json::json!(declared),
+            )]));
+            let result = TokenUsage::from_acp(HarnessKind::Codex, report);
+            assert_eq!(result.scope, expected);
+            assert_eq!(result.total_tokens, 100);
         }
     }
 }

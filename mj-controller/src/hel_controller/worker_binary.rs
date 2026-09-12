@@ -4104,7 +4104,7 @@ mod tests {
         );
         assert_eq!(codex_command, "sh");
         assert_eq!(codex_arguments[0], "-c");
-        assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.1"));
+        assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.2"));
         assert!(codex_arguments[1].contains("codex-acp --version"));
 
         let (claude_command, claude_arguments) = bridge_launch(

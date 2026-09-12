@@ -755,34 +755,10 @@ impl ViewerSession {
     }
 }
 
-/// Structured live activity for a session card. The timestamps are epoch
-/// milliseconds and are deliberately optional: old workers can identify a
-/// state without carrying the corresponding clock data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ViewerActivityDetails {
-    pub kind: ViewerActivityKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_started_at_ms: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub step_started_at_ms: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub background_started_at_ms: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idle_since_ms: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ViewerActivityKind {
-    Turn,
-    Step,
-    Background,
-    Idle,
-    Lifecycle,
-}
+// One wire representation for the UI and native API activity facts.
+pub use hel::hel_database::{
+    ApiActivityDetails as ViewerActivityDetails, ApiActivityKind as ViewerActivityKind,
+};
 
 /// One Mjolnir command a phone may offer for this session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

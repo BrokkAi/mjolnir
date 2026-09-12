@@ -2796,6 +2796,7 @@ fn projection_event_application_is_atomic_ordered_and_idempotent() {
         },
     };
     let first = MaterializedSessionMutation {
+        api_events: Vec::new(),
         config_results: vec![],
         provider_cost: None,
         active_turn: None,

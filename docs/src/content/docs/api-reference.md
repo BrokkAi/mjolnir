@@ -478,8 +478,10 @@ when reported. Records persist after stopping and daemon restart. History starts
 with events projected by this version; older usage is not backfilled.
 
 Usage scope is `turn`, `last_request`, or `unspecified`. The managed Claude
-adapter reports the whole turn; the managed Codex adapter reports only its last
-model request. Other adapters' reports retain unspecified scope. Only known
+adapter reports the whole turn. Managed Codex adapter 1.11.2 reports consumption
+across a prompt’s model requests, including cancellation. Unknown resumed baselines,
+missing reports, or counter resets retain incomplete (`unspecified`) coverage. Older
+Codex adapters and historical reports retain `last_request` scope. Other adapters' reports retain unspecified scope. Only known
 whole-turn reports contribute to `totals`. Each counter includes `tokens` and
 `reported_turns`; `coverage` counts recorded turns, full reports, partial
 last-request reports, unspecified reports, and missing reports. An absent counter
@@ -501,6 +503,65 @@ mj usage --session SESSION --json
 mj transcript --session SESSION --role agent --limit 20 --json
 ```
 
+
+## Follow durable events
+
+`GET /api/v1/events` streams server-sent events using the same authentication and
+version headers as the other v1 routes. Optional `session_id` and `workspace_id`
+filters apply together. Workspace filtering uses the session's current workspace.
+
+Without a cursor, the stream follows new events from the current database
+frontier. Use `after_seq=0` to replay all retained history, or resume after the
+last delivered sequence with `after_seq=N` or the `Last-Event-ID: N` header.
+Conflicting cursors, negative or out-of-range values, and cursors ahead of this
+database return 400. Sequence IDs are global; gaps in a filtered stream are normal.
+
+Each SSE frame has an `id` equal to its durable sequence and an `event` matching
+the JSON `type`. For example:
+
+```text
+id: 42
+event: input_resolved
+data: {"seq":42,"session_id":"SESSION","recorded_at_ms":1789200000000,"type":"input_resolved","data":{"elicitation_id":"REQUEST","turn_id":12,"action":"accept"}}
+
+```
+
+| Event | `data` |
+| --- | --- |
+| `turn_started` | `turn`: prompt command ID, `accepted_ordinal` (the API turn ID, when known), transcript start position, and start timestamp. |
+| `turn_ended` | `turn`: command and turn identity, completion ordinal and timestamp, outcome, and optional reported usage. |
+| `error` | `message` and nullable `command_id`, covering command failures and recorded session/startup failures. |
+| `input_required` | `request`: the normalized ACP elicitation, including its response schema, and nullable `turn_id`. |
+| `input_resolved` | `elicitation_id`, nullable `turn_id`, and `action`; `cleared` means the request disappeared without an explicit response observation. |
+| `activity_changed` | `activity`: the UI's `state`, nullable `details`, `is_idle`, `waiting_for_input`, and `capacity_retry`. |
+
+Prompt starts, completions, and explicit input transitions are journaled with
+their relay projection transaction, including intermediate transitions within one
+projection batch. Activity events record observed UI snapshots and may coalesce
+brief intermediate activity. The first observed activity is also recorded.
+Activity `details.kind` is `turn`, `step`, `background`, `idle`, or `lifecycle`,
+with available start/idle timestamps and a label. Unknown activity has no details.
+Idle uses the existing UI classification: no foreground or background work.
+Elapsed silence does not produce a separate stalled state. Pending input and
+capacity retries remain separate facts.
+
+History survives session stop and daemon restart and is deleted when its session
+is forgotten. Recording begins with this version; old transitions are not
+backfilled. Consumers should save the last processed ID and deduplicate replayed
+IDs after reconnecting. Slow readers are buffered within fixed limits and cannot
+block session execution. Keepalive comments carry no application event. A storage
+failure may send an unnumbered `stream_error` frame and end the stream; reconnect
+from the last processed ID. The viewer's existing `/api/events` route is separate.
+
+```sh
+mj events --session SESSION --after-seq 0
+mj events --workspace-id WORKSPACE_ID --after-seq 42
+mj --workspace WORKSPACE_NAME events
+```
+
+`mj events` prints one JSON event per line. Omit the cursor to follow new events
+only; press Ctrl-C to stop. After an interrupted connection, restart with the last
+printed `seq` as `--after-seq`.
 
 ## Upload files and answer structured questions
 
@@ -535,6 +596,13 @@ They also appear as `pending_elicitations` in session detail. Respond with
 ```json
 {"action":"cancel"}
 ```
+
+Free-text answers use an ACP form with a string field, such as the `name` field
+above. Choice questions and plan approvals use the schema supplied by the harness;
+inspect the pending request before constructing the response. These explicit
+requests emit `input_required`, and their resolution emits `input_resolved` on
+the event stream. An assistant question written only in chat text is not an ACP
+elicitation and does not create an input event.
 
 The response is checked against the actual request, including required fields
 and allowed choices, before dispatch. Successful dispatch returns 202; an

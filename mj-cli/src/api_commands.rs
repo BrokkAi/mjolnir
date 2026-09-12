@@ -18,6 +18,62 @@ use mj_controller::hel_server::api::{
 use crate::api_client::{ApiClient, ExportResult};
 
 #[derive(Debug, Args)]
+pub(crate) struct EventsArgs {
+    /// Restrict the stream to this session.
+    #[arg(long)]
+    session: Option<String>,
+    /// Restrict the stream to this workspace ID.
+    #[arg(long)]
+    workspace_id: Option<String>,
+    /// Replay events after this sequence; omit to follow new events only.
+    #[arg(long)]
+    after_seq: Option<u64>,
+}
+
+pub(crate) async fn events(args: EventsArgs, requested_workspace: Option<String>) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let workspace_id = match (args.workspace_id, requested_workspace) {
+        (Some(id), _) => Some(id),
+        (None, Some(name)) => Some(crate::resolve_store_workspace(Some(&name)).await?),
+        (None, None) => None,
+    };
+    let client = ApiClient::connect().await?;
+    let filter = hel::hel_database::ApiEventFilter {
+        session_id: args.session,
+        workspace_id,
+    };
+    let mut response = client.events(&filter, args.after_seq).await?;
+    let mut decoder = crate::api_client::events::EventDecoder::default();
+    let mut stdout = tokio::io::stdout();
+    let mut last_seq = args.after_seq;
+    loop {
+        let chunk = tokio::select! {
+            signal = tokio::signal::ctrl_c() => { signal?; return Ok(()); },
+            chunk = response.chunk() => chunk.with_context(|| format!("event stream interrupted; resume with --after-seq {}", last_seq.unwrap_or(0)))?,
+        };
+        let Some(chunk) = chunk else {
+            bail!(
+                "event stream ended; resume with --after-seq {}",
+                last_seq.unwrap_or(0)
+            );
+        };
+        let events = decoder.push(&chunk).with_context(|| {
+            format!(
+                "decode event stream; resume with --after-seq {}",
+                last_seq.unwrap_or(0)
+            )
+        })?;
+        for event in events {
+            let mut line = serde_json::to_vec(&event)?;
+            line.push(b'\n');
+            stdout.write_all(&line).await?;
+            stdout.flush().await?;
+            last_seq = Some(event.seq);
+        }
+    }
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct NewArgs {
     /// Profile the session runs its harness from.
     #[arg(long)]

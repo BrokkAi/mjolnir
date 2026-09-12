@@ -716,6 +716,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     // it unconditionally (IF NOT EXISTS) on every writer open so an
     // already-migrated database converges too.
     ensure_client_session_state_schema(connection)?;
+    ensure_api_events_schema(connection)?;
     Ok(())
 }
 
@@ -1340,6 +1341,38 @@ fn ensure_projection_digest_column(connection: &Connection) -> Result<()> {
              COMMIT;",
         ))?;
     }
+    Ok(())
+}
+
+fn ensure_api_events_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS api_events (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+            recorded_at_ms INTEGER NOT NULL,
+            body TEXT NOT NULL CHECK(json_valid(body))
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS api_events_session ON api_events(session_id, seq);
+        CREATE TABLE IF NOT EXISTS api_session_activity (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+            body TEXT NOT NULL CHECK(json_valid(body))
+        ) STRICT;
+        CREATE TRIGGER IF NOT EXISTS api_session_error_updated
+        AFTER UPDATE OF last_error ON sessions
+        WHEN NEW.last_error IS NOT NULL AND NEW.last_error IS NOT OLD.last_error
+        BEGIN
+            INSERT INTO api_events(session_id, recorded_at_ms, body)
+            VALUES (NEW.session_id, CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),
+                json_object('type', 'error', 'data', json_object('message', NEW.last_error, 'command_id', NULL)));
+        END;
+        CREATE TRIGGER IF NOT EXISTS api_session_error_inserted
+        AFTER INSERT ON sessions WHEN NEW.last_error IS NOT NULL
+        BEGIN
+            INSERT INTO api_events(session_id, recorded_at_ms, body)
+            VALUES (NEW.session_id, CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),
+                json_object('type', 'error', 'data', json_object('message', NEW.last_error, 'command_id', NULL)));
+        END;"
+    )?;
     Ok(())
 }
 

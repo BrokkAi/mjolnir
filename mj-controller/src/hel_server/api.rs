@@ -12,6 +12,8 @@
 //! reaches them through [`SubagentBackend`], because this crate cannot depend
 //! on the daemon runtime that owns them.
 
+mod events;
+
 use std::path::{Component, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -583,6 +585,14 @@ impl From<ExportError> for ApiFailure {
 /// milestones fill in, so that adding those milestones does not change the
 /// shape every implementation has to match.
 pub trait SubagentBackend: Send + Sync {
+    fn events(
+        &self,
+        filter: hel::hel_database::ApiEventFilter,
+        after_seq: Option<u64>,
+    ) -> BoxFuture<'_, AnyResult<hel::hel_database::ApiEventPage>> {
+        events::load_events(filter, after_seq)
+    }
+
     fn profile_config(
         &self,
         profile: String,
@@ -717,16 +727,12 @@ fn backend(state: &ServerState) -> Result<&Arc<dyn SubagentBackend>, ApiFailure>
 /// an unknown ending "finished" would tell the caller its work succeeded when
 /// nobody knows that it did.
 pub fn map_stop_reason(stop_reason: &str) -> (WaitOutcome, Option<String>) {
-    let normalized = stop_reason
-        .chars()
-        .filter(|character| *character != '_' && *character != '-')
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    match normalized.as_str() {
-        "endturn" => (WaitOutcome::Finished, None),
-        "cancelled" | "canceled" => (WaitOutcome::Cancelled, None),
-        _ if is_capacity_stop_reason(stop_reason) => (WaitOutcome::QuotaLimit, None),
-        _ => (WaitOutcome::Error, Some(stop_reason.to_owned())),
+    use hel::hel_state::{PromptCompletion, classify_prompt_completion};
+    match classify_prompt_completion(stop_reason) {
+        PromptCompletion::Finished => (WaitOutcome::Finished, None),
+        PromptCompletion::Cancelled => (WaitOutcome::Cancelled, None),
+        PromptCompletion::QuotaLimit => (WaitOutcome::QuotaLimit, None),
+        PromptCompletion::Error => (WaitOutcome::Error, Some(stop_reason.to_owned())),
     }
 }
 
@@ -918,6 +924,7 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
 
 pub(super) fn router(state: ServerState) -> Router<ServerState> {
     Router::new()
+        .route("/events", get(events::events))
         .route("/profiles/{profile_id}/config", get(profile_config))
         .route(
             "/sessions/{session_id}/config",
@@ -1783,6 +1790,174 @@ mod tests {
         tests::sample_config_state,
     };
 
+    fn error_event(seq: u64) -> hel::hel_database::ApiEvent {
+        hel::hel_database::ApiEvent {
+            seq,
+            session_id: "session-1".into(),
+            recorded_at_ms: 10,
+            event: hel::hel_database::ApiEventData::Error {
+                message: "test failure".into(),
+                command_id: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
+        let backend = Arc::new(FakeBackend::default());
+        backend
+            .events
+            .lock()
+            .unwrap()
+            .extend([error_event(1), error_event(2)]);
+        let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
+        let response = app
+            .oneshot(
+                bearer(Request::get(
+                    "/api/v1/events?session_id=session-1&workspace_id=default",
+                ))
+                .header("Last-Event-ID", "1")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[API_VERSION_HEADER], API_VERSION);
+        assert_eq!(response.headers()[CONTENT_TYPE], "text/event-stream");
+        let mut body = response.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let text = std::str::from_utf8(frame.data_ref().unwrap()).unwrap();
+        assert!(text.contains("id: 2"), "{text}");
+        assert!(text.contains("event: error"), "{text}");
+        backend.events.lock().unwrap().push(error_event(3));
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            std::str::from_utf8(frame.data_ref().unwrap())
+                .unwrap()
+                .contains("id: 3")
+        );
+        let queries = backend.event_queries.lock().unwrap();
+        assert_eq!(queries[0].0.workspace_id.as_deref(), Some("default"));
+        assert_eq!(queries[0].1, Some(1));
+    }
+
+    #[tokio::test]
+    async fn event_stream_slow_readers_do_not_block_requests_or_shutdown() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.events.lock().unwrap().extend((1..=200).map(|seq| {
+            let mut event = error_event(seq);
+            event.event = hel::hel_database::ApiEventData::Error {
+                message: "x".repeat(8192),
+                command_id: None,
+            };
+            event
+        }));
+        let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
+        let stream = app
+            .clone()
+            .oneshot(
+                bearer(Request::get("/api/v1/events?after_seq=0"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Fill the bounded delivery channel while leaving the stream unread.
+        tokio::task::yield_now().await;
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            app.oneshot(
+                bearer(Request::get("/api/v1/sessions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        backend.shutdown.cancel();
+        let body = tokio::time::timeout(Duration::from_secs(2), stream.into_body().collect())
+            .await
+            .unwrap()
+            .unwrap()
+            .to_bytes();
+        assert!(
+            body.len() < 200 * 8192,
+            "shutdown must not drain the entire unread history"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stream_without_cursor_starts_at_the_current_frontier() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.events.lock().unwrap().push(error_event(1));
+        let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
+        let response = app
+            .oneshot(
+                bearer(Request::get("/api/v1/events"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        backend.events.lock().unwrap().push(error_event(2));
+        let mut body = response.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            std::str::from_utf8(frame.data_ref().unwrap())
+                .unwrap()
+                .contains("id: 2")
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stream_rejects_bad_cursors_and_requires_authentication() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.events.lock().unwrap().push(error_event(1));
+        let (app, _actions, _snapshots, _bundles) = api_app(backend, |_| {});
+        for (uri, header) in [
+            ("/api/v1/events?after_seq=0", "1"),
+            ("/api/v1/events", "invalid"),
+            ("/api/v1/events?after_seq=2", "2"),
+            ("/api/v1/events", "18446744073709551615"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    bearer(Request::get(uri))
+                        .header("Last-Event-ID", header)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri}, {header}"
+            );
+        }
+        let response = app
+            .oneshot(Request::get("/api/v1/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
     /// A hand-written backend. Mocking the trait would only re-state its
     /// signature; this returns the exact observations each test needs and
     /// records what the handlers asked for.
@@ -1812,6 +1987,9 @@ mod tests {
         /// The path the file handler asked the backend for.
         file_paths: Mutex<Vec<PathBuf>>,
         file_writes: Mutex<Vec<(PathBuf, Vec<u8>, bool)>>,
+        events: Mutex<Vec<hel::hel_database::ApiEvent>>,
+        shutdown: tokio_util::sync::CancellationToken,
+        event_queries: Mutex<Vec<(hel::hel_database::ApiEventFilter, Option<u64>)>>,
     }
 
     impl FakeBackend {
@@ -1826,6 +2004,39 @@ mod tests {
     }
 
     impl SubagentBackend for FakeBackend {
+        fn events(
+            &self,
+            filter: hel::hel_database::ApiEventFilter,
+            after_seq: Option<u64>,
+        ) -> BoxFuture<'_, AnyResult<hel::hel_database::ApiEventPage>> {
+            Box::pin(async move {
+                self.event_queries
+                    .lock()
+                    .unwrap()
+                    .push((filter.clone(), after_seq));
+                let events = self.events.lock().unwrap();
+                let latest_seq = events.last().map_or(0, |e| e.seq);
+                let cursor = after_seq.unwrap_or(latest_seq);
+                let page: Vec<_> = events
+                    .iter()
+                    .filter(|e| {
+                        e.seq > cursor
+                            && filter
+                                .session_id
+                                .as_ref()
+                                .is_none_or(|id| id == &e.session_id)
+                    })
+                    .take(200)
+                    .cloned()
+                    .collect();
+                Ok(hel::hel_database::ApiEventPage {
+                    next_after_seq: page.last().map_or(latest_seq.max(cursor), |e| e.seq),
+                    latest_seq,
+                    events: page,
+                })
+            })
+        }
+
         fn profile_config(
             &self,
             _profile: String,
@@ -2018,6 +2229,7 @@ mod tests {
         )
         .unwrap()
         .with_test_credentials("123456", b"01234567890123456789012345678901");
+        options.shutdown = backend.shutdown.clone();
         options.set_subagent_backend(backend);
         (router(options), action_rx, snapshot_tx, bundle_rx)
     }

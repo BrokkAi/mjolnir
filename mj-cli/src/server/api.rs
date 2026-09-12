@@ -643,6 +643,21 @@ impl SubagentBackend for ApiBackend {
                         message: format!("starting session {id} failed: {error}"),
                     }),
                 };
+                if let Some(StartStatus::Failed { message }) = &status {
+                    let failed_id = id.clone();
+                    let message = message.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        hel::hel_database::record_api_error(failed_id, message)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => tracing::warn!(%error, "persist startup API error"),
+                        Err(error) => {
+                            tracing::error!(%error, "startup API error recorder task failed")
+                        }
+                    }
+                }
                 let mut starts = starts.lock().expect("api start status mutex poisoned");
                 match status {
                     Some(status) => {
