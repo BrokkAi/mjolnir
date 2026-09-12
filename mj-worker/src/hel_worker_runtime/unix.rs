@@ -2374,7 +2374,95 @@ fn github_token_state_payload(
     }
 }
 
-pub(super) fn configure_github_cli(
+struct GithubCliPaths {
+    bin: PathBuf,
+    wrapper: PathBuf,
+    git_config: PathBuf,
+}
+
+impl GithubCliPaths {
+    fn new(root: &std::path::Path) -> Self {
+        let bin = root.join("bin");
+        Self {
+            wrapper: bin.join("gh"),
+            bin,
+            git_config: root.join("gitconfig"),
+        }
+    }
+}
+
+fn prepend_github_cli_path(
+    bin: &std::path::Path,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let inherited_path = environment.get("PATH").cloned().unwrap_or_default();
+    let mut entries = vec![bin.to_path_buf()];
+    if !inherited_path.is_empty() {
+        entries.extend(
+            std::env::split_paths(std::ffi::OsStr::new(&inherited_path))
+                .filter(|entry| entry != bin),
+        );
+    }
+    let path = std::env::join_paths(entries).context("prepend session GitHub CLI to PATH")?;
+    environment.insert(
+        "PATH".into(),
+        path.into_string()
+            .map_err(|_| anyhow::anyhow!("session GitHub CLI PATH is not UTF-8"))?,
+    );
+    Ok(())
+}
+
+/// Attach an export to existing session authentication without rewriting it.
+/// The wrapper reads the latest token only when Git invokes its helper.
+pub fn attach_session_git_environment(
+    root: &std::path::Path,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let root = std::path::absolute(root).context("resolve session worker root")?;
+    let paths = GithubCliPaths::new(&root);
+    let validate = || -> Result<()> {
+        let metadata = std::fs::symlink_metadata(&paths.bin)?;
+        anyhow::ensure!(
+            metadata.is_dir(),
+            "GitHub wrapper directory is not a directory"
+        );
+        for path in [&paths.wrapper, &paths.git_config] {
+            let metadata = std::fs::symlink_metadata(path)
+                .with_context(|| format!("inspect {}", path.display()))?;
+            anyhow::ensure!(
+                metadata.is_file(),
+                "{} is not a regular file",
+                path.display()
+            );
+            std::fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
+        }
+        Ok(())
+    };
+    validate().with_context(|| {
+        format!(
+            "load session Git authentication from {}; resume the session to restore its setup",
+            root.display()
+        )
+    })?;
+    prepend_github_cli_path(&paths.bin, environment)?;
+    environment.insert(
+        "GIT_CONFIG_GLOBAL".into(),
+        paths.git_config.to_string_lossy().into_owned(),
+    );
+    // Startup already migrated these entries into the generated configuration.
+    // Reapplying them would outrank its absolute credential helper.
+    environment.retain(|name, _| {
+        name != "GIT_CONFIG_COUNT"
+            && !is_indexed_git_config_name(name, "KEY")
+            && !is_indexed_git_config_name(name, "VALUE")
+            && name != "GH_TOKEN"
+            && name != "GITHUB_TOKEN"
+    });
+    Ok(())
+}
+
+/// Install the session-owned GitHub wrapper and Git configuration at startup.
+pub fn configure_github_cli(
     root: &std::path::Path,
     environment: &mut BTreeMap<String, String>,
 ) -> Result<()> {
@@ -2382,19 +2470,20 @@ pub(super) fn configure_github_cli(
 
     const ORIGINAL_BASH_ENV: &str = "MJ_ORIGINAL_BASH_ENV";
 
-    let bin = root.join("bin");
-    if std::fs::symlink_metadata(&bin).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+    let paths = GithubCliPaths::new(root);
+    let bin = &paths.bin;
+    if std::fs::symlink_metadata(bin).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         bail!(
             "GitHub CLI wrapper directory {} is a symbolic link",
             bin.display()
         );
     }
-    std::fs::create_dir_all(&bin)
+    std::fs::create_dir_all(bin)
         .with_context(|| format!("create GitHub CLI wrapper directory {}", bin.display()))?;
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o700))?;
 
-    let wrapper = bin.join("gh");
-    if std::fs::symlink_metadata(&wrapper).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+    let wrapper = &paths.wrapper;
+    if std::fs::symlink_metadata(wrapper).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         bail!(
             "GitHub CLI wrapper {} is a symbolic link",
             wrapper.display()
@@ -2424,8 +2513,8 @@ else
 fi
 exec gh "$@"
 "#;
-    hel::hel_config::atomic_write_existing(&wrapper, WRAPPER.as_bytes())?;
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+    hel::hel_config::atomic_write_existing(wrapper, WRAPPER.as_bytes())?;
+    std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o700))?;
 
     // Harnesses can start `bash -lc`, whose login profile may replace PATH
     // after the ACP bridge inherited it. BASH_ENV is read after that profile.
@@ -2451,21 +2540,11 @@ fi
     hel::hel_config::atomic_write_existing(&shell_environment, SHELL_ENVIRONMENT.as_bytes())?;
     std::fs::set_permissions(&shell_environment, std::fs::Permissions::from_mode(0o600))?;
 
-    let inherited_path = environment.get("PATH").cloned().unwrap_or_default();
-    let bin_text = bin.to_string_lossy().into_owned();
+    prepend_github_cli_path(bin, environment)?;
     environment.insert(
-        "PATH".into(),
-        if std::env::split_paths(std::ffi::OsStr::new(&inherited_path))
-            .any(|entry| entry.as_path() == bin.as_path())
-        {
-            inherited_path
-        } else if inherited_path.is_empty() {
-            bin_text.clone()
-        } else {
-            format!("{bin_text}:{inherited_path}")
-        },
+        super::GITHUB_CLI_BIN_ENV.into(),
+        bin.to_string_lossy().into_owned(),
     );
-    environment.insert(super::GITHUB_CLI_BIN_ENV.into(), bin_text);
     let shell_environment_text = shell_environment.to_string_lossy().into_owned();
     let original_bash_env = environment
         .get("BASH_ENV")
@@ -2481,7 +2560,7 @@ fi
         }
     }
     environment.insert("BASH_ENV".into(), shell_environment_text);
-    configure_git_config_file(root, environment, &wrapper)?;
+    configure_git_config_file(root, environment, &paths)?;
 
     let inherited_token = std::env::var("GH_TOKEN")
         .ok()
@@ -2507,14 +2586,14 @@ fi
 fn configure_git_config_file(
     root: &std::path::Path,
     environment: &mut BTreeMap<String, String>,
-    wrapper: &std::path::Path,
+    paths: &GithubCliPaths,
 ) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     const ORIGINAL_GIT_CONFIG_GLOBAL: &str = "MJ_ORIGINAL_GIT_CONFIG_GLOBAL";
 
-    let path = root.join("gitconfig");
-    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+    let path = &paths.git_config;
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         bail!("Git configuration {} is a symbolic link", path.display());
     }
     let path_text = path.to_string_lossy().into_owned();
@@ -2579,7 +2658,7 @@ fn configure_git_config_file(
     // included file.
     let helper = format!(
         "!{} auth git-credential",
-        hel::hel_targets::posix_quote(&wrapper.to_string_lossy())
+        hel::hel_targets::posix_quote(&paths.wrapper.to_string_lossy())
     );
     for host in ["github.com", "gist.github.com"] {
         let key = format!("credential.https://{host}.helper");
@@ -2587,8 +2666,8 @@ fn configure_git_config_file(
         entries.push((key, helper.clone()));
     }
 
-    hel::hel_config::atomic_write_existing(&path, render_git_config(&entries)?.as_bytes())?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    hel::hel_config::atomic_write_existing(path, render_git_config(&entries)?.as_bytes())?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     environment.insert("GIT_CONFIG_GLOBAL".into(), path_text);
     Ok(())
 }
