@@ -626,7 +626,11 @@ impl KimiTaskMonitor {
                 relay
                     .lock()
                     .expect("relay state lock poisoned")
-                    .kimi_background_tasks_changed(snapshot.tasks, snapshot.provider_tool_ids)
+                    .kimi_background_tasks_changed(
+                        snapshot.tasks,
+                        snapshot.provider_tool_ids,
+                        snapshot.observed_task_ids,
+                    )
             }
             Ok(Err(error)) => self.record_failure(relay, error),
             Err(error) => self.record_failure(
