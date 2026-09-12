@@ -228,11 +228,28 @@ fn refresh_worker_launch_if_stale(
     Ok(())
 }
 
+#[cfg(test)]
 async fn recover_worker(
     plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
 ) -> Result<WorkerRecoveryOutcome> {
+    recover_worker_for_session(plan, restart_unresponsive, None).await
+}
+
+async fn recover_worker_for_session(
+    mut plan: WorkerRecoveryPlan,
+    restart_unresponsive: bool,
+    session_id: Option<String>,
+) -> Result<WorkerRecoveryOutcome> {
     tokio::task::spawn_blocking(move || {
+        // A failed Move can leave this actor with a plan from before recovery.
+        // Never overwrite the durable checkpoint-only launch with that old plan.
+        if let Some(id) = session_id.as_deref()
+            && hel::hel_database::load_move_operation(id)?
+                .is_some_and(|op| op.source_checkpoint_only && op.destination_target.is_none())
+        {
+            plan = crate::hel_controller::Controller::load()?.worker_recovery_plan(id)?;
+        }
         let executor = CancellableProcessExecutor::with_timeout(WORKER_RESTART_TIMEOUT);
         if ensure_recovery_target_running(&executor, plan.target.as_ref())
             .context("restore relay worker target")?
@@ -1745,6 +1762,7 @@ async fn run_session_actor(
                             "session relay sync failed: {error:#}"
                         );
                         let recovery_due = !integrity
+                            && !crate::hel_controller::move_session::move_owns_session(&target.session_id)
                             && failures >= UNREACHABLE_FAILURE_THRESHOLD
                             && worker_connect_needs_restart(&error)
                             && target.worker_recovery.is_some()
@@ -1783,7 +1801,7 @@ async fn run_session_actor(
                                 session_id = target.session_id,
                                 "relay worker is unreachable; probing it before recovery: {error:#}"
                             );
-                            match recover_worker(plan, restart_unresponsive).await {
+                            match recover_worker_for_session(plan, restart_unresponsive, Some(target.session_id.clone())).await {
                                 Ok(
                                     outcome @ (WorkerRecoveryOutcome::RestartedDead
                                     | WorkerRecoveryOutcome::RestartedUnresponsive),
@@ -4051,6 +4069,7 @@ mod tests {
                     recovery_floor_ordinal: 0,
                     recovery_floor_digest: hel::hel_worker::RELAY_EVENT_GENESIS_DIGEST.into(),
                     native_session_id: None,
+                    checkpoint_only: false,
                     acp_ready: None,
                     agent_capabilities: None,
                     agent_info: None,

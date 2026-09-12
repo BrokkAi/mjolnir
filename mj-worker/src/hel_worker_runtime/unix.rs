@@ -75,7 +75,10 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     let startup_directory = std::env::current_dir()?;
     let root = super::resolve_relative_worker_root(root, &startup_directory);
     super::resolve_relative_harness_home(&mut config, &startup_directory);
-    super::enforce_execution_policy(&mut config)?;
+    let checkpoint_only = config.run_mode == hel::hel_worker_launch::WorkerRunMode::CheckpointOnly;
+    if !checkpoint_only {
+        super::enforce_execution_policy(&mut config)?;
+    }
     // Resolve this before the launch config's environment is consumed by
     // the ACP supervisor specification below.
     let credentials = super::credential_endpoint(&config);
@@ -87,29 +90,13 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     });
     std::fs::create_dir_all(&root)
         .with_context(|| format!("create worker root {}", root.display()))?;
-    if config.environment.remove(DISCOVER_LOGIN_PATH_ENV).is_some()
+    if !checkpoint_only
+        && config.environment.remove(DISCOVER_LOGIN_PATH_ENV).is_some()
         && !config.environment.contains_key("PATH")
         && let Some(path) = discover_login_path(&config.session_id).await
     {
         config.environment.insert("PATH".into(), path);
     }
-    configure_github_cli(&root, &mut config.environment)?;
-    let managed_harness = super::harness::resolve(
-        config.harness_runtime,
-        config.harness,
-        config.execution_policy,
-        &config.environment,
-    )
-    .await
-    .with_context(|| format!("prepare managed {}", config.harness.display_name()))?;
-    if let Some(managed) = &managed_harness {
-        config.bridge_command = managed.command.clone();
-        config.bridge_args = managed.args.clone();
-        config.environment.extend(managed.environment.clone());
-    }
-    let harness_gc = managed_harness
-        .as_ref()
-        .map(|managed| super::harness::spawn_gc(managed.cache_root.clone(), config.harness));
     let socket = root.join("control.sock");
     // Refuse a second daemon before touching durable state: opening the
     // relay recovers the journal in place, so getting that far would
@@ -132,7 +119,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // different: replacing a missing baseline then could hide changes from a
     // review that was interrupted. A restored relay has no state file yet, so
     // its restored worktree is a safe fresh-session boundary.
-    if !relay_state_exists {
+    if !relay_state_exists && !checkpoint_only {
         let mut workspace_roots = vec![config.cwd.clone()];
         workspace_roots.extend(config.additional_directories.iter().cloned());
         tokio::task::spawn_blocking(move || {
@@ -146,8 +133,11 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     }
     // Validate and recover durable state before publishing a socket. A
     // failed startup must never leave a fresh endpoint that looks live.
-    let mut durable_relay =
-        DurableRelay::open(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?;
+    let mut durable_relay = if checkpoint_only {
+        DurableRelay::open_for_checkpoint(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?
+    } else {
+        DurableRelay::open(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?
+    };
     // Hashed once, at startup: the controller compares this against the binary
     // it would install to decide whether this worker is the current build.
     durable_relay.set_worker_build(hel::hel_worker_launch::running_executable_digest());
@@ -168,7 +158,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     });
     let resume_session = select_resume_session(&config, &durable_relay)?;
     let project_memory = ProjectMemoryEndpoint::new(config.project_memory.clone());
-    if resume_session.is_none()
+    if !checkpoint_only && resume_session.is_none()
         // Recreating an unused native thread keeps this relay's original
         // startup context, which may already belong to a pending prompt.
         && durable_relay.operational_state().native_session_id.is_none()
@@ -213,16 +203,23 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // Client tasks are detached, so a durable failure they cannot recover
     // from has to travel back here to stop the daemon.
     let (fatal_tx, mut fatal_rx) = mpsc::channel(1);
-    if relay
-        .lock()
-        .expect("relay state lock poisoned")
-        .operational_state()
-        .execution
-        == hel::hel_worker::RelayExecutionState::Closed
+    if checkpoint_only
+        || relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .operational_state()
+            .execution
+            == hel::hel_worker::RelayExecutionState::Closed
     {
         // A durable close is a seal, including across target or daemon
         // restarts. Keep the relay attachable so the controller can catch
         // up and complete its checkpoint, but never reopen the ACP session.
+        if checkpoint_only {
+            relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .dispatch_checkpoint_only()?;
+        }
         let (dispatch_wake_tx, dispatch_wake_rx) = mpsc::channel(1);
         drop(dispatch_wake_rx);
         return serve_terminal_relay(
@@ -236,6 +233,24 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         )
         .await;
     }
+
+    configure_github_cli(&root, &mut config.environment)?;
+    let managed_harness = super::harness::resolve(
+        config.harness_runtime,
+        config.harness,
+        config.execution_policy,
+        &config.environment,
+    )
+    .await
+    .with_context(|| format!("prepare managed {}", config.harness.display_name()))?;
+    if let Some(managed) = &managed_harness {
+        config.bridge_command = managed.command.clone();
+        config.bridge_args = managed.args.clone();
+        config.environment.extend(managed.environment.clone());
+    }
+    let harness_gc = managed_harness
+        .as_ref()
+        .map(|managed| super::harness::spawn_gc(managed.cache_root.clone(), config.harness));
 
     let (acp_commands_tx, acp_commands_rx) = mpsc::channel(32);
     let (acp_events_tx, acp_events_rx) = mpsc::channel(ACP_EVENT_CHANNEL_CAPACITY);
@@ -2843,6 +2858,12 @@ pub(super) fn wake_dispatch(
     relay: &Arc<Mutex<DurableRelay>>,
     dispatch_wake: &mpsc::Sender<()>,
 ) -> Result<()> {
+    {
+        let mut state = relay.lock().expect("relay state lock poisoned");
+        if state.operational_state().checkpoint_only {
+            return state.dispatch_checkpoint_only();
+        }
+    }
     match dispatch_wake.try_send(()) {
         Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
         Err(mpsc::error::TrySendError::Closed(()))

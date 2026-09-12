@@ -256,6 +256,17 @@ impl Controller {
             }
         };
         connection.set_project_memory_target(project_memory);
+        let checkpoint_only = connection.sync().await?.operational.checkpoint_only;
+        if let Some(launch) = launch {
+            anyhow::ensure!(
+                checkpoint_only
+                    == (launch.run_mode == hel::hel_worker_launch::WorkerRunMode::CheckpointOnly),
+                "restarted worker did not enter the requested execution mode"
+            );
+        }
+        if checkpoint_only {
+            return Ok(connection);
+        }
         wait_for_native_session(&mut connection, executor)
             .await
             .context(messages.native_session)?;

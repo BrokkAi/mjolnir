@@ -3594,6 +3594,7 @@ mod tests {
     #[test]
     fn move_recovery_projection_exposes_safe_retry_settings_only() {
         let operation = hel::hel_state::MoveOperation {
+            source_checkpoint_only: false,
             operation_id: "move-1".into(),
             selection: hel::hel_state::MoveSelection {
                 clear_resource_allocation: true,
@@ -3771,6 +3772,7 @@ mod tests {
             recovery_floor_ordinal: 0,
             recovery_floor_digest: String::new(),
             native_session_id: None,
+            checkpoint_only: false,
             acp_ready: None,
             agent_capabilities,
             agent_info: None,
@@ -3836,6 +3838,7 @@ mod tests {
             recovery_floor_ordinal: 0,
             recovery_floor_digest: String::new(),
             native_session_id: None,
+            checkpoint_only: false,
             acp_ready: None,
             agent_capabilities: None,
             agent_info: None,

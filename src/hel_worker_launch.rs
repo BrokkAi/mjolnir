@@ -79,9 +79,20 @@ fn default_worker_workspace_id() -> String {
     crate::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned()
 }
 
+/// Whether this worker executes the harness or only preserves recovered state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerRunMode {
+    #[default]
+    Harness,
+    CheckpointOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
+    #[serde(default)]
+    pub run_mode: WorkerRunMode,
     pub session_id: String,
     pub harness: HarnessKind,
     pub bridge_command: PathBuf,

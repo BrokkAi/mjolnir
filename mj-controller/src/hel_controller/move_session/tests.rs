@@ -265,6 +265,7 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             resource_allocation: None,
         };
         let operation = MoveOperation {
+            source_checkpoint_only: false,
             operation_id: format!("move-recovery-terminal-{prefix}"),
             selection,
             source_profile_id: "codex".into(),
@@ -619,6 +620,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .move_configuration_fingerprint(&selection)
         .unwrap();
     let mut operation = MoveOperation {
+        source_checkpoint_only: false,
         operation_id: "move-queue-replay".into(),
         selection,
         source_profile_id: "codex".into(),
@@ -797,4 +799,196 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
         ["queued-2"]
     );
     assert_ne!(first.fingerprint, second.fingerprint);
+}
+
+#[cfg(unix)]
+#[test]
+fn move_preparation_can_refresh_a_dead_source_without_starting_its_harness() {
+    let name = test_name("move_preparation_can_refresh_a_dead_source_without_starting_its_harness");
+    if !isolated_test_child(&name, "MJ_MOVE_DEAD_SOURCE_CHILD") {
+        return;
+    }
+    let _writer = hel::hel_database::install_isolated_test_writer();
+    let session = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
+    hel::hel_database::save_session(&session).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let manager = crate::hel_session_manager::spawn_session_manager().unwrap();
+        manager
+            .targets
+            .send(vec![crate::hel_session_manager::RelaySessionTarget {
+                session_id: MOVE_QUEUE_SESSION_ID.into(),
+                spec: CommandSpec::new("sh", ["-c", "exit 1"]),
+                worker_recovery: None,
+                project_memory: None,
+            }])
+            .unwrap();
+        let snapshot = super::refresh_move_source(&manager.control, MOVE_QUEUE_SESSION_ID)
+            .await
+            .unwrap();
+        assert!(snapshot.is_none());
+        manager.shutdown.shutdown().await.unwrap();
+    });
+}
+
+#[cfg(unix)]
+fn source_recovery_operation(session: &hel::hel_state::SessionRecord) -> MoveOperation {
+    MoveOperation {
+        source_checkpoint_only: false,
+        operation_id: "move-source-recovery".into(),
+        selection: MoveSelection {
+            clear_resource_allocation: false,
+            session_id: session.id.clone(),
+            profile_id: Some("destination".into()),
+            target_template_id: Some("local-bare".into()),
+            additional_mounts: None,
+            resource_allocation: None,
+        },
+        source_profile_id: session.last_profile.clone(),
+        source_target_template_id: session.target_template_id.clone(),
+        source_target: session.target.clone(),
+        source_native_session_id: session.native_session_id.clone(),
+        source_additional_mounts: Vec::new(),
+        source_resource_allocation: None,
+        destination_target: None,
+        destination_native_session_id: None,
+        destination_store_id: None,
+        configuration_fingerprint: "source-recovery-test".into(),
+        checkpoint: None,
+        recovery_session: None,
+        queue: ResumeQueueDisposition::Discard,
+        phase: MovePhase::ClosingSource,
+        queue_admission_started: false,
+        queue_admission_finished: false,
+        cancellation_requested: false,
+        created_at: session.created_at.clone(),
+        updated_at: session.updated_at.clone(),
+        error: None,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_its_mode() {
+    let name = test_name(
+        "move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_its_mode",
+    );
+    if !isolated_test_child(&name, "MJ_MOVE_SOURCE_STOP_CHILD") {
+        return;
+    }
+    let _writer = hel::hel_database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(MOVE_QUEUE_SESSION_ID);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("retained-data"), b"source work").unwrap();
+    let mut session = raw_session_on("local-bare", directory.path().to_str().unwrap());
+    session.state = SessionState::Running;
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: root.clone(),
+    });
+    hel::hel_database::save_session(&session).unwrap();
+    let mut config = resume_compatibility_config();
+    add_codex_profile(&mut config, directory.path());
+    let mut controller = Controller {
+        config,
+        state: HelState {
+            sessions: BTreeMap::from([(session.id.clone(), session.clone())]),
+            ..HelState::default()
+        },
+    };
+    struct StopFails {
+        cancelled: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl CommandExecutor for StopFails {
+        fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("source process group is still running")
+        }
+        fn cancellation_requested(&self) -> bool {
+            self.cancelled
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let manager = crate::hel_session_manager::spawn_session_manager().unwrap();
+        manager
+            .targets
+            .send(vec![crate::hel_session_manager::RelaySessionTarget {
+                session_id: session.id.clone(),
+                spec: CommandSpec::new("sh", ["-c", "exit 1"]),
+                worker_recovery: None,
+                project_memory: None,
+            }])
+            .unwrap();
+        for cancelled in [true, false] {
+            let mut operation = source_recovery_operation(&session);
+            hel::hel_database::save_move_operation(&operation).unwrap();
+            let executor = StopFails {
+                cancelled,
+                calls: 0.into(),
+            };
+            let error = controller
+                .prepare_move_source_checkpoint(
+                    &session.id,
+                    &executor,
+                    &manager.control,
+                    &mut operation,
+                )
+                .await
+                .unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(if cancelled {
+                    "cancelled"
+                } else {
+                    "still running"
+                }),
+                "{message}"
+            );
+            assert_eq!(
+                executor.calls.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(!cancelled)
+            );
+            assert_eq!(
+                fs::read(root.join("retained-data")).unwrap(),
+                b"source work"
+            );
+            assert!(!root.join("hel.next").exists());
+            assert!(!root.join("launch.json").exists());
+            let persisted = hel::hel_database::load_move_operation(&session.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted.source_checkpoint_only, !cancelled);
+        }
+        let (backend, _) = controller.worker_placement(&session.id).unwrap();
+        assert_eq!(
+            controller
+                .current_worker_launch_config(&session.id, &backend)
+                .unwrap()
+                .run_mode,
+            hel::hel_worker_launch::WorkerRunMode::CheckpointOnly
+        );
+        // A fresh ordinary Resume must not inherit the source's maintenance mode.
+        controller
+            .state
+            .sessions
+            .get_mut(&session.id)
+            .unwrap()
+            .state = SessionState::Stopped;
+        assert_eq!(
+            controller
+                .current_worker_launch_config(&session.id, &backend)
+                .unwrap()
+                .run_mode,
+            hel::hel_worker_launch::WorkerRunMode::Harness
+        );
+        manager.shutdown.shutdown().await.unwrap();
+    });
 }

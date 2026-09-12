@@ -24,6 +24,8 @@ pub struct MoveSelection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MovePreparation {
+    #[serde(default)]
+    pub source_unavailable: bool,
     pub selection: MoveSelection,
     pub source_profile_id: String,
     pub source_target_template_id: String,
@@ -69,6 +71,9 @@ pub enum MovePhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MoveOperation {
+    /// Keep the source harness stopped across recovery until destination restoration.
+    #[serde(default)]
+    pub source_checkpoint_only: bool,
     pub operation_id: String,
     pub selection: MoveSelection,
     pub source_profile_id: String,

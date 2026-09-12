@@ -6430,6 +6430,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         request
             .reply
             .send(Ok(MovePreparation {
+                source_unavailable: false,
                 selection: request.selection,
                 source_profile_id: "codex-1".into(),
                 source_target_template_id: "podman".into(),
@@ -6919,6 +6920,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
             resource_allocation: None,
         };
         let preparation = MovePreparation {
+            source_unavailable: false,
             selection,
             source_profile_id: "codex-1".into(),
             source_target_template_id: "podman".into(),

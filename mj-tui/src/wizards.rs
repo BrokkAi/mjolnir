@@ -799,6 +799,7 @@ pub(crate) fn render_new_wizard(
                 preparation_error: None,
                 submit_enabled: true,
                 active_interruption: false,
+                source_unavailable: false,
                 clear_resource_allocation: false,
                 queue: None,
                 queued_entries: &[],
@@ -1203,6 +1204,7 @@ struct ReviewWizardView<'a> {
     preparation_error: Option<&'a str>,
     submit_enabled: bool,
     active_interruption: bool,
+    source_unavailable: bool,
     clear_resource_allocation: bool,
     queue: Option<(usize, bool)>,
     queued_entries: &'a [hel::hel_worker::QueuedPrompt],
@@ -1236,6 +1238,7 @@ fn render_review_wizard(
         preparation_error,
         submit_enabled,
         active_interruption,
+        source_unavailable,
         clear_resource_allocation,
         queue,
         queued_entries,
@@ -1277,6 +1280,12 @@ fn render_review_wizard(
             Span::raw(resource_allocation_label(allocation, None)),
         ]),
     ];
+    if moving && source_unavailable {
+        lines.push(Line::styled(
+            "Source is unavailable; Move will recover its saved data without starting its old harness.",
+            Style::default().fg(theme::palette().warning),
+        ));
+    }
     if moving && active_interruption {
         lines.push(Line::styled(
             "Active work will be interrupted; the session is restored into a fresh environment.",
@@ -1831,6 +1840,10 @@ pub(crate) fn render_resume_wizard(
                 submit_enabled: !wizard.moving
                     || wizard.preparation.is_some()
                     || wizard.preparation_error.is_some(),
+                source_unavailable: wizard
+                    .preparation
+                    .as_ref()
+                    .is_some_and(|p| p.source_unavailable),
                 active_interruption: wizard
                     .preparation
                     .as_ref()

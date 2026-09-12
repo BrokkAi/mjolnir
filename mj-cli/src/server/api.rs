@@ -805,6 +805,7 @@ mod tests {
             recovery_floor_ordinal: 0,
             recovery_floor_digest: hel::hel_worker::RELAY_EVENT_GENESIS_DIGEST.into(),
             native_session_id: Some("native-1".into()),
+            checkpoint_only: false,
             acp_ready: Some(true),
             agent_capabilities: None,
             agent_info: None,
