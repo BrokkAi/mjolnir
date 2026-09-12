@@ -478,8 +478,10 @@ when reported. Records persist after stopping and daemon restart. History starts
 with events projected by this version; older usage is not backfilled.
 
 Usage scope is `turn`, `last_request`, or `unspecified`. The managed Claude
-adapter reports the whole turn; the managed Codex adapter reports only its last
-model request. Other adapters' reports retain unspecified scope. Only known
+adapter reports the whole turn. Managed Codex adapter 1.11.2 reports consumption
+across a prompt’s model requests, including cancellation. Unknown resumed baselines,
+missing reports, or counter resets retain incomplete (`unspecified`) coverage. Older
+Codex adapters and historical reports retain `last_request` scope. Other adapters' reports retain unspecified scope. Only known
 whole-turn reports contribute to `totals`. Each counter includes `tokens` and
 `reported_turns`; `coverage` counts recorded turns, full reports, partial
 last-request reports, unspecified reports, and missing reports. An absent counter
