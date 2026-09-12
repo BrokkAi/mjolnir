@@ -3520,6 +3520,7 @@ mod tests {
         let mut queued = view(session, hel::hel_state::MaterializedExecutionState::Idle);
         if let Some(snapshot) = queued.snapshot.as_mut() {
             snapshot.materialized.queued_prompts = vec![hel::hel_state::MaterializedQueuedPrompt {
+                accepted_ordinal: None,
                 command_id: "queued-1".to_owned(),
                 kind: hel::hel_state::QueuedCommandKind::Prompt,
                 content: vec![serde_json::json!({"type": "text", "text": "next"})],

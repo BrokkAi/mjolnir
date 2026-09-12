@@ -1714,6 +1714,7 @@ impl ChatState {
             self.queued_prompts
                 .iter()
                 .map(|prompt| MaterializedQueuedPrompt {
+                    accepted_ordinal: None,
                     command_id: prompt.id.clone(),
                     kind: prompt.kind.clone(),
                     content: prompt_content_blocks(&prompt.text, &prompt.images),
@@ -5181,6 +5182,7 @@ mod tests {
         // The projection only rebuilds when its frontier moved.
         session.applied_event_ordinal = 5;
         session.queued_prompts.push(MaterializedQueuedPrompt {
+            accepted_ordinal: None,
             command_id: "queued-config".into(),
             kind: QueuedCommandKind::SetConfig {
                 key: "model".into(),
@@ -5228,6 +5230,7 @@ mod tests {
         let payload = source.draft_payload();
         let mut session = MaterializedSession::empty("image-queue");
         session.queued_prompts.push(MaterializedQueuedPrompt {
+            accepted_ordinal: None,
             command_id: "queued-image".into(),
             kind: QueuedCommandKind::Prompt,
             content: prompt_content_blocks(&payload.text, &payload.images),
@@ -5259,6 +5262,7 @@ mod tests {
         let mut session = MaterializedSession::empty("session-queue-edit");
         session.applied_event_ordinal = 5;
         session.queued_prompts.push(MaterializedQueuedPrompt {
+            accepted_ordinal: None,
             command_id: "queued-prompt".into(),
             kind: QueuedCommandKind::Prompt,
             content: vec![serde_json::json!({"type": "text", "text": "revise me"})],
@@ -5984,6 +5988,7 @@ mod tests {
             content: vec![serde_json::json!("changed without new ordinal")],
         };
         session.queued_prompts.push(MaterializedQueuedPrompt {
+            accepted_ordinal: None,
             command_id: "queued".into(),
             kind: QueuedCommandKind::Prompt,
             content: vec![serde_json::json!("queued prompt")],

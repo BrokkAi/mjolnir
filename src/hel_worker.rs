@@ -16,7 +16,7 @@
 mod capacity;
 use capacity::CapacityResponse;
 pub(crate) use capacity::{CAPACITY_STOP_REASON, capacity_error};
-pub use capacity::{CapacityRetry, is_capacity_retry_command};
+pub use capacity::{CapacityRetry, is_capacity_retry_command, is_capacity_stop_reason};
 
 mod journal;
 mod protocol;

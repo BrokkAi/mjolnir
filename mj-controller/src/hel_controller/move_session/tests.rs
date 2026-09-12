@@ -481,6 +481,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
 
 fn queued_prompt(command_id: &str) -> MaterializedQueuedPrompt {
     MaterializedQueuedPrompt {
+        accepted_ordinal: None,
         command_id: command_id.into(),
         kind: QueuedCommandKind::Prompt,
         content: Vec::new(),

@@ -5168,6 +5168,7 @@ mod tests {
             let mut materialized = MaterializedSession::empty("steering-session");
             if let Some(kind) = queue_kind {
                 materialized.queued_prompts.push(MaterializedQueuedPrompt {
+                    accepted_ordinal: None,
                     command_id: "queued-correction".into(),
                     kind,
                     content: vec![serde_json::json!({"type": "text", "text": "change direction"})],

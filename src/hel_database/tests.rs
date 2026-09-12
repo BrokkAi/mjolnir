@@ -1,7 +1,8 @@
 use super::*;
 use crate::hel_config::HarnessKind;
 use crate::hel_state::{
-    HostContainerSize, ManagedWorktreeTarget, QueuedCommandKind, TranscriptBody,
+    HostContainerSize, ManagedWorktreeTarget, MaterializedTurn, MaterializedTurnOutcome,
+    QueuedCommandKind, TranscriptBody, TurnOutcomeKind,
 };
 use crate::hel_worker::RELAY_EVENT_GENESIS_DIGEST;
 use rusqlite::OptionalExtension;
@@ -333,6 +334,8 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
 
 fn materialized_session(session_id: &str) -> MaterializedSession {
     MaterializedSession {
+        active_turn: None,
+        last_turn_outcome: None,
         session_id: session_id.into(),
         applied_event_ordinal: 7,
         applied_event_digest: event_digest(7),
@@ -420,6 +423,7 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
             }),
         ],
         queued_prompts: vec![MaterializedQueuedPrompt {
+            accepted_ordinal: None,
             command_id: "prompt-2".into(),
             kind: QueuedCommandKind::Prompt,
             content: vec![serde_json::json!({"type": "text", "text": "then test"})],
@@ -2102,7 +2106,7 @@ fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
         UPDATE sqlite_schema SET sql=replace(sql, ',''muse''', '') WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
         PRAGMA writable_schema=OFF;
         PRAGMA schema_version=1000;
-        DELETE FROM schema_migrations WHERE version=27;
+        DELETE FROM schema_migrations WHERE version>=27;
         PRAGMA user_version=26;").unwrap();
     drop(connection);
     let connection = open(&database).unwrap();
@@ -2249,6 +2253,7 @@ fn queue_entry_kinds_round_trip_and_default_to_prompt() {
     save_session_to(&database, &session("session-1", "project-1")).unwrap();
     let mut materialized = materialized_session("session-1");
     materialized.queued_prompts.push(MaterializedQueuedPrompt {
+        accepted_ordinal: None,
         command_id: "config-1".into(),
         kind: QueuedCommandKind::SetConfig {
             key: "model".into(),
@@ -2790,12 +2795,15 @@ fn projection_event_application_is_atomic_ordered_and_idempotent() {
         },
     };
     let first = MaterializedSessionMutation {
+        active_turn: None,
+        last_turn_outcome: None,
         last_activity_at_ms: Some(105),
         execution: Some(MaterializedExecutionState::Running { started_at_ms: 90 }),
         session_title: Some(Some("Testing".into())),
         configuration: Some(BTreeMap::from([("model".into(), serde_json::json!("sol"))])),
         transcript: vec![TranscriptMutation::Upsert(first_item.clone())],
         queued_prompts: Some(vec![MaterializedQueuedPrompt {
+            accepted_ordinal: None,
             command_id: "prompt-2".into(),
             kind: QueuedCommandKind::Prompt,
             content: vec![serde_json::json!({"type": "text", "text": "next"})],
@@ -3089,6 +3097,7 @@ fn projection_activity_watermark_is_atomic_and_monotonic() {
         &MaterializedSessionMutation {
             last_activity_at_ms: Some(500),
             queued_prompts: Some(vec![MaterializedQueuedPrompt {
+                accepted_ordinal: None,
                 command_id: "queued-1".into(),
                 kind: QueuedCommandKind::Prompt,
                 content: vec![serde_json::json!({"type": "text", "text": "later"})],
@@ -4516,5 +4525,238 @@ fn migration_twenty_four_preserves_targets_and_accepts_ssh_docker() {
             .optional()
             .unwrap()
             .is_none()
+    );
+}
+
+/// A projection page must carry the whole turn record, not just the transcript
+/// rows: the wait endpoint reads the outcome back from these columns long after
+/// the session's actor is gone.
+#[test]
+fn a_projection_page_persists_the_turn_outcome_and_the_queue_acceptance_ordinal() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+
+    let started = MaterializedSessionMutation {
+        execution: Some(MaterializedExecutionState::Running { started_at_ms: 90 }),
+        active_turn: Some(Some(MaterializedTurn {
+            command_id: "prompt-1".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: 2,
+            started_at_ms: 90,
+        })),
+        queued_prompts: Some(vec![MaterializedQueuedPrompt {
+            command_id: "prompt-2".into(),
+            kind: QueuedCommandKind::Prompt,
+            content: vec![serde_json::json!({"type": "text", "text": "next"})],
+            queued_at_ms: 105,
+            accepted_ordinal: Some(3),
+        }]),
+        ..MaterializedSessionMutation::default()
+    };
+    apply_projection_event_to(
+        &database,
+        "session-1",
+        1,
+        RELAY_EVENT_GENESIS_DIGEST,
+        &event_digest(1),
+        &started,
+    )
+    .unwrap();
+
+    let reloaded = load_materialized_session_from(&database, "session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reloaded
+            .active_turn
+            .as_ref()
+            .map(|turn| turn.accepted_ordinal),
+        Some(Some(1))
+    );
+    assert_eq!(reloaded.queued_prompts[0].accepted_ordinal, Some(3));
+    assert_eq!(
+        load_materialized_turn_outcome_from(&database, "session-1")
+            .unwrap()
+            .unwrap()
+            .1
+            .map(|turn| turn.turn_start_position),
+        Some(2)
+    );
+
+    let completed = MaterializedSessionMutation {
+        execution: Some(MaterializedExecutionState::Idle),
+        active_turn: Some(None),
+        last_turn_outcome: Some(MaterializedTurnOutcome {
+            command_id: "prompt-1".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(2),
+            completed_ordinal: 2,
+            completed_at_ms: 400,
+            outcome: TurnOutcomeKind::Completed {
+                stop_reason: "EndTurn".into(),
+            },
+        }),
+        ..MaterializedSessionMutation::default()
+    };
+    apply_projection_event_to(
+        &database,
+        "session-1",
+        2,
+        &event_digest(1),
+        &event_digest(2),
+        &completed,
+    )
+    .unwrap();
+
+    let (execution, active, outcome) = load_materialized_turn_outcome_from(&database, "session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(execution, MaterializedExecutionState::Idle);
+    assert!(active.is_none(), "a completed turn is no longer running");
+    let outcome = outcome.expect("the finished turn's outcome");
+    assert_eq!(outcome.accepted_ordinal, Some(1));
+    assert_eq!(
+        outcome.outcome,
+        TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into()
+        }
+    );
+}
+
+/// The wait endpoint reports a turn number and a final message for a turn it
+/// only knows the start position of.
+#[test]
+fn a_turn_summary_counts_turn_starts_and_reads_that_turn_s_final_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+
+    let user = |position: u64, text: &str| TranscriptItem {
+        stable_id: format!("user:{position}"),
+        position,
+        latest_content_event_ordinal: None,
+        created_at_ms: position as i64 * 100,
+        last_changed_at_ms: position as i64 * 100,
+        body: TranscriptBody::User {
+            content: vec![serde_json::json!({"type": "text", "text": text})],
+        },
+    };
+    let agent = |position: u64, text: &str| TranscriptItem {
+        stable_id: format!("agent:{position}"),
+        position,
+        latest_content_event_ordinal: Some(position),
+        created_at_ms: position as i64 * 100,
+        last_changed_at_ms: position as i64 * 100 + 50,
+        body: TranscriptBody::Agent {
+            chunks: vec![serde_json::json!({
+                "content": {"type": "text", "text": text}
+            })],
+            streaming: false,
+        },
+    };
+    let items = [
+        user(1, "first"),
+        agent(2, "first answer"),
+        user(3, "second"),
+        agent(4, "second answer"),
+    ];
+    for (index, item) in items.into_iter().enumerate() {
+        let ordinal = index as u64 + 1;
+        let previous = if ordinal == 1 {
+            RELAY_EVENT_GENESIS_DIGEST.to_owned()
+        } else {
+            event_digest(ordinal - 1)
+        };
+        apply_projection_event_to(
+            &database,
+            "session-1",
+            ordinal,
+            &previous,
+            &event_digest(ordinal),
+            &MaterializedSessionMutation {
+                transcript: vec![TranscriptMutation::Upsert(item)],
+                ..MaterializedSessionMutation::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let first = load_materialized_turn_summary_from(&database, "session-1", 1).unwrap();
+    assert_eq!(first.turn_number, 1);
+    assert_eq!(first.turn_started_at_ms, 100);
+    assert_eq!(first.last_changed_at_ms, 450);
+    assert_eq!(
+        first.final_message.as_deref(),
+        Some("second answer"),
+        "a summary from the first turn covers everything after it"
+    );
+
+    let second = load_materialized_turn_summary_from(&database, "session-1", 3).unwrap();
+    assert_eq!(second.turn_number, 2);
+    assert_eq!(second.turn_started_at_ms, 300);
+    assert_eq!(second.final_message.as_deref(), Some("second answer"));
+}
+
+/// A database written before the turn columns existed must migrate rather than
+/// fail to open, and must report no turn history rather than invent one.
+#[test]
+fn a_version_twenty_seven_database_migrates_and_reports_no_turn_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let connection = open(&database).unwrap();
+    // Rebuild the preceding schema so this exercises the real migration.
+    connection
+        .execute_batch(
+            "PRAGMA writable_schema = ON;
+             UPDATE sqlite_master
+                 SET sql = replace(
+                     replace(sql, ', active_turn_json TEXT CHECK(active_turn_json IS NULL OR json_valid(active_turn_json))', ''),
+                     ', last_turn_outcome_json TEXT CHECK(last_turn_outcome_json IS NULL OR json_valid(last_turn_outcome_json))',
+                     '')
+                 WHERE name = 'materialized_sessions';
+             PRAGMA writable_schema = OFF;
+             DROP TABLE api_idempotency;
+             DELETE FROM schema_migrations WHERE version > 27;
+             PRAGMA user_version = 27;",
+        )
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&database);
+
+    assert!(
+        table_has_column(
+            &open(&database).unwrap(),
+            "materialized_sessions",
+            "active_turn_json"
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        load_materialized_turn_outcome_from(&database, "session-1").unwrap(),
+        Some((MaterializedExecutionState::Idle, None, None)),
+        "a migrated session has no turn history to report"
+    );
+    assert_eq!(
+        load_materialized_turn_outcome_from(&database, "missing").unwrap(),
+        None
+    );
+
+    // The idempotency table the migration created is usable straight away.
+    assert_eq!(
+        lookup_api_idempotency_from(&database, "key-1").unwrap(),
+        None
+    );
+    record_api_idempotency_in(&database, "key-1", "session-1").unwrap();
+    assert_eq!(
+        lookup_api_idempotency_from(&database, "key-1").unwrap(),
+        Some("session-1".to_owned())
+    );
+    // A repeated key keeps the session it first named.
+    record_api_idempotency_in(&database, "key-1", "session-2").unwrap();
+    assert_eq!(
+        lookup_api_idempotency_from(&database, "key-1").unwrap(),
+        Some("session-1".to_owned())
     );
 }

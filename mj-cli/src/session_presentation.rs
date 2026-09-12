@@ -216,6 +216,8 @@ mod tests {
 
     fn managed_view(operational: RelayOperationalState, connected: bool) -> ManagedSessionView {
         let materialized = MaterializedSession {
+            active_turn: None,
+            last_turn_outcome: None,
             session_id: "session-1".into(),
             applied_event_ordinal: 0,
             applied_event_digest: RELAY_EVENT_GENESIS_DIGEST.into(),

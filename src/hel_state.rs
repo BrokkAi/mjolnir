@@ -149,6 +149,51 @@ pub struct MaterializedQueuedPrompt {
     pub kind: QueuedCommandKind,
     pub content: Vec<serde_json::Value>,
     pub queued_at_ms: i64,
+    /// Relay acceptance ordinal of the `CommandQueued` event that created this
+    /// entry. It is the turn identity the API hands back to callers, so wait
+    /// can tell one queued prompt's outcome from another's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_ordinal: Option<u64>,
+}
+
+/// The prompt currently executing, recorded when its `CommandStarted` event is
+/// projected and cleared when the command completes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterializedTurn {
+    pub command_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_ordinal: Option<u64>,
+    /// Ordinal of the `CommandStarted` event, which is also the transcript
+    /// position of the turn's first item.
+    pub turn_start_position: u64,
+    pub started_at_ms: i64,
+}
+
+/// How a prompt ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TurnOutcomeKind {
+    /// The harness finished the turn and reported this stop reason.
+    Completed { stop_reason: String },
+    /// The relay refused the command before it ran.
+    Rejected { message: String },
+    /// The command was interrupted after being accepted.
+    Interrupted { message: String },
+}
+
+/// The most recent finished prompt on a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterializedTurnOutcome {
+    pub command_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_ordinal: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_start_position: Option<u64>,
+    pub completed_ordinal: u64,
+    pub completed_at_ms: i64,
+    pub outcome: TurnOutcomeKind,
 }
 
 /// Canonical controller projection for one logical ACP session.
@@ -176,6 +221,13 @@ pub struct MaterializedSession {
     /// connection-only and never enter this state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_elicitations: Vec<crate::hel_elicitation::ElicitationRequest>,
+    /// The prompt running right now, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn: Option<MaterializedTurn>,
+    /// The most recently finished prompt, kept after the session stops so a
+    /// caller can still read how the last turn ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_outcome: Option<MaterializedTurnOutcome>,
 }
 
 /// The small portion of a durable projection needed to populate dashboard
@@ -209,6 +261,8 @@ impl MaterializedSession {
             transcript: Vec::new(),
             queued_prompts: Vec::new(),
             pending_elicitations: Vec::new(),
+            active_turn: None,
+            last_turn_outcome: None,
         }
     }
 
@@ -2405,6 +2459,7 @@ mod tests {
             },
         }));
         materialized.queued_prompts.push(MaterializedQueuedPrompt {
+            accepted_ordinal: None,
             command_id: "prompt-2".into(),
             kind: QueuedCommandKind::Prompt,
             content: Vec::new(),

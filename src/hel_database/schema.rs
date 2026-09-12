@@ -676,6 +676,12 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 27 {
         migrate_muse_harness_kind(connection)?;
     }
+    // The projection gained per-turn identity and outcome so a caller driving a
+    // session through the HTTP API can wait for a specific prompt and read how
+    // it ended. `api_idempotency` makes session creation retry-safe.
+    if version < 28 {
+        migrate_turn_outcome_columns(connection)?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -817,6 +823,56 @@ fn ensure_session_container_override_columns(connection: &Connection) -> Result<
 /// Per-mount read-only flag. It is an additive column, so a database written
 /// before the mount editors offered the option opens unchanged and its mounts
 /// keep the copy-on-write overlay they were provisioned with.
+/// Add the per-turn identity and outcome columns, the queue's acceptance
+/// ordinal, and the API idempotency ledger.
+///
+/// Each addition is guarded by a structural check rather than by the version
+/// alone. A database rebuilt by another build's ladder — or by a test that
+/// rewinds `user_version` — can already carry some of these, and a bare
+/// `ALTER TABLE` would then fail the whole open.
+fn migrate_turn_outcome_columns(connection: &Connection) -> Result<()> {
+    let mut statements = String::from("BEGIN IMMEDIATE;\n");
+    if !table_has_column(connection, "materialized_sessions", "active_turn_json")? {
+        statements.push_str(
+            "ALTER TABLE materialized_sessions ADD COLUMN active_turn_json TEXT
+                 CHECK(active_turn_json IS NULL OR json_valid(active_turn_json));\n",
+        );
+    }
+    if !table_has_column(
+        connection,
+        "materialized_sessions",
+        "last_turn_outcome_json",
+    )? {
+        statements.push_str(
+            "ALTER TABLE materialized_sessions ADD COLUMN last_turn_outcome_json TEXT
+                 CHECK(last_turn_outcome_json IS NULL OR json_valid(last_turn_outcome_json));\n",
+        );
+    }
+    if !table_has_column(
+        connection,
+        "materialized_queued_prompts",
+        "accepted_ordinal",
+    )? {
+        statements.push_str(
+            "ALTER TABLE materialized_queued_prompts ADD COLUMN accepted_ordinal INTEGER
+                 CHECK(accepted_ordinal IS NULL OR accepted_ordinal > 0);\n",
+        );
+    }
+    statements.push_str(
+        "CREATE TABLE IF NOT EXISTS api_idempotency (
+             key TEXT PRIMARY KEY CHECK(length(trim(key)) BETWEEN 1 AND 128),
+             session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+             created_at_ms INTEGER NOT NULL
+         ) STRICT;
+         INSERT INTO schema_migrations(version, applied_at)
+             VALUES (28, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+         PRAGMA user_version = 28;
+         COMMIT;",
+    );
+    connection.execute_batch(&statements)?;
+    Ok(())
+}
+
 fn ensure_session_mount_read_only_column(connection: &Connection) -> Result<()> {
     if !table_has_column(connection, "session_mounts", "read_only")? {
         connection.execute_batch(

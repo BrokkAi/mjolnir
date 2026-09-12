@@ -46,6 +46,13 @@ impl CapacityRetry {
     }
 }
 
+/// Whether a prompt stop reason means the model was at capacity and the
+/// worker will retry on its own. Comparison is case-insensitive because stop
+/// reasons are free text from the harness.
+pub fn is_capacity_stop_reason(stop_reason: &str) -> bool {
+    stop_reason.eq_ignore_ascii_case(CAPACITY_STOP_REASON)
+}
+
 pub fn is_capacity_retry_command(command_id: &str) -> bool {
     command_id
         .strip_prefix("capacity-retry-")

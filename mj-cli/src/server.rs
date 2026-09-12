@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+mod api;
+
 use hel::hel_config::{HarnessProfile, HelConfig, PhoneConfig, is_bare_project_target};
 use hel::hel_remote_git::{default_branch, display_url, resolve_repository};
 use hel::hel_state::{HelState, MaterializedSession, ProjectSourceIdentity, SessionRecord};
@@ -483,7 +485,7 @@ impl PendingActionReplies {
         if matches!(action, ControllerAction::New { .. }) {
             self.0.insert(action_id, reply);
         } else {
-            if reply.send(ActionOutcome::Accepted).is_err() {
+            if reply.send(ActionOutcome::accepted()).is_err() {
                 tracing::debug!(
                     action_id,
                     "phone action acceptance reply dropped after client disconnect"
@@ -795,6 +797,12 @@ pub(crate) async fn run_server(
     options.set_cookie_key(mj_controller::hel_server::load_or_create_cookie_key(
         &cookie_key_path,
     )?)?;
+    // The documented `/api/v1` surface authenticates with a persisted bearer
+    // token and drives sessions through the daemon-side backend.
+    options.set_api_token(mj_controller::hel_server::load_or_create_api_token(
+        &mj_controller::hel_server::api_token_path(),
+    )?);
+    options.set_subagent_backend(Arc::new(api::ApiBackend::new(worker_commands_tx.client())));
     let renewal_cancellation = termination.child_token();
     let mut renewal_task = None;
     if let Some((cert, key)) = resolved.tls_files {
@@ -1641,7 +1649,7 @@ pub(crate) async fn run_server(
                                 publish_snapshot!(revision);
                             }
                             let outcome = if accepted {
-                                ActionOutcome::Accepted
+                                ActionOutcome::accepted()
                             } else {
                                 ActionOutcome::Failed
                             };
@@ -1662,7 +1670,7 @@ pub(crate) async fn run_server(
                                 quota_profiles_tx.send_replace(quota_batch.clone());
                             }
                             let outcome = if known {
-                                ActionOutcome::Accepted
+                                ActionOutcome::accepted()
                             } else {
                                 ActionOutcome::Failed
                             };
@@ -1681,7 +1689,7 @@ pub(crate) async fn run_server(
                             &action_cancellations,
                         ) {
                             daemon_runtime.cancel_lifecycle_if_active(session_id);
-                            ActionOutcome::Accepted
+                            ActionOutcome::accepted()
                         } else {
                             ActionOutcome::NotCancellable
                         };
@@ -1766,6 +1774,7 @@ pub(crate) async fn run_server(
                         tokio::task::yield_now().await;
                         continue;
                     };
+                    let started_session_id = started.session.id.clone();
                     let publication = if !action_cancellations.contains_key(&started.action_id) {
                         Err("phone action completed before its provisional session was published".into())
                     } else {
@@ -1795,7 +1804,9 @@ pub(crate) async fn run_server(
                     action_replies.resolve(
                         started.action_id,
                         if publication.is_ok() {
-                            ActionOutcome::Accepted
+                            ActionOutcome::Accepted {
+                                session_id: Some(started_session_id),
+                            }
                         } else {
                             ActionOutcome::Failed
                         },
@@ -4297,7 +4308,7 @@ mod tests {
         // No completion has been reported, and the phone already has its
         // answer: holding it until the action finished is what mobile
         // networks time out on.
-        assert_eq!(answer.await.unwrap(), ActionOutcome::Accepted);
+        assert_eq!(answer.await.unwrap(), ActionOutcome::accepted());
     }
 
     #[tokio::test]
@@ -4314,8 +4325,8 @@ mod tests {
             "a new session has no id to report before it is published"
         );
 
-        replies.resolve(7, ActionOutcome::Accepted);
-        assert_eq!(answer.await.unwrap(), ActionOutcome::Accepted);
+        replies.resolve(7, ActionOutcome::accepted());
+        assert_eq!(answer.await.unwrap(), ActionOutcome::accepted());
     }
 
     #[tokio::test]
@@ -4331,7 +4342,7 @@ mod tests {
         assert_eq!(answer.await.unwrap(), ActionOutcome::Failed);
         // A second resolution is a no-op, so a completion after a publication
         // cannot overwrite the answer already sent.
-        replies.resolve(7, ActionOutcome::Accepted);
+        replies.resolve(7, ActionOutcome::accepted());
     }
 
     #[test]

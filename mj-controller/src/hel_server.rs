@@ -48,6 +48,14 @@ use crate::hel_dictation::{
 };
 use crate::hel_image::optimize_image;
 
+pub mod api;
+
+pub use api::{
+    ApiFailure, ApiSession, PromptRequest, PromptResponse, SessionListResponse,
+    StartSessionRequest, StartSessionResponse, SubagentBackend, WaitOutcome, WaitRequest,
+    WaitResponse, api_token_path, load_or_create_api_token, map_stop_reason, resolve_wait,
+};
+
 pub use mj_client::web::{
     BrowserDiffStat, BrowserTranscript, BrowserTranscriptEntry, WebListenerProcess,
     WebViewerAccess, WebViewerRecovery,
@@ -179,6 +187,8 @@ pub struct ServerOptions {
     viewer_code: String,
     login_token: String,
     cookie_key: Vec<u8>,
+    api_token: String,
+    subagent: Option<Arc<dyn api::SubagentBackend>>,
 }
 
 /// Typed request channels served by the authenticated HTTP surface.
@@ -218,6 +228,10 @@ impl ServerOptions {
             viewer_code: generate_viewer_code()?,
             login_token: generate_login_token()?,
             cookie_key: generate_cookie_key()?.to_vec(),
+            // An empty token authenticates nothing: the daemon installs the
+            // persisted one, and a server without it serves the viewer only.
+            api_token: String::new(),
+            subagent: None,
         })
     }
 
@@ -253,12 +267,25 @@ impl ServerOptions {
         self.background_task_stop_tx = tx;
     }
 
+    /// Install the persisted bearer token for the `/api/v1` routes. Rotating
+    /// it revokes every client that still holds the old one.
+    pub fn set_api_token(&mut self, token: String) {
+        self.api_token = token;
+    }
+
+    /// Install the daemon-side backend the `/api/v1` routes drive sessions
+    /// through. Without it those routes answer 503.
+    pub fn set_subagent_backend(&mut self, backend: Arc<dyn api::SubagentBackend>) {
+        self.subagent = Some(backend);
+    }
+
     #[cfg(test)]
     fn with_test_credentials(mut self, code: &str, key: &[u8]) -> Self {
         self.viewer_code = code.to_string();
         self.login_token = "test-login-token".into();
         self.cookie_key = key.to_vec();
         self.secure_cookie = false;
+        self.api_token = "test-api-token".into();
         self
     }
 }
@@ -1346,10 +1373,13 @@ pub struct ViewerPromptImage {
 /// Only the outcome crosses this boundary. The controller's own failure text
 /// names profile homes, project paths and SSH hosts, so it stays on the
 /// controller and the phone gets a fixed message it can act on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionOutcome {
     /// Admitted and now running; watch the snapshot for what happens next.
-    Accepted,
+    ///
+    /// A `new` action carries the published session id, which is the only way
+    /// its caller learns what it just created.
+    Accepted { session_id: Option<String> },
     /// The controller already runs as many phone actions as it allows.
     Busy,
     /// This session already has an operation running.
@@ -1361,10 +1391,23 @@ pub enum ActionOutcome {
 }
 
 impl ActionOutcome {
-    /// The reply an outcome owes the phone, or `None` when it was accepted.
-    const fn rejection(self) -> Option<ApiError> {
+    /// Admitted, with no session id to report.
+    pub const fn accepted() -> Self {
+        Self::Accepted { session_id: None }
+    }
+
+    /// The published session id, when this outcome carries one.
+    pub fn session_id(&self) -> Option<&str> {
         match self {
-            Self::Accepted => None,
+            Self::Accepted { session_id } => session_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The reply an outcome owes the phone, or `None` when it was accepted.
+    fn rejection(&self) -> Option<ApiError> {
+        match self {
+            Self::Accepted { .. } => None,
             Self::Busy => Some(ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,
                 "the controller is at its concurrent action limit; retry shortly",
@@ -1589,6 +1632,8 @@ struct ServerState {
     session_ttl: Duration,
     secure_cookie: bool,
     code_guard: Arc<Mutex<CodeGuard>>,
+    api_token: Arc<str>,
+    subagent: Option<Arc<dyn api::SubagentBackend>>,
 }
 
 /// Online-guessing defence for the deliberately small viewer code.
@@ -1663,6 +1708,8 @@ fn router(options: ServerOptions) -> Router {
         session_ttl: options.session_ttl,
         secure_cookie: options.secure_cookie,
         code_guard: Arc::new(Mutex::new(CodeGuard::default())),
+        api_token: options.api_token.into(),
+        subagent: options.subagent,
     };
     let protected = Router::new()
         .route("/api/snapshot", get(snapshot))
@@ -1725,6 +1772,7 @@ fn router(options: ServerOptions) -> Router {
         .route("/auth/session", post(create_session).delete(clear_session))
         .route("/auth/login", get(create_session_from_query))
         .merge(protected)
+        .nest("/api/v1", api::router(state.clone()))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn(security_headers))
         .with_state(state)
@@ -3684,7 +3732,7 @@ mod tests {
         ));
     }
 
-    fn sample_config_state() -> (HelConfig, HelState) {
+    pub(super) fn sample_config_state() -> (HelConfig, HelState) {
         let config = HelConfig {
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
@@ -4713,7 +4761,7 @@ mod tests {
                 response: accept(&[("question_0", "reusable")]),
             }
         );
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        action.reply.send(ActionOutcome::accepted()).unwrap();
         assert_eq!(
             response.await.unwrap().unwrap().status(),
             StatusCode::ACCEPTED
@@ -5293,7 +5341,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
             ),
             "the advertised value was not forwarded unchanged"
         );
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        action.reply.send(ActionOutcome::accepted()).unwrap();
         assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
     }
 
@@ -5344,7 +5392,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
             ),
             "the workspace or the absent title did not survive the boundary"
         );
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        action.reply.send(ActionOutcome::accepted()).unwrap();
         assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
     }
 
@@ -6095,7 +6143,7 @@ if (sentElicitations.size !== 0) {
                 .iter()
                 .all(|image| { image.data_base64.is_empty() && image.attachment.is_some() })
         );
-        reply.send(ActionOutcome::Accepted).unwrap();
+        reply.send(ActionOutcome::accepted()).unwrap();
         assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
     }
 
@@ -6146,7 +6194,7 @@ if (sentElicitations.size !== 0) {
         assert!(body.len() < MAX_PROMPT_BODY_BYTES);
         let response = tokio::spawn(post_action(app, cookie, body));
         let action = actions.recv().await.unwrap();
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        action.reply.send(ActionOutcome::accepted()).unwrap();
         assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
     }
 
@@ -6326,7 +6374,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 images: Vec::new(),
             }
         );
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        action.reply.send(ActionOutcome::accepted()).unwrap();
         let response = response.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
@@ -6365,6 +6413,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 cross_harness: false,
                 active: true,
                 queued_commands: vec![hel::hel_state::MaterializedQueuedPrompt {
+                    accepted_ordinal: None,
                     command_id: "queued-1".into(),
                     kind: hel::hel_state::QueuedCommandKind::Prompt,
                     content: vec![serde_json::json!({
@@ -6411,7 +6460,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         );
         let action = actions.recv().await.expect("move action reached daemon");
         assert!(matches!(action.action, ControllerAction::Move { .. }));
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        action.reply.send(ActionOutcome::accepted()).unwrap();
         assert_eq!(
             response.await.unwrap().unwrap().status(),
             StatusCode::ACCEPTED
@@ -6441,7 +6490,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 command: "cargo test".into(),
             }
         );
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        action.reply.send(ActionOutcome::accepted()).unwrap();
         assert_eq!(
             response.await.unwrap().unwrap().status(),
             StatusCode::ACCEPTED
@@ -6531,7 +6580,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 dirty_ack: Vec::new(),
             }
         );
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        action.reply.send(ActionOutcome::accepted()).unwrap();
         assert_eq!(
             response.await.unwrap().unwrap().status(),
             StatusCode::ACCEPTED
@@ -6602,7 +6651,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 session_id: "session-1".into(),
             }
         );
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        action.reply.send(ActionOutcome::accepted()).unwrap();
         assert_eq!(
             response.await.unwrap().unwrap().status(),
             StatusCode::ACCEPTED
@@ -6853,6 +6902,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
             cross_harness: false,
             active: true,
             queued_commands: vec![hel::hel_state::MaterializedQueuedPrompt {
+                accepted_ordinal: None,
                 command_id: "command-1".into(),
                 kind: hel::hel_state::QueuedCommandKind::Prompt,
                 content: vec![serde_json::json!({"type": "text", "text": "continue"})],
@@ -7099,7 +7149,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
             "a read receipt must not queue a controller action"
         );
 
-        action.reply.send(ActionOutcome::Accepted).unwrap();
+        action.reply.send(ActionOutcome::accepted()).unwrap();
         assert_eq!(
             prompt.await.unwrap().unwrap().status(),
             StatusCode::ACCEPTED
@@ -7142,7 +7192,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                 ),
             );
             let request = actions.recv().await.unwrap();
-            request.reply.send(outcome).unwrap();
+            request.reply.send(outcome.clone()).unwrap();
 
             let response = response.await.unwrap().unwrap();
             assert_eq!(response.status(), status, "{outcome:?}");

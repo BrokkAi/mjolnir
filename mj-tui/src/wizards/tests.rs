@@ -2121,6 +2121,7 @@ fn queue_choice_keeps_a_ready_move_confirmation_when_only_prepared_queue_exists(
     let request_id = open_move_review(&mut dashboard);
     let mut preparation = move_preparation();
     preparation.queued_commands = vec![hel::hel_state::MaterializedQueuedPrompt {
+        accepted_ordinal: None,
         command_id: "queued-1".into(),
         kind: hel::hel_state::QueuedCommandKind::Prompt,
         content: Vec::new(),

@@ -17,9 +17,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::hel_config::data_dir;
 use crate::hel_state::{
     CheckpointMetadata, HelState, HostContainerSize, ManagedWorktree, MaterializedExecutionState,
-    MaterializedQueuedPrompt, MaterializedSession, MaterializedSessionSummary, ProjectionWindow,
-    SessionRecord, SessionResourceAllocation, SessionState, TargetLocator, TranscriptBody,
-    TranscriptItem, validate_relay_event_digest, validate_relay_event_frontier,
+    MaterializedQueuedPrompt, MaterializedSession, MaterializedSessionSummary, MaterializedTurn,
+    MaterializedTurnOutcome, ProjectionWindow, SessionRecord, SessionResourceAllocation,
+    SessionState, TargetLocator, TranscriptBody, TranscriptItem, validate_relay_event_digest,
+    validate_relay_event_frontier,
 };
 use crate::hel_targets::AdditionalMount;
 use crate::hel_worker::RELAY_EVENT_GENESIS_DIGEST;
@@ -28,7 +29,7 @@ use crate::hel_workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 28;
 
 mod session_move;
 pub use session_move::*;
@@ -119,6 +120,11 @@ pub struct MaterializedSessionMutation {
     pub transcript: Vec<TranscriptMutation>,
     pub queued_prompts: Option<Vec<MaterializedQueuedPrompt>>,
     pub pending_elicitations: Option<Vec<crate::hel_elicitation::ElicitationRequest>>,
+    /// The nested option distinguishes "unchanged" from "cleared", which is
+    /// how a completed turn removes the running turn.
+    pub active_turn: Option<Option<MaterializedTurn>>,
+    /// A finished turn is only ever replaced, never cleared.
+    pub last_turn_outcome: Option<MaterializedTurnOutcome>,
 }
 
 mod schema;
@@ -2300,11 +2306,33 @@ fn last_materialized_agent_message(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Option<(u64, String)>> {
+    last_materialized_agent_message_in(connection, session_id, 0)
+}
+
+/// The newest nonempty agent message strictly after `after_position`, flattened
+/// to text. Restricting by position is how one turn's final message is read.
+fn last_materialized_agent_message_after(
+    connection: &Connection,
+    session_id: &str,
+    after_position: u64,
+) -> Result<Option<String>> {
+    Ok(
+        last_materialized_agent_message_in(connection, session_id, after_position)?
+            .map(|(_, text)| text),
+    )
+}
+
+fn last_materialized_agent_message_in(
+    connection: &Connection,
+    session_id: &str,
+    after_position: u64,
+) -> Result<Option<(u64, String)>> {
     let row = connection
         .query_row(
             "SELECT position, body_json
              FROM materialized_transcript_items
              WHERE session_id = ?1
+               AND position > ?2
                AND latest_content_event_ordinal IS NOT NULL
                AND EXISTS (
                    SELECT 1 FROM json_each(
@@ -2324,7 +2352,7 @@ fn last_materialized_agent_message(
                )
              ORDER BY position DESC, stable_id DESC
              LIMIT 1",
-            [session_id],
+            params![session_id, after_position],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?;
@@ -2338,6 +2366,139 @@ fn last_materialized_agent_message(
     };
     let text = crate::hel_transcript::materialized_chunks_text(&chunks);
     Ok((!text.trim().is_empty()).then_some((position, text)))
+}
+
+/// Execution state, the running turn, and the last finished turn's outcome.
+pub type MaterializedTurnState = (
+    MaterializedExecutionState,
+    Option<MaterializedTurn>,
+    Option<MaterializedTurnOutcome>,
+);
+
+/// Where a session stands turn by turn: what is running now, and how the last
+/// finished prompt ended. Returns `None` when the session has no projection
+/// row. The API's wait loop reads this for sessions whose actor is gone.
+pub fn load_materialized_turn_outcome(session_id: &str) -> Result<Option<MaterializedTurnState>> {
+    load_materialized_turn_outcome_from(&database_path(), session_id)
+}
+
+fn load_materialized_turn_outcome_from(
+    path: &Path,
+    session_id: &str,
+) -> Result<Option<MaterializedTurnState>> {
+    let connection = open_reader(path)?;
+    let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        fields.execution,
+        fields.active_turn,
+        fields.last_turn_outcome,
+    )))
+}
+
+/// What one turn produced, without loading the transcript around it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnSummary {
+    /// One-based count of turn starts up to and including this one, which is
+    /// what a caller means by "turn 3 of this session".
+    pub turn_number: u64,
+    pub turn_started_at_ms: i64,
+    /// Newest change at or after the turn start, so the caller can measure how
+    /// long the turn took.
+    pub last_changed_at_ms: i64,
+    /// The last nonempty agent message the turn produced, flattened to text.
+    pub final_message: Option<String>,
+}
+
+/// Summarize the turn that began at `turn_start_position`.
+pub fn load_materialized_turn_summary(
+    session_id: &str,
+    turn_start_position: u64,
+) -> Result<TurnSummary> {
+    load_materialized_turn_summary_from(&database_path(), session_id, turn_start_position)
+}
+
+fn load_materialized_turn_summary_from(
+    path: &Path,
+    session_id: &str,
+    turn_start_position: u64,
+) -> Result<TurnSummary> {
+    let connection = open_reader(path)?;
+    let turn_number = connection.query_row(
+        "SELECT COUNT(*)
+         FROM materialized_transcript_items
+         WHERE session_id = ?1
+           AND position <= ?3
+           AND (
+               stable_id GLOB ?2
+               OR json_extract(
+                   CASE
+                       WHEN stable_id GLOB 'user:*' OR stable_id GLOB 'user-*'
+                       THEN body_json
+                       ELSE '{}'
+                   END,
+                   '$.kind'
+               ) = 'user'
+           )",
+        params![
+            session_id,
+            format!("{}*", crate::hel_transcript::HARNESS_TURN_ITEM_PREFIX),
+            turn_start_position
+        ],
+        |row| row.get::<_, u64>(0),
+    )?;
+    let (turn_started_at_ms, last_changed_at_ms) = connection.query_row(
+        "SELECT COALESCE(MIN(created_at_ms), 0), COALESCE(MAX(last_changed_at_ms), 0)
+         FROM materialized_transcript_items
+         WHERE session_id = ?1 AND position >= ?2",
+        params![session_id, turn_start_position],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let final_message =
+        last_materialized_agent_message_after(&connection, session_id, turn_start_position)?;
+    Ok(TurnSummary {
+        turn_number,
+        turn_started_at_ms,
+        last_changed_at_ms,
+        final_message,
+    })
+}
+
+/// Remember that an API session-creation key produced this session, so a retry
+/// with the same key returns the same session instead of starting another.
+pub fn record_api_idempotency(key: &str, session_id: &str) -> Result<()> {
+    let key = key.to_owned();
+    let session_id = session_id.to_owned();
+    submit_database_write("record_api_idempotency", move |_| {
+        record_api_idempotency_in(&database_path(), &key, &session_id)
+    })
+}
+
+fn record_api_idempotency_in(path: &Path, key: &str, session_id: &str) -> Result<()> {
+    let connection = open(path)?;
+    connection.execute(
+        "INSERT INTO api_idempotency(key, session_id, created_at_ms)
+             VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO NOTHING",
+        params![key, session_id, crate::clock::epoch_millis()],
+    )?;
+    Ok(())
+}
+
+/// The session a previous API creation call recorded under this key.
+pub fn lookup_api_idempotency(key: &str) -> Result<Option<String>> {
+    lookup_api_idempotency_from(&database_path(), key)
+}
+
+fn lookup_api_idempotency_from(path: &Path, key: &str) -> Result<Option<String>> {
+    Ok(open_reader(path)?
+        .query_row(
+            "SELECT session_id FROM api_idempotency WHERE key = ?1",
+            [key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?)
 }
 
 /// Read the newest `limit` transcript items for a session, oldest first.
@@ -2534,6 +2695,8 @@ fn load_materialized_projection_tail_from(
         transcript,
         queued_prompts: read_materialized_queued_prompts(&connection, session_id)?,
         pending_elicitations: fields.pending_elicitations,
+        active_turn: fields.active_turn,
+        last_turn_outcome: fields.last_turn_outcome,
     };
     materialized.validate()?;
     Ok(Some((materialized, window)))
@@ -2602,7 +2765,7 @@ fn load_materialized_queued_prompts_from(
 ) -> Result<BTreeMap<String, Vec<MaterializedQueuedPrompt>>> {
     let connection = open_reader(path)?;
     let mut statement = connection.prepare(
-        "SELECT session_id, command_id, kind_json, content_json, queued_at_ms
+        "SELECT session_id, command_id, kind_json, content_json, queued_at_ms, accepted_ordinal
          FROM materialized_queued_prompts
          ORDER BY session_id, ordinal",
     )?;
@@ -2613,11 +2776,13 @@ fn load_materialized_queued_prompts_from(
             row.get::<_, String>(2)?,
             row.get::<_, String>(3)?,
             row.get::<_, i64>(4)?,
+            row.get::<_, Option<u64>>(5)?,
         ))
     })?;
     let mut queues = BTreeMap::<String, Vec<MaterializedQueuedPrompt>>::new();
     for row in rows {
-        let (session_id, command_id, kind_json, content_json, queued_at_ms) = row?;
+        let (session_id, command_id, kind_json, content_json, queued_at_ms, accepted_ordinal) =
+            row?;
         let content = serde_json::from_str(&content_json).with_context(|| {
             format!("parse materialized queued prompt for session {session_id}")
         })?;
@@ -2632,6 +2797,7 @@ fn load_materialized_queued_prompts_from(
                 kind,
                 content,
                 queued_at_ms,
+                accepted_ordinal,
             });
     }
     Ok(queues)
@@ -2663,6 +2829,8 @@ fn load_materialized_session_with(
         transcript: read_materialized_transcript(connection, session_id, None)?,
         queued_prompts: read_materialized_queued_prompts(connection, session_id)?,
         pending_elicitations: fields.pending_elicitations,
+        active_turn: fields.active_turn,
+        last_turn_outcome: fields.last_turn_outcome,
     };
     materialized.validate()?;
     Ok(Some(materialized))
@@ -2677,6 +2845,8 @@ struct MaterializedSessionFields {
     session_title: Option<String>,
     configuration: BTreeMap<String, serde_json::Value>,
     pending_elicitations: Vec<crate::hel_elicitation::ElicitationRequest>,
+    active_turn: Option<MaterializedTurn>,
+    last_turn_outcome: Option<MaterializedTurnOutcome>,
 }
 
 fn read_materialized_session_fields(
@@ -2687,7 +2857,7 @@ fn read_materialized_session_fields(
         .query_row(
             "SELECT applied_event_ordinal, applied_event_digest, last_activity_at_ms,
                     execution_state, running_started_at_ms, session_title, configuration_json,
-                    pending_elicitations_json
+                    pending_elicitations_json, active_turn_json, last_turn_outcome_json
              FROM materialized_sessions WHERE session_id = ?1",
             [session_id],
             |row| {
@@ -2700,6 +2870,8 @@ fn read_materialized_session_fields(
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
                 ))
             },
         )
@@ -2713,6 +2885,8 @@ fn read_materialized_session_fields(
         session_title,
         configuration_json,
         pending_elicitations_json,
+        active_turn_json,
+        last_turn_outcome_json,
     )) = row
     else {
         return Ok(None);
@@ -2728,6 +2902,16 @@ fn read_materialized_session_fields(
         })?,
         pending_elicitations: serde_json::from_str(&pending_elicitations_json)
             .with_context(|| format!("parse pending elicitations for session {session_id}"))?,
+        active_turn: active_turn_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .with_context(|| format!("parse active turn for session {session_id}"))?,
+        last_turn_outcome: last_turn_outcome_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .with_context(|| format!("parse last turn outcome for session {session_id}"))?,
     }))
 }
 
@@ -2811,7 +2995,7 @@ fn read_materialized_queued_prompts(
     session_id: &str,
 ) -> Result<Vec<MaterializedQueuedPrompt>> {
     let mut statement = connection.prepare(
-        "SELECT command_id, kind_json, content_json, queued_at_ms
+        "SELECT command_id, kind_json, content_json, queued_at_ms, accepted_ordinal
          FROM materialized_queued_prompts
          WHERE session_id = ?1
          ORDER BY ordinal",
@@ -2823,22 +3007,26 @@ fn read_materialized_queued_prompts(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, Option<u64>>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rows.into_iter()
-        .map(|(command_id, kind_json, content_json, queued_at_ms)| {
-            Ok(MaterializedQueuedPrompt {
-                command_id,
-                kind: serde_json::from_str(&kind_json).with_context(|| {
-                    format!("parse materialized queue entry kind for session {session_id}")
-                })?,
-                content: serde_json::from_str(&content_json).with_context(|| {
-                    format!("parse materialized queued prompt for session {session_id}")
-                })?,
-                queued_at_ms,
-            })
-        })
+        .map(
+            |(command_id, kind_json, content_json, queued_at_ms, accepted_ordinal)| {
+                Ok(MaterializedQueuedPrompt {
+                    command_id,
+                    kind: serde_json::from_str(&kind_json).with_context(|| {
+                        format!("parse materialized queue entry kind for session {session_id}")
+                    })?,
+                    content: serde_json::from_str(&content_json).with_context(|| {
+                        format!("parse materialized queued prompt for session {session_id}")
+                    })?,
+                    queued_at_ms,
+                    accepted_ordinal,
+                })
+            },
+        )
         .collect()
 }
 
@@ -2993,6 +3181,12 @@ impl ProjectionPage<'_> {
         if let Some(pending_elicitations) = &mutation.pending_elicitations {
             self.pending.pending_elicitations = Some(pending_elicitations.clone());
         }
+        if let Some(active_turn) = &mutation.active_turn {
+            self.pending.active_turn = Some(active_turn.clone());
+        }
+        if let Some(last_turn_outcome) = &mutation.last_turn_outcome {
+            self.pending.last_turn_outcome = Some(last_turn_outcome.clone());
+        }
         self.applied_ordinal = event_ordinal;
         event_digest.clone_into(&mut self.applied_digest);
         self.dirty = true;
@@ -3061,6 +3255,25 @@ impl ProjectionPage<'_> {
                 "UPDATE materialized_sessions
                  SET pending_elicitations_json = ?2 WHERE session_id = ?1",
                 params![session_id, serde_json::to_string(pending_elicitations)?],
+            )?;
+        }
+        if let Some(active_turn) = &self.pending.active_turn {
+            tx.execute(
+                "UPDATE materialized_sessions SET active_turn_json = ?2 WHERE session_id = ?1",
+                params![
+                    session_id,
+                    active_turn
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?
+                ],
+            )?;
+        }
+        if let Some(last_turn_outcome) = &self.pending.last_turn_outcome {
+            tx.execute(
+                "UPDATE materialized_sessions
+                 SET last_turn_outcome_json = ?2 WHERE session_id = ?1",
+                params![session_id, serde_json::to_string(last_turn_outcome)?],
             )?;
         }
         tx.execute(
@@ -3867,8 +4080,8 @@ fn write_materialized_session(
         "INSERT INTO materialized_sessions(
              session_id, applied_event_ordinal, applied_event_digest, execution_state,
              running_started_at_ms, session_title, configuration_json, last_activity_at_ms,
-             pending_elicitations_json
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             pending_elicitations_json, active_turn_json, last_turn_outcome_json
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
          ON CONFLICT(session_id) DO UPDATE SET
              applied_event_ordinal = excluded.applied_event_ordinal,
              applied_event_digest = excluded.applied_event_digest,
@@ -3877,7 +4090,9 @@ fn write_materialized_session(
              session_title = excluded.session_title,
              configuration_json = excluded.configuration_json,
              last_activity_at_ms = excluded.last_activity_at_ms,
-             pending_elicitations_json = excluded.pending_elicitations_json",
+             pending_elicitations_json = excluded.pending_elicitations_json,
+             active_turn_json = excluded.active_turn_json,
+             last_turn_outcome_json = excluded.last_turn_outcome_json",
         params![
             materialized.session_id,
             materialized.applied_event_ordinal,
@@ -3888,6 +4103,16 @@ fn write_materialized_session(
             serde_json::to_string(&materialized.configuration)?,
             materialized.last_activity_at_ms,
             serde_json::to_string(&materialized.pending_elicitations)?,
+            materialized
+                .active_turn
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            materialized
+                .last_turn_outcome
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     tx.execute(
@@ -4005,8 +4230,9 @@ fn replace_materialized_queue(
     for (ordinal, prompt) in queued_prompts.iter().enumerate() {
         tx.execute(
             "INSERT INTO materialized_queued_prompts(
-                 session_id, ordinal, command_id, kind_json, content_json, queued_at_ms
-             ) VALUES (?1,?2,?3,?4,?5,?6)",
+                 session_id, ordinal, command_id, kind_json, content_json, queued_at_ms,
+                 accepted_ordinal
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
                 session_id,
                 ordinal as i64,
@@ -4014,6 +4240,7 @@ fn replace_materialized_queue(
                 serde_json::to_string(&prompt.kind)?,
                 serde_json::to_string(&prompt.content)?,
                 prompt.queued_at_ms,
+                prompt.accepted_ordinal,
             ],
         )?;
     }

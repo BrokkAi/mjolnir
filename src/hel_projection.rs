@@ -25,9 +25,10 @@ use crate::hel_database::{
     MaterializedSessionMutation, ProjectionIntegrityError, TranscriptMutation,
 };
 use crate::hel_state::{
-    MaterializedExecutionState, MaterializedQueuedPrompt, MaterializedSession, QueuedCommandKind,
-    TerminalOutputRecord, TranscriptBody, TranscriptItem, config_command_text,
-    normalize_session_title, provisional_session_title,
+    MaterializedExecutionState, MaterializedQueuedPrompt, MaterializedSession, MaterializedTurn,
+    MaterializedTurnOutcome, QueuedCommandKind, TerminalOutputRecord, TranscriptBody,
+    TranscriptItem, TurnOutcomeKind, config_command_text, normalize_session_title,
+    provisional_session_title,
 };
 use crate::hel_transcript::{ChatEntry, ChatRole, PlanStatus, ToolStatus, tool_call_presentation};
 use crate::hel_worker::{
@@ -358,6 +359,12 @@ fn apply_committed_projection_event_inner(
     if let Some(pending_elicitations) = mutation.pending_elicitations {
         current.pending_elicitations = pending_elicitations;
     }
+    if let Some(active_turn) = mutation.active_turn {
+        current.active_turn = active_turn;
+    }
+    if let Some(last_turn_outcome) = mutation.last_turn_outcome {
+        current.last_turn_outcome = Some(last_turn_outcome);
+    }
     if let Some(activity) = mutation.last_activity_at_ms {
         current.last_activity_at_ms = Some(
             current
@@ -460,6 +467,7 @@ fn project_observation(
                     kind: QueuedCommandKind::Prompt,
                     content,
                     queued_at_ms: *created_at_ms,
+                    accepted_ordinal: Some(event.ordinal),
                 });
                 mutation.queued_prompts = Some(queue);
             }
@@ -478,6 +486,7 @@ fn project_observation(
                         config_command_text(key, value),
                     )))?],
                     queued_at_ms: *created_at_ms,
+                    accepted_ordinal: Some(event.ordinal),
                 });
                 mutation.queued_prompts = Some(queue);
             }
@@ -512,6 +521,7 @@ fn project_observation(
             {
                 let mut queue = current.queued_prompts.clone();
                 let entry = queue.remove(queue_index);
+                let entry_accepted_ordinal = entry.accepted_ordinal;
                 mutation.queued_prompts = Some(queue);
                 // A configuration change applies between turns: it never
                 // becomes a transcript turn and never starts the turn clock.
@@ -533,6 +543,12 @@ fn project_observation(
                     mutation.execution = Some(MaterializedExecutionState::Running {
                         started_at_ms: *started_at_ms,
                     });
+                    mutation.active_turn = Some(Some(MaterializedTurn {
+                        command_id: command_id.clone(),
+                        accepted_ordinal: entry_accepted_ordinal,
+                        turn_start_position: event.ordinal,
+                        started_at_ms: *started_at_ms,
+                    }));
                 }
             }
             if let Some(existing) = index.get(&user_shell_item_id(command_id)) {
@@ -551,9 +567,24 @@ fn project_observation(
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
             match outcome {
-                crate::hel_worker::RelayCommandOutcome::Prompt { .. } => {
+                crate::hel_worker::RelayCommandOutcome::Prompt { stop_reason } => {
                     close_streams(index, mutation, event.recorded_at_ms);
                     mutation.execution = Some(MaterializedExecutionState::Idle);
+                    let active = current
+                        .active_turn
+                        .as_ref()
+                        .filter(|turn| turn.command_id == *command_id);
+                    mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                        command_id: command_id.clone(),
+                        accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal),
+                        turn_start_position: active.map(|turn| turn.turn_start_position),
+                        completed_ordinal: event.ordinal,
+                        completed_at_ms: event.recorded_at_ms,
+                        outcome: TurnOutcomeKind::Completed {
+                            stop_reason: stop_reason.clone(),
+                        },
+                    });
+                    mutation.active_turn = Some(None);
                 }
                 crate::hel_worker::RelayCommandOutcome::UserShell { result } => {
                     if let Some(existing) = index.get(&user_shell_item_id(command_id)) {
@@ -587,6 +618,15 @@ fn project_observation(
                     if !entry.kind.is_prompt() {
                         bail!("steered queue entry is not a prompt");
                     }
+                    // The running turn becomes the steered prompt's turn: the
+                    // harness keeps the same command in flight but the work it
+                    // now reports belongs to the queued prompt.
+                    mutation.active_turn = Some(Some(MaterializedTurn {
+                        command_id: queued_command_id.clone(),
+                        accepted_ordinal: entry.accepted_ordinal,
+                        turn_start_position: event.ordinal,
+                        started_at_ms: event.recorded_at_ms,
+                    }));
                     close_streams(index, mutation, event.recorded_at_ms);
                     upsert(
                         mutation,
@@ -626,6 +666,11 @@ fn project_observation(
             message,
         } => {
             let prompt_was_started = index.get(&format!("user:{command_id}")).is_some();
+            let queued_entry = current
+                .queued_prompts
+                .iter()
+                .find(|queued| queued.command_id == *command_id)
+                .cloned();
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
             if queue != current.queued_prompts {
@@ -634,6 +679,41 @@ fn project_observation(
             if prompt_was_started {
                 close_streams(index, mutation, event.recorded_at_ms);
                 mutation.execution = Some(MaterializedExecutionState::Idle);
+            }
+            if *command == RelayCommandKind::Prompt {
+                // A prompt that never started has its acceptance ordinal on the
+                // queue entry; one that started carries it on the active turn.
+                let active = current
+                    .active_turn
+                    .as_ref()
+                    .filter(|turn| turn.command_id == *command_id);
+                let outcome_text = message.clone();
+                mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                    command_id: command_id.clone(),
+                    accepted_ordinal: active.and_then(|turn| turn.accepted_ordinal).or_else(|| {
+                        queued_entry
+                            .as_ref()
+                            .and_then(|entry| entry.accepted_ordinal)
+                    }),
+                    turn_start_position: active.map(|turn| turn.turn_start_position),
+                    completed_ordinal: event.ordinal,
+                    completed_at_ms: event.recorded_at_ms,
+                    outcome: if matches!(
+                        event.observation,
+                        RelayObservation::CommandRejected { .. }
+                    ) {
+                        TurnOutcomeKind::Rejected {
+                            message: outcome_text,
+                        }
+                    } else {
+                        TurnOutcomeKind::Interrupted {
+                            message: outcome_text,
+                        }
+                    },
+                });
+                if active.is_some() {
+                    mutation.active_turn = Some(None);
+                }
             }
             if *command == RelayCommandKind::Close
                 && current.execution == MaterializedExecutionState::Closing
@@ -1831,6 +1911,10 @@ pub fn materialized_session_from_entries(
         transcript,
         queued_prompts,
         pending_elicitations,
+        // Imported transcripts have no relay command journal, so no turn
+        // identity can be reconstructed for them.
+        active_turn: None,
+        last_turn_outcome: None,
     }
 }
 
@@ -2093,6 +2177,10 @@ pub fn materialized_session_from_canonical(
         transcript,
         queued_prompts: materialized_queued_prompts_from_canonical(&canonical.queued_prompts),
         pending_elicitations: Vec::new(),
+        // The checkpoint archive does not carry turn identity, so a resumed
+        // session starts with no active turn and no last outcome.
+        active_turn: None,
+        last_turn_outcome: None,
     })
 }
 
@@ -2117,6 +2205,7 @@ pub fn materialized_queued_prompts_from_canonical(
             },
             content: prompt.content.clone(),
             queued_at_ms: prompt.queued_at_ms,
+            accepted_ordinal: None,
         })
         .collect()
 }
@@ -2199,6 +2288,151 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn a_completed_prompt_records_its_stop_reason_and_clears_the_running_turn() {
+        let mut session = MaterializedSession::empty("session");
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandQueued {
+                command_id: "prompt-1".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from("go")],
+                },
+                created_at_ms: 10,
+            },
+        );
+        let accepted = session.applied_event_ordinal;
+        assert_eq!(
+            session.queued_prompts[0].accepted_ordinal,
+            Some(accepted),
+            "a queue entry remembers the ordinal its caller was told"
+        );
+
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandStarted {
+                command_id: "prompt-1".into(),
+                started_at_ms: 20,
+            },
+        );
+        let turn = session.active_turn.clone().expect("a running turn");
+        assert_eq!(turn.command_id, "prompt-1");
+        assert_eq!(turn.accepted_ordinal, Some(accepted));
+        assert_eq!(turn.turn_start_position, session.applied_event_ordinal);
+        assert_eq!(turn.started_at_ms, 20);
+
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandCompleted {
+                command_id: "prompt-1".into(),
+                outcome: RelayCommandOutcome::Prompt {
+                    stop_reason: "EndTurn".into(),
+                },
+            },
+        );
+        assert!(session.active_turn.is_none());
+        let outcome = session.last_turn_outcome.clone().expect("an outcome");
+        assert_eq!(outcome.command_id, "prompt-1");
+        assert_eq!(outcome.accepted_ordinal, Some(accepted));
+        assert_eq!(outcome.turn_start_position, Some(turn.turn_start_position));
+        assert_eq!(outcome.completed_ordinal, session.applied_event_ordinal);
+        assert_eq!(
+            outcome.outcome,
+            TurnOutcomeKind::Completed {
+                stop_reason: "EndTurn".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start() {
+        let mut session = MaterializedSession::empty("session");
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandQueued {
+                command_id: "prompt-1".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from("go")],
+                },
+                created_at_ms: 10,
+            },
+        );
+        let accepted = session.applied_event_ordinal;
+
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandRejected {
+                command_id: "prompt-1".into(),
+                command: RelayCommandKind::Prompt,
+                message: "transport failed".into(),
+            },
+        );
+
+        assert!(session.active_turn.is_none());
+        assert!(session.queued_prompts.is_empty());
+        let outcome = session.last_turn_outcome.clone().expect("an outcome");
+        assert_eq!(outcome.accepted_ordinal, Some(accepted));
+        assert_eq!(
+            outcome.turn_start_position, None,
+            "a prompt that never started has no turn in the transcript"
+        );
+        assert_eq!(
+            outcome.outcome,
+            TurnOutcomeKind::Rejected {
+                message: "transport failed".into()
+            }
+        );
+    }
+
+    #[test]
+    fn queued_prompts_keep_their_own_acceptance_ordinals_through_their_turns() {
+        let mut session = MaterializedSession::empty("session");
+        let mut accepted = Vec::new();
+        for command_id in ["prompt-a", "prompt-b"] {
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandQueued {
+                    command_id: command_id.into(),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from("go")],
+                    },
+                    created_at_ms: 10,
+                },
+            );
+            accepted.push(session.applied_event_ordinal);
+        }
+        // The second prompt is accepted before the first one starts, which is
+        // exactly the ordering that makes "newest turn" the wrong answer.
+        assert!(accepted[1] > accepted[0]);
+
+        for (index, command_id) in ["prompt-a", "prompt-b"].into_iter().enumerate() {
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandStarted {
+                    command_id: command_id.into(),
+                    started_at_ms: 20,
+                },
+            );
+            apply_observation(
+                &mut session,
+                RelayObservation::CommandCompleted {
+                    command_id: command_id.into(),
+                    outcome: RelayCommandOutcome::Prompt {
+                        stop_reason: "EndTurn".into(),
+                    },
+                },
+            );
+            assert_eq!(
+                session
+                    .last_turn_outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.accepted_ordinal),
+                Some(accepted[index]),
+                "{command_id} must report the ordinal its own submission returned"
+            );
+        }
     }
 
     #[test]
@@ -3800,6 +4034,7 @@ mod tests {
     fn queue_changes_project_only_from_their_completion_events() {
         let mut session = MaterializedSession::empty("session-1");
         session.queued_prompts.push(MaterializedQueuedPrompt {
+            accepted_ordinal: None,
             command_id: "queued-1".into(),
             kind: QueuedCommandKind::Prompt,
             content: vec![json!({"type": "text", "text": "later"})],
@@ -3831,12 +4066,14 @@ mod tests {
 
         session.queued_prompts.extend([
             MaterializedQueuedPrompt {
+                accepted_ordinal: None,
                 command_id: "queued-2".into(),
                 kind: QueuedCommandKind::Prompt,
                 content: vec![json!({"type": "text", "text": "two"})],
                 queued_at_ms: 20,
             },
             MaterializedQueuedPrompt {
+                accepted_ordinal: None,
                 command_id: "queued-3".into(),
                 kind: QueuedCommandKind::Prompt,
                 content: vec![json!({"type": "text", "text": "three"})],
@@ -4078,6 +4315,7 @@ mod tests {
             },
         }));
         session.queued_prompts.push(MaterializedQueuedPrompt {
+            accepted_ordinal: None,
             command_id: "queued-config".into(),
             kind: QueuedCommandKind::SetConfig {
                 key: "model".into(),

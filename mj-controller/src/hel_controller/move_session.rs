@@ -188,6 +188,7 @@ impl Controller {
                 .queued_prompts
                 .into_iter()
                 .map(|entry| hel::hel_state::MaterializedQueuedPrompt {
+                    accepted_ordinal: None,
                     command_id: entry.command_id,
                     kind: match entry.kind {
                         CanonicalQueuedCommandKind::Prompt => {
