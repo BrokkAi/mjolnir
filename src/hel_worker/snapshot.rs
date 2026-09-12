@@ -508,8 +508,28 @@ impl RelayOperationalState {
     /// does. Other harnesses retain their historical checkpoint behavior.
     #[must_use]
     pub fn safe_for_checkpoint(&self, harness: HarnessKind) -> bool {
-        harness != HarnessKind::Kimi
-            || (self.background_work_known == Some(true) && self.background_commands.is_empty())
+        self.checkpoint_background_blocker(harness).is_none()
+    }
+
+    /// The same provider-owned work prerequisite used by checkpoint admission.
+    pub fn checkpoint_background_blocker(&self, harness: HarnessKind) -> Option<&'static str> {
+        if harness != HarnessKind::Kimi {
+            None
+        } else if self.background_work_known.is_none() {
+            Some(
+                "Kimi worker has not reported background-agent synchronization support; checkpoint requires a worker reporting synchronized task state",
+            )
+        } else if self.background_work_known == Some(false) {
+            Some(
+                "Kimi background-agent state is not synchronized; checkpoint requires a synchronized empty task list",
+            )
+        } else if !self.background_commands.is_empty() {
+            Some(
+                "Kimi background agents are still active; checkpoint requires their completion and a synchronized empty task list",
+            )
+        } else {
+            None
+        }
     }
 }
 
@@ -2205,9 +2225,21 @@ mod tests {
             "an older Kimi worker cannot prove provider tasks are absent"
         );
 
+        assert!(
+            state
+                .checkpoint_background_blocker(HarnessKind::Kimi)
+                .unwrap()
+                .contains("not reported")
+        );
         state.background_work_known = Some(false);
         assert!(!state.safe_for_checkpoint(HarnessKind::Kimi));
 
+        assert!(
+            state
+                .checkpoint_background_blocker(HarnessKind::Kimi)
+                .unwrap()
+                .contains("not synchronized")
+        );
         state.background_work_known = Some(true);
         assert!(state.safe_for_checkpoint(HarnessKind::Kimi));
         state.background_commands.push(BackgroundCommand {

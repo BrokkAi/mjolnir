@@ -299,6 +299,14 @@ where
         .with_context(|| format!("{label} task panicked"))?
 }
 
+fn checkpoint_export_error(error: anyhow::Error) -> ExportError {
+    if mj_controller::hel_controller::checkpoint_was_deferred(&error) {
+        ExportError::Refused(format!("{error:#}"))
+    } else {
+        ExportError::Failed(error)
+    }
+}
+
 /// Run one blocking export step off the async runtime.
 async fn export_blocking<T, F>(label: &'static str, job: F) -> Result<T, ExportError>
 where
@@ -865,7 +873,7 @@ impl SubagentBackend for ApiBackend {
                     self.exports
                         .checkpoint_now(session_id.clone())
                         .await
-                        .map_err(ExportError::Failed)?
+                        .map_err(checkpoint_export_error)?
                         .archive_path
                 }
                 None => {
@@ -991,6 +999,23 @@ mod tests {
     /// Every session this daemon is asked about is up and running.
     fn running_states() -> SessionStateSource {
         Arc::new(|_| Some(SessionState::Running))
+    }
+
+    #[test]
+    fn checkpoint_export_retains_typed_deferrals_and_real_failures() {
+        let error = anyhow!("disk failed");
+        assert!(matches!(
+            checkpoint_export_error(error),
+            ExportError::Failed(_)
+        ));
+        let error =
+            anyhow::Error::new(mj_controller::hel_controller::CheckpointDeferred::harness_busy())
+                .context("capture bundle");
+        let ExportError::Refused(message) = checkpoint_export_error(error) else {
+            panic!("expected a deferred export");
+        };
+        assert!(message.contains("capture bundle"));
+        assert!(message.contains("agent is working"));
     }
 
     /// An export runtime with nothing in it. The follow-up tests never export;

@@ -188,11 +188,29 @@ impl IntoResponse for ApiFailure {
 // Wire types
 // ---------------------------------------------------------------------------
 
+/// Observed provider-owned background work; absent when no live snapshot is available.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiBackgroundWork {
+    pub known: Option<bool>,
+    pub tasks: Vec<hel::hel_worker::BackgroundCommand>,
+}
+
+impl From<&hel::hel_worker::RelayOperationalState> for ApiBackgroundWork {
+    fn from(state: &hel::hel_worker::RelayOperationalState) -> Self {
+        Self {
+            known: state.background_work_known,
+            tasks: state.background_commands.clone(),
+        }
+    }
+}
+
 /// One session as the API presents it. This is a narrower, more stable shape
 /// than the viewer's own session projection, which changes whenever the browser
 /// needs something new.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_work: Option<ApiBackgroundWork>,
     pub id: String,
     pub workspace_id: String,
     pub title: String,
@@ -221,6 +239,7 @@ pub struct ApiSession {
 impl From<&ViewerSession> for ApiSession {
     fn from(session: &ViewerSession) -> Self {
         Self {
+            background_work: None,
             id: session.id.clone(),
             workspace_id: session.workspace_id.clone(),
             title: session.title.clone(),
@@ -739,6 +758,7 @@ pub fn map_stop_reason(stop_reason: &str) -> (WaitOutcome, Option<String>) {
 /// Everything one pass of the wait loop knows about a session.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WaitObservation {
+    pub background_work: Option<ApiBackgroundWork>,
     pub pending_elicitations: Vec<hel::hel_elicitation::ElicitationRequest>,
     pub lifecycle: Option<ViewerLifecycleCategory>,
     /// A recorded launch failure names this session.
@@ -1127,10 +1147,18 @@ async fn get_session(
         let snapshot = state.snapshot_rx.borrow();
         ApiSession::from(require_session_record(&snapshot, &session_id)?)
     };
-    if let Ok(backend) = backend(&state)
-        && let Some(turn) = backend.turn_state(session_id).await?
-    {
-        session.last_turn_outcome = turn.last_turn_outcome.map(api_turn_outcome);
+    if let Ok(backend) = backend(&state) {
+        if let Some(turn) = backend.turn_state(session_id.clone()).await? {
+            session.last_turn_outcome = turn.last_turn_outcome.map(api_turn_outcome);
+        }
+        if let Some(handle) = backend.session_handle(session_id).await? {
+            let view = handle.view();
+            if view.connected
+                && let Some(snapshot) = view.snapshot
+            {
+                session.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+            }
+        }
     }
     Ok(Json(session))
 }
@@ -1688,6 +1716,12 @@ fn build_observation(
         start_status,
         ..WaitObservation::default()
     };
+    if let Some(view) = live
+        && view.connected
+        && let Some(snapshot) = &view.snapshot
+    {
+        observation.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+    }
     if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {
         observation
             .pending_elicitations
@@ -1726,6 +1760,9 @@ async fn finish_wait(
     decision: WaitDecision,
     relay: Option<RelayHealth>,
 ) -> Result<WaitResponse, ApiFailure> {
+    session
+        .background_work
+        .clone_from(&observation.background_work);
     session
         .last_turn_outcome
         .clone_from(&observation.last_turn_outcome);
@@ -1800,6 +1837,97 @@ mod tests {
                 command_id: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn bundle_export_distinguishes_deferral_from_failure() {
+        for fails in [false, true] {
+            let (app, _actions, _snapshots, _bundles) = api_app(
+                Arc::new(FakeBackend {
+                    bundle_fails: fails,
+                    ..Default::default()
+                }),
+                |_| {},
+            );
+            let response = app
+                .oneshot(
+                    bearer(Request::post("/api/v1/sessions/session-1/export"))
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(r#"{"kind":"bundle"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if fails {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::CONFLICT
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_reports_background_knowledge_without_claiming_checkpoint_readiness() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = hel::hel_worker::DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap();
+        let materialized = hel::hel_state::MaterializedSession::empty("session-1");
+        let mut live = mj_client::session::ManagedSessionView {
+            connected: true,
+            error: None,
+            snapshot: Some(hel::hel_state::ManagedSessionSnapshot {
+                window: hel::hel_state::ProjectionWindow::of(&materialized),
+                materialized,
+                operational: relay.operational_state(),
+                latest_credential_sync_signal: None,
+                worker_build: None,
+            }),
+        };
+        let (config, state) = sample_config_state();
+        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        let session = &snapshot.sessions[0];
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend::default());
+        for known in [None, Some(false), Some(true)] {
+            live.snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .background_work_known = known;
+            let observation = build_observation(&snapshot, session, Some(&live), None, None);
+            let decision = resolve_wait(&observation, &WaitRequest::default()).unwrap();
+            let response = finish_wait(
+                &backend,
+                &session.id,
+                ApiSession::from(session),
+                observation,
+                decision,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.session.background_work.unwrap().known, known);
+        }
+        live.snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .background_commands
+            .push(hel::hel_worker::BackgroundCommand {
+                id: "task-1".into(),
+                started_at_ms: 1,
+                command: "background agent".into(),
+                can_stop: false,
+            });
+        let observation = build_observation(&snapshot, session, Some(&live), None, None);
+        assert_eq!(observation.background_work.unwrap().tasks[0].id, "task-1");
+        live.connected = false;
+        assert!(
+            build_observation(&snapshot, session, Some(&live), None, None)
+                .background_work
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1984,6 +2112,7 @@ mod tests {
         bundle: Option<BundleExport>,
         /// When set, the diff fails outright rather than being refused.
         diff_fails: bool,
+        bundle_fails: bool,
         /// The path the file handler asked the backend for.
         file_paths: Mutex<Vec<PathBuf>>,
         file_writes: Mutex<Vec<(PathBuf, Vec<u8>, bool)>>,
@@ -2179,6 +2308,11 @@ mod tests {
         }
         fn bundle(&self, _session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
             Box::pin(async {
+                if self.bundle_fails {
+                    return Err(ExportError::Failed(anyhow::anyhow!(
+                        "checkpoint storage failed"
+                    )));
+                }
                 self.bundle.clone().ok_or_else(|| {
                     ExportError::Refused("no commits beyond the session base".into())
                 })

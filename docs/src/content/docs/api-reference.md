@@ -126,6 +126,21 @@ GET /api/v1/sessions
 `lifecycle` is one of `live`, `starting`, `stopping`, `stopped`, `failed`.
 `chat_phase` is one of `idle`, `running`, `closing`, `closed`.
 
+Session detail and the session embedded in wait responses also include optional
+`background_work` from the current connected worker snapshot. Its `known` field
+is `true` when background state is synchronized, `false` when it is not yet
+synchronized, and `null` when the worker does not report this capability. `tasks`
+contains known task records (`id`, `started_at_ms`, `command`, `can_stop`). The
+whole field is omitted when no connected snapshot is available.
+
+A finished prompt or idle chat phase does not prove background tasks have ended.
+For Kimi, a routine checkpoint requires `known: true` and an empty task list,
+in addition to the normal checkpoint prerequisites. A deferred bundle export
+returns **409** with the prerequisite that blocked it; actual checkpoint failures
+return **500**. Retry after state synchronizes and tasks finish. Missing worker
+support requires an updated worker; do not infer safety from an empty list alone.
+
+
 ### Get one session
 
 ```text
@@ -240,6 +255,25 @@ asked about; the wait keeps waiting until that turn actually ends.
   "relay": { "state": "connected" },
   "session": { "id": "session-1" }
 }
+```
+
+For `mj wait --json` and `mj prompt --wait --json`, stdout contains the JSON
+response even when the command exits unsuccessfully. `finished` and opted-in
+`input_required` exit **0**. `timeout`, `error`, `cancelled`, `quota_limit`, and
+`stopped` exit **1**, with a diagnostic on stderr. A timeout does not cancel the
+turn. Transport or authentication failures may have no JSON response.
+
+Preserve stdout before interpreting the exit status, for example:
+
+```python
+result = subprocess.run(
+    ["mj", "wait", "--session", session_id, "--json"],
+    capture_output=True, text=True, check=False,
+)
+if not result.stdout.strip():
+    raise RuntimeError(result.stderr)
+response = json.loads(result.stdout)
+# Handle response["outcome"], including timeout, before deciding whether to retry.
 ```
 
 | `outcome` | What happened |

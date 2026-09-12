@@ -931,7 +931,11 @@ impl Controller {
                     // barrier is submitted; close deliberately does not use
                     // this path and may still interrupt/terminate it.
                     relay.release();
-                    return Err(CheckpointDeferred::background_work().into());
+                    return Err(CheckpointDeferred::background_snapshot(
+                        &snapshot.operational,
+                        session.harness_kind,
+                    )
+                    .into());
                 }
             }
             let barrier_command_id = new_command_id("checkpoint")?;
@@ -1580,7 +1584,9 @@ async fn wait_for_checkpoint_barrier(
             // idle sync and before the queued BeginCheckpoint is processed.
             // Defer from the barrier wait rather than allowing its timeout to
             // classify the worker as wedged and restart it.
-            return Err(CheckpointDeferred::background_work().into());
+            return Err(
+                CheckpointDeferred::background_snapshot(&snapshot.operational, harness).into(),
+            );
         }
         if checkpoint_barrier_is_ready(&snapshot, command_id) {
             if let Some(started_at) = cancel_started_at {
@@ -1771,14 +1777,23 @@ fn checkpoint_cancel_turn_needs_worker_restart(error: &anyhow::Error) -> bool {
 pub struct CheckpointDeferred(String);
 
 impl CheckpointDeferred {
-    pub(crate) fn harness_busy() -> Self {
+    pub fn harness_busy() -> Self {
         Self("the agent is working; try again when it is idle".to_owned())
     }
 
     fn background_work() -> Self {
+        Self("Kimi background-agent state could not be synchronized; checkpoint requires a synchronized empty task list".into())
+    }
+
+    fn background_snapshot(
+        state: &hel::hel_worker::RelayOperationalState,
+        harness: HarnessKind,
+    ) -> Self {
         Self(
-            "Kimi background-agent state is unknown or still active; checkpoint deferred until it is synchronized and idle"
-                .to_owned(),
+            state
+                .checkpoint_background_blocker(harness)
+                .unwrap_or("background state changed during checkpoint")
+                .into(),
         )
     }
 
@@ -1980,7 +1995,7 @@ fn validate_automatic_checkpoint_barrier_snapshot(
     validate_checkpoint_barrier_snapshot(snapshot, command_id, expected)?;
     ensure!(
         snapshot.operational.safe_for_checkpoint(harness),
-        CheckpointDeferred::background_work()
+        CheckpointDeferred::background_snapshot(&snapshot.operational, harness)
     );
     Ok(())
 }
