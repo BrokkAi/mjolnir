@@ -2012,10 +2012,21 @@ async fn create_bundle(
     State(state): State<ServerState>,
     Json(request): Json<CreateBundleRequest>,
 ) -> Result<Json<CreateBundleResponse>, ApiError> {
-    if request.source.trim().is_empty() {
+    Ok(Json(CreateBundleResponse {
+        bundle_id: create_quick_bundle(&state, request.source).await?,
+    }))
+}
+
+/// Create or reuse the quick bundle for one repository source.
+///
+/// Both the viewer's `/api/bundles` route and the documented API's session
+/// creation need this, and a caller that supplies a project directory instead
+/// of a bundle id must get exactly the bundle the viewer would have made.
+async fn create_quick_bundle(state: &ServerState, source: String) -> Result<String, ApiError> {
+    if source.trim().is_empty() {
         return Err(ApiError::bad_request("repository source cannot be empty"));
     }
-    if request.source.chars().count() > MAX_BUNDLE_SOURCE_CHARS {
+    if source.chars().count() > MAX_BUNDLE_SOURCE_CHARS {
         return Err(ApiError::bad_request(
             "repository source must contain 1024 characters or fewer",
         ));
@@ -2023,13 +2034,10 @@ async fn create_bundle(
     let (reply, result) = tokio::sync::oneshot::channel();
     state
         .bundle_tx
-        .send(BundleRequest {
-            source: request.source,
-            reply,
-        })
+        .send(BundleRequest { source, reply })
         .await
         .map_err(|_| ApiError::controller_unavailable())?;
-    let bundle_id = result
+    result
         .await
         .map_err(|_| ApiError::controller_unavailable())?
         .map_err(|failure| match failure {
@@ -2040,8 +2048,7 @@ async fn create_bundle(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "the controller could not create the bundle",
             ),
-        })?;
-    Ok(Json(CreateBundleResponse { bundle_id }))
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -2904,6 +2911,30 @@ fn validate_move_request(
     Ok(())
 }
 
+/// What every surface accepts as prompt text.
+///
+/// Session creation carries a first prompt before any session record exists,
+/// so this is separate from [`validate_action`]'s prompt arm rather than being
+/// restated there: both must refuse the same text.
+fn validate_prompt_text(text: &str, has_images: bool) -> Result<(), ApiError> {
+    if text.starts_with('!') {
+        return Err(ApiError::bad_request(
+            "leading ! is reserved for shell commands",
+        ));
+    }
+    if text.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(
+            "prompt must contain 1-65536 characters",
+        ));
+    }
+    if text.trim().is_empty() && !has_images {
+        return Err(ApiError::bad_request(
+            "prompt must contain text or an image",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Result<(), ApiError> {
     match action {
         ControllerAction::New {
@@ -3092,21 +3123,7 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
                     "a prompt may contain at most 10 images",
                 ));
             }
-            if text.starts_with('!') {
-                return Err(ApiError::bad_request(
-                    "leading ! is reserved for shell commands",
-                ));
-            }
-            if text.chars().count() > MAX_PROMPT_CHARS {
-                return Err(ApiError::bad_request(
-                    "prompt must contain 1-65536 characters",
-                ));
-            }
-            if text.trim().is_empty() && images.is_empty() {
-                return Err(ApiError::bad_request(
-                    "prompt must contain text or an image",
-                ));
-            }
+            validate_prompt_text(text, !images.is_empty())?;
             if !images.is_empty() && !session.prompt_images_supported {
                 return Err(ApiError::bad_request(
                     "this session does not support image prompts",

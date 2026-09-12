@@ -33,9 +33,10 @@ use hel::hel_worker::{CapacityRetry, is_capacity_stop_reason};
 use mj_client::session::{BoxFuture, SessionHandle};
 
 use super::{
-    ApiError, COOKIE_NAME, ControllerAction, ControllerRequest, ServerState,
+    ActionOutcome, ApiError, COOKIE_NAME, ControllerAction, ControllerRequest, ServerState,
     ViewerLifecycleCategory, ViewerSession, ViewerSnapshot, constant_time_eq, cookie_value,
-    now_unix, require_session_record, session_cookie_valid, validate_action,
+    create_quick_bundle, now_unix, require_session_record, session_cookie_valid, validate_action,
+    validate_prompt_text,
 };
 
 /// Response header naming the contract version this server speaks. A client
@@ -694,7 +695,7 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
 
 pub(super) fn router(state: ServerState) -> Router<ServerState> {
     Router::new()
-        .route("/sessions", get(list_sessions))
+        .route("/sessions", get(list_sessions).post(start_session))
         .route("/sessions/{session_id}", get(get_session))
         .route("/sessions/{session_id}/prompt", post(prompt))
         .route("/sessions/{session_id}/wait", post(wait))
@@ -781,6 +782,118 @@ async fn get_session(
         session.last_turn_outcome = turn.last_turn_outcome;
     }
     Ok(Json(session))
+}
+
+/// Create a session, and hand its first prompt to the backend to submit once
+/// the harness is ready.
+///
+/// Creation answers as soon as the controller has published an id, because
+/// provisioning a target takes minutes and the caller's next call is a wait.
+/// The prompt is therefore not submitted here; the backend follows the session
+/// up and records the turn it became, which `wait` reads.
+async fn start_session(
+    State(state): State<ServerState>,
+    Json(request): Json<StartSessionRequest>,
+) -> Result<(StatusCode, Json<StartSessionResponse>), ApiFailure> {
+    let backend = backend(&state)?.clone();
+    if let Some(prompt) = &request.prompt {
+        validate_prompt_text(prompt, false)?;
+    }
+    let key = match request.idempotency_key.as_deref().map(str::trim) {
+        Some(key) if key.is_empty() || key.chars().count() > MAX_IDEMPOTENCY_KEY_CHARS => {
+            return Err(ApiFailure::bad_request(format!(
+                "idempotency_key must contain 1-{MAX_IDEMPOTENCY_KEY_CHARS} characters"
+            )));
+        }
+        Some(key) => Some(key.to_owned()),
+        None => None,
+    };
+    // A retry with a key that already created a session returns that session
+    // rather than starting a second one, which is the whole point of the key:
+    // a caller whose connection dropped cannot tell whether the first call
+    // reached the controller.
+    if let Some(key) = &key
+        && let Some(session_id) = backend.lookup_idempotency(key.clone()).await?
+    {
+        let turn_id = match backend.start_status(session_id.clone()).await? {
+            Some(StartStatus::Submitted { turn_id }) => Some(turn_id),
+            _ => None,
+        };
+        return Ok((
+            StatusCode::OK,
+            Json(StartSessionResponse {
+                session_id,
+                turn_id,
+            }),
+        ));
+    }
+
+    let bundle_id = match (&request.bundle_id, &request.project_directory) {
+        (Some(bundle_id), _) => bundle_id.clone(),
+        // A caller that names a directory should not have to make a bundle
+        // first; this is the same quick bundle the viewer's own form creates.
+        (None, Some(directory)) => {
+            create_quick_bundle(&state, directory.display().to_string()).await?
+        }
+        (None, None) => {
+            return Err(ApiFailure::bad_request(
+                "supply bundle_id, project_directory, or both",
+            ));
+        }
+    };
+    let action = ControllerAction::New {
+        workspace_id: request.workspace_id.clone().unwrap_or_default(),
+        profile_id: request.profile_id.clone(),
+        bundle_id,
+        target_id: request.target_id.clone(),
+        title: request.title.clone(),
+        project_directory: request.project_directory.clone(),
+        dirty_ack: Vec::new(),
+    };
+    validate_action(&action, &state.snapshot_rx.borrow())?;
+
+    let (reply, outcome) = tokio::sync::oneshot::channel();
+    state
+        .action_tx
+        .send(ControllerRequest { action, reply })
+        .await
+        .map_err(|_| ApiFailure::unavailable("the controller is not accepting actions"))?;
+    let outcome = outcome
+        .await
+        .map_err(|_| ApiFailure::unavailable("the controller dropped this action"))?;
+    if let Some(rejection) = outcome.rejection() {
+        return Err(rejection.into());
+    }
+    let ActionOutcome::Accepted {
+        session_id: Some(session_id),
+    } = outcome
+    else {
+        return Err(ApiFailure::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the controller accepted the session but published no id",
+        ));
+    };
+
+    backend
+        .start_followup(
+            session_id.clone(),
+            StartFollowup {
+                model: request.model,
+                effort: request.effort,
+                prompt: request.prompt,
+            },
+        )
+        .await?;
+    if let Some(key) = key {
+        backend.record_idempotency(key, session_id.clone()).await?;
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(StartSessionResponse {
+            session_id,
+            turn_id: None,
+        }),
+    ))
 }
 
 async fn prompt(
@@ -1044,6 +1157,13 @@ mod tests {
         prompt_ordinal: u64,
         prompts: Mutex<Vec<(String, String)>>,
         summary: Option<TurnSummary>,
+        /// Follow-ups the start handler asked for, and the keys it recorded.
+        followups: Mutex<Vec<(String, StartFollowup)>>,
+        idempotency: Mutex<BTreeMap<String, String>>,
+        start_status: Option<StartStatus>,
+        /// The page and the limit the transcript handler asked for.
+        transcript: Mutex<Option<TranscriptPage>>,
+        transcript_limits: Mutex<Vec<usize>>,
     }
 
     impl FakeBackend {
@@ -1086,34 +1206,43 @@ mod tests {
         }
         fn start_followup(
             &self,
-            _session_id: String,
-            _followup: StartFollowup,
+            session_id: String,
+            followup: StartFollowup,
         ) -> BoxFuture<'_, AnyResult<()>> {
-            Box::pin(async { anyhow::bail!("not implemented in this milestone") })
+            Box::pin(async move {
+                self.followups.lock().unwrap().push((session_id, followup));
+                Ok(())
+            })
         }
         fn start_status(
             &self,
             _session_id: String,
         ) -> BoxFuture<'_, AnyResult<Option<StartStatus>>> {
-            Box::pin(async { Ok(None) })
+            Box::pin(async { Ok(self.start_status.clone()) })
         }
-        fn lookup_idempotency(&self, _key: String) -> BoxFuture<'_, AnyResult<Option<String>>> {
-            Box::pin(async { Ok(None) })
+        fn lookup_idempotency(&self, key: String) -> BoxFuture<'_, AnyResult<Option<String>>> {
+            Box::pin(async move { Ok(self.idempotency.lock().unwrap().get(&key).cloned()) })
         }
         fn record_idempotency(
             &self,
-            _key: String,
-            _session_id: String,
+            key: String,
+            session_id: String,
         ) -> BoxFuture<'_, AnyResult<()>> {
-            Box::pin(async { Ok(()) })
+            Box::pin(async move {
+                self.idempotency.lock().unwrap().insert(key, session_id);
+                Ok(())
+            })
         }
         fn transcript(
             &self,
             _session_id: String,
             _after_seq: u64,
-            _limit: usize,
+            limit: usize,
         ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>> {
-            Box::pin(async { anyhow::bail!("not implemented in this milestone") })
+            Box::pin(async move {
+                self.transcript_limits.lock().unwrap().push(limit);
+                Ok(self.transcript.lock().unwrap().clone())
+            })
         }
         fn diff(&self, _session_id: String) -> BoxFuture<'_, Result<String, ExportError>> {
             Box::pin(async { Err(ExportError::Refused("not implemented".into())) })
@@ -1147,6 +1276,7 @@ mod tests {
         axum::Router,
         mpsc::Receiver<ControllerRequest>,
         watch::Sender<ViewerSnapshot>,
+        mpsc::Receiver<super::super::BundleRequest>,
     ) {
         let (config, state) = sample_config_state();
         let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
@@ -1157,7 +1287,7 @@ mod tests {
         let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
         let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
         let (action_tx, action_rx) = mpsc::channel(8);
-        let (bundle_tx, _bundle_rx) = mpsc::channel(8);
+        let (bundle_tx, bundle_rx) = mpsc::channel(8);
         let (receipt_tx, _receipt_rx) = mpsc::channel(8);
         let (preflight_tx, _preflight_rx) = mpsc::channel(8);
         let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
@@ -1180,7 +1310,7 @@ mod tests {
         .unwrap()
         .with_test_credentials("123456", b"01234567890123456789012345678901");
         options.set_subagent_backend(backend);
-        (router(options), action_rx, snapshot_tx)
+        (router(options), action_rx, snapshot_tx, bundle_rx)
     }
 
     fn bearer(request: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -1218,7 +1348,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_api_refuses_an_unauthenticated_caller_and_still_names_its_version() {
-        let (app, _actions, _snapshot_tx) = api_app(Arc::new(FakeBackend::default()), |_| {});
+        let (app, _actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
 
         let response = app
             .clone()
@@ -1252,7 +1383,8 @@ mod tests {
 
     #[tokio::test]
     async fn either_the_bearer_token_or_the_viewer_cookie_lists_sessions() {
-        let (app, _actions, _snapshot_tx) = api_app(Arc::new(FakeBackend::default()), |_| {});
+        let (app, _actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
         let cookie = login_cookie(&app).await;
 
         for request in [
@@ -1276,7 +1408,8 @@ mod tests {
 
     #[tokio::test]
     async fn one_session_is_readable_by_id_and_an_unknown_one_is_not_found() {
-        let (app, _actions, _snapshot_tx) = api_app(Arc::new(FakeBackend::default()), |_| {});
+        let (app, _actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
 
         let response = app
             .clone()
@@ -1307,7 +1440,7 @@ mod tests {
         // server's own answer to "is this session ready", so it must refuse
         // before submitting anything.
         let backend = Arc::new(FakeBackend::default());
-        let (app, _actions, _snapshot_tx) = api_app(backend.clone(), |_| {});
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
         let response = app
             .oneshot(
                 bearer(Request::post("/api/v1/sessions/session-1/prompt"))
@@ -1324,7 +1457,7 @@ mod tests {
             prompt_ordinal: 17,
             ..FakeBackend::default()
         });
-        let (app, _actions, _snapshot_tx) = api_app(backend.clone(), |snapshot| {
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
             snapshot.sessions[0].capabilities.prompt = true;
         });
 
@@ -1362,9 +1495,150 @@ mod tests {
         );
     }
 
+    fn start_body(extra: &str) -> String {
+        format!(r#"{{"profile_id":"codex-1","target_id":"podman","bundle_id":"hel"{extra}}}"#)
+    }
+
+    fn start_request(body: String) -> Request<Body> {
+        bearer(Request::post("/api/v1/sessions"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn start_returns_the_created_session_and_remembers_its_idempotency_key() {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+        let response = tokio::spawn(app.oneshot(start_request(start_body(
+            r#","prompt":"add a README line","idempotency_key":"key-1""#,
+        ))));
+        let request = actions.recv().await.unwrap();
+        assert_eq!(
+            request.action,
+            ControllerAction::New {
+                workspace_id: String::new(),
+                profile_id: "codex-1".into(),
+                bundle_id: "hel".into(),
+                target_id: "podman".into(),
+                title: None,
+                project_directory: None,
+                dirty_ack: Vec::new(),
+            }
+        );
+        request
+            .reply
+            .send(ActionOutcome::Accepted {
+                session_id: Some("session-2".into()),
+            })
+            .unwrap();
+
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(json_body(response).await["session_id"], "session-2");
+        assert_eq!(
+            backend.idempotency.lock().unwrap().get("key-1").cloned(),
+            Some("session-2".to_owned()),
+            "a retry with this key must find the session it created"
+        );
+        let followups = backend.followups.lock().unwrap();
+        assert_eq!(followups.len(), 1);
+        assert_eq!(followups[0].0, "session-2");
+        assert_eq!(
+            followups[0].1.prompt.as_deref(),
+            Some("add a README line"),
+            "the first prompt is the backend's to submit once the harness is ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_idempotency_key_returns_the_first_session_without_creating_another() {
+        let backend = Arc::new(FakeBackend {
+            idempotency: Mutex::new(BTreeMap::from([(
+                "key-1".to_owned(),
+                "session-1".to_owned(),
+            )])),
+            start_status: Some(StartStatus::Submitted { turn_id: 7 }),
+            ..FakeBackend::default()
+        });
+        let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+
+        let response = app
+            .oneshot(start_request(start_body(r#","idempotency_key":"key-1""#)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["session_id"], "session-1");
+        assert_eq!(
+            body["turn_id"], 7,
+            "a retry must learn which turn the first call's prompt became"
+        );
+        assert!(
+            actions.try_recv().is_err(),
+            "the controller must not be asked to create a second session"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_refuses_a_shell_command_as_a_first_prompt() {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+        let response = app
+            .oneshot(start_request(start_body(r#","prompt":"!ls""#)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(actions.try_recv().is_err());
+        assert!(backend.followups.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_project_directory_without_a_bundle_creates_the_quick_bundle_first() {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, mut actions, _snapshot_tx, mut bundles) = api_app(backend, |_| {});
+
+        let response = tokio::spawn(
+            app.oneshot(start_request(
+                r#"{"profile_id":"codex-1","target_id":"raw","project_directory":"/work/hel"}"#
+                    .to_owned(),
+            )),
+        );
+
+        let bundle = bundles.recv().await.unwrap();
+        assert_eq!(bundle.source, "/work/hel");
+        bundle.reply.send(Ok("hel".to_owned())).unwrap();
+
+        let request = actions.recv().await.unwrap();
+        assert_eq!(
+            request.action,
+            ControllerAction::New {
+                workspace_id: String::new(),
+                profile_id: "codex-1".into(),
+                bundle_id: "hel".into(),
+                target_id: "raw".into(),
+                title: None,
+                project_directory: Some(PathBuf::from("/work/hel")),
+                dirty_ack: Vec::new(),
+            }
+        );
+        request
+            .reply
+            .send(ActionOutcome::Accepted {
+                session_id: Some("session-2".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            response.await.unwrap().unwrap().status(),
+            StatusCode::CREATED
+        );
+    }
+
     #[tokio::test]
     async fn close_and_cancel_turn_reach_the_controller_as_typed_actions() {
-        let (app, mut actions, _snapshot_tx) =
+        let (app, mut actions, _snapshot_tx, _bundles) =
             api_app(Arc::new(FakeBackend::default()), |snapshot| {
                 snapshot.sessions[0].capabilities.cancel_turn = true;
             });
@@ -1400,7 +1674,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_turn_is_refused_when_there_is_no_turn_to_cancel() {
-        let (app, _actions, _snapshot_tx) = api_app(Arc::new(FakeBackend::default()), |_| {});
+        let (app, _actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
         let response = app
             .oneshot(
                 bearer(Request::post("/api/v1/sessions/session-1/cancel-turn"))
@@ -1449,7 +1724,7 @@ mod tests {
             }),
             ..FakeBackend::default()
         });
-        let (app, _actions, _snapshot_tx) = api_app(backend, |_| {});
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
 
         let response = app
             .oneshot(
@@ -1485,7 +1760,7 @@ mod tests {
             })]),
             ..FakeBackend::default()
         });
-        let (app, _actions, _snapshot_tx) = api_app(backend, |_| {});
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
 
         let response = app
             .oneshot(
@@ -1504,7 +1779,8 @@ mod tests {
 
     #[tokio::test]
     async fn wait_refuses_a_timeout_outside_its_bounds() {
-        let (app, _actions, _snapshot_tx) = api_app(Arc::new(FakeBackend::default()), |_| {});
+        let (app, _actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
         for body in [r#"{"timeout_secs":0}"#, r#"{"timeout_secs":100000}"#] {
             let response = app
                 .clone()

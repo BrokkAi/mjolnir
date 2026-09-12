@@ -2289,6 +2289,19 @@ impl RuntimeState {
             .collect()
     }
 
+    /// The lifecycle state of one in-memory record, or `None` when the daemon
+    /// holds no record for it. Reading one field costs one lock rather than a
+    /// clone of every record, which is what a poll wants.
+    pub(crate) fn session_state(&self, session_id: &str) -> Option<hel::hel_state::SessionState> {
+        self.controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .sessions
+            .get(session_id)
+            .map(|record| record.state)
+    }
+
     /// In-memory records and ownership sampled with the same lock order as
     /// completion. A web publish must not pair old records with a new absence
     /// of ownership, even while its background database reload is in flight.

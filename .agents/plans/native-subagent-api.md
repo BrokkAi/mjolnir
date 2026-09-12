@@ -24,7 +24,7 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 
 - [x] (2026-09-11) Design fixed and ExecPlan written.
 - [x] (2026-09-11) M1: persist the per-turn outcome in the projection and database; API module with auth, version header, sessions list/get, prompt, wait, close, cancel-turn; daemon-side backend.
-- [ ] M2: start with model/effort/prompt follow-up and durable idempotency keys.
+- [x] (2026-09-11) M2: start with model/effort/prompt follow-up and durable idempotency keys.
 - [ ] M3: transcript paged by seq from SQLite.
 - [ ] M4: export: worker subcommands, diff, file fetch, branch push, bundle.
 - [ ] M5: CLI subcommands and the API reference page.
@@ -46,6 +46,10 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - Observation: `replacement_session_test_fixture` in `mj-controller/src/hel_session_manager.rs` is `#[cfg(test)]` and private, despite a comment claiming it is compiled unconditionally for other crates. It is not usable from `mj-cli` tests.
   Evidence: `grep -rn replacement_session_test_fixture` finds uses only inside `hel_session_manager.rs`.
 - Observation: the sample session in `hel_server`'s test config carries a recorded error, so every wait resolved to `error` until the API test factory cleared `has_error`.
+- Observation: `validate_action`'s prompt arm reads the session record, so session creation — which carries a first prompt before any record exists — could not reuse it. The text rules are now `validate_prompt_text` in `hel_server.rs`, called from both.
+- Observation: `create_bundle` was a handler with its validation inline, so "create the quick bundle exactly as the viewer does" meant factoring `create_quick_bundle(state, source)` out of it rather than restating 1024-character and empty-source checks in the API module.
+- Observation: the follow-up task can finish before `start_followup` returns, so the `Pending` entry has to be inserted before the task is spawned; inserting it afterwards lost the `Submitted { turn_id }` a fast fake session had already recorded.
+
 - Observation: a closed `watch` channel reports "changed" immediately and forever, so the first wait loop spun without ever letting a timer fire. The test hung rather than failing.
   Evidence: `pstree` showed the test binary alive with one busy thread and no progress; `tokio::select!` was taking the `snapshot_rx.changed()` branch on every pass because the test factory dropped the sender.
   Resolution: the loop now returns 503 when the snapshot channel closes, which is the honest answer when the control loop that publishes session facts is gone.
@@ -97,6 +101,16 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - Decision: the `SubagentBackend` methods for M2-M4 return `anyhow::bail!`-style errors rather than panicking.
   Rationale: a `todo!()` in a trait object reachable from an HTTP handler turns a caller's mistake into a daemon panic.
   Date/Author: 2026-09-11, M1 implementation.
+
+- Decision: `ApiBackend` reads session record state through a `SessionStateSource` function (`Arc<dyn Fn(&str) -> Option<SessionState>>`) that the daemon builds from `RuntimeState::session_state`, rather than holding `Arc<RuntimeState>`.
+  Rationale: the follow-up needs one field of one record, a new `RuntimeState::session_state` reads it under one lock instead of cloning every record the way `session_projection` does, and a function keeps the backend constructible in a test without a daemon runtime.
+  Date/Author: 2026-09-11, M2 implementation.
+- Decision: a follow-up with no prompt removes its start entry instead of leaving it `Pending`.
+  Rationale: `StartStatus` has no "nothing to wait for" state, and a permanent `Pending` would make every later wait on that session look like a start still in flight; with no entry, wait falls back to its newest-turn rules, which is the truth.
+  Date/Author: 2026-09-11, M2 implementation.
+- Decision: creation answers 201 as soon as the controller publishes an id, and the prompt is submitted by the backend's follow-up task.
+  Rationale: provisioning a target takes minutes; holding the HTTP request open for it would make every creation look like a timeout, and the caller's next call is a wait that reports the follow-up's outcome anyway.
+  Date/Author: 2026-09-11, M2 implementation.
 
 ## Outcomes & Retrospective
 

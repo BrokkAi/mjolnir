@@ -802,7 +802,11 @@ pub(crate) async fn run_server(
     options.set_api_token(mj_controller::hel_server::load_or_create_api_token(
         &mj_controller::hel_server::api_token_path(),
     )?);
-    options.set_subagent_backend(Arc::new(api::ApiBackend::new(worker_commands_tx.client())));
+    let api_runtime = daemon_runtime.clone();
+    options.set_subagent_backend(Arc::new(api::ApiBackend::new(
+        worker_commands_tx.client(),
+        Arc::new(move |session_id: &str| api_runtime.session_state(session_id)),
+    )));
     let renewal_cancellation = termination.child_token();
     let mut renewal_task = None;
     if let Some((cert, key)) = resolved.tls_files {
