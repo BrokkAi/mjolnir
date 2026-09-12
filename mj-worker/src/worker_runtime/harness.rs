@@ -126,6 +126,17 @@ fn resolve_at(
     let install = harness_root.join(selected.install_id);
     if !complete_install(&install, harness, selected)? {
         if install.exists() {
+            let lease = open_lock(&install.join(LEASE_FILE))?;
+            match lease.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => bail!(
+                    "managed harness repair deferred: {} is still in use",
+                    install.display()
+                ),
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(error).context("lock invalid managed harness for repair");
+                }
+            }
             std::fs::remove_dir_all(&install).with_context(|| {
                 format!("remove incomplete managed harness {}", install.display())
             })?;
@@ -226,6 +237,7 @@ fn install_into(
         HarnessKind::Grok => install_grok(staging.path(), environment)?,
         HarnessKind::Muse => install_muse(staging.path(), environment)?,
     }
+    relativize_internal_links(staging.path(), staging.path())?;
     validate_entrypoint(staging.path(), selected, harness)?;
     open_lock(&staging.path().join(LEASE_FILE))?;
     let manifest = InstallManifest {
@@ -234,11 +246,13 @@ fn install_into(
         install_id: selected.install_id.to_owned(),
     };
     let body = serde_json::to_vec_pretty(&manifest)?;
-    mj_core::config::atomic_write(&staging.path().join(MANIFEST_FILE), &body)?;
-
     let staging_path = staging.keep();
     match std::fs::rename(&staging_path, final_path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            validate_entrypoint(final_path, selected, harness)
+                .context("validate relocated managed harness")?;
+            mj_core::config::atomic_write(&final_path.join(MANIFEST_FILE), &body)
+        }
         Err(error) if final_path.exists() => {
             std::fs::remove_dir_all(&staging_path).with_context(|| {
                 format!("remove losing harness staging {}", staging_path.display())
@@ -254,6 +268,35 @@ fn install_into(
             Err(error).with_context(|| format!("publish managed harness {}", final_path.display()))
         }
     }
+}
+
+/// Installer-generated absolute links inside staging must survive its rename.
+/// Do not follow directory links or rewrite links to external tools.
+fn relativize_internal_links(root: &Path, directory: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            relativize_internal_links(root, &path)?;
+        } else if kind.is_symlink() {
+            let target = std::fs::read_link(&path)?;
+            if target.is_absolute()
+                && let Ok(target) = target.strip_prefix(root)
+            {
+                let parent = directory.strip_prefix(root)?;
+                let mut relative = PathBuf::new();
+                for _ in parent.components() {
+                    relative.push("..");
+                }
+                relative.push(target);
+                std::fs::remove_file(&path)?;
+                std::os::unix::fs::symlink(relative, &path)
+                    .with_context(|| format!("relocate managed harness link {}", path.display()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn install_npm(
@@ -492,18 +535,24 @@ fn complete_install(path: &Path, harness: HarnessKind, selected: HarnessPin) -> 
     {
         return Ok(false);
     }
-    Ok(entrypoint_is_executable(&path.join(selected.entrypoint))
-        && (harness != HarnessKind::Muse || entrypoint_is_executable(&path.join("bin/muse"))))
+    Ok(validate_entrypoint(path, selected, harness).is_ok())
 }
 
 fn validate_entrypoint(path: &Path, selected: HarnessPin, harness: HarnessKind) -> Result<()> {
-    let entrypoint = path.join(selected.entrypoint);
-    if !entrypoint_is_executable(&entrypoint) {
-        bail!(
-            "{} installer did not create executable {}",
-            harness.display_name(),
-            entrypoint.display()
-        );
+    let additional = match harness {
+        HarnessKind::Muse => Some("bin/muse"),
+        HarnessKind::Grok => Some("bin/agent"),
+        _ => None,
+    };
+    for entry in std::iter::once(selected.entrypoint).chain(additional) {
+        let entrypoint = path.join(entry);
+        if !entrypoint_is_executable(&entrypoint) {
+            bail!(
+                "{} installer did not create executable {}",
+                harness.display_name(),
+                entrypoint.display()
+            );
+        }
     }
     Ok(())
 }
@@ -574,6 +623,145 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    #[test]
+    #[ignore = "downloads the pinned Grok installer into a disposable cache"]
+    fn grok_real_install_launches_from_final_directory() {
+        let parent =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/grok-install-validation");
+        std::fs::create_dir_all(&parent).unwrap();
+        let temp = tempfile::tempdir_in(parent).unwrap();
+        let environment = mj_core::login_environment::discover().unwrap();
+        let managed = resolve_at(
+            temp.path(),
+            HarnessKind::Grok,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        )
+        .unwrap();
+        for path in [
+            managed.command.clone(),
+            managed.command.with_file_name("agent"),
+        ] {
+            let mut command = Command::new(path);
+            command.arg("--version");
+            apply_environment(&mut command, &environment);
+            run_checked(&mut command, "verify relocated Grok launcher").unwrap();
+        }
+    }
+
+    fn fake_grok_installer(root: &Path) -> BTreeMap<String, String> {
+        let tools = root.join("tools");
+        executable(
+            &tools.join("curl"),
+            r#"#!/bin/sh
+cat <<'INSTALLER'
+set -eu
+mkdir -p "$HOME/.grok/downloads" "$GROK_BIN_DIR"
+printf '#!/bin/sh\necho grok-fixture\n' > "$HOME/.grok/downloads/grok"
+chmod +x "$HOME/.grok/downloads/grok"
+ln -s "$HOME/.grok/downloads/grok" "$GROK_BIN_DIR/grok"
+ln -s "$HOME/.grok/downloads/grok" "$GROK_BIN_DIR/agent"
+INSTALLER
+"#,
+        );
+        BTreeMap::from([("PATH".into(), format!("{}:/usr/bin:/bin", tools.display()))])
+    }
+
+    #[test]
+    fn grok_launchers_execute_after_relocation_and_invalid_cache_repairs_itself() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = fake_grok_installer(temp.path());
+        let cache = temp.path().join("cache");
+        let selected = pin(HarnessKind::Grok);
+        let install = cache.join("grok").join(selected.install_id);
+        for attempt in 0..2 {
+            let managed = resolve_at(
+                &cache,
+                HarnessKind::Grok,
+                ExecutionPolicy::ConfiguredApprovals,
+                &environment,
+            )
+            .unwrap();
+            assert!(complete_install(&install, HarnessKind::Grok, selected).unwrap());
+            assert!(std::fs::read_dir(cache.join("grok")).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".install-")
+            }));
+            for launcher in ["grok", "agent"] {
+                let path = install.join("bin").join(launcher);
+                assert!(!std::fs::read_link(&path).unwrap().is_absolute());
+                let output =
+                    mj_core::subprocess::run_with_input(&mut Command::new(path), &[]).unwrap();
+                assert!(output.status.success());
+                assert_eq!(output.stdout, b"grok-fixture\n");
+            }
+            drop(managed);
+            if attempt == 0 {
+                std::fs::remove_file(install.join("bin/agent")).unwrap();
+                assert!(!complete_install(&install, HarnessKind::Grok, selected).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn link_relocation_preserves_relative_and_external_links_without_following_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("staging");
+        executable(&root.join("bin/tool"), "#!/bin/sh\nexit 0\n");
+        let external = temp.path().join("external");
+        std::fs::create_dir(&external).unwrap();
+        std::os::unix::fs::symlink("tool", root.join("bin/relative")).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("external")).unwrap();
+        std::os::unix::fs::symlink(root.join("bin/tool"), external.join("untouched")).unwrap();
+        relativize_internal_links(&root, &root).unwrap();
+        assert_eq!(
+            std::fs::read_link(root.join("bin/relative")).unwrap(),
+            Path::new("tool")
+        );
+        assert_eq!(std::fs::read_link(root.join("external")).unwrap(), external);
+        assert_eq!(
+            std::fs::read_link(external.join("untouched")).unwrap(),
+            root.join("bin/tool")
+        );
+    }
+
+    #[test]
+    fn invalid_install_is_not_removed_while_leased() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let environment = fake_grok_installer(temp.path());
+        let managed = resolve_at(
+            &cache,
+            HarnessKind::Grok,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        )
+        .unwrap();
+        std::fs::remove_file(&managed.command).unwrap();
+        let error = resolve_at(
+            &cache,
+            HarnessKind::Grok,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("repair deferred"));
+        assert!(managed.lease_path.exists());
+        drop(managed);
+        assert!(
+            resolve_at(
+                &cache,
+                HarnessKind::Grok,
+                ExecutionPolicy::ConfiguredApprovals,
+                &environment
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn muse_download_rejects_corrupt_payload_before_publication() {
