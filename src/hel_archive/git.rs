@@ -1151,6 +1151,46 @@ fn create_symlink(_target: &Path, _destination: &Path) -> Result<()> {
 // Session export
 // ---------------------------------------------------------------------------
 
+/// Exit code the worker's export subcommands use for a precondition the caller
+/// can fix, such as a repository with no push remote or a session with no
+/// recorded base. Anything else is an ordinary failure, and clap's exit code 2
+/// stays reserved for a worker too old to know these subcommands at all.
+pub const EXPORT_REFUSED_EXIT_CODE: i32 = 3;
+
+/// Why a session export could not be produced.
+///
+/// A refusal is a precondition the caller can act on, and it survives the
+/// worker process boundary as [`EXPORT_REFUSED_EXIT_CODE`] plus the reason on
+/// standard error, so the API can answer 409 with that reason instead of 500.
+#[derive(Debug)]
+pub enum SessionExportError {
+    Refused(String),
+    Failed(anyhow::Error),
+}
+
+impl SessionExportError {
+    pub fn refused(reason: impl Into<String>) -> Self {
+        Self::Refused(reason.into())
+    }
+}
+
+impl std::fmt::Display for SessionExportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(reason) => write!(formatter, "{reason}"),
+            Self::Failed(error) => write!(formatter, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for SessionExportError {}
+
+impl From<anyhow::Error> for SessionExportError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
 /// The work a session did in one repository, as a unified diff.
 ///
 /// The comparison is the session's base commit against the working tree,
@@ -1163,17 +1203,19 @@ pub fn session_diff(
     repository: &Path,
     base: Option<&str>,
     branch: Option<&str>,
-) -> Result<String> {
+) -> Result<String, SessionExportError> {
     let base = match base.map(str::trim).filter(|base| !base.is_empty()) {
         Some(base) => base.to_owned(),
-        None => match remote_workspace_base(runner, repository)? {
-            Some(base) => base,
-            None => match branch {
-                Some(branch) => branch_creation_commit(runner, repository, branch)?
-                    .context("no session base recorded")?,
-                None => bail!("no session base recorded"),
-            },
-        },
+        None => {
+            let recorded = match branch {
+                Some(branch) => match remote_workspace_base(runner, repository)? {
+                    Some(base) => Some(base),
+                    None => branch_creation_commit(runner, repository, branch)?,
+                },
+                None => remote_workspace_base(runner, repository)?,
+            };
+            recorded.ok_or_else(|| SessionExportError::refused("no session base recorded"))?
+        }
     };
     let base_tree = git_text(
         runner,
@@ -1182,7 +1224,12 @@ pub fn session_diff(
     )
     .context("resolve the session base tree")?;
     let current = capture_worktree_tree(runner, repository)?;
-    diff_between_trees(runner, repository, Some(&base_tree), &current)
+    Ok(diff_between_trees(
+        runner,
+        repository,
+        Some(&base_tree),
+        &current,
+    )?)
 }
 
 /// The commit a branch was created at, read from its reflog.
@@ -1228,6 +1275,8 @@ pub struct PushedBranch {
 pub enum PushBranchError {
     /// The repository names neither `remote.pushDefault` nor `origin`.
     NoRemote,
+    /// Git would not accept the name as a branch.
+    InvalidBranch(String),
     Failed(anyhow::Error),
 }
 
@@ -1235,6 +1284,9 @@ impl std::fmt::Display for PushBranchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoRemote => write!(formatter, "no push remote configured"),
+            Self::InvalidBranch(branch) => {
+                write!(formatter, "{branch:?} is not a valid branch name")
+            }
             Self::Failed(error) => write!(formatter, "{error:#}"),
         }
     }
@@ -1259,9 +1311,7 @@ pub fn push_branch(
     branch: &str,
 ) -> Result<PushedBranch, PushBranchError> {
     if branch.starts_with('-') {
-        return Err(PushBranchError::Failed(anyhow!(
-            "branch name must not start with '-'"
-        )));
+        return Err(PushBranchError::InvalidBranch(branch.to_owned()));
     }
     let checked = run_git(
         runner,
@@ -1270,9 +1320,7 @@ pub fn push_branch(
         &[],
     )?;
     if checked.status != 0 {
-        return Err(PushBranchError::Failed(anyhow!(
-            "{branch:?} is not a valid branch name"
-        )));
+        return Err(PushBranchError::InvalidBranch(branch.to_owned()));
     }
     let remote = push_remote(runner, repository)?;
     let refspec = format!("HEAD:refs/heads/{branch}");

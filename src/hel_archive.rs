@@ -2266,46 +2266,60 @@ pub const MAX_SESSION_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// The path is relative and must stay inside `root` after both ends are
 /// canonicalized, so neither a `..` component nor a symlink pointing out of the
 /// workspace can reach the rest of the target's filesystem.
-pub fn read_session_file(root: &Path, relative: &Path) -> Result<Vec<u8>> {
+pub fn read_session_file(root: &Path, relative: &Path) -> Result<Vec<u8>, SessionExportError> {
+    let refuse = |reason: String| SessionExportError::Refused(reason);
     crate::hel_config::validate_relative_destination(relative)
-        .context("read a file from the session workspace")?;
+        .map_err(|error| refuse(format!("{error:#}")))?;
     let root = root
         .canonicalize()
         .with_context(|| format!("resolve session workspace {}", root.display()))?;
-    let path = root
-        .join(relative)
-        .canonicalize()
-        .with_context(|| format!("resolve {} in the session workspace", relative.display()))?;
-    ensure!(
-        path.starts_with(&root),
-        "{} leaves the session workspace",
-        relative.display()
-    );
+    let path = root.join(relative).canonicalize().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            refuse(format!(
+                "{} is not in the session workspace",
+                relative.display()
+            ))
+        } else {
+            SessionExportError::Failed(anyhow::Error::new(error).context(format!(
+                "resolve {} in the session workspace",
+                relative.display()
+            )))
+        }
+    })?;
+    if !path.starts_with(&root) {
+        return Err(refuse(format!(
+            "{} leaves the session workspace",
+            relative.display()
+        )));
+    }
     let metadata = std::fs::metadata(&path)
         .with_context(|| format!("read {} in the session workspace", relative.display()))?;
-    ensure!(
-        metadata.is_file(),
-        "{} is not a regular file",
-        relative.display()
-    );
-    ensure!(
-        metadata.len() <= MAX_SESSION_FILE_BYTES,
-        "{} is larger than {MAX_SESSION_FILE_BYTES} bytes",
-        relative.display()
-    );
-    fs::read(&path).with_context(|| format!("read {} in the session workspace", relative.display()))
+    if !metadata.is_file() {
+        return Err(refuse(format!(
+            "{} is not a regular file",
+            relative.display()
+        )));
+    }
+    if metadata.len() > MAX_SESSION_FILE_BYTES {
+        return Err(refuse(format!(
+            "{} is larger than {MAX_SESSION_FILE_BYTES} bytes",
+            relative.display()
+        )));
+    }
+    Ok(fs::read(&path)
+        .with_context(|| format!("read {} in the session workspace", relative.display()))?)
 }
 
 mod git;
 
 pub(crate) use git::ensure_no_symlink_ancestors;
 pub use git::{
-    GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, GitOutput,
-    GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV, NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError,
-    PushedBranch, REVIEW_BASELINE_REF, REVIEW_CAPTURE_REF, SystemGit, capture_worktree_tree,
-    collect_git_metadata_snapshot, collect_git_snapshot, collect_git_snapshot_with_progress,
-    diff_between_trees, empty_tree_id, has_origin_refs, pin_review_tree, push_branch,
-    remote_workspace_base, restore_git_snapshot, session_diff,
+    EXPORT_REFUSED_EXIT_CODE, GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode,
+    GitOutput, GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV, NON_INTERACTIVE_GIT_SSH_COMMAND,
+    PushBranchError, PushedBranch, REVIEW_BASELINE_REF, REVIEW_CAPTURE_REF, SessionExportError,
+    SystemGit, capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
+    collect_git_snapshot_with_progress, diff_between_trees, empty_tree_id, has_origin_refs,
+    pin_review_tree, push_branch, remote_workspace_base, restore_git_snapshot, session_diff,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

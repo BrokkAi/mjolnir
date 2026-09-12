@@ -365,10 +365,29 @@ async fn worker_command(
         CLAP_USAGE_EXIT_CODE => Err(ExportError::Refused(
             "worker on this target predates export support; resume the session to upgrade".into(),
         )),
+        // The worker met a precondition it could not satisfy — no recorded
+        // base, no push remote, a path outside the workspace — and printed the
+        // reason. That is the caller's to fix, so it is a refusal, not a
+        // failed export.
+        hel::hel_archive::EXPORT_REFUSED_EXIT_CODE => Err(ExportError::Refused(refusal_reason(
+            &output.stderr,
+            purpose,
+        ))),
         status => Err(ExportError::Failed(anyhow!(
             "{purpose} failed with status {status}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ))),
+    }
+}
+
+/// The worker's own words for why it refused, or a plain statement when it
+/// said nothing.
+fn refusal_reason(stderr: &[u8], purpose: &str) -> String {
+    let reason = String::from_utf8_lossy(stderr);
+    let reason = reason.trim();
+    match reason.is_empty() {
+        true => format!("{purpose} was refused by the target"),
+        false => reason.to_owned(),
     }
 }
 

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use hel::hel_archive::{EXPORT_REFUSED_EXIT_CODE, PushBranchError, SessionExportError};
 use hel::hel_worker_launch::WorkerLaunchConfig;
 use mj_worker::hel_worker_runtime::{
     AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor,
@@ -180,6 +181,15 @@ fn main() -> Result<()> {
         .build()
         .context("build Tokio runtime")?;
     let result = runtime.block_on(run_command(cli.command));
+    if let Err(error) = &result
+        && let Some(refusal) = error.downcast_ref::<ExportRefused>()
+    {
+        // A refusal is a precondition the caller can fix, so it leaves the
+        // process with its own exit code and the reason on standard error;
+        // the daemon turns that pair into a 409 rather than a 500.
+        eprintln!("{refusal}");
+        std::process::exit(EXPORT_REFUSED_EXIT_CODE);
+    }
     if let Err(error) = &result {
         tracing::error!(
             error = format!("{error:#}"),
@@ -243,19 +253,49 @@ async fn run_command(command: Command) -> Result<()> {
                 &repository,
                 base.as_deref(),
                 branch.as_deref(),
-            )?;
+            )
+            .map_err(export_error)?;
             write_stdout(diff.as_bytes())
         }
         WorkerCommand::ReadFile { root, path } => {
-            write_stdout(&hel::hel_archive::read_session_file(&root, &path)?)
+            write_stdout(&hel::hel_archive::read_session_file(&root, &path).map_err(export_error)?)
         }
         WorkerCommand::PushBranch { repository, branch } => {
             let pushed =
                 hel::hel_archive::push_branch(&hel::hel_archive::SystemGit, &repository, &branch)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    .map_err(push_error)?;
             println!("{}", serde_json::to_string(&pushed)?);
             Ok(())
         }
+    }
+}
+
+/// A precondition an export could not meet, carried out of `run_command` so
+/// `main` can answer with [`EXPORT_REFUSED_EXIT_CODE`].
+#[derive(Debug)]
+struct ExportRefused(String);
+
+impl std::fmt::Display for ExportRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ExportRefused {}
+
+fn export_error(error: SessionExportError) -> anyhow::Error {
+    match error {
+        SessionExportError::Refused(reason) => anyhow::Error::new(ExportRefused(reason)),
+        SessionExportError::Failed(error) => error,
+    }
+}
+
+fn push_error(error: PushBranchError) -> anyhow::Error {
+    match error {
+        refusal @ (PushBranchError::NoRemote | PushBranchError::InvalidBranch(_)) => {
+            anyhow::Error::new(ExportRefused(refusal.to_string()))
+        }
+        PushBranchError::Failed(error) => error,
     }
 }
 
@@ -381,6 +421,38 @@ mod tests {
                 command: WorkerCommand::PushBranch { repository, branch },
             }) if repository == Path::new("/workspace/app") && branch == "review/one"
         ));
+    }
+
+    /// A precondition failure leaves its reason on the process, not a generic
+    /// error: the daemon maps this exit code to a 409 carrying that reason.
+    #[test]
+    fn an_export_precondition_failure_carries_the_refusal_exit_code() {
+        let root = tempfile::tempdir().unwrap();
+        let error = export_error(
+            hel::hel_archive::read_session_file(root.path(), Path::new("../secret.txt"))
+                .unwrap_err(),
+        );
+        let refusal = error
+            .downcast_ref::<ExportRefused>()
+            .expect("a path leaving the workspace is a refusal");
+        assert!(
+            refusal.to_string().contains(".."),
+            "the refusal names the reason: {refusal}"
+        );
+        assert_eq!(EXPORT_REFUSED_EXIT_CODE, 3);
+
+        let missing_remote = push_error(PushBranchError::NoRemote);
+        assert_eq!(
+            missing_remote
+                .downcast_ref::<ExportRefused>()
+                .map(ToString::to_string),
+            Some("no push remote configured".to_owned())
+        );
+
+        // A push that actually ran and failed is not a refusal; it stays an
+        // ordinary error so the daemon reports it as a failure.
+        let failed = push_error(PushBranchError::Failed(anyhow::anyhow!("git exploded")));
+        assert!(failed.downcast_ref::<ExportRefused>().is_none());
     }
 
     /// A worker that predates these subcommands answers a usage failure, which
