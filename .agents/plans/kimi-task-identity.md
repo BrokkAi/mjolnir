@@ -11,7 +11,7 @@ Completed Kimi sessions must become idle after their background tasks terminate.
 - [x] Confirmed all 12 stale entries across eval9 3209, 3167, and 3212 against live relay snapshots and native wire records.
 - [x] Implemented native identity history and provisional reconciliation; added query-order regressions.
 - [x] Full Rust tests and clippy passed; final diff reviewed.
-- [ ] Commit the validated changes and push to origin/master.
+- [x] Committed the display change as 613a9069 and the Kimi fix as 9fdbfb31; pushed both to origin/master.
 
 ## Surprises & Discoveries
 
