@@ -295,7 +295,7 @@ mod tests {
             "connection status missing from {text:?}"
         );
         assert!(
-            !text.contains("Running "),
+            !text.contains("Working "),
             "stale activity must not hide the connection failure"
         );
         assert!(
@@ -306,7 +306,7 @@ mod tests {
         apply_session_activity(&mut dashboard, "session-1", &view);
         let (text, _) = dashboard_text(&mut dashboard);
         assert!(
-            text.contains("Running "),
+            text.contains("Working "),
             "live SDK step clock missing from {text:?}"
         );
         assert!(!text.contains("Unreachable"));

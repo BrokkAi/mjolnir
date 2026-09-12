@@ -167,10 +167,27 @@ impl SessionActivity {
         let started = match kind {
             SessionActivityKind::Turn => turn,
             SessionActivityKind::Step => turn.or_else(|| self.foreground_tool_since()),
-            SessionActivityKind::Background => turn.or_else(|| self.background_since()),
+            SessionActivityKind::Background => self.background_since(),
             _ => None,
         };
-        elapsed_label("Running", now_epoch_seconds, started)
+        let label = if kind == SessionActivityKind::Background {
+            let tasks = self.background_commands.len();
+            let shells = self.active_user_shells.len();
+            let mut counts = Vec::new();
+            if tasks > 0 {
+                counts.push(format!("{tasks} task{}", if tasks == 1 { "" } else { "s" }));
+            }
+            if shells > 0 {
+                counts.push(format!(
+                    "{shells} shell{}",
+                    if shells == 1 { "" } else { "s" }
+                ));
+            }
+            counts.join(", ")
+        } else {
+            "Working".to_owned()
+        };
+        elapsed_label(&label, now_epoch_seconds, started)
     }
 
     /// Classify the current activity and retain the timestamps that support
@@ -478,7 +495,7 @@ mod tests {
         state.current_step_started_at_ms = Some(50_000);
         let activity = SessionActivity::of(&state);
         assert!(activity.is_working(None, false));
-        assert_eq!(activity.display_clock(60, None, None, false), "Running 10s");
+        assert_eq!(activity.display_clock(60, None, None, false), "Working 10s");
         state.execution = hel::hel_worker::RelayExecutionState::Idle;
         assert!(!SessionActivity::of(&state).is_working(None, false));
         state.execution = hel::hel_worker::RelayExecutionState::Running;
@@ -744,28 +761,58 @@ mod tests {
     }
 
     #[test]
-    fn compact_clock_continues_the_turn_through_background_work() {
+    fn compact_clock_distinguishes_a_finished_turn_with_background_work() {
         let mut activity = background(20_000, "build");
         activity.activity_turn_started_at_ms = Some(10_000);
         assert_eq!(
             activity.display_clock(60, Some(10), Some(50_000), false),
-            "Running 50s"
+            "Working 50s"
         );
         assert_eq!(
             activity.display_clock(60, Some(10), Some(50_000), true),
             "T 50s S 10s"
         );
-        assert_eq!(
-            activity.display_clock(70, None, None, false),
-            "Running 1m00s"
-        );
+        assert_eq!(activity.display_clock(70, None, None, false), "1 task 50s");
         assert_eq!(activity.display_clock(70, None, None, true), "BG 50s");
         activity.activity_turn_started_at_ms = Some(65_000);
         assert_eq!(
             activity.display_clock(70, Some(65), None, false),
-            "Running 5s"
+            "Working 5s"
         );
         activity.background_commands.clear();
+        assert_eq!(activity.display_clock(70, None, None, false), "Idle");
+    }
+
+    #[test]
+    fn background_status_counts_tasks_and_user_shells_without_claiming_foreground_work() {
+        let mut activity = background(20_000, "build");
+        activity
+            .background_commands
+            .push(hel::hel_worker::BackgroundCommand {
+                id: "second".into(),
+                started_at_ms: 30_000,
+                command: "test".into(),
+                can_stop: false,
+            });
+        assert_eq!(activity.display_clock(70, None, None, false), "2 tasks 50s");
+        activity
+            .active_user_shells
+            .push(hel::hel_worker::ActiveUserShell {
+                command_id: "shell".into(),
+                command: "watch".into(),
+                created_at_ms: 40_000,
+                started_at_ms: Some(40_000),
+            });
+        assert_eq!(
+            activity.display_clock(70, None, None, false),
+            "2 tasks, 1 shell 50s"
+        );
+        activity.background_commands.clear();
+        assert_eq!(activity.display_clock(70, None, None, false), "1 shell 30s");
+        activity.foreground_tool_started_at_ms = Some(60_000);
+        assert_eq!(activity.display_clock(70, None, None, false), "Working 10s");
+        activity.foreground_tool_started_at_ms = None;
+        activity.active_user_shells.clear();
         assert_eq!(activity.display_clock(70, None, None, false), "Idle");
     }
 
@@ -779,7 +826,7 @@ mod tests {
         assert_eq!(activity.display_clock(60, None, None, false), "Idle");
         activity.prompt_in_flight = true;
         assert!(activity.is_working(None, false));
-        assert_eq!(activity.display_clock(60, None, None, false), "Running");
+        assert_eq!(activity.display_clock(60, None, None, false), "Working");
         assert!(!activity.is_working(Some(10), true));
         activity.background_commands = background(20_000, "build").background_commands;
         assert!(activity.is_working(Some(10), true));

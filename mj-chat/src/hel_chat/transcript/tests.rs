@@ -363,7 +363,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
 
     assert_eq!(
         transcript_title(&chat, 20_000).to_string(),
-        " precision-3260/bifrost-fuzz  Running 3h22m  kimi  Fix the build "
+        " precision-3260/bifrost-fuzz  Working 3h22m  kimi  Fix the build "
     );
     chat.set_detailed_activity_clocks(true);
     assert_eq!(
@@ -375,7 +375,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     chat.render_mode = TranscriptRenderMode::Raw;
     assert_eq!(
         transcript_title(&chat, 20_000).to_string(),
-        " precision-3260/bifrost-fuzz  Running 3h22m  kimi  Fix the build · raw source "
+        " precision-3260/bifrost-fuzz  Working 3h22m  kimi  Fix the build · raw source "
     );
 
     // An idle session that left a command running names it in the same place
@@ -400,7 +400,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     });
     assert_eq!(
         transcript_title(&chat, 20_000).to_string(),
-        " precision-3260/bifrost-fuzz  Running 43m36s  kimi  Fix the build "
+        " precision-3260/bifrost-fuzz  1 task 43m36s  kimi  Fix the build "
     );
     chat.set_detailed_activity_clocks(true);
     assert_eq!(
@@ -416,7 +416,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     });
     assert_eq!(
         transcript_title(&chat, 20_000).to_string(),
-        " precision-3260/bifrost-fuzz  Running 12s  kimi  Fix the build "
+        " precision-3260/bifrost-fuzz  Working 12s  kimi  Fix the build "
     );
 }
 
