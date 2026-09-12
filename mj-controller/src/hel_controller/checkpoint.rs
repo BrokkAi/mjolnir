@@ -970,11 +970,11 @@ impl Controller {
                     if !restarted_worker && checkpoint_barrier_needs_worker_restart(&error) =>
                 {
                     if exclusivity == LatchExclusivity::ReleaseAfterLatch
-                        && session.harness_kind == HarnessKind::Kimi
+                        && matches!(session.harness_kind, HarnessKind::Kimi | HarnessKind::Codex)
                     {
                         let safe_to_restart =
                             relay.connection_mut().sync().await.is_ok_and(|snapshot| {
-                                snapshot.operational.safe_to_replace(HarnessKind::Kimi)
+                                snapshot.operational.safe_to_replace(session.harness_kind)
                             });
                         if !safe_to_restart {
                             return Err(error.context(CheckpointDeferred::background_work()));
@@ -2720,6 +2720,10 @@ mod tests {
             latest_credential_sync_signal: None,
             worker_build: None,
             operational: hel::hel_worker::RelayOperationalState {
+                goal: serde_json::from_value(
+                    serde_json::json!({"known":true,"execution":{"version":1,"status":"idle"}}),
+                )
+                .unwrap(),
                 capacity_retry: None,
                 activity_turn_started_at_ms: None,
                 checkpoint_only: false,
@@ -3535,6 +3539,11 @@ mod tests {
                     resumed: true,
                 })
                 .unwrap();
+        }
+        if !relay.operational_state().goal.synchronized() && !checkpoint_only {
+            relay.record_session_update(serde_json::from_value(serde_json::json!({
+            "sessionUpdate":"session_info_update", "_meta":{"goal":null,"execution":{"version":1,"status":"idle"}}
+        })).unwrap()).unwrap();
         }
         let ready_at = Instant::now()
             + Duration::from_millis(

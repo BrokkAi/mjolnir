@@ -3734,6 +3734,7 @@ mod tests {
 
         let foreground = SessionDetail {
             activity: mj_chat::usage_format::SessionActivity {
+                pursuing_goal: Default::default(),
                 foreground_tool_started_at_ms: Some(1),
                 ..mj_chat::usage_format::SessionActivity::default()
             },
@@ -3748,6 +3749,7 @@ mod tests {
         let unread_background = SessionDetail {
             unread_agent_messages: 1,
             activity: mj_chat::usage_format::SessionActivity {
+                pursuing_goal: Default::default(),
                 background_commands: vec![hel::hel_worker::BackgroundCommand {
                     id: "test-background".into(),
                     started_at_ms: 1,
@@ -4528,6 +4530,7 @@ mod tests {
     fn background_work_reaches_both_session_row_forms() {
         let started_at_ms = i64::try_from(hel::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
         let activity = mj_chat::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,
             prompt_in_flight: false,

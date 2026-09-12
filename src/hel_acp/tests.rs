@@ -10,6 +10,7 @@ use agent_client_protocol::schema::v1::{
 #[test]
 fn deepseek_new_session_sends_required_empty_mcp_list() {
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "dsh".into(),
         args: vec!["--profile".into(), "acp".into()],
         environment: BTreeMap::new(),
@@ -84,6 +85,7 @@ fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
 #[test]
 fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
     let mut spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "/worker/hel".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -142,6 +144,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
 #[test]
 fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies() {
     let mut spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "claude-agent-acp".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -233,7 +236,12 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
     }
     spec.execution_policy = ExecutionPolicy::Unconstrained;
     spec.harness = HarnessKind::Codex;
-    assert_eq!(session_request_meta(&spec), None);
+    let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+    assert!(meta.get("claudeCode").is_none());
+    assert_eq!(
+        meta.pointer("/goal/resumePolicy"),
+        Some(&serde_json::json!("preserve"))
+    );
 }
 
 #[test]
@@ -305,6 +313,7 @@ fn claude_async_task_stop_request_uses_the_air_wire_shape() {
 #[test]
 fn resumed_session_request_keeps_load_context() {
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "claude-agent-acp".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -463,6 +472,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
         let step_clock = crate::hel_acp::StepClock::default();
         let observed_step_clock = step_clock.clone();
         let spec = LaunchSpec {
+            goal_recovery: Default::default(),
             command: "scripted".into(),
             args: Vec::new(),
             environment: BTreeMap::new(),
@@ -920,6 +930,7 @@ async fn answer_to_ext_request(
     // Drain events so a full channel can never be mistaken for silence.
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -1072,6 +1083,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -1457,6 +1469,7 @@ async fn config_change_request(
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -1602,6 +1615,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -1676,6 +1690,7 @@ async fn codex_policy_is_enforced_before_session_is_reported(
     let (request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -1826,6 +1841,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -2251,6 +2267,7 @@ async fn exercise_image_steering(with_images: bool) {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -2380,6 +2397,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -2505,6 +2523,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
@@ -2583,6 +2602,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
 async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
     fn scripted_spec(resume_session: Option<String>) -> LaunchSpec {
         LaunchSpec {
+            goal_recovery: Default::default(),
             command: "scripted".into(),
             args: Vec::new(),
             environment: BTreeMap::new(),
@@ -2904,6 +2924,7 @@ mod terminals {
             }
         });
         let spec = LaunchSpec {
+            goal_recovery: Default::default(),
             command: "scripted".into(),
             args: Vec::new(),
             environment: BTreeMap::new(),
@@ -3409,6 +3430,7 @@ for line in sys.stdin:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = tokio::spawn(run(
         LaunchSpec {
+            goal_recovery: Default::default(),
             command: "python3".into(),
             args: vec![script.to_string_lossy().into_owned()],
             environment: BTreeMap::new(),
@@ -3557,6 +3579,7 @@ while True:
     let (request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],
         environment: BTreeMap::new(),
@@ -3678,6 +3701,7 @@ while True:
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],
         environment: BTreeMap::new(),
@@ -3772,6 +3796,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     let (_request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        goal_recovery: Default::default(),
         command: "sh".into(),
         args: vec![
             "-c".into(),
@@ -3832,6 +3857,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         let (_request_tx, request_rx) = mpsc::channel(1);
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let spec = LaunchSpec {
+            goal_recovery: Default::default(),
             command: bridge.clone(),
             args: Vec::new(),
             environment: BTreeMap::new(),

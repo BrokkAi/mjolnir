@@ -571,8 +571,13 @@ fn project_observation(
             queue.retain(|queued| queued.command_id != *command_id);
             match outcome {
                 crate::hel_worker::RelayCommandOutcome::Prompt { stop_reason, usage } => {
-                    close_streams(index, mutation, event.recorded_at_ms);
-                    mutation.execution = Some(MaterializedExecutionState::Idle);
+                    let native_running =
+                        crate::hel_goal::GoalState::from_configuration(&current.configuration)?
+                            .running();
+                    if !native_running {
+                        close_streams(index, mutation, event.recorded_at_ms);
+                        mutation.execution = Some(MaterializedExecutionState::Idle);
+                    }
                     let active = current
                         .active_turn
                         .as_ref()
@@ -687,7 +692,10 @@ fn project_observation(
             if queue != current.queued_prompts {
                 mutation.queued_prompts = Some(queue);
             }
-            if prompt_was_started {
+            if prompt_was_started
+                && !crate::hel_goal::GoalState::from_configuration(&current.configuration)?
+                    .running()
+            {
                 close_streams(index, mutation, event.recorded_at_ms);
                 mutation.execution = Some(MaterializedExecutionState::Idle);
             }
@@ -879,6 +887,16 @@ fn project_observation(
             push_system(mutation, event, format!("warning: {message}"));
         }
         RelayObservation::SessionRestarted => {
+            if let Some(value) = current.configuration.get(crate::hel_goal::PROJECTION_KEY) {
+                let mut goal: crate::hel_goal::GoalState = serde_json::from_value(value.clone())?;
+                goal.restart();
+                let mut configuration = current.configuration.clone();
+                configuration.insert(
+                    crate::hel_goal::PROJECTION_KEY.into(),
+                    serde_json::to_value(goal)?,
+                );
+                mutation.configuration = Some(configuration);
+            }
             push_system_with_id(
                 mutation,
                 event,
@@ -1203,13 +1221,24 @@ fn project_session_update(
             );
             mutation.configuration = Some(configuration);
         }
-        SessionUpdate::SessionInfoUpdate(update) => match &update.title {
-            MaybeUndefined::Undefined => {}
-            MaybeUndefined::Null => mutation.session_title = Some(None),
-            MaybeUndefined::Value(title) => {
-                mutation.session_title = Some(normalize_session_title(title));
+        SessionUpdate::SessionInfoUpdate(update) => {
+            let mut goal = crate::hel_goal::GoalState::from_configuration(&current.configuration)?;
+            if goal.apply(&SessionUpdate::SessionInfoUpdate(update.clone()))? {
+                let mut configuration = current.configuration.clone();
+                configuration.insert(
+                    crate::hel_goal::PROJECTION_KEY.into(),
+                    serde_json::to_value(&goal)?,
+                );
+                mutation.configuration = Some(configuration);
             }
-        },
+            match &update.title {
+                MaybeUndefined::Undefined => {}
+                MaybeUndefined::Null => mutation.session_title = Some(None),
+                MaybeUndefined::Value(title) => {
+                    mutation.session_title = Some(normalize_session_title(title));
+                }
+            }
+        }
         SessionUpdate::UsageUpdate(update) => {
             if let Some(cost) = &update.cost {
                 mutation.provider_cost = Some(crate::hel_usage::ProviderCost {
@@ -2591,6 +2620,48 @@ mod tests {
         assert!(!session.transcript.iter().any(
             |item| matches!(&item.body, TranscriptBody::Agent { streaming, .. } if *streaming)
         ));
+    }
+
+    #[test]
+    fn finishing_an_acp_prompt_preserves_a_later_native_goal_stream() {
+        let mut session = MaterializedSession::empty("session");
+        apply_observation(
+            &mut session,
+            RelayObservation::HarnessTurnStarted {
+                started_at_ms: 4200,
+            },
+        );
+        apply_observation(&mut session, RelayObservation::SessionUpdate { update: Box::new(serde_json::from_value(serde_json::json!({"sessionUpdate":"session_info_update","_meta":{"goal":{"objective":"finish","status":"active"},"execution":{"version":1,"status":"running","turnId":"later"}}})).unwrap()) });
+        apply_observation(&mut session, agent_chunk("autonomous work", "later-answer"));
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandCompleted {
+                command_id: "initial-prompt".into(),
+                outcome: RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                },
+            },
+        );
+        assert!(matches!(
+            session.execution,
+            MaterializedExecutionState::Running { .. }
+        ));
+        assert!(session.transcript.iter().any(|item| matches!(
+            &item.body,
+            TranscriptBody::Agent {
+                streaming: true,
+                ..
+            }
+        )));
+        apply_observation(
+            &mut session,
+            RelayObservation::HarnessTurnSettled {
+                origin: Some("codex".into()),
+                prompt_in_flight: false,
+            },
+        );
+        assert_eq!(session.execution, MaterializedExecutionState::Idle);
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod hel_credentials;
 pub mod hel_database;
 pub mod hel_diff;
 pub mod hel_elicitation;
+pub mod hel_goal;
 pub mod hel_harness_runtime;
 #[cfg(feature = "controller")]
 pub mod hel_local_git;

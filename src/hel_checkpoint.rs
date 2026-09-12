@@ -5,6 +5,8 @@
 //! only returns a teardown gate after reopening and verifying the installed
 //! archive.
 
+mod codex_goal;
+
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
@@ -370,6 +372,19 @@ pub fn restore_checkpoint(spec: &CheckpointRestoreSpec, git: &dyn GitCommandRunn
                 continue;
             }
             let native_data = archive.payload(descriptor)?;
+            if codex_goal::is_artifact(relative_path) {
+                ensure!(
+                    archive.manifest.session.harness_kind == HarnessKind::Codex,
+                    "goal artifact belongs to a non-Codex session"
+                );
+                codex_goal::restore(
+                    &spec.harness_home,
+                    &archive.manifest.session.native_session_id,
+                    relative_path,
+                    native_data,
+                )?;
+                continue;
+            }
             let relative_path = restored_native_relative_path(
                 archive.manifest.session.harness_kind,
                 relative_path,
@@ -1796,6 +1811,12 @@ fn collect_native_artifacts_cached(
         allow_empty || !output.is_empty(),
         "no session artifacts found"
     );
+    if harness == HarnessKind::Codex
+        && let Some(goal) = codex_goal::collect(home, session_id)?
+    {
+        output.push(goal);
+        output.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    }
     let total = output
         .iter()
         .try_fold(0_u64, |total, artifact| {
@@ -1862,12 +1883,16 @@ pub fn collect_import_native_artifacts(
         metadata.len() <= MAX_NATIVE_FILE,
         "Codex rollout is too large"
     );
-    Ok(vec![NativeArtifact {
+    let mut artifacts = vec![NativeArtifact {
         relative_path: relative.to_path_buf(),
         data: fs::read(source_path)
             .with_context(|| format!("read Codex rollout {}", source_path.display()))?,
         mode: file_mode(&metadata),
-    }])
+    }];
+    if let Some(goal) = codex_goal::collect(home, session_id)? {
+        artifacts.push(goal);
+    }
+    Ok(artifacts)
 }
 
 /// External Muse storage has a separate XDG root. Normalize the selected
@@ -4303,6 +4328,7 @@ mod tests {
         fs::create_dir_all(&memory_root).unwrap();
         fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
         crate::hel_worker_launch::WorkerLaunchConfig {
+            goal_resume_request: Default::default(),
             target_environment: Default::default(),
             run_mode: Default::default(),
             session_id: SESSION.into(),

@@ -29,7 +29,7 @@ name = "hel"
 
 [features]
 default = ["controller"]
-controller = ["dep:rusqlite", "dep:signal-hook"]
+controller = ["dep:signal-hook"]
 worker = []
 test-hooks = []
 
@@ -97,7 +97,7 @@ libc = "0.2"
 signal-hook = { version = "0.3", optional = true }
 rayon = "1"
 regex = "1"
-rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 zstd = "0.13"

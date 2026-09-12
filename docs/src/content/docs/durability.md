@@ -47,6 +47,22 @@ barrier, or close operation. Agent-started work and background commands also
 count as live work; Mjolnir does not declare a session quiet merely because the
 last user prompt appears complete.
 
+## Codex goals across restarts
+
+An active `/goal` keeps the session busy between native turns, even after the
+initial prompt finishes. Automatic worker upgrades and routine checkpoints wait
+until the goal is paused or ends. Older workers that cannot report goal state
+are not automatically replaced.
+
+After an unavoidable recovery restart, Mjolnir observes any native continuation
+and resumes a quiescent active goal without resetting its budget or usage.
+Paused, blocked, limited, completed, and cleared goals stay inactive.
+
+An explicit **Restart** or **Resume** pauses an active goal before opening the
+native session. Use the **!** question indicator to answer **Resume this goal?**
+in the prompt area. Choosing **Keep paused** or cancelling leaves it paused.
+If a saved model needs replacement, choose that model before resuming the goal.
+
 ## What a recovery checkpoint contains
 
 A checkpoint barrier waits for earlier effectful commands and any harness-
@@ -60,7 +76,8 @@ The archive includes:
 - queued prompts and queued configuration changes;
 - each repository's committed delta, staged and unstaged changes, and untracked
   files;
-- an allowlisted set of native session artifacts for the selected harness; and
+- an allowlisted set of native session artifacts for the selected harness,
+  including the selected Codex goal and its budget/accounting; and
 - manifests describing the session, bundle, target provenance, versions, and
   payload hashes.
 

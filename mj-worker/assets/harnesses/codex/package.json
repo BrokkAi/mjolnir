@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "dependencies": {
-    "@brokkai/codex-acp": "1.11.2",
+    "@brokkai/codex-acp": "1.11.3",
     "@openai/codex": "0.153.4"
   }
 }

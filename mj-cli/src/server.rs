@@ -3423,7 +3423,8 @@ fn viewer_activity_details(
                 ViewerActivityKind::Background
             }
             mj_chat::usage_format::SessionActivityKind::Idle => ViewerActivityKind::Idle,
-            mj_chat::usage_format::SessionActivityKind::Lifecycle => ViewerActivityKind::Lifecycle,
+            mj_chat::usage_format::SessionActivityKind::Lifecycle
+            | mj_chat::usage_format::SessionActivityKind::Goal => ViewerActivityKind::Lifecycle,
         },
         turn_started_at_ms: details.turn_started_at_ms,
         step_started_at_ms: details.step_started_at_ms,
@@ -3757,6 +3758,7 @@ mod tests {
         use hel::hel_worker::{RelayExecutionState, RelayOperationalState};
 
         let operational = |agent_capabilities| RelayOperationalState {
+            goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,
             session_id: "session-1".into(),
@@ -3823,6 +3825,7 @@ mod tests {
         record.state = SessionState::Running;
         controller.state.sessions.insert(record.id.clone(), record);
         let operational = RelayOperationalState {
+            goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,
             session_id: "session-1".into(),

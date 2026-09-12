@@ -84,9 +84,14 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("session target template is missing")?;
-        let (launch, project_memory, target_profile_home) =
+        let (mut launch, project_memory, target_profile_home) =
             worker_launch_config(session, profile, bundle, backend, session_id, target)?;
 
+        if session.native_session_id.is_some()
+            && profile.kind == hel::hel_config::HarnessKind::Codex
+        {
+            launch.goal_resume_request = Some(hel::hel_state::new_session_id()?);
+        }
         let staging = tempfile::tempdir().context("create worker staging directory")?;
         let launch_path = staging.path().join("launch.json");
         launch.write(&launch_path)?;
@@ -399,6 +404,7 @@ fn worker_launch_config(
     );
     Ok((
         WorkerLaunchConfig {
+            goal_resume_request: None,
             target_environment,
             run_mode: Default::default(),
             session_id: session_id.to_string(),
@@ -4104,7 +4110,7 @@ mod tests {
         );
         assert_eq!(codex_command, "sh");
         assert_eq!(codex_arguments[0], "-c");
-        assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.2"));
+        assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.3"));
         assert!(codex_arguments[1].contains("codex-acp --version"));
 
         let (claude_command, claude_arguments) = bridge_launch(
@@ -4743,6 +4749,7 @@ mod tests {
             commands: RefCell::new(Vec::new()),
         };
         let launch = WorkerLaunchConfig {
+            goal_resume_request: Default::default(),
             target_environment: Default::default(),
             run_mode: Default::default(),
             session_id: session.into(),
@@ -4838,6 +4845,7 @@ mod tests {
             launch: RefCell::new(None),
         };
         let launch = WorkerLaunchConfig {
+            goal_resume_request: Default::default(),
             target_environment: Default::default(),
             run_mode: Default::default(),
             session_id: "session-local".into(),
@@ -4918,6 +4926,7 @@ mod tests {
             commands: RefCell::new(Vec::new()),
         };
         let mut launch = WorkerLaunchConfig {
+            goal_resume_request: Default::default(),
             target_environment: Default::default(),
             run_mode: Default::default(),
             session_id: session.into(),

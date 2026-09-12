@@ -1051,6 +1051,7 @@ mod tests {
             }))
             .expect("the fixture describes a select the schema accepts");
         let operational = hel::hel_worker::RelayOperationalState {
+            goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,
             idle_since_ms: None,

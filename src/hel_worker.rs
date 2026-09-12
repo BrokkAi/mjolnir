@@ -83,6 +83,7 @@ pub enum HarnessTurnPolicy {
     #[default]
     Disabled,
     ClaudeAdapter,
+    CodexAdapter,
 }
 
 /// Where this relay learns about commands the agent left running.
@@ -727,6 +728,7 @@ impl DurableRelay {
             && self.background_work_known != Some(false)
             && self.snapshot.active_prompt.is_none()
             && self.snapshot.harness_turn.is_none()
+            && !self.snapshot.goal.active()
             && self.foreground_tools.is_empty()
             && self.snapshot.active_user_shells.is_empty()
             && self.background_commands().is_empty()
@@ -2335,6 +2337,18 @@ impl DurableRelay {
         {
             self.capacity_response.observe(&update);
         }
+        let native_before = self.snapshot.goal.running();
+        let mut native_after = self.snapshot.goal.clone();
+        native_after.apply(&update)?;
+        let codex = self.harness_turns == HarnessTurnPolicy::CodexAdapter;
+        if codex && !native_before && native_after.running() {
+            self.append_relay_event(
+                None,
+                RelayObservation::HarnessTurnStarted {
+                    started_at_ms: epoch_millis(),
+                },
+            )?;
+        }
         let claude = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter;
         if claude && self.opens_harness_turn(&update) {
             self.append_relay_event(
@@ -2358,8 +2372,9 @@ impl DurableRelay {
         })?;
         // Any origin kind settles the turn: the marker means the SDK reached a
         // turn boundary, whatever started the work.
-        if let Some(origin) = settles
-            && self.snapshot.harness_turn.is_some()
+        if let Some(origin) = settles.or_else(|| {
+            (codex && native_before && !native_after.running()).then_some(Some("codex".into()))
+        }) && self.snapshot.harness_turn.is_some()
         {
             self.append_relay_event(
                 None,
@@ -2684,7 +2699,7 @@ impl DurableRelay {
                 outcome,
             },
         )?;
-        if finishes_turn {
+        if finishes_turn && !self.snapshot.goal.running() {
             self.finish_turn_activity()?;
         }
         self.promote_next_queued_command()?;
@@ -4811,6 +4826,86 @@ mod tests {
         }
 
         assert_eq!(session.transcript.len(), 1);
+    }
+
+    #[test]
+    fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
+        use crate::hel_config::HarnessKind;
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        relay.set_harness_turn_policy(HarnessTurnPolicy::CodexAdapter);
+        let metadata = |meta| {
+            serde_json::from_value::<SessionUpdate>(
+                serde_json::json!({"sessionUpdate":"session_info_update","_meta":meta}),
+            )
+            .unwrap()
+        };
+        assert!(
+            !relay
+                .operational_state()
+                .safe_to_replace(HarnessKind::Codex)
+        );
+        submit_relay(
+            &mut relay,
+            "00000000000000000000000000000001",
+            prompt("/goal finish"),
+        );
+        relay.claim_pending_commands(true).unwrap();
+        relay.record_session_update(metadata(serde_json::json!({"goal":{"objective":"finish","status":"active","createdAt":1},"execution":{"version":1,"status":"running","turnId":"autonomous"}}))).unwrap();
+        relay
+            .record_command_completed(
+                "00000000000000000000000000000001",
+                RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                },
+            )
+            .unwrap();
+        let state = relay.operational_state();
+        assert!(state.active_prompt.is_none());
+        assert!(state.harness_turn.is_some());
+        assert_eq!(state.execution, RelayExecutionState::Running);
+        assert!(!state.safe_to_replace(HarnessKind::Codex));
+        assert!(!state.safe_for_checkpoint(HarnessKind::Codex));
+        relay.record_session_update(metadata(serde_json::json!({"execution":{"version":1,"status":"idle","turnId":"autonomous"}}))).unwrap();
+        assert_eq!(
+            relay.operational_state().execution,
+            RelayExecutionState::Idle
+        );
+        assert!(
+            !relay
+                .operational_state()
+                .safe_to_replace(HarnessKind::Codex),
+            "between goal turns is not safe to kill"
+        );
+        drop(relay);
+        let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionRestarted)
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "native".into(),
+                resumed: true,
+            })
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        assert!(relay.operational_state().goal.active());
+        assert!(!relay.operational_state().goal.synchronized());
+        relay
+            .record_session_update(metadata(
+                serde_json::json!({"goal":null,"execution":{"version":1,"status":"idle"}}),
+            ))
+            .unwrap();
+        assert!(
+            relay
+                .operational_state()
+                .safe_to_replace(HarnessKind::Codex)
+        );
     }
 
     /// Build a relay that models the turns Claude Code starts on its own.

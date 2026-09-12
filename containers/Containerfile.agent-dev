@@ -72,7 +72,7 @@ RUN apt-get update \
 # intentionally left to Hel's official on-demand installer because that path is
 # not version-pinned yet.
 RUN npm install --global --no-audit --no-fund \
-        @brokkai/codex-acp@1.11.2 \
+        @brokkai/codex-acp@1.11.3 \
         @agentclientprotocol/claude-agent-acp@0.73.0 \
         @deepseek-ai/dsh@0.1.2-rc.1 \
         @openai/codex@0.153.4 \

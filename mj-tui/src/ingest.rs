@@ -1476,6 +1476,7 @@ mod tests {
     fn duplicate_visible_activity_update_does_not_request_a_frame() {
         let mut dashboard = dashboard_with_session(running_session());
         let activity = mj_chat::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             activity_turn_started_at_ms: Some(1_000),
             ..Default::default()
         };

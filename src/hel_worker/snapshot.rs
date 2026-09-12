@@ -371,6 +371,8 @@ pub struct RelayCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
+    #[serde(default)]
+    pub goal: crate::hel_goal::GoalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_retry: Option<CapacityRetry>,
     pub session_id: String,
@@ -479,7 +481,11 @@ impl RelayOperationalState {
     /// waiting to capture.
     #[must_use]
     pub fn is_quiet(&self) -> bool {
-        self.execution == RelayExecutionState::Idle
+        self.goal.pending_resume.is_none()
+            && self.goal.decision.is_none()
+            && !self.goal.active()
+            && !self.goal.running()
+            && self.execution == RelayExecutionState::Idle
             && self.acp_ready != Some(false)
             && self.background_work_known != Some(false)
             && self.active_prompt.is_none()
@@ -494,18 +500,17 @@ impl RelayOperationalState {
 
     /// Whether a controller may replace this worker without losing work.
     ///
-    /// An older Kimi worker cannot report provider-owned background agents,
-    /// so its otherwise-quiet snapshot is not proof that replacement is safe.
+    /// Older Codex and Kimi workers cannot prove that native goals or
+    /// background agents are absent, even when their snapshots look quiet.
     #[must_use]
     pub fn safe_to_replace(&self, harness: HarnessKind) -> bool {
         self.is_quiet()
+            && (harness != HarnessKind::Codex || self.goal.synchronized())
             && (harness != HarnessKind::Kimi || self.background_work_known == Some(true))
     }
 
-    /// Whether a routine checkpoint may admit a barrier without risking work
-    /// owned by a Kimi provider process. Older Kimi workers omit the
-    /// synchronization field, so they must fail closed just like replacement
-    /// does. Other harnesses retain their historical checkpoint behavior.
+    /// Whether a routine checkpoint may admit a barrier without risking
+    /// provider-owned goal or background work. Unknown native state fails closed.
     #[must_use]
     pub fn safe_for_checkpoint(&self, harness: HarnessKind) -> bool {
         self.checkpoint_background_blocker(harness).is_none()
@@ -513,7 +518,13 @@ impl RelayOperationalState {
 
     /// The same provider-owned work prerequisite used by checkpoint admission.
     pub fn checkpoint_background_blocker(&self, harness: HarnessKind) -> Option<&'static str> {
-        if harness != HarnessKind::Kimi {
+        if self.checkpoint_only || self.execution == RelayExecutionState::Closed {
+            None
+        } else if harness == HarnessKind::Codex && !self.goal.synchronized() {
+            Some("Codex goal and execution state is not synchronized; checkpoint deferred")
+        } else if self.goal.active() || self.goal.running() || self.goal.decision.is_some() {
+            Some("an active goal owns this session; pause the goal before checkpointing")
+        } else if harness != HarnessKind::Kimi {
             None
         } else if self.background_work_known.is_none() {
             Some(
@@ -785,6 +796,8 @@ pub(crate) struct HandledRelayCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RelaySnapshot {
+    #[serde(default)]
+    pub(crate) goal: crate::hel_goal::GoalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) capacity_retry: Option<CapacityRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -834,6 +847,7 @@ pub(crate) struct RelaySnapshot {
 impl RelaySnapshot {
     pub(crate) fn new(session_id: String) -> Self {
         Self {
+            goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,
             store_id: None,
@@ -872,6 +886,7 @@ impl RelaySnapshot {
 
     pub(crate) fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            goal: self.goal.clone(),
             capacity_retry: self.capacity_retry.clone().filter(|r| !r.submitted),
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
             store_id: self.store_id.clone(),
@@ -1291,6 +1306,7 @@ pub(crate) fn observation_changes_state(observation: &RelayObservation) -> bool 
             SessionUpdate::AvailableCommandsUpdate(_)
                 | SessionUpdate::ConfigOptionUpdate(_)
                 | SessionUpdate::CurrentModeUpdate(_)
+                | SessionUpdate::SessionInfoUpdate(_)
         ),
         RelayObservation::PermissionAutoApproved { .. }
         | RelayObservation::ElicitationRequested { .. }
@@ -1499,10 +1515,13 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
                     {
                         snapshot.active_prompt = None;
                     }
-                    // A prompt result means the SDK reached a turn boundary,
-                    // so whatever the harness had started on its own is over.
-                    snapshot.harness_turn = None;
-                    if snapshot.execution == RelayExecutionState::Running {
+                    // ACP completion must not settle a later native goal turn.
+                    if !snapshot.goal.running() {
+                        snapshot.harness_turn = None;
+                    }
+                    if snapshot.execution == RelayExecutionState::Running
+                        && !snapshot.goal.running()
+                    {
                         snapshot.execution = RelayExecutionState::Idle;
                     }
                     if snapshot
@@ -1770,8 +1789,10 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
                 == Some(command_id)
             {
                 snapshot.active_prompt = None;
-                snapshot.harness_turn = None;
-                snapshot.execution = RelayExecutionState::Idle;
+                if !snapshot.goal.running() {
+                    snapshot.harness_turn = None;
+                    snapshot.execution = RelayExecutionState::Idle;
+                }
             }
             if snapshot
                 .pending_prompt_context
@@ -1858,6 +1879,7 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
         // harness had started on its own no longer exists. Both callers record
         // this with no prompt in flight.
         RelayObservation::SessionRestarted => {
+            snapshot.goal.restart();
             if snapshot.harness_turn.take().is_some()
                 && snapshot.active_prompt.is_none()
                 && snapshot.execution == RelayExecutionState::Running
@@ -1878,6 +1900,9 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
             snapshot.active_prompt = None;
         }
         RelayObservation::SessionUpdate { update } => match update.as_ref() {
+            SessionUpdate::SessionInfoUpdate(_) => {
+                snapshot.goal.apply(update)?;
+            }
             SessionUpdate::AvailableCommandsUpdate(update) => {
                 snapshot.available_commands = update.available_commands.clone();
             }
@@ -2201,7 +2226,7 @@ mod tests {
         state.acp_ready = Some(true);
 
         assert!(state.is_quiet());
-        assert!(state.safe_to_replace(HarnessKind::Codex));
+        assert!(!state.safe_to_replace(HarnessKind::Codex));
         assert!(
             !state.safe_to_replace(HarnessKind::Kimi),
             "an older Kimi worker cannot prove provider tasks are absent"
@@ -2219,7 +2244,7 @@ mod tests {
     #[test]
     fn kimi_checkpoint_requires_known_empty_background_work() {
         let mut state = RelaySnapshot::new(SESSION.into()).operational_state();
-        assert!(state.safe_for_checkpoint(HarnessKind::Codex));
+        assert!(!state.safe_for_checkpoint(HarnessKind::Codex));
         assert!(
             !state.safe_for_checkpoint(HarnessKind::Kimi),
             "an older Kimi worker cannot prove provider tasks are absent"

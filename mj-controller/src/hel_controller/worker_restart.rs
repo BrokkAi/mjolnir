@@ -152,7 +152,16 @@ impl Controller {
             return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
         }
         let harness = self.state.sessions[session_id].harness_kind;
-        if !snapshot.operational.safe_to_replace(harness) {
+        let safe_to_replace = snapshot.operational.safe_to_replace(harness);
+        tracing::debug!(
+            session_id,
+            safe_to_replace,
+            goal_synchronized = snapshot.operational.goal.synchronized(),
+            goal_active = snapshot.operational.goal.active(),
+            native_running = snapshot.operational.goal.running(),
+            "evaluated automatic worker replacement"
+        );
+        if !safe_to_replace {
             lease.release();
             return Ok(WorkerUpgradeOutcome::Deferred);
         }
@@ -289,8 +298,10 @@ async fn wait_for_idle_projection(relay: &mut StandaloneSession, timeout: Durati
         let snapshot = relay.sync().await?;
         let ordinal = snapshot.operational.latest_ordinal;
         let idle = snapshot.operational.native_session_is_ready()
-            && snapshot.operational.execution == RelayExecutionState::Idle;
-        if idle && last_ordinal == Some(ordinal) {
+            && (snapshot.operational.execution == RelayExecutionState::Idle
+                || (snapshot.operational.goal.synchronized()
+                    && snapshot.operational.goal.active()));
+        if idle && (snapshot.operational.goal.active() || last_ordinal == Some(ordinal)) {
             stable_polls = stable_polls.saturating_add(1);
             if stable_polls >= 3 {
                 return Ok(());

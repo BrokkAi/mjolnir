@@ -383,6 +383,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     chat.render_mode = TranscriptRenderMode::Rich;
     chat.turn_started_at_epoch_seconds = None;
     chat.set_session_activity(crate::usage_format::SessionActivity {
+        pursuing_goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,
         prompt_in_flight: false,
@@ -411,6 +412,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
 
     let previous_activity = chat.session_activity().clone();
     chat.set_session_activity(crate::usage_format::SessionActivity {
+        pursuing_goal: Default::default(),
         foreground_tool_started_at_ms: Some(19_988_000),
         ..previous_activity
     });

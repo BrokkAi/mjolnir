@@ -149,6 +149,7 @@ impl PlanProbe {
         let (commands, mut requests) = mpsc::channel(16);
         let (event_tx, events) = mpsc::channel(128);
         let spec = LaunchSpec {
+            goal_recovery: Default::default(),
             command: "plan-probe".into(),
             args: vec![],
             environment: BTreeMap::new(),

@@ -38,6 +38,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     }
     .write_spec(&supervisor)?;
     let launch = LaunchSpec {
+        goal_recovery: Default::default(),
         command: std::env::current_exe()?,
         args: vec![
             "--login-environment-ready".into(),
@@ -267,6 +268,7 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
 "#).unwrap();
         let launch = LaunchSpec {
+            goal_recovery: Default::default(),
             command: "python3".into(),
             args: vec![script.to_string_lossy().into_owned()],
             environment: Default::default(),

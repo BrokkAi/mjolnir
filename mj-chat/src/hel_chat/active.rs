@@ -3622,6 +3622,7 @@ mod tests {
         chat.turn_started_at_epoch_seconds = Some(hel::clock::epoch_seconds().saturating_sub(42));
         chat.set_current_step_start(Some(hel::clock::epoch_millis().saturating_sub(7_000)));
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             execution: Some(hel::hel_worker::RelayExecutionState::Running),
             ..Default::default()
         });
@@ -3740,6 +3741,7 @@ mod tests {
                 latest_credential_sync_signal: None,
                 worker_build: None,
                 operational: hel::hel_worker::RelayOperationalState {
+                    goal: Default::default(),
                     capacity_retry: None,
                     activity_turn_started_at_ms: None,
                     store_id: None,
@@ -5228,6 +5230,7 @@ mod tests {
         assert!(prompt_title(&chat).is_empty());
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,
             prompt_in_flight: false,
@@ -5247,6 +5250,7 @@ mod tests {
         assert!(!prompt_title(&chat).contains("Background"));
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,
             prompt_in_flight: false,

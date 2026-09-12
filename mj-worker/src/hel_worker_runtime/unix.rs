@@ -141,6 +141,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // Running. See `.agents/docs/claude-autonomous-turns.md`.
     durable_relay.set_harness_turn_policy(match config.harness {
         HarnessKind::Claude => hel::hel_worker::HarnessTurnPolicy::ClaudeAdapter,
+        HarnessKind::Codex => hel::hel_worker::HarnessTurnPolicy::CodexAdapter,
         _ => hel::hel_worker::HarnessTurnPolicy::Disabled,
     });
     // Codex runs its own shells instead of asking Hel for a terminal, so the
@@ -316,7 +317,25 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         )
     };
     let outcome = async {
+        if let Some(request) = &config.goal_resume_request {
+            let mut state = relay.lock().expect("relay lock poisoned");
+            if state.operational_state().goal.answered_resume.as_ref() != Some(request) {
+                state.record_session_update(serde_json::from_value(serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"mjGoalResumePending":request}}))?)?;
+            }
+        }
+        let goal_recovery = Arc::new(Mutex::new(hel::hel_goal::GoalRecoveryContext {
+            state: relay.lock().expect("relay lock poisoned").operational_state().goal,
+            request: config.goal_resume_request.clone(),
+            journal: Some(hel::hel_goal::GoalJournal({
+                let relay = relay.clone();
+                Arc::new(move |update| {
+                    relay.lock().expect("relay lock poisoned").record_session_update(update)?;
+                    Ok(())
+                })
+            })),
+        }));
         let acp_spec = LaunchSpec {
+            goal_recovery,
             command: worker_executable,
             args: vec![
                 "--login-environment-ready".into(),

@@ -101,6 +101,7 @@ for line in sys.stdin:
 
 fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig) -> LaunchSpec {
     LaunchSpec {
+        goal_recovery: Default::default(),
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],
         environment: BTreeMap::new(),

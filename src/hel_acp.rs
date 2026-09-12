@@ -5,6 +5,7 @@
 //! [`surface`] projects protocol capabilities for the chat control surface.
 
 mod dialect;
+mod goal;
 mod kimi_tasks;
 #[cfg(test)]
 mod plan_tests;
@@ -187,6 +188,7 @@ fn session_update_is_relay_visible(
 
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
+    pub goal_recovery: Arc<Mutex<crate::hel_goal::GoalRecoveryContext>>,
     pub command: PathBuf,
     pub args: Vec<String>,
     pub environment: BTreeMap<String, String>,
@@ -314,6 +316,17 @@ fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
 }
 
 fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if spec.harness == HarnessKind::Codex {
+        let asking = spec
+            .goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .asking();
+        return Some(serde_json::Map::from_iter([(
+            "goal".into(),
+            serde_json::json!({"resumePolicy": if asking {"pause"} else {"preserve"}}),
+        )]));
+    }
     if spec.harness != HarnessKind::Claude {
         return None;
     }
@@ -922,6 +935,11 @@ async fn run_inner(
                     },
                 )
                 .await?;
+                spec.goal_recovery
+                    .lock()
+                    .expect("goal lock poisoned")
+                    .state
+                    .restart();
                 spec.resume_session = restart.resume_session;
                 replacing_previous_bridge = true;
             }
@@ -1457,6 +1475,7 @@ where
     // updates on the same ACP connection.
     let live_tool_calls = Arc::new(Mutex::new(BTreeSet::<String>::new()));
     let notification_live_tool_calls = live_tool_calls.clone();
+    let notification_goal = spec.goal_recovery.clone();
     let notification_harness = spec.harness;
     let claude_sdk_events = events.clone();
     let claude_sdk_harness = spec.harness;
@@ -1538,6 +1557,8 @@ where
                             )),
                         )
                     })?;
+                notification_goal.lock().expect("goal lock poisoned").state.apply(&update)
+                    .map_err(|e| agent_client_protocol::Error::invalid_params().data(serde_json::json!(e.to_string())))?;
                 notification_step_clock.observe(&update);
                 if !notification_session_updates_enabled.load(Ordering::Acquire) {
                     return Ok(());
@@ -2503,6 +2524,9 @@ async fn serve_session(
 ) -> Result<Option<String>> {
     let mut meta = serde_json::Map::new();
     meta.insert("terminal_output".into(), serde_json::Value::Bool(true));
+    if spec.harness == HarnessKind::Codex {
+        meta.insert("execution".into(), serde_json::json!({"version":1}));
+    }
     if spec.harness == HarnessKind::Claude {
         meta.insert(
             "jetbrains".into(),
@@ -2539,6 +2563,24 @@ async fn serve_session(
             initialized.protocol_version
         );
     }
+    if spec.harness == HarnessKind::Codex
+        && spec
+            .goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .asking()
+    {
+        ensure!(
+            initialized
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("goal"))
+                .and_then(|g| g.get("resumePolicies"))
+                .and_then(|p| p.as_array())
+                .is_some_and(|p| p.iter().any(|v| v == "pause")),
+            "the installed Codex adapter cannot pause a goal before explicit resume; update the adapter"
+        );
+    }
     let steering_supported = steering_supported_from_meta(initialized.meta.as_ref());
     // Grok Build publishes its catalogue here rather than as `configOptions`.
     let mut grok_models = (spec.harness == HarnessKind::Grok)
@@ -2573,6 +2615,7 @@ async fn serve_session(
             .resume
             .is_some()
         {
+            session_updates_enabled.store(true, Ordering::Release);
             let resumed = connection
                 .send_request(resume_session_request(spec, session_id.clone()))
                 .block_task()
@@ -2594,6 +2637,11 @@ async fn serve_session(
         {
             *state = fresh;
         }
+        if spec.harness == HarnessKind::Codex
+            && let Some(meta) = loaded_meta.as_ref()
+        {
+            goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
+        }
         // The response is the boundary between provider replay and future
         // live updates for this connection.
         session_updates_enabled.store(true, Ordering::Release);
@@ -2611,6 +2659,11 @@ async fn serve_session(
                 .await;
             spec.acp_activity.mark();
             let created = created.context("create ACP session")?;
+            if spec.harness == HarnessKind::Codex
+                && let Some(meta) = created.meta.as_ref()
+            {
+                goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
+            }
             // A session may open on a different model than the agent-wide
             // default, so a fresher catalogue on the session wins.
             if let Some(state) = grok_models.as_mut()
@@ -2757,6 +2810,14 @@ async fn serve_session(
         }
     }
 
+    let mut goal_question = goal::recover(
+        connection,
+        &session_id,
+        spec,
+        events,
+        config_recovery.is_some(),
+    )
+    .await?;
     while let Some(request) = requests.recv().await {
         let request = match request {
             CommandRequest::PromptAttachments {
@@ -3136,7 +3197,10 @@ async fn serve_session(
                                 response,
                                 resolved,
                             }) => {
-                                let outcome = match resolve_session_config_recovery(
+                                let goal_outcome = goal::resolve(connection, &session_id, spec, events, &mut goal_question, config_recovery.is_some(), (&elicitation_id, &response)).await?;
+                                let outcome = if let Some(outcome) = goal_outcome {
+                                    outcome
+                                } else { match resolve_session_config_recovery(
                                     connection,
                                     &session_id,
                                     spec,
@@ -3156,7 +3220,7 @@ async fn serve_session(
                                         &elicitation_id,
                                         response,
                                     ),
-                                };
+                                }};
                                 if resolved.send(outcome).is_err() {
                                     tracing::debug!(
                                         session_id = %session_id,
@@ -3317,23 +3381,39 @@ async fn serve_session(
                 response,
                 resolved,
             } => {
-                let outcome = match resolve_session_config_recovery(
+                let goal_outcome = goal::resolve(
                     connection,
                     &session_id,
                     spec,
                     events,
-                    &mut config_options,
-                    &mut grok_models,
-                    &mut config_recovery,
-                    true,
-                    &elicitation_id,
-                    &response,
+                    &mut goal_question,
+                    config_recovery.is_some(),
+                    (&elicitation_id, &response),
                 )
-                .await?
-                {
-                    Some(outcome) => outcome,
-                    None => {
-                        resolve_pending_elicitation(pending_elicitations, &elicitation_id, response)
+                .await?;
+                let outcome = if let Some(outcome) = goal_outcome {
+                    outcome
+                } else {
+                    match resolve_session_config_recovery(
+                        connection,
+                        &session_id,
+                        spec,
+                        events,
+                        &mut config_options,
+                        &mut grok_models,
+                        &mut config_recovery,
+                        true,
+                        &elicitation_id,
+                        &response,
+                    )
+                    .await?
+                    {
+                        Some(outcome) => outcome,
+                        None => resolve_pending_elicitation(
+                            pending_elicitations,
+                            &elicitation_id,
+                            response,
+                        ),
                     }
                 };
                 if resolved.send(outcome).is_err() {

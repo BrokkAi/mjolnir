@@ -32,6 +32,7 @@ pub fn format_turn_clock(now_epoch_seconds: u64, current_turn_started_at: Option
 /// activity facts from this, so they agree on what "idle" means.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionActivity {
+    pub pursuing_goal: bool,
     pub capacity_retry: Option<hel::hel_worker::CapacityRetry>,
     /// Durable turn start retained through the background work it launched.
     pub activity_turn_started_at_ms: Option<i64>,
@@ -60,6 +61,7 @@ impl SessionActivity {
     /// Read the activity out of what a session's relay last reported.
     pub fn of(operational: &hel::hel_worker::RelayOperationalState) -> Self {
         Self {
+            pursuing_goal: operational.goal.active(),
             capacity_retry: operational.capacity_retry.clone(),
             activity_turn_started_at_ms: operational
                 .active_prompt
@@ -92,7 +94,8 @@ impl SessionActivity {
     /// than the relay's operational snapshot.
     #[must_use]
     pub fn is_idle(&self, current_turn_started_at: Option<u64>) -> bool {
-        self.capacity_retry.is_none()
+        !self.pursuing_goal
+            && self.capacity_retry.is_none()
             && matches!(
                 self.kind(current_turn_started_at),
                 SessionActivityKind::Idle
@@ -107,7 +110,7 @@ impl SessionActivity {
         waiting_for_input: bool,
     ) -> bool {
         match self.kind(current_turn_started_at) {
-            SessionActivityKind::Idle => false,
+            SessionActivityKind::Idle | SessionActivityKind::Goal => false,
             SessionActivityKind::Lifecycle => {
                 self.execution == Some(hel::hel_worker::RelayExecutionState::Closing)
             }
@@ -133,6 +136,9 @@ impl SessionActivity {
                 .status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64);
         }
         let kind = self.kind(current_turn_started_at);
+        if kind == SessionActivityKind::Goal {
+            return "Pursuing goal".into();
+        }
         if kind == SessionActivityKind::Idle {
             return "Idle".into();
         }
@@ -232,8 +238,11 @@ impl SessionActivity {
                     .min()
             })
             .flatten();
-        let label =
-            (kind == SessionActivityKind::Lifecycle).then(|| self.lifecycle_label().to_owned());
+        let label = match kind {
+            SessionActivityKind::Lifecycle => Some(self.lifecycle_label().to_owned()),
+            SessionActivityKind::Goal => Some("Pursuing goal".into()),
+            _ => None,
+        };
         SessionActivityDetails {
             kind,
             turn_started_at_ms,
@@ -273,7 +282,11 @@ impl SessionActivity {
         if !self.background_commands.is_empty() || !self.active_user_shells.is_empty() {
             return SessionActivityKind::Background;
         }
-        SessionActivityKind::Idle
+        if self.pursuing_goal {
+            SessionActivityKind::Goal
+        } else {
+            SessionActivityKind::Idle
+        }
     }
 
     fn lifecycle_label(&self) -> &'static str {
@@ -311,6 +324,7 @@ impl SessionActivity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionActivityKind {
+    Goal,
     Turn,
     Step,
     Background,
@@ -394,6 +408,7 @@ pub fn format_activity_columns(
         }
         SessionActivityKind::Lifecycle => vec![activity.lifecycle_label().to_owned()],
         SessionActivityKind::Idle => vec!["[idle]".into()],
+        SessionActivityKind::Goal => vec!["Pursuing goal".into()],
     }
 }
 
@@ -427,6 +442,7 @@ pub fn format_activity_clock(
         ),
         SessionActivityKind::Lifecycle => format!("[{}]", activity.lifecycle_label()),
         SessionActivityKind::Idle => "[idle]".into(),
+        SessionActivityKind::Goal => "Pursuing goal".into(),
     }
 }
 
@@ -510,8 +526,24 @@ mod tests {
         assert_eq!(format_turn_clock(5_000, None), "[idle]");
     }
 
+    #[test]
+    fn active_goal_between_turns_is_not_idle_or_computation() {
+        let activity = SessionActivity {
+            pursuing_goal: true,
+            ..Default::default()
+        };
+        assert!(!activity.is_idle(None));
+        assert!(!activity.is_working(None, false));
+        assert_eq!(
+            activity.display_clock(100, None, None, false),
+            "Pursuing goal"
+        );
+        assert_eq!(activity.details(None, None).kind, SessionActivityKind::Goal);
+    }
+
     fn background(started_at_ms: i64, command: &str) -> SessionActivity {
         SessionActivity {
+            pursuing_goal: false,
             capacity_retry: None,
             execution: None,
             activity_turn_started_at_ms: None,
@@ -619,6 +651,7 @@ mod tests {
     #[test]
     fn structured_activity_keeps_known_idle_and_missing_idle_since_distinct() {
         let known = SessionActivity {
+            pursuing_goal: Default::default(),
             execution: Some(hel::hel_worker::RelayExecutionState::Idle),
             idle_since_ms: Some(19_000_000),
             ..SessionActivity::default()
@@ -628,6 +661,7 @@ mod tests {
         assert_eq!(known.idle_since_ms, Some(19_000_000));
 
         let old_worker = SessionActivity {
+            pursuing_goal: Default::default(),
             execution: Some(hel::hel_worker::RelayExecutionState::Idle),
             ..SessionActivity::default()
         }
@@ -678,6 +712,7 @@ mod tests {
     #[test]
     fn invalid_activity_timestamps_still_report_work_without_fabricating_a_clock() {
         let foreground = SessionActivity {
+            pursuing_goal: Default::default(),
             foreground_tool_started_at_ms: Some(-1),
             ..SessionActivity::default()
         };
@@ -689,6 +724,7 @@ mod tests {
         assert_eq!(format_activity_clock(20_000, None, &foreground), "[Step]");
 
         let background = SessionActivity {
+            pursuing_goal: Default::default(),
             background_commands: vec![hel::hel_worker::BackgroundCommand {
                 id: "test-background".into(),
                 started_at_ms: -1,
@@ -708,6 +744,7 @@ mod tests {
     #[test]
     fn relay_execution_and_user_shells_keep_activity_non_idle_without_timestamps() {
         let running = SessionActivity {
+            pursuing_goal: Default::default(),
             prompt_in_flight: true,
             execution: Some(hel::hel_worker::RelayExecutionState::Running),
             ..SessionActivity::default()
@@ -724,6 +761,7 @@ mod tests {
             hel::hel_worker::RelayExecutionState::Closed,
         ] {
             let lifecycle = SessionActivity {
+                pursuing_goal: Default::default(),
                 execution: Some(execution),
                 ..SessionActivity::default()
             };
@@ -744,6 +782,7 @@ mod tests {
         }
 
         let shell = SessionActivity {
+            pursuing_goal: Default::default(),
             active_user_shells: vec![hel::hel_worker::ActiveUserShell {
                 command_id: "shell-1".into(),
                 command: "cargo test".into(),
@@ -819,6 +858,7 @@ mod tests {
     #[test]
     fn activity_indicators_ignore_stale_phases_and_questions_without_work() {
         let mut activity = SessionActivity {
+            pursuing_goal: Default::default(),
             execution: Some(hel::hel_worker::RelayExecutionState::Running),
             ..SessionActivity::default()
         };

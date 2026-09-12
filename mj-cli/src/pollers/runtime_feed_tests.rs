@@ -51,6 +51,7 @@ fn session_record(id: &str) -> SessionRecord {
 
 fn operational(session_id: &str) -> RelayOperationalState {
     RelayOperationalState {
+        goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,
         idle_since_ms: None,

@@ -748,6 +748,7 @@ impl ChatState {
             activity_reachable: true,
             prompt_in_flight: snapshot.active_prompt.is_some(),
             session_activity: crate::usage_format::SessionActivity {
+                pursuing_goal: Default::default(),
                 prompt_in_flight: snapshot.active_prompt.is_some(),
                 ..crate::usage_format::SessionActivity::default()
             },
@@ -1685,7 +1686,8 @@ impl ChatState {
     }
 
     fn pursuing_goal(&self) -> bool {
-        self.goal_prompt_active && self.acp_surface.advertises_command("goal")
+        self.session_activity.pursuing_goal
+            || (self.goal_prompt_active && self.acp_surface.advertises_command("goal"))
     }
     pub fn entries(&self) -> &[ChatEntry] {
         &self.entries
@@ -4251,6 +4253,7 @@ mod tests {
         chat.header_target = "localhost".into();
         chat.header_profile = "codex".into();
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             capacity_retry: Some(hel::hel_worker::CapacityRetry {
                 attempt: 1,
                 retry_at_ms: 120000,
@@ -4273,6 +4276,7 @@ mod tests {
         chat.header_profile.clear();
         assert_eq!(chat.clock_text(100), chat.clock_text(101));
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             background_commands: vec![hel::hel_worker::BackgroundCommand {
                 id: "test:clock".into(),
                 started_at_ms: 0,
@@ -4300,6 +4304,7 @@ mod tests {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_input("keep this draft".into());
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             background_commands: vec![hel::hel_worker::BackgroundCommand {
                 id: "test:dialog".into(),
                 started_at_ms: hel::clock::epoch_millis() - 61_000,
@@ -4430,6 +4435,7 @@ mod tests {
     fn stoppable_background_task_keyboard_activation_is_deduplicated() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             background_commands: vec![background_task("task-1", "cargo test", true)],
             ..crate::usage_format::SessionActivity::default()
         });
@@ -4461,6 +4467,7 @@ mod tests {
     fn read_only_background_rows_have_no_stop_control() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             background_commands: vec![background_task("codex:1", "codex exec", false)],
             ..crate::usage_format::SessionActivity::default()
         });
@@ -4476,6 +4483,7 @@ mod tests {
     fn stoppable_background_task_mouse_activation_and_scroll_keep_dialog_state() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             background_commands: (0..8)
                 .map(|index| {
                     background_task(&format!("task-{index}"), &format!("work-{index}"), true)
@@ -4521,6 +4529,7 @@ mod tests {
     fn disappeared_background_task_clears_pending_stop_and_failure_reenables_it() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             background_commands: vec![background_task("task-1", "cargo test", true)],
             ..crate::usage_format::SessionActivity::default()
         });
@@ -4551,6 +4560,7 @@ mod tests {
         assert_eq!(chat.notice(), notice_after_disappearance);
 
         chat.set_session_activity(crate::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
             background_commands: vec![background_task("task-1", "cargo test", true)],
             ..crate::usage_format::SessionActivity::default()
         });

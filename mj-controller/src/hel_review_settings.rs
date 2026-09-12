@@ -463,6 +463,7 @@ mod tests {
 
     fn operational(session_id: &str) -> RelayOperationalState {
         RelayOperationalState {
+            goal: Default::default(),
             capacity_retry: None,
             store_id: None,
             idle_since_ms: None,

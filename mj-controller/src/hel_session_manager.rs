@@ -4056,6 +4056,7 @@ mod tests {
                 window: hel::hel_state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational: RelayOperationalState {
+                    goal: Default::default(),
                     capacity_retry: None,
                     activity_turn_started_at_ms: None,
                     store_id: None,

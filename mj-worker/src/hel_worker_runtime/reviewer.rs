@@ -798,6 +798,7 @@ impl ReviewerRole {
             )
         };
         let spec = LaunchSpec {
+            goal_recovery: Default::default(),
             command: self.placement.worker_executable.clone(),
             args: vec![
                 "--login-environment-ready".into(),
