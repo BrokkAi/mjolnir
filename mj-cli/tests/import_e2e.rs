@@ -11,15 +11,16 @@ use std::process::Command;
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
-use hel::hel_archive::read_archive_verified;
-use hel::hel_config::{
-    CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, HelConfig, ProjectBundle,
+use mj_core::archive::read_archive_verified;
+use mj_core::config::{
+    CONFIG_VERSION, Config, ContainerTemplate, HarnessKind, HarnessProfile, ProjectBundle,
     ProjectRepository, TargetTemplate,
 };
-use hel::hel_state::{HelState, MaterializedSession, SessionState, TranscriptBody};
-use hel::hel_worker::RelayCommand;
-use mj_controller::hel_controller::Controller;
-use mj_controller::hel_session_manager::{StandaloneSession, new_command_id};
+use mj_core::state::{MaterializedSession, SessionState, State, TranscriptBody};
+
+use mj_controller::controller::Controller;
+use mj_controller::session_manager::{StandaloneSession, new_command_id};
+use mj_core::relay::RelayCommand;
 
 fn mj_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_mj") {
@@ -109,7 +110,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         .current_dir(&scratch)
         .env("CLAUDE_CONFIG_DIR", &claude_home))?;
 
-    let mut config = HelConfig {
+    let mut config = Config {
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
         advanced: Default::default(),
@@ -160,7 +161,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         },
     );
     config.save()?;
-    HelState::default().save()?;
+    mj_controller::database::save_state(&State::default())?;
 
     let output = Command::new(mj_binary())
         .args(["import", "claude", "--latest", "--bundle", "scratch"])
@@ -172,7 +173,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let state = HelState::load()?;
+    let state = mj_controller::database::load_state_migrating()?;
     let (session_id, imported) = state.sessions.iter().next().unwrap();
     assert_eq!(imported.state, SessionState::Stopped);
     let checkpoint = imported.checkpoint.as_ref().unwrap();
@@ -203,7 +204,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
     )
     .await?;
     controller.close_session(session_id).await?;
-    let final_state = HelState::load()?;
+    let final_state = mj_controller::database::load_state_migrating()?;
     let checkpoint = final_state.sessions[session_id]
         .checkpoint
         .as_ref()
@@ -226,7 +227,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     let native_session_id = std::env::var("MJ_IMPORT_E2E_KIMI_SESSION")?;
     let repository = std::env::var("MJ_IMPORT_E2E_KIMI_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
-    let config = HelConfig {
+    let config = Config {
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
         advanced: Default::default(),
@@ -276,7 +277,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         )]),
     };
     config.save()?;
-    HelState::default().save()?;
+    mj_controller::database::save_state(&State::default())?;
 
     let output = Command::new(mj_binary())
         .args([
@@ -295,7 +296,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let state = HelState::load()?;
+    let state = mj_controller::database::load_state_migrating()?;
     let (session_id, imported) = state.sessions.iter().next().unwrap();
     assert_eq!(imported.state, SessionState::Stopped);
     let checkpoint = imported.checkpoint.as_ref().unwrap();
@@ -325,7 +326,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     )
     .await?;
     controller.close_session(session_id).await?;
-    let final_state = HelState::load()?;
+    let final_state = mj_controller::database::load_state_migrating()?;
     read_archive_verified(
         &final_state.sessions[session_id]
             .checkpoint
@@ -350,7 +351,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     let native_session_id = std::env::var("MJ_IMPORT_E2E_GROK_SESSION")?;
     let repository = std::env::var("MJ_IMPORT_E2E_GROK_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
-    let config = HelConfig {
+    let config = Config {
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
         advanced: Default::default(),
@@ -400,7 +401,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         )]),
     };
     config.save()?;
-    HelState::default().save()?;
+    mj_controller::database::save_state(&State::default())?;
 
     let output = Command::new(mj_binary())
         .args([
@@ -419,7 +420,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let state = HelState::load()?;
+    let state = mj_controller::database::load_state_migrating()?;
     let (session_id, imported) = state.sessions.iter().next().unwrap();
     assert_eq!(imported.state, SessionState::Stopped);
     let checkpoint = imported.checkpoint.as_ref().unwrap();
@@ -449,7 +450,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     )
     .await?;
     controller.close_session(session_id).await?;
-    let final_state = HelState::load()?;
+    let final_state = mj_controller::database::load_state_migrating()?;
     read_archive_verified(
         &final_state.sessions[session_id]
             .checkpoint
@@ -581,7 +582,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     let native_session_id = std::env::var("MJ_IMPORT_E2E_CODEX_SESSION")?;
     let repository = std::env::var("MJ_IMPORT_E2E_CODEX_REPOSITORY")?;
     let image = std::env::var("MJ_IMPORT_E2E_IMAGE")?;
-    let config = HelConfig {
+    let config = Config {
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
         advanced: Default::default(),
@@ -631,7 +632,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         )]),
     };
     config.save()?;
-    HelState::default().save()?;
+    mj_controller::database::save_state(&State::default())?;
 
     let output = Command::new(mj_binary())
         .args([
@@ -650,7 +651,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let state = HelState::load()?;
+    let state = mj_controller::database::load_state_migrating()?;
     let (session_id, imported) = state.sessions.iter().next().unwrap();
     assert_eq!(imported.state, SessionState::Stopped);
     let checkpoint = imported.checkpoint.as_ref().unwrap();
@@ -680,7 +681,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     )
     .await?;
     controller.close_session(session_id).await?;
-    let final_state = HelState::load()?;
+    let final_state = mj_controller::database::load_state_migrating()?;
     read_archive_verified(
         &final_state.sessions[session_id]
             .checkpoint

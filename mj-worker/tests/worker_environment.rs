@@ -1,7 +1,7 @@
 //! Real worker entrypoints must clean inherited state before invoking Git.
 #![cfg(unix)]
 
-use hel::hel_targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
+use mj_core::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
 use std::time::Duration;
 
 struct PushFixture {
@@ -53,7 +53,7 @@ impl PushFixture {
             ),
             ("GIT_CONFIG_VALUE_1".into(), "invalid-target-helper".into()),
         ]);
-        let config: hel::hel_worker_launch::WorkerLaunchConfig =
+        let config: mj_core::worker_launch::WorkerLaunchConfig =
             serde_json::from_value(serde_json::json!({
                 "session_id": "018f9dd2-a3b4-7c8d-9000-123456789abc", "harness": "codex",
                 "bridge_command": "/unused-harness", "bridge_args": [], "environment": {},
@@ -62,9 +62,8 @@ impl PushFixture {
             }))
             .unwrap();
         config.write(&fixture.root.join("launch.json")).unwrap();
-        mj_worker::hel_worker_runtime::configure_github_cli(&fixture.root, &mut environment)
-            .unwrap();
-        hel::hel_credentials::remove_github_token(&fixture.root.join("github-token")).unwrap();
+        mj_worker::worker_runtime::configure_github_cli(&fixture.root, &mut environment).unwrap();
+        mj_core::credentials::remove_github_token(&fixture.root.join("github-token")).unwrap();
         let gh = bin.join("gh");
         std::fs::write(
             &gh,
@@ -103,7 +102,7 @@ fi
             &fixture.repository,
             &["remote", "add", "origin", fixture.remote.to_str().unwrap()],
         );
-        let quote = hel::hel_targets::posix_quote;
+        let quote = mj_core::targets::posix_quote;
         let hook = fixture.repository.join(".git/hooks/pre-push");
         let script = format!(
             r#"#!/bin/sh
@@ -158,7 +157,7 @@ test "$credentials" = "$(printf 'protocol=https\nhost=github.com\nusername=x-acc
         output.stdout
     }
 
-    fn push(&self, branch: &str) -> hel::hel_targets::CommandOutput {
+    fn push(&self, branch: &str) -> mj_core::targets::CommandOutput {
         let mut command = CommandSpec::new(
             env!("CARGO_BIN_EXE_mj-worker"),
             [
@@ -200,7 +199,7 @@ fn branch_export_uses_session_auth_after_clean_reexec() {
         ("first-session-token", "review/first"),
         ("rotated-session-token", "review/rotated"),
     ] {
-        hel::hel_credentials::write_github_token(
+        mj_core::credentials::write_github_token(
             &fixture.root.join("github-token"),
             token.as_bytes(),
         )
@@ -219,7 +218,7 @@ fn branch_export_uses_session_auth_after_clean_reexec() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let pushed: hel::hel_archive::PushedBranch =
+        let pushed: mj_core::archive::PushedBranch =
             serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(pushed.branch, branch);
         assert_eq!(
@@ -239,7 +238,7 @@ fn branch_export_uses_session_auth_after_clean_reexec() {
             );
         }
     }
-    hel::hel_credentials::remove_github_token(&fixture.root.join("github-token")).unwrap();
+    mj_core::credentials::remove_github_token(&fixture.root.join("github-token")).unwrap();
     let output = fixture.push("review/removed");
     assert_ne!(output.status, 0);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -301,7 +300,7 @@ fn branch_export_preserves_local_and_explicit_ssh_pushes_without_a_token() {
 
     // Exercise Git's SSH transport with a local receive-pack instead of a server.
     let ssh = fixture.directory.path().join("fixture ssh");
-    let quote = hel::hel_targets::posix_quote;
+    let quote = mj_core::targets::posix_quote;
     std::fs::write(
         &ssh,
         format!(
@@ -313,7 +312,7 @@ fn branch_export_preserves_local_and_explicit_ssh_pushes_without_a_token() {
     .unwrap();
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config_path = fixture.root.join("launch.json");
-    let mut config = hel::hel_worker_launch::WorkerLaunchConfig::read(&config_path).unwrap();
+    let mut config = mj_core::worker_launch::WorkerLaunchConfig::read(&config_path).unwrap();
     config
         .target_environment
         .insert("GIT_SSH_COMMAND".into(), quote(ssh.to_str().unwrap()));
@@ -428,7 +427,7 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
     let root = tempfile::tempdir().unwrap();
     let worker_root = root.path().join("worker");
     drop(
-        hel::hel_worker::DurableRelay::open(
+        mj_worker::relay::DurableRelay::open(
             &worker_root,
             "018f9dd2-a3b4-7c8d-9000-123456789abc",
             "test",
@@ -473,7 +472,8 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
             ensure!(Instant::now() < deadline, "checkpoint worker did not start");
             std::thread::sleep(Duration::from_millis(25));
         }
-        let script = hel::hel_targets::worker_daemon_liveness_script(worker_root.to_str().unwrap());
+        let script =
+            mj_controller::targets::worker_daemon_liveness_script(worker_root.to_str().unwrap());
         let output = executor.execute(&CommandSpec::new("sh", ["-c", &script]))?;
         ensure!(
             output.status == 0 && output.stdout == b"alive\n",
@@ -483,7 +483,7 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
     })();
     // Always stop/join before dropping the worker's files, even if observation
     // failed. The bounded owner also cleans up if the identity check regresses.
-    let script = hel::hel_targets::stop_worker_daemon_script(worker_root.to_str().unwrap());
+    let script = mj_controller::targets::stop_worker_daemon_script(worker_root.to_str().unwrap());
     let stopped = executor.execute(&CommandSpec::new("sh", ["-c", &script]));
     let output = worker.join().expect("worker owner panicked");
     observation.unwrap();

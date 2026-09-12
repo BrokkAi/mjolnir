@@ -16,7 +16,7 @@ fn top_level_failure_is_written_to_a_private_per_run_log() {
         .env("MJ_DATA_DIR", &data)
         .env("MJ_CONFIG_DIR", config);
 
-    let output = hel::hel_subprocess::run_with_input(&mut command, &[]).unwrap();
+    let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
 
     let metadata: serde_json::Value =
         serde_json::from_slice(&fs::read(data.join("daemon.json")).unwrap()).unwrap();
@@ -82,7 +82,7 @@ fn a_panicking_checkpoint_fixture_stops_its_daemon_before_removing_storage() {
     let data = root.path().join("data");
     let config = root.path().join("config");
     let storage = common::DaemonStorage::new(root, config.clone(), data.clone());
-    let output = hel::hel_subprocess::run_with_input(
+    let output = mj_core::subprocess::run_with_input(
         common::own_test_daemons(
             Command::new(env!("CARGO_BIN_EXE_mj"))
                 .args(["checkpoint", "--session", "definitely-missing"])

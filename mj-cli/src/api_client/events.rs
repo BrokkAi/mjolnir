@@ -1,6 +1,6 @@
 //! Bounded SSE decoding, independent of network chunk boundaries.
 use anyhow::{Result, bail, ensure};
-use hel::hel_database::ApiEvent;
+use mj_controller::database::ApiEvent;
 
 #[derive(Default)]
 pub(crate) struct EventDecoder {
@@ -74,7 +74,7 @@ mod tests {
             seq: 3,
             session_id: "session-1".into(),
             recorded_at_ms: 1,
-            event: hel::hel_database::ApiEventData::Error {
+            event: mj_controller::database::ApiEventData::Error {
                 message: "é".repeat(70000),
                 command_id: None,
             },

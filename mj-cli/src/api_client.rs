@@ -1,7 +1,7 @@
 //! A typed client for the daemon's documented `/api/v1` routes.
 //!
 //! The CLI subcommands are thin: they resolve the viewer URL and the bearer
-//! token, serialize the request structs `mj_controller::hel_server::api`
+//! token, serialize the request structs `mj_controller::server::api`
 //! exports, and print what comes back. Keeping the wire shapes in one crate
 //! means the CLI and the server cannot disagree about them.
 
@@ -11,12 +11,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use mj_controller::hel_server::api::{
+use mj_controller::server::api::{
     API_VERSION, API_VERSION_HEADER, ApiSession, ExportRequest, PromptRequest, PromptResponse,
     PushedBranch, SessionListResponse, StartSessionRequest, StartSessionResponse,
     TranscriptResponse, WaitRequest, WaitResponse,
 };
-use mj_controller::hel_server::api_token_path;
+use mj_controller::server::api_token_path;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -155,7 +155,7 @@ impl ApiClient {
             .send(
                 self.http
                     .get(self.url("/sessions"))
-                    .query(&mj_controller::hel_server::api::SessionListQuery { workspace_id })
+                    .query(&mj_controller::server::api::SessionListQuery { workspace_id })
                     .timeout(REQUEST_TIMEOUT),
             )
             .await?;
@@ -166,7 +166,7 @@ impl ApiClient {
         &self,
         profile: &str,
         model: Option<String>,
-    ) -> Result<hel::hel_worker_launch::ProfileConfig> {
+    ) -> Result<mj_core::worker_launch::ProfileConfig> {
         let mut request = self
             .http
             .get(self.url(&format!("/profiles/{profile}/config")))
@@ -180,7 +180,7 @@ impl ApiClient {
     pub(crate) async fn set_config(
         &self,
         session: &str,
-        request: &mj_controller::hel_server::api::SetConfigRequest,
+        request: &mj_controller::server::api::SetConfigRequest,
     ) -> Result<ApiSession> {
         decode(
             self.send(
@@ -233,7 +233,7 @@ impl ApiClient {
         session_id: &str,
         after_seq: Option<u64>,
         limit: Option<usize>,
-        role: Option<hel::hel_transcript::TranscriptRole>,
+        role: Option<mj_core::transcript::TranscriptRole>,
     ) -> Result<TranscriptResponse> {
         let mut query = Vec::new();
         if let Some(role) = role {
@@ -254,7 +254,7 @@ impl ApiClient {
 
     pub(crate) async fn events(
         &self,
-        filter: &hel::hel_database::ApiEventFilter,
+        filter: &mj_controller::database::ApiEventFilter,
         after_seq: Option<u64>,
     ) -> Result<reqwest::Response> {
         let mut request = self
@@ -282,7 +282,7 @@ impl ApiClient {
         session_id: &str,
         after_seq: Option<u64>,
         limit: Option<usize>,
-    ) -> Result<hel::hel_database::UsagePage> {
+    ) -> Result<mj_controller::database::UsagePage> {
         self.get_json(&format!(
             "/sessions/{session_id}/usage?after_seq={}&limit={}",
             after_seq.unwrap_or(0),
@@ -308,7 +308,7 @@ impl ApiClient {
         path: &str,
         bytes: Vec<u8>,
         overwrite: bool,
-    ) -> Result<mj_controller::hel_server::api::WriteFileResponse> {
+    ) -> Result<mj_controller::server::api::WriteFileResponse> {
         self.send(
             self.http
                 .put(self.url(&format!("/sessions/{session_id}/files")))
@@ -329,7 +329,7 @@ impl ApiClient {
     pub(crate) async fn elicitations(
         &self,
         session_id: &str,
-    ) -> Result<Vec<hel::hel_elicitation::ElicitationRequest>> {
+    ) -> Result<Vec<mj_core::elicitation::ElicitationRequest>> {
         self.get_json(&format!("/sessions/{session_id}/elicitations"))
             .await
     }
@@ -338,7 +338,7 @@ impl ApiClient {
         &self,
         session_id: &str,
         elicitation_id: &str,
-        response: &hel::hel_elicitation::ElicitationResponse,
+        response: &mj_core::elicitation::ElicitationResponse,
     ) -> Result<()> {
         self.send(
             self.http

@@ -31,7 +31,7 @@ import urllib.request
 
 
 TIMEOUT = 20.0
-# Match the Codex spec in src/hel_harness_runtime.rs when updating that pin.
+# Match the Codex spec in mj-core/src/harness_runtime.rs when updating that pin.
 MANAGED_CODEX_INSTALL_ID = "brokkai-codex-acp-1.11.1_codex-0.153.4"
 
 

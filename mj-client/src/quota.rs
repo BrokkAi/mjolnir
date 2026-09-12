@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use hel::hel_config::HarnessKind;
+use mj_core::config::HarnessKind;
 
 /// Label used when a harness is billed by API usage rather than a subscription.
 pub const API_LABEL: &str = "API";

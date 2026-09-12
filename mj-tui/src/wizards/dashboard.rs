@@ -940,7 +940,7 @@ impl DashboardState {
         let path = std::path::Path::new(wizard.project_directory.trim());
         if wizard.project_directory.trim().is_empty() {
             wizard.project_directory_error = Some("Project directory cannot be empty.".into());
-        } else if let Err(error) = hel::hel_path_input::validate_absolute_input(path) {
+        } else if let Err(error) = mj_core::path_input::validate_absolute_input(path) {
             wizard.project_directory_error = Some(error.to_string());
         } else {
             let target_template_id = nth_key(&self.config.targets, wizard.target);
@@ -1338,7 +1338,7 @@ impl DashboardState {
         }
     }
 
-    pub fn apply_created_bundle(&mut self, config: HelConfig, bundle_id: &str) -> DashboardAction {
+    pub fn apply_created_bundle(&mut self, config: Config, bundle_id: &str) -> DashboardAction {
         self.config = config;
         let Mode::New(mut wizard) = self.mode.clone() else {
             return DashboardAction::None;
@@ -2228,7 +2228,7 @@ impl DashboardState {
     pub fn apply_move_preparation(
         &mut self,
         request_id: u64,
-        preparation: hel::hel_state::MovePreparation,
+        preparation: mj_core::state::MovePreparation,
     ) -> bool {
         let session_id = preparation.selection.session_id.clone();
         let Mode::Resume(wizard) = &mut self.mode else {
@@ -2278,7 +2278,7 @@ impl DashboardState {
     pub fn take_move_preparation(
         &mut self,
         session_id: &str,
-    ) -> Option<hel::hel_state::MovePreparation> {
+    ) -> Option<mj_core::state::MovePreparation> {
         let preparation = match &mut self.mode {
             Mode::Resume(wizard) if wizard.moving && wizard.session_id == session_id => {
                 wizard.preparation.take()
@@ -2435,7 +2435,7 @@ impl DashboardState {
         } else {
             self.config
                 .enabled_profiles()
-                .find(|(_, profile)| profile.kind == hel::hel_config::HarnessKind::Codex)
+                .find(|(_, profile)| profile.kind == mj_core::config::HarnessKind::Codex)
                 .or_else(|| self.config.enabled_profiles().next())
                 .map(|(id, _)| id.to_owned())
                 .ok_or(
@@ -2491,9 +2491,9 @@ impl DashboardState {
 
             new_bundle_selected: 0,
             new_bundle_repositories: Vec::new(),
-            new_bundle_source: mj_chat::hel_path_input::PathInput::new(),
+            new_bundle_source: mj_chat::path_input::PathInput::new(),
             bundle_creation_in_flight: false,
-            project_directory: mj_chat::hel_path_input::PathInput::new(),
+            project_directory: mj_chat::path_input::PathInput::new(),
             project_directory_error: None,
             project_history: Vec::new(),
             project_history_index: 0,

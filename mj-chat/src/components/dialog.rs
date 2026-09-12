@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use super::{ButtonRow, ControlKind, EventResult, Form, Interaction, Outcome};
-use crate::{hel_modal, hel_selection::FrameSurfaces, theme};
+use crate::{modal, selection::FrameSurfaces, theme};
 
 /// The meaning of an action, independent of its label and position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,7 +307,7 @@ impl<K: Copy + Eq> Dialog<K> {
         if !self.confirmation_open() {
             return;
         }
-        let popup = hel_modal::centered_modal_fixed(frame, surfaces, 56, 7, area);
+        let popup = modal::centered_modal_fixed(frame, surfaces, 56, 7, area);
         let block = theme::modal().title(" Discard unsaved changes? ");
         let inner = block.inner(popup);
         frame.render_widget(block, popup);

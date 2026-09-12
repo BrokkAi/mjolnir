@@ -12,23 +12,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use hel::hel_config::{HelConfig, ProjectBundle, is_bare_project_target};
-use hel::hel_database::DetachedSessionDraft;
-use hel::hel_remote_git::{default_branch, display_url, resolve_repository};
-use hel::hel_state::{
-    HelState, MaterializedSession, MovePreparation, ProjectSourceIdentity, SessionRecord,
-    SessionState,
+use mj_controller::database::DetachedSessionDraft;
+use mj_core::config::{Config, ProjectBundle, is_bare_project_target};
+use mj_core::remote_git::{default_branch, display_url, resolve_repository};
+use mj_core::state::{
+    MaterializedSession, MovePreparation, ProjectSourceIdentity, SessionRecord, SessionState, State,
 };
-use hel::hel_targets::CancellableProcessExecutor;
-use hel_tui::{
+
+use mj_controller::controller::Controller;
+use mj_controller::controller::ResumeRepositorySourcePreflight;
+use mj_controller::session_manager::SessionManagerControl;
+use mj_controller::targets::CancellableProcessExecutor;
+use mj_tui::{
     DashboardAction, PreparedMaterializedSessionDetail, PreparedMaterializedSessionSummary,
     RemoteRepositoryPreview, ReviewSettingsChoices, ReviewSettingsDiscoveryResult,
     SessionOperationKind, WebViewerAccess,
 };
-use hel_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
-use mj_controller::hel_controller::Controller;
-use mj_controller::hel_controller::ResumeRepositorySourcePreflight;
-use mj_controller::hel_session_manager::SessionManagerControl;
+use mj_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
@@ -55,7 +55,7 @@ pub(crate) enum DashboardIoUpdate {
         result: std::result::Result<WorkspaceManagementResult, String>,
     },
     WorkspacePaneSizes {
-        result: std::result::Result<BTreeMap<String, hel::hel_workspace::PaneSizes>, String>,
+        result: std::result::Result<BTreeMap<String, mj_core::workspace::PaneSizes>, String>,
     },
     WorkerRecordPersistence {
         operation: WorkerRecordPersistence,
@@ -81,7 +81,7 @@ pub(crate) enum DashboardIoUpdate {
     ChatOpened {
         generation: u64,
         session_id: String,
-        result: Box<std::result::Result<mj_chat::hel_chat::PreparedChat, String>>,
+        result: Box<std::result::Result<mj_chat::chat::PreparedChat, String>>,
     },
     /// The daemon refused a review action. The message is a sentence for the
     /// person who pressed the key, so it goes back to the chat that sent it.
@@ -100,7 +100,7 @@ pub(crate) enum DashboardIoUpdate {
     RemoteSourcesResolved {
         repositories: Vec<RemoteRepositoryPreview>,
     },
-    StartupConfig(HelConfig),
+    StartupConfig(Config),
     RenameSession {
         session_id: String,
         title: String,
@@ -125,7 +125,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     WebListeners {
         generation: u64,
-        result: Result<Vec<hel_tui::WebListenerProcess>, String>,
+        result: Result<Vec<mj_tui::WebListenerProcess>, String>,
     },
     WebAccessError {
         generation: u64,
@@ -133,11 +133,11 @@ pub(crate) enum DashboardIoUpdate {
     },
     SetupSaved {
         generation: u64,
-        result: std::result::Result<HelConfig, String>,
+        result: std::result::Result<Config, String>,
     },
     SetupDiscovered {
         generation: u64,
-        result: std::result::Result<HelConfig, String>,
+        result: std::result::Result<Config, String>,
     },
     ReviewSettingsDiscovered {
         generation: u64,
@@ -149,10 +149,10 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         profile_id: String,
         model: Option<String>,
-        choices: mj_controller::hel_review_settings::ReviewCapabilityChoices,
+        choices: mj_controller::review_settings::ReviewCapabilityChoices,
     },
     SpinnerStyleSaved {
-        result: std::result::Result<HelConfig, String>,
+        result: std::result::Result<Config, String>,
     },
     DetachedSessionState {
         session_id: String,
@@ -248,14 +248,14 @@ pub(crate) struct WorkspaceManagementResult {
 pub(crate) struct RegisteredDashboardSession {
     retry_launch: DashboardAction,
     session: SessionRecord,
-    remembered_container_size: Option<(String, hel::hel_state::HostContainerSize)>,
+    remembered_container_size: Option<(String, mj_core::state::HostContainerSize)>,
     cancelled: Arc<AtomicBool>,
 }
 
 pub(crate) enum DashboardCreateSessionUpdate {
     RemoteRepair {
         bundle_id: String,
-        repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
         retry: Box<DashboardAction>,
     },
     Registered(Box<RegisteredDashboardSession>),
@@ -267,7 +267,7 @@ pub(crate) enum DashboardCreateSessionUpdate {
 
 pub(crate) enum RemotePreflightOutcome {
     Ready(Vec<RemoteRepositoryPreview>),
-    Repair(Vec<hel::hel_local_git::LocalRemoteRepair>),
+    Repair(Vec<mj_core::local_git::LocalRemoteRepair>),
 }
 
 pub(crate) struct ImportedDashboardSessionApply {
@@ -279,12 +279,12 @@ pub(crate) struct ImportedDashboardSessionApply {
 }
 
 pub(crate) struct CreatedBundleUpdate {
-    config: HelConfig,
+    config: Config,
     bundle_id: String,
 }
 
 pub(crate) struct ResumeRepositoryPreflightApply {
-    pub(crate) config: Option<HelConfig>,
+    pub(crate) config: Option<Config>,
     pub(crate) preflight: ResumeRepositorySourcePreflight,
 }
 
@@ -299,10 +299,10 @@ pub(crate) struct LifecycleReloaded {
 }
 
 fn resolve_remote_repositories(
-    config: &HelConfig,
+    config: &Config,
     bundle_id: &str,
     target_template_id: &str,
-    executor: &impl hel::hel_targets::CommandExecutor,
+    executor: &impl mj_controller::targets::CommandExecutor,
 ) -> Result<Vec<RemoteRepositoryPreview>> {
     let target = config
         .targets
@@ -520,7 +520,7 @@ pub(crate) fn spawn_workspace_pane_sizes_load(
             workspace_ids
                 .into_iter()
                 .map(|workspace_id| {
-                    let sizes = hel::hel_database::load_workspace_pane_sizes(&workspace_id)?;
+                    let sizes = mj_controller::database::load_workspace_pane_sizes(&workspace_id)?;
                     Ok((workspace_id, sizes))
                 })
                 .collect()
@@ -701,7 +701,7 @@ where
 /// drops replies whose generation no longer matches the current draft.
 pub(crate) fn spawn_review_settings_discovery(
     control: SessionManagerControl,
-    request: mj_controller::hel_review_settings::ReviewDiscoveryRequest,
+    request: mj_controller::review_settings::ReviewDiscoveryRequest,
     generation: u64,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
@@ -713,7 +713,7 @@ pub(crate) fn spawn_review_settings_discovery(
     let worker_cancelled = cancelled.clone();
     tokio::spawn(async move {
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-        let discovery = mj_controller::hel_review_settings::discover_review_settings(
+        let discovery = mj_controller::review_settings::discover_review_settings(
             control,
             request,
             worker_cancelled,
@@ -739,14 +739,14 @@ pub(crate) fn spawn_review_settings_discovery(
             }
         }
         .map(|outcome| match outcome {
-            mj_controller::hel_review_settings::ReviewDiscoveryOutcome::Available {
+            mj_controller::review_settings::ReviewDiscoveryOutcome::Available {
                 choices,
                 cleanup_warning,
             } => ReviewSettingsDiscoveryResult::Available {
                 choices: review_settings_choices(choices),
                 cleanup_warning,
             },
-            mj_controller::hel_review_settings::ReviewDiscoveryOutcome::Unavailable => {
+            mj_controller::review_settings::ReviewDiscoveryOutcome::Unavailable => {
                 ReviewSettingsDiscoveryResult::Unavailable
             }
         })
@@ -765,7 +765,7 @@ pub(crate) fn spawn_review_settings_discovery(
 }
 
 fn review_settings_choices(
-    choices: mj_controller::hel_review_settings::ReviewCapabilityChoices,
+    choices: mj_controller::review_settings::ReviewCapabilityChoices,
 ) -> ReviewSettingsChoices {
     ReviewSettingsChoices {
         model_choices: choices.model_choices,
@@ -784,11 +784,11 @@ pub(crate) fn spawn_setup_discovery(
         "detecting setup",
         updates,
         move |cancelled| {
-            use mj_controller::hel_setup::{self, DEFAULT_IMAGE, RuntimeKind};
+            use mj_controller::setup::{self, DEFAULT_IMAGE, RuntimeKind};
             let executor =
                 CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            let discovery = hel_setup::discover_current(&executor);
-            let mut config = hel_setup::build_config(
+            let discovery = setup::discover_current(&executor);
+            let mut config = setup::build_config(
                 &discovery.homes,
                 discovery.repository.as_ref(),
                 RuntimeKind::Podman,
@@ -796,13 +796,13 @@ pub(crate) fn spawn_setup_discovery(
             );
             config.targets.clear();
             for runtime in discovery.runtimes.iter().filter(|runtime| runtime.usable) {
-                let (id, target) = hel_setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
+                let (id, target) = setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
                 config.targets.insert(id.to_owned(), target);
             }
             #[cfg(unix)]
             config.targets.insert(
                 "localhost".into(),
-                hel::hel_config::TargetTemplate::LocalBare,
+                mj_core::config::TargetTemplate::LocalBare,
             );
             Ok(config)
         },
@@ -822,8 +822,8 @@ pub(crate) fn spawn_setup_save(
         "saving setup",
         updates,
         move || {
-            let state = HelState::load()?;
-            save_setup_at(&hel::hel_config::config_path(), &original, &updated, &state)
+            let state = mj_controller::database::load_state_migrating()?;
+            save_setup_at(&mj_core::config::config_path(), &original, &updated, &state)
         },
         move |result| DashboardIoUpdate::SetupSaved { generation, result },
     )
@@ -833,13 +833,13 @@ fn save_setup_at(
     path: &std::path::Path,
     original: &str,
     updated: &str,
-    state: &HelState,
-) -> Result<HelConfig> {
+    state: &State,
+) -> Result<Config> {
     let original: serde_json::Value = serde_json::from_str(original)?;
-    let updated_config: HelConfig = serde_json::from_str(updated)?;
+    let updated_config: Config = serde_json::from_str(updated)?;
     updated_config.validate()?;
     let updated = serde_json::to_value(updated_config)?;
-    HelConfig::update_to(path, |config| {
+    Config::update_to(path, |config| {
         let current = serde_json::to_value(&*config)?;
         let merged = merge_setup_edit(Some(&original), Some(&updated), Some(&current), "Setup")?
             .context("setup cannot remove the configuration")?;
@@ -892,7 +892,7 @@ fn merge_setup_edit(
 }
 
 pub(crate) fn spawn_spinner_style_save(
-    style: hel::hel_config::SpinnerStyle,
+    style: mj_core::config::SpinnerStyle,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
@@ -901,7 +901,7 @@ pub(crate) fn spawn_spinner_style_save(
         "saving spinner style",
         updates,
         move || {
-            HelConfig::update(|config| {
+            Config::update(|config| {
                 config.spinner = style;
                 Ok(())
             })
@@ -924,11 +924,11 @@ pub(crate) fn spawn_project_source_resolution(
     let session = controller.state.sessions.get(&session_id).cloned();
     let source_controller = Controller {
         config,
-        state: HelState {
+        state: State {
             sessions: session
                 .map(|session| [(session_id.clone(), session)].into_iter().collect())
                 .unwrap_or_default(),
-            ..HelState::default()
+            ..State::default()
         },
     };
     let reported_session_id = session_id.clone();
@@ -954,12 +954,7 @@ pub(crate) fn spawn_project_source_resolution(
 }
 
 /// A controller that answers target questions from configuration alone.
-pub(crate) fn config_only_controller(config: HelConfig) -> Controller {
-    Controller {
-        config,
-        state: HelState::default(),
-    }
-}
+pub(crate) use mj_controller::controller::config_only_controller;
 
 /// What every session lifecycle operation needs to run off the loop.
 pub(crate) struct LifecycleOperationRequest {
@@ -1013,7 +1008,7 @@ pub(crate) fn spawn_lifecycle_operation(
 pub(crate) fn spawn_materialized_session_projection(
     materialized: MaterializedSession,
     viewed_through_event_ordinal: u64,
-    previous: hel_tui::MaterializedProjectionCache,
+    previous: mj_tui::MaterializedProjectionCache,
     updates: UnboundedSender<DashboardIoUpdate>,
     permits: Arc<tokio::sync::Semaphore>,
 ) {
@@ -1054,7 +1049,7 @@ pub(crate) fn spawn_stored_session_summary(
         "load stored session summary",
         updates,
         move || {
-            let summary = hel::hel_database::load_materialized_session_summary(&session_id)?
+            let summary = mj_controller::database::load_materialized_session_summary(&session_id)?
                 .with_context(|| format!("session {session_id} has no stored projection"))?;
             Ok(PreparedMaterializedSessionSummary::from_materialized(
                 summary,
@@ -1168,7 +1163,7 @@ pub(crate) struct ContainerSettingsRequest {
     pub(crate) session_id: String,
     pub(crate) cpus: Option<String>,
     pub(crate) memory: Option<String>,
-    pub(crate) additional_mounts: Vec<hel::hel_targets::AdditionalMount>,
+    pub(crate) additional_mounts: Vec<mj_controller::targets::AdditionalMount>,
     pub(crate) mount_history: Vec<std::path::PathBuf>,
     pub(crate) workspace_id: String,
     pub(crate) client_id: String,
@@ -1281,7 +1276,7 @@ pub(crate) fn spawn_clipboard_read(updates: UnboundedSender<DashboardIoUpdate>) 
     spawn_io(
         "read clipboard",
         updates,
-        mj_chat::hel_clipboard::read_text,
+        mj_chat::clipboard::read_text,
         DashboardIoUpdate::ClipboardText,
     )
 }
@@ -1294,7 +1289,7 @@ pub(crate) fn spawn_clipboard_write(
     spawn_io(
         "write clipboard",
         updates,
-        move || mj_chat::hel_clipboard::write_text(&text),
+        move || mj_chat::clipboard::write_text(&text),
         DashboardIoUpdate::ClipboardWritten,
     )
 }
@@ -1311,7 +1306,7 @@ pub(crate) fn spawn_create_bundle(
         move || {
             // Load fresh so a concurrent background save (e.g. an import
             // apply) is not clobbered by a stale UI-time config snapshot.
-            let created = mj_controller::hel_controller::create_bundle_from_sources(&sources)?;
+            let created = mj_controller::controller::create_bundle_from_sources(&sources)?;
             Ok(CreatedBundleUpdate {
                 config: created.config,
                 bundle_id: created.bundle_id,
@@ -1347,7 +1342,7 @@ pub(crate) fn spawn_imported_session_apply(
                 .get(&session.bundle_id)
                 .cloned()
                 .context("import worker did not return its session bundle")?;
-            HelConfig::update(|config| {
+            Config::update(|config| {
                 if let Some(existing) = config.bundles.get(&session.bundle_id) {
                     anyhow::ensure!(
                         existing == &bundle,
@@ -1493,7 +1488,7 @@ pub(crate) fn spawn_dashboard_create_session(
                     .bundles
                     .get(&bundle_id)
                     .context("unknown bundle")?;
-                let repairs = hel::hel_local_git::repository_remote_repairs(bundle, &executor)?;
+                let repairs = mj_core::local_git::repository_remote_repairs(bundle, &executor)?;
                 if !repairs.is_empty() {
                     updates
                         .send(DashboardIoUpdate::CreateSession(Box::new(
@@ -1820,7 +1815,7 @@ impl DashboardContext {
                         if let Some(ordinal) = self
                             .active_chat
                             .as_ref()
-                            .map(mj_chat::hel_chat::ActiveChat::latest_event_ordinal)
+                            .map(mj_chat::chat::ActiveChat::latest_event_ordinal)
                         {
                             self.record_detach(ordinal);
                         }
@@ -2526,23 +2521,23 @@ impl DashboardContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hel::hel_config::{HarnessKind, ProjectRepository};
-    use mj_controller::hel_controller::create_quick_bundle_in_config as create_quick_bundle;
+    use mj_controller::controller::create_quick_bundle_in_config as create_quick_bundle;
+    use mj_core::config::{HarnessKind, ProjectRepository};
 
     #[test]
     fn setup_save_refuses_to_remove_an_active_sessions_target_without_writing() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        let mut original = HelConfig::default();
+        let mut original = Config::default();
         original
             .targets
-            .insert("podman".into(), hel::hel_config::TargetTemplate::LocalBare);
+            .insert("podman".into(), mj_core::config::TargetTemplate::LocalBare);
         original.save_to(&path).unwrap();
         let before = std::fs::read(&path).unwrap();
         let session = lifecycle_session("session-1", "default", SessionState::Running);
-        let state = HelState {
+        let state = State {
             sessions: BTreeMap::from([(session.id.clone(), session)]),
-            ..HelState::default()
+            ..State::default()
         };
         let mut updated = original.clone();
         updated.targets.clear();
@@ -2565,19 +2560,19 @@ mod tests {
             &state,
         )
         .unwrap();
-        assert!(!HelConfig::load_from(&path).unwrap().startup.prompt);
+        assert!(!Config::load_from(&path).unwrap().startup.prompt);
     }
 
     #[test]
     fn setup_save_merges_unrelated_edits_and_refuses_conflicts_or_invalid_values() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        let original = HelConfig::default();
+        let original = Config::default();
         original.save_to(&path).unwrap();
         let mut edited = original.clone();
-        edited.sessions_side = hel::hel_config::SessionsSide::Right;
-        edited.theme = hel::hel_config::UiTheme::Light;
-        HelConfig::update_to(&path, |current| {
+        edited.sessions_side = mj_core::config::SessionsSide::Right;
+        edited.theme = mj_core::config::UiTheme::Light;
+        Config::update_to(&path, |current| {
             current.startup.prompt = false;
             Ok(())
         })
@@ -2587,17 +2582,17 @@ mod tests {
             &path,
             &original_json,
             &serde_json::to_string(&edited).unwrap(),
-            &HelState::default(),
+            &State::default(),
         )
         .unwrap();
-        assert_eq!(saved.sessions_side, hel::hel_config::SessionsSide::Right);
-        assert_eq!(saved.theme, hel::hel_config::UiTheme::Light);
+        assert_eq!(saved.sessions_side, mj_core::config::SessionsSide::Right);
+        assert_eq!(saved.theme, mj_core::config::UiTheme::Light);
         assert!(!saved.startup.prompt);
-        assert_eq!(HelConfig::load_from(&path).unwrap(), saved);
+        assert_eq!(Config::load_from(&path).unwrap(), saved);
 
         let mut conflicting = original.clone();
         conflicting.phone.bind = "127.0.0.1:1234".parse().unwrap();
-        HelConfig::update_to(&path, |current| {
+        Config::update_to(&path, |current| {
             current.phone.bind = "127.0.0.1:5678".parse().unwrap();
             Ok(())
         })
@@ -2608,7 +2603,7 @@ mod tests {
                 &path,
                 &original_json,
                 &serde_json::to_string(&conflicting).unwrap(),
-                &HelState::default(),
+                &State::default(),
             )
             .unwrap_err()
             .to_string()
@@ -2621,7 +2616,7 @@ mod tests {
                 &path,
                 &original_json,
                 &serde_json::to_string(&invalid).unwrap(),
-                &HelState::default(),
+                &State::default(),
             )
             .is_err()
         );
@@ -2729,7 +2724,7 @@ mod tests {
 
     #[test]
     fn quick_github_bundle_uses_collision_suffix_and_reuses_matching_source() {
-        let mut config = HelConfig::default();
+        let mut config = Config::default();
         config.bundles.insert(
             "app".into(),
             ProjectBundle {
@@ -2786,12 +2781,12 @@ mod tests {
             );
             return;
         }
-        let _writer = hel::hel_database::install_isolated_test_writer();
+        let _writer = mj_controller::database::install_isolated_test_writer();
 
-        let mut config = HelConfig::default();
+        let mut config = Config::default();
         config.profiles.insert(
             "codex".into(),
-            hel::hel_config::HarnessProfile {
+            mj_core::config::HarnessProfile {
                 enabled: true,
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/dev/.codex"),
@@ -2814,8 +2809,8 @@ mod tests {
         );
         config.targets.insert(
             "podman".into(),
-            hel::hel_config::TargetTemplate::LocalPodman {
-                container: hel::hel_config::ContainerTemplate {
+            mj_core::config::TargetTemplate::LocalPodman {
+                container: mj_core::config::ContainerTemplate {
                     image: "example.invalid/hel-test:latest".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -2828,22 +2823,22 @@ mod tests {
         );
         config.save().unwrap();
 
-        let database = hel::hel_database::database_path();
-        let alpha = hel::hel_database::create_workspace_at(&database, "alpha").unwrap();
-        let beta = hel::hel_database::create_workspace_at(&database, "beta").unwrap();
-        hel::hel_database::save_session(&lifecycle_session(
+        let database = mj_controller::database::database_path();
+        let alpha = mj_controller::database::create_workspace_at(&database, "alpha").unwrap();
+        let beta = mj_controller::database::create_workspace_at(&database, "beta").unwrap();
+        mj_controller::database::save_session(&lifecycle_session(
             "session-alpha-live",
             &alpha.id,
             SessionState::Running,
         ))
         .unwrap();
-        hel::hel_database::save_session(&lifecycle_session(
+        mj_controller::database::save_session(&lifecycle_session(
             "session-alpha-stopped",
             &alpha.id,
             SessionState::Stopped,
         ))
         .unwrap();
-        hel::hel_database::save_session(&lifecycle_session(
+        mj_controller::database::save_session(&lifecycle_session(
             "session-beta-live",
             &beta.id,
             SessionState::Running,

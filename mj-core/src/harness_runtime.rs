@@ -1,0 +1,59 @@
+//! Exact harness versions used by Mjolnir-managed bare workers.
+//!
+//! Installation and process ownership live in `brokk-mj-worker`; this module
+//! contains only shared, inert metadata so the controller, worker, container
+//! parity tests, and diagnostics cannot silently disagree about a pin.
+
+use crate::config::HarnessKind;
+
+pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
+pub const CODEX_ACP_VERSION: &str = "1.11.3";
+pub const CODEX_CLI_VERSION: &str = "0.153.4";
+pub const CLAUDE_ACP_VERSION: &str = "0.73.0";
+pub const KIMI_VERSION: &str = "0.41.0";
+pub const GROK_VERSION: &str = "1.0.13";
+pub const DEEPSEEK_DSH_VERSION: &str = "0.1.2-rc.1";
+pub const MUSE_ACP_VERSION: &str = "0.2.4";
+pub const MUSE_VERSION: &str = "1.0.3-R2198.1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarnessPin {
+    pub install_id: &'static str,
+    pub display_version: &'static str,
+    pub entrypoint: &'static str,
+}
+
+pub const fn pin(kind: HarnessKind) -> HarnessPin {
+    match kind {
+        HarnessKind::Muse => HarnessPin {
+            install_id: "muse-acp-0.2.4_muse-1.0.3-R2198.1",
+            display_version: "muse-acp 0.2.4 + Muse Code 1.0.3-R2198.1",
+            entrypoint: "bin/muse-acp",
+        },
+        HarnessKind::Codex => HarnessPin {
+            install_id: "brokkai-codex-acp-1.11.3_codex-0.153.4",
+            display_version: "@brokkai/codex-acp 1.11.3 + codex 0.153.4",
+            entrypoint: "node_modules/.bin/codex-acp",
+        },
+        HarnessKind::Claude => HarnessPin {
+            install_id: "claude-agent-acp-0.73.0",
+            display_version: "claude-agent-acp 0.73.0",
+            entrypoint: "node_modules/.bin/claude-agent-acp",
+        },
+        HarnessKind::Kimi => HarnessPin {
+            install_id: "kimi-0.41.0",
+            display_version: "Kimi Code 0.41.0",
+            entrypoint: "bin/kimi",
+        },
+        HarnessKind::Grok => HarnessPin {
+            install_id: "grok-1.0.13",
+            display_version: "Grok 1.0.13",
+            entrypoint: "bin/grok",
+        },
+        HarnessKind::Deepseek => HarnessPin {
+            install_id: "dsh-0.1.2-rc.1",
+            display_version: "dsh 0.1.2-rc.1 (bundled ACP)",
+            entrypoint: "node_modules/.bin/dsh",
+        },
+    }
+}

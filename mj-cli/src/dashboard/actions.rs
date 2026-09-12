@@ -7,14 +7,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
-use hel::hel_config::is_bare_project_target;
-use hel::hel_remote_git::{default_branch, display_url, resolve_repository};
-use hel::hel_state::{MoveSelection, MoveSessionRequest};
-use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor};
-use hel_tui::WebViewerAccess;
-use hel_tui::{DashboardAction, RemoteRepositoryPreview, SessionOperationKind};
-use mj_controller::hel_controller::{Controller, ResumeRepositorySourceReceipt};
-use mj_controller::hel_review_settings::ReviewDiscoveryRequest;
+use mj_core::config::is_bare_project_target;
+use mj_core::remote_git::{default_branch, display_url, resolve_repository};
+use mj_core::state::{MoveSelection, MoveSessionRequest};
+
+use mj_controller::controller::{Controller, ResumeRepositorySourceReceipt};
+use mj_controller::review_settings::ReviewDiscoveryRequest;
+use mj_controller::targets::{CancellableProcessExecutor, CommandExecutor};
+use mj_tui::WebViewerAccess;
+use mj_tui::{DashboardAction, RemoteRepositoryPreview, SessionOperationKind};
 
 use crate::daemon;
 use crate::dashboard::io::{
@@ -156,7 +157,7 @@ pub(crate) async fn apply_dashboard_action(
                 move |cancelled| {
                     let executor = CancellableProcessExecutor::new(cancelled)
                         .with_deadline(std::time::Duration::from_secs(30));
-                    mj_controller::hel_controller::resolve_target_input_path(
+                    mj_controller::controller::resolve_target_input_path(
                         &target,
                         std::path::Path::new(&requested),
                         &executor,
@@ -573,11 +574,11 @@ pub(crate) async fn apply_dashboard_action(
                 "repairing Git tracking",
                 context.dashboard_io_tx.clone(),
                 move |cancelled| {
-                    let config = hel::hel_config::HelConfig::load()?;
+                    let config = mj_core::config::Config::load()?;
                     let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
                     let executor = CancellableProcessExecutor::new(cancelled)
                         .with_deadline(std::time::Duration::from_secs(30));
-                    hel::hel_local_git::apply_repository_remote_repairs(bundle, &repairs, &executor)
+                    mj_core::local_git::apply_repository_remote_repairs(bundle, &repairs, &executor)
                 },
                 move |result| DashboardIoUpdate::RepositoryRemotesRepaired {
                     generation,
@@ -1052,7 +1053,7 @@ pub(crate) fn start_create_session_preflight(
                 .bundles
                 .get(&bundle_id)
                 .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
-            let repairs = hel::hel_local_git::repository_remote_repairs(bundle, &executor)?;
+            let repairs = mj_core::local_git::repository_remote_repairs(bundle, &executor)?;
             if !repairs.is_empty() {
                 return Ok(super::io::RemotePreflightOutcome::Repair(repairs));
             }
@@ -1200,7 +1201,7 @@ fn start_session_launch_with_repository_preflight(
 /// retired on purpose. The stop closes the relay feed, and the chat must read
 /// that as the expected end rather than a lost actor to chase.
 pub(crate) fn mark_active_chat_retiring(
-    active_chat: Option<&mut mj_chat::hel_chat::ActiveChat>,
+    active_chat: Option<&mut mj_chat::chat::ActiveChat>,
     session_id: &str,
 ) {
     if let Some(chat) = active_chat.filter(|chat| chat.session_id() == session_id) {
@@ -1332,7 +1333,7 @@ fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mj_chat::hel_chat::{ActiveChat, Notices, SessionHeaderIdentity};
+    use mj_chat::chat::{ActiveChat, Notices, SessionHeaderIdentity};
 
     fn open_chat(session_id: &str) -> ActiveChat {
         let fixture = mj_client::session::replacement_session_test_fixture(session_id, 1);

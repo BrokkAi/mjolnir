@@ -361,7 +361,7 @@ fn daemon_exits_when_its_owner_process_exits() {
 fn an_unusable_owner_pid_is_a_startup_error() {
     let (_storage, config_directory, data_directory) = configured_storage();
 
-    let output = hel::hel_subprocess::run_with_input(
+    let output = mj_core::subprocess::run_with_input(
         Command::new(env!("CARGO_BIN_EXE_mj"))
             .arg("daemon-run")
             .env("MJ_CONFIG_DIR", &config_directory)

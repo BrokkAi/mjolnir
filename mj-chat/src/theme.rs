@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, BorderType, Borders};
 
 use std::cell::Cell;
 
-pub use hel::hel_config::UiTheme;
+pub use mj_core::config::UiTheme;
 
 /// Semantic colors always paired with the palette's painted surfaces.
 #[derive(Debug)]

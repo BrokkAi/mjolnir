@@ -1,5 +1,5 @@
 //! Container settings composed from reusable terminal controls.
-use mj_chat::hel_path_input::PathInput;
+use mj_chat::path_input::PathInput;
 
 use std::cell::{Cell, RefCell};
 
@@ -544,7 +544,7 @@ impl DashboardState {
                 editor.error = None;
             }
             Some(Interaction::Activate(Source | Destination)) => {
-                match hel::hel_path_input::needs_home(std::path::Path::new(editor.source.trim())) {
+                match mj_core::path_input::needs_home(std::path::Path::new(editor.source.trim())) {
                     Ok(true) => {
                         let action = DashboardAction::ResolveContainerPath {
                             session_id: editor.session_id.clone(),

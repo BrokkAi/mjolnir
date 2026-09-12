@@ -5,10 +5,10 @@
 //! summaries under it, with a shared one-row footer. There is no second screen
 //! to switch to, so nothing is ever hidden behind a navigation step.
 
-use hel::hel_state::SessionTransitionKind;
-use mj_chat::hel_chat::{ActiveChat, ChatFooter, ChatRegions};
-use mj_chat::hel_selection::{SurfaceFrame, SurfaceId};
+use mj_chat::chat::{ActiveChat, ChatFooter, ChatRegions};
+use mj_chat::selection::{SurfaceFrame, SurfaceId};
 use mj_chat::{spinner, theme};
+use mj_core::state::SessionTransitionKind;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -360,7 +360,7 @@ fn render_combined_themed(
 
     let sidebar_width =
         sessions_sidebar_width(area.width, dashboard.pane_size(SupportPane::Sessions));
-    let sidebar_right = dashboard.config.sessions_side == hel::hel_config::SessionsSide::Right;
+    let sidebar_right = dashboard.config.sessions_side == mj_core::config::SessionsSide::Right;
     let content_area = Rect::new(
         area.x + if sidebar_right { 0 } else { sidebar_width },
         area.y,
@@ -820,7 +820,7 @@ fn render_transition_surface(
             Line::raw(format!("Current stage: {stages}")),
             Line::raw(format!(
                 "Elapsed: {} · Profile: {profile}",
-                mj_chat::usage_format::format_clock(now.saturating_sub(started_at))
+                mj_client::usage_format::format_clock(now.saturating_sub(started_at))
             )),
         ])
         .wrap(Wrap { trim: true })
@@ -1055,7 +1055,7 @@ mod tests {
 
     #[test]
     fn support_layout_moves_both_panes_at_the_measured_threshold_for_every_sidebar_size() {
-        use hel::hel_config::SessionsSide;
+        use mj_core::config::SessionsSide;
         use ratatui::{Terminal, backend::TestBackend};
         for side in [SessionsSide::Left, SessionsSide::Right] {
             for size in [PaneSize::Minimized, PaneSize::Standard, PaneSize::Maximized] {
@@ -1095,7 +1095,7 @@ mod tests {
 
     #[test]
     fn resizing_sidebar_relayouts_support_panes_without_resizing_terminal() {
-        use hel::hel_config::SessionsSide;
+        use mj_core::config::SessionsSide;
         use ratatui::{Terminal, backend::TestBackend};
 
         for side in [SessionsSide::Left, SessionsSide::Right] {

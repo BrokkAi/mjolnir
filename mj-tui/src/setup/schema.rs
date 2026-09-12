@@ -163,7 +163,7 @@ pub(super) fn choice_label(value: &Value) -> String {
         };
     };
     if let Ok(theme) =
-        serde_json::from_value::<hel::hel_config::UiTheme>(Value::String(value.into()))
+        serde_json::from_value::<mj_core::config::UiTheme>(Value::String(value.into()))
     {
         return theme.label().into();
     }
@@ -220,13 +220,13 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         _ => &[],
     };
     if path.len() == 1 && key == "theme" {
-        return hel::hel_config::UiTheme::ALL
+        return mj_core::config::UiTheme::ALL
             .into_iter()
             .map(|theme| serde_json::to_value(theme).expect("theme serializes"))
             .collect();
     }
     if key == "spinner" {
-        let first = hel::hel_config::SpinnerStyle::default();
+        let first = mj_core::config::SpinnerStyle::default();
         let mut current = first;
         let mut choices = Vec::new();
         loop {

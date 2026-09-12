@@ -4,19 +4,20 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hel::hel_config::HelConfig;
-use hel::hel_elicitation::ElicitationRequest;
-use hel::hel_state::{
-    HelState, MaterializedExecutionState, MaterializedSession, MaterializedSessionSummary,
-    MoveOperation, SessionRecord, SessionResourceAllocation, TranscriptBody, TranscriptItem,
+use mj_core::config::Config;
+use mj_core::elicitation::ElicitationRequest;
+use mj_core::state::{
+    MaterializedExecutionState, MaterializedSession, MaterializedSessionSummary, MoveOperation,
+    SessionRecord, SessionResourceAllocation, State, TranscriptBody, TranscriptItem,
     normalize_session_title,
 };
-use hel::hel_targets::{
+
+use mj_chat::chat::{Notices, TranscriptSnapshot};
+use mj_client::quota::ProfileQuota;
+use mj_core::targets::{
     DeploymentCapacityTarget, DeploymentCapacityUsage, ProvisionStage, SessionResourceUsage,
 };
-use hel::hel_transcript::{materialized_content_text, materialized_tool_diffstats};
-use mj_chat::hel_chat::{Notices, TranscriptSnapshot};
-use mj_client::quota::ProfileQuota;
+use mj_core::transcript::{materialized_content_text, materialized_tool_diffstats};
 
 use crate::render::session_review_display_signature;
 use crate::render_changes::{
@@ -62,7 +63,7 @@ pub(crate) struct SessionDetail {
     pub(crate) current_step_started_at_ms: Option<u64>,
     /// What the session is doing beyond its turn clock: the turn the harness
     /// started on its own, and the commands the agent left running.
-    pub(crate) activity: mj_chat::usage_format::SessionActivity,
+    pub(crate) activity: mj_client::usage_format::SessionActivity,
     /// Latest agent-content ordinals retained so a state-only read-cursor
     /// update can recompute unread agent messages exactly.
     pub(crate) agent_message_latest_content_ordinals: Vec<u64>,
@@ -72,7 +73,7 @@ pub(crate) struct SessionDetail {
     pub(crate) resource_usage: Option<SessionResourceUsage>,
     pub(crate) transcript: Option<TranscriptSnapshot>,
     pub(crate) transcript_hydration: TranscriptHydration,
-    pub(crate) queued_prompts: Vec<hel::hel_worker::QueuedPrompt>,
+    pub(crate) queued_prompts: Vec<mj_core::relay::QueuedPrompt>,
     /// Form requests the agent is currently waiting for. This comes from the
     /// complete materialized projection and drives the dashboard's attention
     /// indicator without opening a live chat connection.
@@ -120,7 +121,7 @@ pub struct MaterializedProjectionCache {
     /// Exact stats for terminal tool items, keyed by logical identity and
     /// revision so unrelated transcript updates never repeat their diff.
     tool_diffstats: BTreeMap<(String, i64), Vec<String>>,
-    converted_entries: Arc<Vec<hel::hel_transcript::ChatEntry>>,
+    converted_entries: Arc<Vec<mj_core::transcript::ChatEntry>>,
     converted_diffstats: BTreeMap<String, Vec<String>>,
 }
 
@@ -150,7 +151,7 @@ fn last_agent_message_in(
             let TranscriptBody::Agent { chunks, .. } = &item.body else {
                 return None;
             };
-            let text = hel::hel_transcript::materialized_chunks_text(chunks);
+            let text = mj_core::transcript::materialized_chunks_text(chunks);
             (!text.trim().is_empty()).then(|| (start + offset, Arc::from(text)))
         })
 }
@@ -182,7 +183,7 @@ pub(crate) fn last_agent_message(
 fn agent_activity_text(item: &TranscriptItem) -> Option<Arc<str>> {
     let text = match &item.body {
         TranscriptBody::Thought { chunks, .. } => {
-            hel::hel_transcript::materialized_chunks_text(chunks)
+            mj_core::transcript::materialized_chunks_text(chunks)
         }
         TranscriptBody::Tool { call, .. } => call
             .get("title")
@@ -236,7 +237,7 @@ pub struct PreparedMaterializedSessionDetail {
     session_restart_event_ordinals: Vec<u64>,
     pub(crate) unread_session_restarts: usize,
     pub(crate) transcript: TranscriptSnapshot,
-    pub(crate) queued_prompts: Vec<hel::hel_worker::QueuedPrompt>,
+    pub(crate) queued_prompts: Vec<mj_core::relay::QueuedPrompt>,
     pub(crate) pending_elicitations: Vec<ElicitationRequest>,
     pub(crate) projection: MaterializedProjectionCache,
 }
@@ -294,7 +295,7 @@ impl PreparedMaterializedSessionSummary {
                 .and_then(|value| u64::try_from(value).ok()),
             last_agent_message: summary.last_agent_message.map(Arc::from),
             last_user_message: summary.last_user_message.and_then(|message| {
-                let visible = hel::hel_worker::strip_hidden_prompt_context(&message);
+                let visible = mj_core::relay::strip_hidden_prompt_context(&message);
                 (!visible.trim().is_empty()).then(|| Arc::from(visible.to_owned()))
             }),
             last_agent_message_follows_last_user: summary.last_agent_message_follows_last_user,
@@ -406,7 +407,7 @@ impl PreparedMaterializedSessionDetail {
         let queued_prompts = session
             .queued_prompts
             .iter()
-            .map(|prompt| hel::hel_worker::QueuedPrompt {
+            .map(|prompt| mj_core::relay::QueuedPrompt {
                 id: prompt.command_id.clone(),
                 text: materialized_content_text(&prompt.content),
                 attachments: Vec::new(),
@@ -520,7 +521,7 @@ impl DashboardState {
         }
     }
 
-    pub fn set_config(&mut self, config: HelConfig) {
+    pub fn set_config(&mut self, config: Config) {
         // Background saves return a fresh snapshot even when configuration
         // did not change. They must not close a dialog opened after submission.
         if self.config == config {
@@ -538,7 +539,7 @@ impl DashboardState {
         self.mark_render_changed();
     }
 
-    pub fn set_state(&mut self, state: HelState) {
+    pub fn set_state(&mut self, state: State) {
         let previous_visible = self.visible_state_signature();
         let resume_dialog_state_changed = matches!(self.mode, Mode::ResumeDialog(_))
             && (self.state.sessions.iter().any(|(id, previous)| {
@@ -665,13 +666,13 @@ impl DashboardState {
 
     fn move_recovery_signature(
         &self,
-    ) -> BTreeMap<String, (hel::hel_state::MovePhase, bool, bool, bool)> {
+    ) -> BTreeMap<String, (mj_core::state::MovePhase, bool, bool, bool)> {
         self.move_operations
             .iter()
             .filter(|(_, operation)| {
                 matches!(
                     operation.phase,
-                    hel::hel_state::MovePhase::Failed | hel::hel_state::MovePhase::Cancelled
+                    mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
                 ) && (operation.checkpoint.is_some()
                     || (operation.queue_admission_started && !operation.queue_admission_finished))
             })
@@ -1268,7 +1269,7 @@ impl DashboardState {
     pub fn set_session_activity(
         &mut self,
         session_id: &str,
-        activity: mj_chat::usage_format::SessionActivity,
+        activity: mj_client::usage_format::SessionActivity,
     ) {
         let changed = self
             .session_details
@@ -1364,7 +1365,7 @@ impl DashboardState {
     pub fn apply_queued_prompts(
         &mut self,
         session_id: &str,
-        queued_prompts: Vec<hel::hel_worker::QueuedPrompt>,
+        queued_prompts: Vec<mj_core::relay::QueuedPrompt>,
     ) {
         let changed = self
             .session_details
@@ -1429,12 +1430,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use hel::hel_state::{
-        HelState, MaterializedExecutionState, MaterializedSession, SessionState, TranscriptBody,
+    use mj_core::state::{
+        MaterializedExecutionState, MaterializedSession, SessionState, State, TranscriptBody,
         TranscriptItem,
     };
-    use hel::hel_targets::ProvisionStage;
-    use mj_chat::hel_chat::Notices;
+
+    use mj_chat::chat::Notices;
+    use mj_core::targets::ProvisionStage;
 
     use super::*;
     use crate::test_support::*;
@@ -1475,7 +1477,7 @@ mod tests {
     #[test]
     fn duplicate_visible_activity_update_does_not_request_a_frame() {
         let mut dashboard = dashboard_with_session(running_session());
-        let activity = mj_chat::usage_format::SessionActivity {
+        let activity = mj_client::usage_format::SessionActivity {
             pursuing_goal: Default::default(),
             activity_turn_started_at_ms: Some(1_000),
             ..Default::default()
@@ -1558,7 +1560,7 @@ mod tests {
 
     #[test]
     fn notice_replacement_does_not_overwrite_a_newer_notice() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         dashboard.set_notice("Refreshing profile quotas…");
         assert!(
             dashboard.replace_notice_if("Refreshing profile quotas…", "Profile quotas refreshed.")
@@ -1583,8 +1585,8 @@ mod tests {
         let mut dashboard = dashboard_with_session(stopped_session());
         let review = mj_client::review::RuntimeReviewView {
             session_id: "session-1".into(),
-            tier: hel::hel_review::lanes::ReviewTier::Quick,
-            phase: hel::hel_review::driver::TurnReviewPhase::LaunchingReviewer,
+            tier: mj_core::review::lanes::ReviewTier::Quick,
+            phase: mj_core::review::driver::TurnReviewPhase::LaunchingReviewer,
             roles: Vec::new(),
             status: "starting the reviewer…".into(),
             verdict: None,
@@ -1604,7 +1606,7 @@ mod tests {
     /// what the dashboard sets, and the dashboard sees what the clone sets.
     #[test]
     fn a_shared_notice_is_visible_through_every_clone_of_the_handle() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         let shared = Notices::default();
         dashboard.share_notices(shared.clone());
 
@@ -1820,10 +1822,10 @@ mod tests {
         let mut initial = materialized_session_for("session-1", vec![agent_message(1, "first ")]);
         initial
             .queued_prompts
-            .push(hel::hel_state::MaterializedQueuedPrompt {
+            .push(mj_core::state::MaterializedQueuedPrompt {
                 accepted_ordinal: None,
                 command_id: "queued-1".into(),
-                kind: hel::hel_state::QueuedCommandKind::Prompt,
+                kind: mj_core::state::QueuedCommandKind::Prompt,
                 content: vec![serde_json::json!({ "type": "text", "text": "next task" })],
                 queued_at_ms: 0,
             });
@@ -2320,7 +2322,7 @@ mod tests {
 
     #[test]
     fn setting_a_stage_for_an_unknown_session_is_ignored() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         dashboard.set_session_operation_stage("missing", ProvisionStage::Booting, true);
         assert!(dashboard.session_operations.is_empty());
     }
@@ -2362,14 +2364,14 @@ mod tests {
 
     #[test]
     fn set_resume_destination_for_an_unknown_session_is_ignored() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         dashboard.set_resume_destination("missing", "grok-1".into(), "localhost".into());
         assert!(dashboard.session_operations.is_empty());
     }
 
     #[test]
     fn repeating_a_stage_report_does_not_reset_its_clock() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         dashboard.begin_session_operation(
             "session-1".into(),
             SessionOperationKind::Launching,
@@ -2393,7 +2395,7 @@ mod tests {
 
     #[test]
     fn finishing_one_stage_keeps_a_concurrent_stage_active() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         dashboard.begin_session_operation(
             "session-1".into(),
             SessionOperationKind::Launching,
@@ -2415,7 +2417,7 @@ mod tests {
 
     #[test]
     fn transition_kind_prefers_operations_and_import_does_not_hide_chat() {
-        use hel::hel_state::SessionTransitionKind;
+        use mj_core::state::SessionTransitionKind;
 
         let mut session = stopped_session();
         session.state = SessionState::Provisioning;
@@ -2443,7 +2445,7 @@ mod tests {
         assert_eq!(dashboard.transition_kind("session-1"), None);
         assert_eq!(
             dashboard.transition_failure_kind("session-1"),
-            Some(hel::hel_state::SessionTransitionKind::Stopping)
+            Some(mj_core::state::SessionTransitionKind::Stopping)
         );
     }
 }

@@ -1,5 +1,5 @@
 //! New-session and resume wizards, including their mount and review steps.
-use mj_chat::hel_path_input::PathInput;
+use mj_chat::path_input::PathInput;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -12,21 +12,23 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use hel::hel_config::{
-    HelConfig, TargetTemplate, container_size_host, is_bare_project_target, mount_history_host,
+use mj_core::config::{
+    Config, TargetTemplate, container_size_host, is_bare_project_target, mount_history_host,
     project_history_host, raw_project_context_id,
 };
-use hel::hel_state::{
-    HelState, MaterializedQueuedPrompt, MoveOperation, MovePreparation, ResumeQueueDisposition,
-    SessionRecord, SessionResourceAllocation, SessionState, allocation_cpus, allocation_memory,
+use mj_core::state::{
+    MaterializedQueuedPrompt, MoveOperation, MovePreparation, ResumeQueueDisposition,
+    SessionRecord, SessionResourceAllocation, SessionState, State, allocation_cpus,
+    allocation_memory,
 };
-use hel::hel_targets::{AdditionalMount, default_mount_destination, path_completion};
+
 use mj_chat::components::PathField;
 use mj_chat::components::{
     Checkbox, ChoiceList, ConsumedEvent, ControlKind, Dialog, FieldEdit, FormViewport, Interaction,
     Outcome,
 };
-use mj_chat::hel_selection::FrameSurfaces;
+use mj_chat::selection::FrameSurfaces;
+use mj_core::targets::{AdditionalMount, default_mount_destination, path_completion};
 
 use crate::widgets::{centered_modal, dismissible_modal_title, format_resource_bytes};
 use crate::{
@@ -437,7 +439,7 @@ fn edit_selected_resume_mount(wizard: &mut ResumeWizard) {
 
 fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
     if let Err(error) =
-        hel::hel_path_input::validate_absolute_input(std::path::Path::new(mounts.source.trim()))
+        mj_core::path_input::validate_absolute_input(std::path::Path::new(mounts.source.trim()))
     {
         return Some(error.to_string());
     }
@@ -446,7 +448,7 @@ fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
         destination: mounts.destination.to_string().into(),
         read_only: mounts.read_only,
     };
-    if let Err(error) = hel::hel_targets::validate_mount_destination(&mount.destination) {
+    if let Err(error) = mj_core::targets::validate_mount_destination(&mount.destination) {
         return Some(error.to_string());
     }
     let duplicate = mounts.mounts.iter().enumerate().any(|(index, existing)| {
@@ -1207,7 +1209,7 @@ struct ReviewWizardView<'a> {
     source_unavailable: bool,
     clear_resource_allocation: bool,
     queue: Option<(usize, bool)>,
-    queued_entries: &'a [hel::hel_worker::QueuedPrompt],
+    queued_entries: &'a [mj_core::relay::QueuedPrompt],
     prepared_entries: &'a [MaterializedQueuedPrompt],
     remote_repositories: Option<&'a [RemoteRepositoryPreview]>,
     remote_preflight_in_flight: bool,
@@ -1353,7 +1355,7 @@ fn render_review_wizard(
     // Guardian targets rely on the harness's own approval mode rather than
     // Hel-managed isolation.
     if (matches!(target, TargetTemplate::LocalBare)
-        || target.permission_mode() == Some(hel::hel_config::PermissionMode::Guardian))
+        || target.permission_mode() == Some(mj_core::config::PermissionMode::Guardian))
         && let Some(kind) = dashboard
             .config
             .profiles
@@ -1505,12 +1507,12 @@ fn render_review_wizard(
         }
         for (index, entry) in prepared_entries.iter().enumerate() {
             let (kind, text) = match &entry.kind {
-                hel::hel_state::QueuedCommandKind::Prompt => (
+                mj_core::state::QueuedCommandKind::Prompt => (
                     "prompt",
-                    hel::hel_transcript::materialized_content_text(&entry.content),
+                    mj_core::transcript::materialized_content_text(&entry.content),
                 ),
-                hel::hel_state::QueuedCommandKind::SetConfig { key, value } => {
-                    ("config", hel::hel_state::config_command_text(key, value))
+                mj_core::state::QueuedCommandKind::SetConfig { key, value } => {
+                    ("config", mj_core::state::config_command_text(key, value))
                 }
             };
             let text = if text.trim().is_empty() {
@@ -1859,8 +1861,8 @@ pub(crate) fn render_resume_wizard(
                             && matches!(
                                 dashboard.config.targets.get(&target_id),
                                 Some(
-                                    hel::hel_config::TargetTemplate::LocalBare
-                                        | hel::hel_config::TargetTemplate::SshBare { .. }
+                                    mj_core::config::TargetTemplate::LocalBare
+                                        | mj_core::config::TargetTemplate::SshBare { .. }
                                 )
                             )
                     },
@@ -2008,7 +2010,7 @@ pub(crate) fn render_resume_wizard(
     });
 }
 
-fn nth_bundle_key(config: &HelConfig, state: &HelState, index: usize) -> String {
+fn nth_bundle_key(config: &Config, state: &State, index: usize) -> String {
     bundle_ids_by_recent_creation(config, state)
         .get(index)
         .expect("wizard is only opened for non-empty configuration")
@@ -2016,8 +2018,8 @@ fn nth_bundle_key(config: &HelConfig, state: &HelState, index: usize) -> String 
 }
 
 fn most_recent_configured_session<'a>(
-    config: &HelConfig,
-    state: &'a HelState,
+    config: &Config,
+    state: &'a State,
 ) -> Option<&'a SessionRecord> {
     state
         .sessions
@@ -2034,7 +2036,7 @@ fn most_recent_configured_session<'a>(
         })
 }
 
-fn bundle_ids_by_recent_creation<'a>(config: &'a HelConfig, state: &HelState) -> Vec<&'a str> {
+fn bundle_ids_by_recent_creation<'a>(config: &'a Config, state: &State) -> Vec<&'a str> {
     let mut latest_created_at = BTreeMap::<&str, i64>::new();
     for session in state.sessions.values() {
         if !config.bundles.contains_key(&session.bundle_id) {

@@ -14,7 +14,7 @@ fn main() {
         target_os = "windows",
         all(target_os = "linux", target_env = "gnu")
     ))]
-    mj_controller::hel_server::install_rustls_crypto_provider();
+    mj_controller::server::install_rustls_crypto_provider();
     if let Err(error) = run_cli() {
         eprintln!("mj-desktop: {error:#}");
         std::process::exit(1);
@@ -75,8 +75,8 @@ mod supported {
     use axum::body::Body;
     use axum::extract::State;
     use axum::http::{HeaderMap, Request, Response, StatusCode, header};
-    use mj_controller::hel_desktop::{DesktopLaunch, sibling_executable};
-    use mj_controller::hel_server::COOKIE_NAME;
+    use mj_controller::desktop::{DesktopLaunch, sibling_executable};
+    use mj_controller::server::COOKIE_NAME;
 
     /// Headers that describe one transport hop rather than the end-to-end
     /// request and therefore must not cross the desktop proxy.
@@ -167,7 +167,7 @@ mod supported {
         let executable = controller_executable()?;
         let mut command = std::process::Command::new(&executable);
         command.arg("desktop-bootstrap");
-        let output = hel::hel_subprocess::run_with_input(&mut command, &[])
+        let output = mj_core::subprocess::run_with_input(&mut command, &[])
             .with_context(|| format!("start Mjolnir controller {}", executable.display()))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -181,7 +181,7 @@ mod supported {
     }
 
     fn controller_executable() -> Result<PathBuf> {
-        let path = if let Some(path) = hel::hel_config::env_override_os("CONTROLLER_BINARY") {
+        let path = if let Some(path) = mj_core::config::env_override_os("CONTROLLER_BINARY") {
             PathBuf::from(path)
         } else {
             let current = std::env::current_exe().context("locate the mj-desktop executable")?;

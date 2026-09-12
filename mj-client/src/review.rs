@@ -1,8 +1,8 @@
 //! Review data shared by Mjolnir's control surfaces.
 
-use hel::hel_review::driver::{Resolution, RoleState, RoleStatus, TurnReviewPhase};
-use hel::hel_review::lanes::ReviewTier;
-use hel::hel_review::verdict::ReviewVerdict;
+use mj_core::review::driver::{Resolution, RoleState, RoleStatus, TurnReviewPhase};
+use mj_core::review::lanes::ReviewTier;
+use mj_core::review::verdict::ReviewVerdict;
 
 /// What the host tells a surface about one running review.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -47,7 +47,7 @@ impl RuntimeReviewView {
             }),
             TurnReviewPhase::Running { roles }
                 if roles.iter().any(|role| {
-                    role.role == hel::hel_review::driver::VALIDATOR_ROLE
+                    role.role == mj_core::review::driver::VALIDATOR_ROLE
                         && matches!(role.state, RoleState::Pending | RoleState::Running)
                 }) =>
             {
@@ -83,7 +83,7 @@ pub enum VerdictKind {
 /// keeps the plan reviewer's id, which is the one the worker uses.
 #[must_use]
 pub fn role_session_id(primary_session_id: &str, role: &str) -> String {
-    if role == hel::hel_review::driver::REVIEWER_ROLE {
+    if role == mj_core::review::driver::REVIEWER_ROLE {
         format!("{primary_session_id}-reviewer")
     } else {
         format!("{primary_session_id}-review-{role}")

@@ -13,9 +13,7 @@ mod desktop;
 mod import;
 mod logging;
 mod pollers;
-mod server;
 mod session_presentation;
-mod web_viewer;
 
 use std::io::{self, Write};
 #[cfg(test)]
@@ -32,12 +30,13 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use hel::hel_config::{HelConfig, config_path};
-use hel::hel_state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
+use mj_core::config::{Config, config_path};
+use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
+
+use mj_controller::controller::Controller;
+use mj_controller::setup::{SetupOutcome, run_setup_dialog};
 #[cfg(test)]
-use hel::hel_targets::ProcessExecutor;
-use mj_controller::hel_controller::Controller;
-use mj_controller::hel_setup::{SetupOutcome, run_setup_dialog};
+use mj_controller::targets::ProcessExecutor;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -266,7 +265,7 @@ enum SetupPlatform {
 }
 
 fn main() -> Result<()> {
-    mj_controller::hel_server::install_rustls_crypto_provider();
+    mj_controller::server::install_rustls_crypto_provider();
     let cli = Cli::parse();
     let log = Some(logging::ControllerLog::start(command_name(
         cli.command.as_ref(),
@@ -293,7 +292,7 @@ fn run(cli: Cli) -> Result<()> {
         // checked, prompted for, and applied. The check is throttled and the
         // whole flow finishes before the TUI takes over the terminal; a
         // successful upgrade never returns because the process re-execs.
-        runtime.block_on(mj_controller::hel_controller::update::check_prompt_and_apply());
+        runtime.block_on(mj_controller::controller::update::check_prompt_and_apply());
     }
     let result = runtime.block_on(run_command(cli.command, cli.workspace));
     if matches!(
@@ -471,7 +470,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
     {
         let error = anyhow::anyhow!("non-interactive moves require --yes");
         if args.json {
-            print_move_json(&hel::hel_state::MoveOutcome {
+            print_move_json(&mj_core::state::MoveOutcome {
                 operation_id: String::new(),
                 session_id: args.session.clone(),
                 profile_id: args.profile.clone().unwrap_or_default(),
@@ -487,7 +486,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         Ok(daemon) => daemon,
         Err(error) => {
             if args.json {
-                print_move_json(&hel::hel_state::MoveOutcome {
+                print_move_json(&mj_core::state::MoveOutcome {
                     operation_id: String::new(),
                     session_id: args.session.clone(),
                     profile_id: args.profile.clone().unwrap_or_default(),
@@ -512,7 +511,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         Ok(preparation) => preparation,
         Err(error) => {
             if args.json {
-                print_move_json(&hel::hel_state::MoveOutcome {
+                print_move_json(&mj_core::state::MoveOutcome {
                     operation_id: String::new(),
                     session_id: args.session.clone(),
                     profile_id: args.profile.clone().unwrap_or_default(),
@@ -594,7 +593,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
                 Err(_) => tracing::warn!("timed out requesting move cancellation"),
             }
             let error = anyhow::anyhow!("move cancellation requested for {}", args.session);
-            let cancelled = hel::hel_state::MoveOutcome {
+            let cancelled = mj_core::state::MoveOutcome {
                 operation_id: preparation.operation_id.clone(),
                 session_id: preparation.selection.session_id.clone(),
                 profile_id: preparation.selection.profile_id.clone().unwrap_or_else(|| preparation.source_profile_id.clone()),
@@ -647,7 +646,7 @@ async fn prompt_queue_choice(pending: usize) -> Result<ResumeQueueDisposition> {
 }
 
 async fn prompt_move_confirmation(
-    preparation: &hel::hel_state::MovePreparation,
+    preparation: &mj_core::state::MovePreparation,
     queue: Option<ResumeQueueDisposition>,
 ) -> Result<bool> {
     let active = preparation.active;
@@ -692,12 +691,12 @@ async fn prompt_move_confirmation(
                 );
                 for (index, command) in queued_commands.iter().enumerate() {
                     let (kind, text) = match &command.kind {
-                        hel::hel_state::QueuedCommandKind::Prompt => (
+                        mj_core::state::QueuedCommandKind::Prompt => (
                             "prompt",
-                            hel::hel_transcript::materialized_content_text(&command.content),
+                            mj_core::transcript::materialized_content_text(&command.content),
                         ),
-                        hel::hel_state::QueuedCommandKind::SetConfig { key, value } => {
-                            ("config", hel::hel_state::config_command_text(key, value))
+                        mj_core::state::QueuedCommandKind::SetConfig { key, value } => {
+                            ("config", mj_core::state::config_command_text(key, value))
                         }
                     };
                     let text = text.replace('\n', " ");
@@ -729,10 +728,10 @@ async fn prompt_move_confirmation(
 }
 
 fn move_error_outcome(
-    preparation: &hel::hel_state::MovePreparation,
+    preparation: &mj_core::state::MovePreparation,
     error: String,
-) -> hel::hel_state::MoveOutcome {
-    hel::hel_state::MoveOutcome {
+) -> mj_core::state::MoveOutcome {
+    mj_core::state::MoveOutcome {
         operation_id: preparation.operation_id.clone(),
         session_id: preparation.selection.session_id.clone(),
         profile_id: preparation
@@ -751,12 +750,12 @@ fn move_error_outcome(
     }
 }
 
-fn print_move_json(outcome: &hel::hel_state::MoveOutcome) -> Result<()> {
+fn print_move_json(outcome: &mj_core::state::MoveOutcome) -> Result<()> {
     println!("{}", serde_json::to_string(outcome)?);
     Ok(())
 }
 
-fn print_move_human(outcome: &hel::hel_state::MoveOutcome) {
+fn print_move_human(outcome: &mj_core::state::MoveOutcome) {
     let destination = format!("{}/{}", outcome.profile_id, outcome.target_template_id);
     match outcome.outcome.as_str() {
         "completed" => println!(
@@ -812,7 +811,7 @@ async fn run_workspace_dashboard(
     let client_id = format!(
         "tui-{}-{}",
         std::process::id(),
-        hel::hel_workspace::new_workspace_id()?
+        mj_core::workspace::new_workspace_id()?
     );
     daemon.attach(client_id.clone(), std::process::id()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
@@ -956,9 +955,9 @@ async fn login(args: LoginArgs) -> Result<()> {
     if args.setup_token {
         return store_claude_setup_token(&profile_id, profile).await;
     }
-    let marker = hel::hel_config::harness_authentication_marker(profile.kind, &profile.home);
-    let (before, _) = hel::hel_credentials::read_credential_file(profile.kind, &marker)?;
-    let (program, arguments) = hel::hel_credentials::login_command(profile);
+    let marker = mj_core::config::harness_authentication_marker(profile.kind, &profile.home);
+    let (before, _) = mj_core::credentials::read_credential_file(profile.kind, &marker)?;
+    let (program, arguments) = mj_core::credentials::login_command(profile);
 
     println!(
         "Running `{program} {}` against {}.",
@@ -981,7 +980,7 @@ async fn login(args: LoginArgs) -> Result<()> {
             )
         })?;
 
-    let (after, _) = hel::hel_credentials::read_credential_file(profile.kind, &marker)?;
+    let (after, _) = mj_core::credentials::read_credential_file(profile.kind, &marker)?;
     if after.present && after.fingerprint != before.fingerprint {
         println!(
             "Credentials updated for profile {profile_id}. Live sessions pick them up within about a minute while the Mjolnir daemon is running."
@@ -1005,10 +1004,10 @@ async fn login(args: LoginArgs) -> Result<()> {
 /// credentials file, so there is nothing left to race.
 async fn store_claude_setup_token(
     profile_id: &str,
-    profile: &hel::hel_config::HarnessProfile,
+    profile: &mj_core::config::HarnessProfile,
 ) -> Result<()> {
-    use hel::hel_config::HarnessKind;
-    use hel::hel_credentials::CLAUDE_OAUTH_TOKEN_ENV;
+    use mj_core::config::HarnessKind;
+    use mj_core::credentials::CLAUDE_OAUTH_TOKEN_ENV;
 
     if profile.kind != HarnessKind::Claude {
         bail!(
@@ -1016,7 +1015,7 @@ async fn store_claude_setup_token(
             profile.kind.display_name()
         );
     }
-    let token_path = hel::hel_credentials::claude_oauth_token_path(profile_id);
+    let token_path = mj_core::credentials::claude_oauth_token_path(profile_id);
 
     println!(
         "Running `claude setup-token` against {}.",
@@ -1030,7 +1029,7 @@ async fn store_claude_setup_token(
             .arg("setup-token")
             .envs(&environment)
             .env(HarnessKind::Claude.home_env(), &home);
-        hel::hel_subprocess::run_capturing_stdout(&mut command)
+        mj_core::subprocess::run_capturing_stdout(&mut command)
     })
     .await
     .context("run `claude setup-token`")??;
@@ -1046,7 +1045,7 @@ async fn store_claude_setup_token(
     let token = extract_setup_token(&stdout).with_context(|| {
         format!("`claude setup-token` printed no token for profile {profile_id}")
     })?;
-    hel::hel_credentials::write_claude_oauth_token(&token_path, token.as_bytes())?;
+    mj_core::credentials::write_claude_oauth_token(&token_path, token.as_bytes())?;
 
     let environment = profile.environment.clone();
     let home = profile.home.clone();
@@ -1058,7 +1057,7 @@ async fn store_claude_setup_token(
             .envs(&environment)
             .env(HarnessKind::Claude.home_env(), &home)
             .env(CLAUDE_OAUTH_TOKEN_ENV, &verify_token);
-        hel::hel_subprocess::run_capturing_stdout(&mut command)
+        mj_core::subprocess::run_capturing_stdout(&mut command)
     })
     .await
     .context("run `claude auth status`")??;
@@ -1124,7 +1123,7 @@ fn extract_setup_token(stdout: &str) -> Option<String> {
         .map(|line| line.to_string())
 }
 
-fn profile_ids(config: &HelConfig) -> String {
+fn profile_ids(config: &Config) -> String {
     config
         .enabled_profiles()
         .map(|(id, _)| id.to_owned())
@@ -1132,7 +1131,7 @@ fn profile_ids(config: &HelConfig) -> String {
         .join(", ")
 }
 
-fn resolve_login_profile(config: &HelConfig, requested: Option<&str>) -> Result<String> {
+fn resolve_login_profile(config: &Config, requested: Option<&str>) -> Result<String> {
     if let Some(profile) = requested {
         let configured = config
             .profiles
@@ -1207,13 +1206,10 @@ fn setup(args: SetupArgs) -> Result<()> {
     match args.command {
         Some(SetupCommand::Instructions { platform }) => {
             let platform = match platform {
-                SetupPlatform::Linux => mj_controller::hel_doctor::InstructionsPlatform::Linux,
-                SetupPlatform::Macos => mj_controller::hel_doctor::InstructionsPlatform::Macos,
+                SetupPlatform::Linux => mj_controller::doctor::InstructionsPlatform::Linux,
+                SetupPlatform::Macos => mj_controller::doctor::InstructionsPlatform::Macos,
             };
-            print!(
-                "{}",
-                mj_controller::hel_doctor::setup_instructions(platform)
-            );
+            print!("{}", mj_controller::doctor::setup_instructions(platform));
             Ok(())
         }
         None => match run_setup_dialog(&config_path())? {
@@ -1223,15 +1219,15 @@ fn setup(args: SetupArgs) -> Result<()> {
 }
 
 fn doctor(args: DoctorArgs) -> Result<()> {
-    let checks = mj_controller::hel_doctor::run_current(mj_controller::hel_doctor::DoctorOptions {
+    let checks = mj_controller::doctor::run_current(mj_controller::doctor::DoctorOptions {
         smoke: args.smoke,
     });
     if args.json {
         println!("{}", serde_json::to_string_pretty(&checks)?);
     } else {
-        mj_controller::hel_doctor::render_human(&checks, &mut io::stdout())?;
+        mj_controller::doctor::render_human(&checks, &mut io::stdout())?;
     }
-    if mj_controller::hel_doctor::all_ready(&checks) {
+    if mj_controller::doctor::all_ready(&checks) {
         Ok(())
     } else {
         Err(doctor_failure())
@@ -1246,9 +1242,7 @@ fn doctor_failure() -> anyhow::Error {
 
 /// The prefix every message uses when it names a session, so notices stay
 /// readable without losing which session they are about.
-pub(crate) fn short_id(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
-}
+pub(crate) use mj_core::state::short_id;
 
 pub(crate) struct TerminalGuard {
     pub(crate) terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -1331,7 +1325,7 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hel::hel_state::{HelState, SessionRecord, SessionState};
+    use mj_core::state::{SessionRecord, SessionState, State};
 
     #[test]
     fn the_verification_reads_which_credential_claude_code_actually_used() {
@@ -1407,14 +1401,14 @@ mod tests {
 
     #[test]
     fn login_uses_the_sole_profile_and_otherwise_demands_a_choice() {
-        let mut config = HelConfig::default();
+        let mut config = Config::default();
         assert!(resolve_login_profile(&config, None).is_err());
 
         config.profiles.insert(
             "work".into(),
-            hel::hel_config::HarnessProfile {
+            mj_core::config::HarnessProfile {
                 enabled: true,
-                kind: hel::hel_config::HarnessKind::Claude,
+                kind: mj_core::config::HarnessKind::Claude,
                 home: PathBuf::from("/home/user/.claude"),
                 environment: Default::default(),
                 context_window_bytes: None,
@@ -1570,17 +1564,17 @@ mod tests {
         let archive_path = directory.path().join("checkpoint.hel.zip");
         std::fs::create_dir(&archive_path).unwrap();
         let session_id = "1123456789abcdef0123456789abcdef";
-        let mut state = HelState::default();
+        let mut state = State::default();
         state.sessions.insert(
             session_id.into(),
             SessionRecord {
-                workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 archived: false,
                 container_cpus: None,
                 container_memory: None,
                 id: session_id.into(),
                 title: "stopped".into(),
-                harness_kind: hel::hel_config::HarnessKind::Codex,
+                harness_kind: mj_core::config::HarnessKind::Codex,
                 last_profile: "codex".into(),
                 bundle_id: "project".into(),
                 project_directory: None,
@@ -1599,7 +1593,7 @@ mod tests {
                 draft_input: String::new(),
                 last_error: None,
                 last_checkpoint_error: None,
-                checkpoint: Some(hel::hel_state::CheckpointMetadata {
+                checkpoint: Some(mj_core::state::CheckpointMetadata {
                     archive_path,
                     sha256: "a".repeat(64),
                     created_at: "2026-08-12T00:00:00Z".into(),
@@ -1608,7 +1602,7 @@ mod tests {
             },
         );
         let mut controller = Controller {
-            config: HelConfig::default(),
+            config: Config::default(),
             state,
         };
 

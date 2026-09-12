@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use hel::hel_database::DetachedSessionDraft;
+use mj_controller::database::DetachedSessionDraft;
 
 #[derive(Debug, Default)]
 pub(crate) struct ComposerDraftCache {

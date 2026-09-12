@@ -17,17 +17,18 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use hel::hel_config::{HarnessKind, HelConfig, TargetTemplate as HelTargetTemplate};
-use hel::hel_state::{
-    HelState, MoveOperation, ProjectSourceIdentity, ResumeQueueDisposition, SessionRecord,
-    SessionResourceAllocation, SessionState, SessionTransitionKind,
+use mj_core::config::{Config, HarnessKind, TargetTemplate as HelTargetTemplate};
+use mj_core::state::{
+    MoveOperation, ProjectSourceIdentity, ResumeQueueDisposition, SessionRecord,
+    SessionResourceAllocation, SessionState, SessionTransitionKind, State,
 };
-use hel::hel_targets::AdditionalMount;
+
+use mj_chat::chat::Notices;
 use mj_chat::components::{EventResult, Outcome};
-use mj_chat::hel_chat::Notices;
-use mj_chat::hel_selection::FrameSurfaces;
+use mj_chat::selection::FrameSurfaces;
 use mj_client::quota::ProfileQuota;
 use mj_client::review::RuntimeReviewView;
+use mj_core::targets::AdditionalMount;
 
 use crate::dialogs::{
     ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, ImportBundleConfirmation,
@@ -72,7 +73,7 @@ pub use crate::ingest::{
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
 pub use crate::workspaces::{WorkspaceDraftEntry, WorkspaceManagementEntry};
-pub use hel::hel_workspace::{PaneSize, PaneSizes};
+pub use mj_core::workspace::{PaneSize, PaneSizes};
 
 /// One drawn row of the Sessions pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +131,7 @@ pub enum DashboardAction {
     },
     RepairRepositoryRemotes {
         bundle_id: String,
-        repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
         retry: Box<DashboardAction>,
     },
     CompleteMountSource {
@@ -155,7 +156,7 @@ pub enum DashboardAction {
         draft: serde_json::Value,
         path: Vec<String>,
         value: String,
-        target: Box<hel::hel_config::TargetTemplate>,
+        target: Box<mj_core::config::TargetTemplate>,
     },
     ValidateProjectDirectory {
         target_template_id: String,
@@ -288,7 +289,7 @@ pub enum DashboardAction {
     CancelReviewSettingsDiscovery,
     /// Persist the client-side activity animation without replacing other settings.
     SaveSpinnerStyle {
-        style: hel::hel_config::SpinnerStyle,
+        style: mj_core::config::SpinnerStyle,
     },
     /// Per-session container provisioning inputs, taking effect the next time
     /// the container is created.
@@ -509,8 +510,8 @@ struct SessionOrderCache {
 
 pub struct DashboardState {
     session_order_cache: RefCell<SessionOrderCache>,
-    pub(crate) config: HelConfig,
-    pub(crate) state: HelState,
+    pub(crate) config: Config,
+    pub(crate) state: State,
     pub(crate) quotas: BTreeMap<String, ProfileQuota>,
     pub(crate) quota_refreshing: BTreeSet<String>,
     pub(crate) session_details: BTreeMap<String, SessionDetail>,
@@ -683,7 +684,7 @@ impl DashboardState {
         self.spinner_save_pending = false;
     }
 
-    pub fn new(config: HelConfig, state: HelState, quotas: BTreeMap<String, ProfileQuota>) -> Self {
+    pub fn new(config: Config, state: State, quotas: BTreeMap<String, ProfileQuota>) -> Self {
         let mut dashboard = Self {
             config,
             state,
@@ -736,8 +737,8 @@ impl DashboardState {
             notices: Notices::default(),
             workspace_name: String::new(),
             workspace_names: BTreeMap::new(),
-            workspace_order: vec![hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned()],
-            active_workspace_id: Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned()),
+            workspace_order: vec![mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()],
+            active_workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()),
             workspace_views: BTreeMap::new(),
             workspace_pane_sizes_modified: BTreeSet::new(),
             workspace_tab_areas: Vec::new(),
@@ -1147,7 +1148,7 @@ impl DashboardState {
     pub fn pending_elicitations(
         &self,
         session_id: &str,
-    ) -> Option<(u64, &[hel::hel_elicitation::ElicitationRequest])> {
+    ) -> Option<(u64, &[mj_core::elicitation::ElicitationRequest])> {
         let detail = self.session_details.get(session_id)?;
         detail
             .pending_elicitations_applied_event_ordinal
@@ -1820,7 +1821,7 @@ impl DashboardState {
             .filter(|operation| {
                 matches!(
                     operation.phase,
-                    hel::hel_state::MovePhase::Failed | hel::hel_state::MovePhase::Cancelled
+                    mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
                 ) && (operation.checkpoint.is_some()
                     || (operation.queue_admission_started && !operation.queue_admission_finished))
             })
@@ -2341,7 +2342,7 @@ pub(crate) fn nth_key<T>(map: &BTreeMap<String, T>, index: usize) -> String {
         .expect("wizard is only opened for non-empty configuration")
 }
 
-pub(crate) fn nth_enabled_profile(config: &HelConfig, index: usize) -> String {
+pub(crate) fn nth_enabled_profile(config: &Config, index: usize) -> String {
     config
         .enabled_profiles()
         .nth(index)
@@ -2374,8 +2375,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use hel::hel_config::{ProjectBundle, ProjectRepository};
-    use hel::hel_state::{HelState, STATE_VERSION, SessionState};
+    use mj_core::config::{ProjectBundle, ProjectRepository};
+    use mj_core::state::{STATE_VERSION, SessionState, State};
 
     use super::*;
     use crate::test_support::*;
@@ -2870,7 +2871,7 @@ mod tests {
             Focus::Quota,
             Focus::Workspaces,
         ] {
-            let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+            let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
             dashboard.focus = focus;
 
             for _ in 0..2 {
@@ -2978,7 +2979,7 @@ mod tests {
             .collect();
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -3022,7 +3023,7 @@ mod tests {
             .collect();
         DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -3136,7 +3137,7 @@ mod tests {
             .collect();
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -3230,7 +3231,7 @@ mod tests {
         assert_eq!(
             dashboard.handle_key_at(
                 key(KeyCode::Down),
-                shown_at + mj_chat::hel_chat::NOTICE_MINIMUM_DISPLAY
+                shown_at + mj_chat::chat::NOTICE_MINIMUM_DISPLAY
             ),
             DashboardAction::None
         );
@@ -3258,7 +3259,7 @@ mod tests {
 
     #[test]
     fn alt_q_quits_without_mutating_any_dashboard_modal() {
-        let mut new_session = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut new_session = DashboardState::new(config(), State::default(), BTreeMap::new());
         assert_eq!(new_session.handle_key(alt_key('w')), DashboardAction::None);
 
         let mut resume = dashboard_with_session(stopped_session());
@@ -3446,7 +3447,7 @@ mod tests {
             "history".into(),
             operation(SessionOperationKind::Launching, None),
         );
-        dashboard.set_active_workspace(Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID.into()));
+        dashboard.set_active_workspace(Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.into()));
         assert!(
             dashboard
                 .ordered_sessions()
@@ -3550,7 +3551,7 @@ mod tests {
             PaneSize::Standard
         );
 
-        dashboard.set_active_workspace(Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID.into()));
+        dashboard.set_active_workspace(Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.into()));
         assert_eq!(dashboard.selected_session_id(), Some("local"));
         assert_eq!(
             dashboard.pane_size(SupportPane::Sessions),
@@ -3592,7 +3593,7 @@ mod tests {
         second.id = "bifrost-fuzz".into();
         second.state = SessionState::Running;
         second.project_directory = Some("/home/dev/bifrost-fuzz".into());
-        let state = HelState {
+        let state = State {
             version: STATE_VERSION,
             sessions: [first, second]
                 .into_iter()
@@ -3640,7 +3641,7 @@ mod tests {
 
         let single = DashboardState::new(
             dashboard_config.clone(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions: [(bundle_session.id.clone(), bundle_session.clone())]
                     .into_iter()
@@ -3665,7 +3666,7 @@ mod tests {
         raw_source.created_at = "2026-08-09T00:01:00Z".into();
         let mut dashboard = DashboardState::new(
             dashboard_config,
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions: [bundle_session, raw_source]
                     .into_iter()
@@ -3790,7 +3791,7 @@ mod tests {
         let other = running_session();
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions: BTreeMap::from([(active.id.clone(), active), (other.id.clone(), other)]),
                 mount_history: BTreeMap::new(),
@@ -3845,7 +3846,7 @@ mod tests {
             .collect();
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -3901,7 +3902,7 @@ mod tests {
             .collect();
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -3940,7 +3941,7 @@ mod tests {
             .collect();
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -4113,7 +4114,7 @@ mod tests {
             .collect();
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -4142,7 +4143,7 @@ mod tests {
         other.state = SessionState::Running;
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions: BTreeMap::from([(other.id.clone(), other)]),
                 mount_history: BTreeMap::new(),

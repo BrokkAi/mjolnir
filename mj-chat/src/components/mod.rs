@@ -28,13 +28,13 @@ impl PathField {
     pub fn render<K: Copy + Eq>(
         frame: &mut ratatui::Frame<'_>,
         area: ratatui::layout::Rect,
-        input: &crate::hel_path_input::PathInput,
+        input: &crate::path_input::PathInput,
         form: &mut Form<K>,
         id: K,
     ) {
         TextField::render(frame, area, input, form, id);
     }
-    pub fn apply(input: &mut crate::hel_path_input::PathInput, edit: FieldEdit) -> Outcome {
+    pub fn apply(input: &mut crate::path_input::PathInput, edit: FieldEdit) -> Outcome {
         TextField::apply(input, edit)
     }
 }

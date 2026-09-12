@@ -78,7 +78,7 @@ impl DashboardState {
         &self,
         frame: &mut ratatui::Frame<'_>,
         area: ratatui::layout::Rect,
-        surfaces: &mut mj_chat::hel_selection::FrameSurfaces,
+        surfaces: &mut mj_chat::selection::FrameSurfaces,
     ) {
         match &self.mode {
             Mode::Rename(dialog) => dialog

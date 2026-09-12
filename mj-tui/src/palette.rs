@@ -22,8 +22,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use mj_chat::hel_selection::FrameSurfaces;
-use mj_chat::hel_text_input::TextInput;
+use mj_chat::selection::FrameSurfaces;
+use mj_chat::text_input::TextInput;
 
 use crate::actions::{Availability, COMMANDS, CommandId, Scope, spec};
 use crate::render::render_session_scrollbar;
@@ -135,7 +135,7 @@ fn scope_order(dashboard: &DashboardState) -> Vec<Scope> {
 /// starts with the query first, and only if none does, everything whose label
 /// or description contains it.
 ///
-/// This is the rule of `matching_indices` in `src/hel_chat/autocomplete.rs`,
+/// This is the rule of `matching_indices` in `src/chat/autocomplete.rs`,
 /// copied rather than shared because the two crates have no common home for it
 /// yet. M4 of this plan proposes that home.
 fn rank(entries: Vec<PaletteEntry>, query: &str) -> Vec<PaletteEntry> {
@@ -833,7 +833,7 @@ mod tests {
         dashboard
             .config
             .targets
-            .insert("local".into(), hel::hel_config::TargetTemplate::LocalBare);
+            .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
         dashboard.focus_sessions();
         assert!(
             dashboard.selected_container_session().is_none(),

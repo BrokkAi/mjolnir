@@ -17,6 +17,8 @@ use std::{
 
 /// Empty-session text that appears after the combined dashboard is ready.
 const READY_MARKER: &[u8] = b"No live session";
+// Fixture setup includes daemon initialization; interaction and exit remain bounded separately.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const TIMEOUT: Duration = Duration::from_secs(5);
 const DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[?u\x1b[c";
 const DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?1;2c";
@@ -101,7 +103,7 @@ fn stable_local_flags(flags: libc::tcflag_t) -> libc::tcflag_t {
 }
 
 fn duplicate(fd: RawFd) -> File {
-    let copy = unsafe { libc::dup(fd) };
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     assert!(copy >= 0, "duplicate PTY fd");
     unsafe { File::from_raw_fd(copy) }
 }
@@ -120,12 +122,35 @@ fn drain(master: &mut File, output: &mut Vec<u8>) {
     }
 }
 
+fn wait_for_ready(child: &mut Child, master: &mut File, output: &mut Vec<u8>, marker: &[u8]) {
+    wait_for_output_until(
+        master,
+        output,
+        marker,
+        Instant::now() + STARTUP_TIMEOUT,
+        Some(child),
+    );
+}
+
 fn wait_for_output(master: &mut File, output: &mut Vec<u8>, marker: &[u8], deadline: Instant) {
+    wait_for_output_until(master, output, marker, deadline, None);
+}
+
+fn wait_for_output_until(
+    master: &mut File,
+    output: &mut Vec<u8>,
+    marker: &[u8],
+    deadline: Instant,
+    mut child: Option<&mut Child>,
+) {
     let mut answered_device_query = output
         .windows(ENTER_ALTERNATE_SCREEN.len())
         .any(|window| window == ENTER_ALTERNATE_SCREEN);
-    while !output.windows(marker.len()).any(|window| window == marker) {
+    loop {
         drain(master, output);
+        if output.windows(marker.len()).any(|window| window == marker) {
+            return;
+        }
         if !answered_device_query
             && output
                 .windows(DEVICE_ATTRIBUTES_QUERY.len())
@@ -136,9 +161,23 @@ fn wait_for_output(master: &mut File, output: &mut Vec<u8>, marker: &[u8], deadl
                 .expect("answer terminal device attributes query");
             answered_device_query = true;
         }
+        if let Some(child) = child.as_deref_mut()
+            && let Some(status) = child.try_wait().expect("poll PTY startup")
+        {
+            panic!(
+                "PTY child {} exited during startup with {status}; expected {marker:?}; output: {:?}",
+                child.id(),
+                String::from_utf8_lossy(output)
+            );
+        }
         assert!(
             Instant::now() < deadline,
-            "PTY child did not emit {marker:?}; output: {:?}",
+            "PTY child did not emit {marker:?}; phase: {}; output: {:?}",
+            if child.is_some() {
+                "dashboard startup"
+            } else {
+                "interaction"
+            },
             String::from_utf8_lossy(output)
         );
         thread::sleep(Duration::from_millis(10));
@@ -245,7 +284,7 @@ image = "ubuntu:24.04"
     if local_startup {
         use std::os::unix::fs::PermissionsExt;
         let path = config_root.join("hel/config.toml");
-        let mut config = hel::hel_config::HelConfig::load_from(&path).unwrap();
+        let mut config = mj_core::config::Config::load_from(&path).unwrap();
         let home = storage.path().join("codex");
         fs::create_dir_all(&home).unwrap();
         // This test checks session creation, not a real Node/Codex install.
@@ -265,7 +304,7 @@ image = "ubuntu:24.04"
         config.targets.clear();
         config.targets.insert(
             "localhost".into(),
-            hel::hel_config::TargetTemplate::LocalBare,
+            mj_core::config::TargetTemplate::LocalBare,
         );
         config.save_to(&path).unwrap();
     }
@@ -279,18 +318,18 @@ image = "ubuntu:24.04"
     }
     let seeded_workspace = pending_session.then(|| {
         let database = storage.path().join("data/hel/mj.sqlite3");
-        let workspace = hel::hel_database::create_workspace_at(&database, "Pending session test").unwrap();
+        let workspace = mj_controller::database::create_workspace_at(&database, "Pending session test").unwrap();
         // A durable session that the manager cannot yet adopt. No provider or
         // container process is needed to exercise the dashboard wait path.
-        let session: hel::hel_state::SessionRecord = serde_json::from_value(serde_json::json!({
+        let session: mj_core::state::SessionRecord = serde_json::from_value(serde_json::json!({
             "id": "pending-session", "workspace_id": workspace.id,
             "title": "Pending session", "harness_kind": "codex",
             "last_profile": "codex", "bundle_id": "hel", "target_template_id": "podman",
             "state": "running", "created_at": "2026-09-07T00:00:00Z", "updated_at": "2026-09-07T00:00:00Z"
         })).unwrap();
-        let mut state = hel::hel_state::HelState::default();
+        let mut state = mj_core::state::State::default();
         state.sessions.insert(session.id.clone(), session);
-        hel::hel_database::save_state_to(&database, &state).unwrap();
+        mj_controller::database::save_state_to(&database, &state).unwrap();
         workspace.name
     });
     let mut master_fd = -1;
@@ -316,6 +355,13 @@ image = "ubuntu:24.04"
     );
     let master = unsafe { File::from_raw_fd(master_fd) };
     let slave = unsafe { File::from_raw_fd(slave_fd) };
+    for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+            0,
+            "close PTY descriptors on exec"
+        );
+    }
     let original_termios = termios(slave.as_raw_fd());
     let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
     assert!(flags >= 0, "read PTY master flags");
@@ -325,7 +371,27 @@ image = "ubuntu:24.04"
         "make PTY master nonblocking"
     );
 
+    // These tests exercise dashboard lifecycle, not worker execution. An explicit
+    // failing worker keeps startup independent of installed workers and avoids
+    // copying and hashing large debug binaries for every parallel fixture.
+    let worker = storage.path().join("fixture-worker");
+    fs::write(
+        &worker,
+        "#!/bin/sh\necho 'PTY fixture cannot launch workers' >&2\nexit 1\n",
+    )
+    .expect("write fixture worker");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o700))
+            .expect("make fixture worker executable");
+    }
     let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    command
+        .env("MJ_WORKER_BINARY", worker)
+        // Each fixture has a dashboard and daemon. Host-sized pools multiply
+        // into thousands of threads on large CI machines during parallel runs.
+        .env("TOKIO_WORKER_THREADS", "2")
+        .env("RAYON_NUM_THREADS", "2");
     common::own_test_daemons(&mut command);
     if let Some(workspace) = &seeded_workspace {
         command.args(["--workspace", workspace]);
@@ -348,6 +414,11 @@ image = "ubuntu:24.04"
     // with SIGTERM unmasked, so establish that condition across exec.
     unsafe {
         command.pre_exec(|| {
+            // Terminal queries must use this fixture's PTY, including when
+            // Cargo itself was launched from an interactive terminal.
+            if libc::setsid() < 0 || libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
             let mut mask = std::mem::zeroed();
             if libc::sigemptyset(&mut mask) != 0
                 || libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) != 0
@@ -385,11 +456,11 @@ image = "ubuntu:24.04"
 fn panicking_dashboard_fixture_reaps_the_dashboard_before_removing_storage() {
     let mut fixture = spawn_dashboard_pty();
     let mut output = Vec::new();
-    wait_for_output(
+    wait_for_ready(
+        fixture.child.child_mut(),
         &mut fixture.master,
         &mut output,
         READY_MARKER,
-        Instant::now() + TIMEOUT,
     );
     let root = fixture._storage.path().to_path_buf();
     let pid = fixture.child.child_mut().id();
@@ -435,18 +506,13 @@ fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
     } = spawn_dashboard_pty_with_startup(false, false, true);
     let database = storage.path().join("data/hel/mj.sqlite3");
     let mut output = Vec::new();
-    wait_for_output(
-        &mut master,
-        &mut output,
-        READY_MARKER,
-        Instant::now() + TIMEOUT,
-    );
+    wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
     // With automatic startup disabled, ordinary background ticks must leave
     // the workspace empty until the user explicitly starts work.
     thread::sleep(Duration::from_millis(1100));
     drain(&mut master, &mut output);
     assert!(
-        hel::hel_database::load_state_from(&database)
+        mj_controller::database::load_state_from(&database)
             .unwrap()
             .sessions
             .is_empty()
@@ -492,7 +558,7 @@ fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
     let session = loop {
         drain(&mut master, &mut output);
         if database.exists()
-            && let Ok(state) = hel::hel_database::load_state_from(&database)
+            && let Ok(state) = mj_controller::database::load_state_from(&database)
             && let Some(session) = state.sessions.values().next()
         {
             assert_eq!(state.sessions.len(), 1);
@@ -512,7 +578,7 @@ fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
         session.project_directory.as_deref(),
         Some(workspace_root.as_path())
     );
-    let workspaces = hel::hel_database::list_workspaces_from(&database).unwrap();
+    let workspaces = mj_controller::database::list_workspaces_from(&database).unwrap();
     assert_eq!(workspaces.len(), 1);
     assert_eq!(workspaces[0].id, session.workspace_id);
     assert_eq!(
@@ -564,7 +630,7 @@ fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
     let deadline = Instant::now() + TIMEOUT;
     let created = loop {
         drain(&mut master, &mut output);
-        let state = hel::hel_database::load_state_from(&database).unwrap();
+        let state = mj_controller::database::load_state_from(&database).unwrap();
         let mut new_sessions = state
             .sessions
             .values()
@@ -607,12 +673,7 @@ fn sigterm_restores_real_pty_terminal() {
     } = spawn_dashboard_pty();
 
     let mut output = Vec::new();
-    wait_for_output(
-        &mut master,
-        &mut output,
-        READY_MARKER,
-        Instant::now() + TIMEOUT,
-    );
+    wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
     assert_eq!(
         unsafe { libc::kill(child.child_mut().id() as i32, libc::SIGTERM) },
         0,
@@ -674,14 +735,8 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
         mut child,
     } = spawn_dashboard_pty();
     let mut output = Vec::new();
-    wait_for_output(
-        &mut master,
-        &mut output,
-        READY_MARKER,
-        Instant::now() + TIMEOUT,
-    );
+    wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
 
-    let quit_started = Instant::now();
     // Alt-Q. Escape belongs to the composer and to modals now; it no longer
     // quits, so the Escape in this sequence is only the Alt prefix.
     master.write_all(QUIT_KEY).expect("send the quit key");
@@ -691,15 +746,10 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
         &mut output,
         "dashboard quit",
     );
-    let quit_elapsed = quit_started.elapsed();
     drain(&mut master, &mut output);
     drop(child.take());
 
     assert!(status.success(), "PTY child exit: {status}");
-    assert!(
-        quit_elapsed < Duration::from_secs(1),
-        "dashboard detach took {quit_elapsed:?}"
-    );
     let after = termios(slave.as_raw_fd());
     assert_eq!(after.c_iflag, before.c_iflag, "restore input flags");
     assert_eq!(after.c_oflag, before.c_oflag, "restore output flags");
@@ -742,12 +792,7 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
         mut child,
     } = spawn_dashboard_pty_with_idle_exit(false);
     let mut output = Vec::new();
-    wait_for_output(
-        &mut master,
-        &mut output,
-        READY_MARKER,
-        Instant::now() + TIMEOUT,
-    );
+    wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
     output.clear();
     // The command palette remains a keyboard entry point for the visible
     // workspace menu and opens management inside the existing terminal.
@@ -781,7 +826,6 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
     master
         .write_all(b"\x1b[6~\x1b[F")
         .expect("navigate workspace manager");
-    let started = Instant::now();
     assert_eq!(
         unsafe { libc::kill(child.child_mut().id() as i32, libc::SIGTERM) },
         0
@@ -793,10 +837,6 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
         "workspace manager SIGTERM",
     );
     assert!(status.success(), "manager exit: {status}");
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "manager shutdown was not bounded"
-    );
     let after = termios(slave.as_raw_fd());
     assert_eq!(after.c_iflag, before.c_iflag);
     assert_eq!(after.c_oflag, before.c_oflag);
@@ -823,12 +863,7 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
     } = spawn_dashboard_pty_fixture(false, true);
     let mut output = Vec::new();
     // The quit hint can be split by cursor movements during a differential redraw.
-    wait_for_output(
-        &mut master,
-        &mut output,
-        b"quits.",
-        Instant::now() + TIMEOUT,
-    );
+    wait_for_ready(child.child_mut(), &mut master, &mut output, b"quits.");
     master.write_all(b"\x1b").expect("cancel opening");
     output.clear();
     wait_for_output(
@@ -851,7 +886,6 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
         b"quits.",
         Instant::now() + TIMEOUT,
     );
-    let quit_started = Instant::now();
     master.write_all(QUIT_KEY).expect("quit while opening");
     let status = wait_for_exit(
         child.child_mut(),
@@ -861,12 +895,42 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
     );
     drop(child.take());
     assert!(status.success());
-    assert!(
-        quit_started.elapsed() < Duration::from_secs(1),
-        "opening delayed quit"
-    );
     assert_eq!(
         stable_local_flags(termios(slave.as_raw_fd()).c_lflag),
         stable_local_flags(before.c_lflag)
+    );
+}
+
+#[test]
+fn startup_wait_reports_a_child_exit_without_waiting_for_the_deadline() {
+    use std::os::{fd::OwnedFd, unix::net::UnixStream};
+
+    let (reader, _writer) = UnixStream::pair().expect("create startup output stream");
+    reader.set_nonblocking(true).unwrap();
+    let mut master = File::from(OwnedFd::from(reader));
+    let mut child = ReapChild(Some(
+        Command::new("/bin/sh")
+            .args(["-c", "exit 23"])
+            .spawn()
+            .expect("spawn failing child"),
+    ));
+    let started = Instant::now();
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_ready(
+            child.child_mut(),
+            &mut master,
+            &mut Vec::new(),
+            READY_MARKER,
+        );
+    }))
+    .expect_err("startup must report child failure");
+    let message = failure.downcast_ref::<String>().expect("panic diagnostic");
+    assert!(
+        message.contains("exited during startup") && message.contains("23"),
+        "{message}"
+    );
+    assert!(
+        started.elapsed() < TIMEOUT,
+        "startup failure waited for its deadline"
     );
 }

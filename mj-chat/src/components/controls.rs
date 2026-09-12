@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::text_layout::multiline_rows;
 use super::{AutocompletePopup, ControlKind, Form, Interaction, PopupSide};
-use crate::hel_text_input::TextInput;
+use crate::text_input::TextInput;
 use crate::theme;
 
 fn focus_style() -> Style {

@@ -1,6 +1,6 @@
 //! The global review settings editor.
 //!
-//! This dialog owns only the in-memory draft of [`HelConfig::review`]. The
+//! This dialog owns only the in-memory draft of [`Config::review`]. The
 //! controller performs discovery and persistence off the event loop; replies
 //! carry a generation so a slow discovery can never replace a newer choice.
 
@@ -9,13 +9,13 @@ use std::collections::BTreeSet;
 use std::time::Instant;
 
 use crossterm::event::Event;
-use hel::hel_acp::SessionConfigChoice;
-use hel::hel_config::{HelConfig, ReviewConfig, SpinnerStyle};
-use hel::hel_review::lanes::ReviewTier;
 use mj_chat::components::{
     Checkbox, ComboBox, ComboBoxState, ControlKind, Dialog, FormViewport, Interaction, PopupSide,
 };
 use mj_chat::theme;
+use mj_core::acp::SessionConfigChoice;
+use mj_core::config::{Config, ReviewConfig, SpinnerStyle};
+use mj_core::review::lanes::ReviewTier;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -154,7 +154,7 @@ impl ReviewSettingsDialog {
         })
     }
 
-    pub(crate) fn new(config: &HelConfig) -> Self {
+    pub(crate) fn new(config: &Config) -> Self {
         let mut profiles = vec![None];
         profiles.extend(
             config
@@ -747,7 +747,7 @@ impl DashboardState {
     /// Keep cached choices only for profile definitions that are unchanged in
     /// the new configuration. Review edits alone therefore preserve the cache,
     /// while editing, removing, or replacing a profile invalidates its keys.
-    pub(crate) fn invalidate_review_settings_choices_for_config(&mut self, config: &HelConfig) {
+    pub(crate) fn invalidate_review_settings_choices_for_config(&mut self, config: &Config) {
         self.review_settings_choices.retain(|(profile, _), _| {
             self.config.profiles.get(profile) == config.profiles.get(profile)
         });
@@ -1245,7 +1245,7 @@ mod tests {
     fn review_settings_is_available_through_setup_without_a_selected_session() {
         let mut dashboard = DashboardState::new(
             config(),
-            hel::hel_state::HelState::default(),
+            mj_core::state::State::default(),
             Default::default(),
         );
         let action = open(&mut dashboard);
@@ -1255,7 +1255,7 @@ mod tests {
 
         let mut dashboard = DashboardState::new(
             config(),
-            hel::hel_state::HelState::default(),
+            mj_core::state::State::default(),
             Default::default(),
         );
         dashboard.handle_key(key(KeyCode::F(2)));
@@ -1329,11 +1329,8 @@ mod tests {
     fn stale_discovery_does_not_replace_choices_after_model_change() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
-        let mut dashboard = DashboardState::new(
-            config,
-            hel::hel_state::HelState::default(),
-            Default::default(),
-        );
+        let mut dashboard =
+            DashboardState::new(config, mj_core::state::State::default(), Default::default());
         let initial = open(&mut dashboard);
         let DashboardAction::DiscoverReviewSettings {
             generation,
@@ -1421,11 +1418,8 @@ mod tests {
     fn selecting_the_current_value_does_not_restart_pending_discovery() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
-        let mut dashboard = DashboardState::new(
-            config,
-            hel::hel_state::HelState::default(),
-            Default::default(),
-        );
+        let mut dashboard =
+            DashboardState::new(config, mj_core::state::State::default(), Default::default());
         let initial = open(&mut dashboard);
         assert!(matches!(
             initial,
@@ -1444,11 +1438,8 @@ mod tests {
     fn effort_change_does_not_restart_discovery() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
-        let mut dashboard = DashboardState::new(
-            config,
-            hel::hel_state::HelState::default(),
-            Default::default(),
-        );
+        let mut dashboard =
+            DashboardState::new(config, mj_core::state::State::default(), Default::default());
         let DashboardAction::DiscoverReviewSettings { generation, .. } = open(&mut dashboard)
         else {
             panic!("expected initial probe")
@@ -1494,11 +1485,8 @@ mod tests {
     fn closing_and_reopening_uses_cached_choices() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
-        let mut dashboard = DashboardState::new(
-            config,
-            hel::hel_state::HelState::default(),
-            Default::default(),
-        );
+        let mut dashboard =
+            DashboardState::new(config, mj_core::state::State::default(), Default::default());
         let DashboardAction::DiscoverReviewSettings {
             generation,
             profile_id,
@@ -1578,11 +1566,8 @@ mod tests {
     fn refresh_clears_only_the_profile_cache_and_retains_current_choices() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
-        let mut dashboard = DashboardState::new(
-            config,
-            hel::hel_state::HelState::default(),
-            Default::default(),
-        );
+        let mut dashboard =
+            DashboardState::new(config, mj_core::state::State::default(), Default::default());
         dashboard.review_settings_choices.insert(
             ("codex-1".into(), None),
             ReviewSettingsChoices {
@@ -1615,7 +1600,7 @@ mod tests {
     fn profile_definition_changes_invalidate_cache_but_review_edits_do_not() {
         let mut dashboard = DashboardState::new(
             config(),
-            hel::hel_state::HelState::default(),
+            mj_core::state::State::default(),
             Default::default(),
         );
         let key = ("codex-1".to_owned(), None);
@@ -1637,11 +1622,8 @@ mod tests {
     fn matching_discovery_replies_apply_through_help() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
-        let mut dashboard = DashboardState::new(
-            config,
-            hel::hel_state::HelState::default(),
-            Default::default(),
-        );
+        let mut dashboard =
+            DashboardState::new(config, mj_core::state::State::default(), Default::default());
         let DashboardAction::DiscoverReviewSettings {
             generation,
             profile_id,
@@ -1681,11 +1663,8 @@ mod tests {
     fn final_cleanup_warning_keeps_choices_and_zero_effort_is_known() {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
-        let mut dashboard = DashboardState::new(
-            config,
-            hel::hel_state::HelState::default(),
-            Default::default(),
-        );
+        let mut dashboard =
+            DashboardState::new(config, mj_core::state::State::default(), Default::default());
         let DashboardAction::DiscoverReviewSettings {
             generation,
             profile_id,
@@ -1724,11 +1703,8 @@ mod tests {
         config.review.enabled = true;
         config.review.model = Some("missing".into());
         config.review.effort = Some("missing".into());
-        let mut dashboard = DashboardState::new(
-            config,
-            hel::hel_state::HelState::default(),
-            Default::default(),
-        );
+        let mut dashboard =
+            DashboardState::new(config, mj_core::state::State::default(), Default::default());
         let DashboardAction::DiscoverReviewSettings {
             generation,
             profile_id,
@@ -1781,11 +1757,8 @@ mod tests {
         let mut config = config();
         config.review.profile = Some("codex-1".into());
         config.review.enabled = true;
-        let mut dashboard = DashboardState::new(
-            config,
-            hel::hel_state::HelState::default(),
-            Default::default(),
-        );
+        let mut dashboard =
+            DashboardState::new(config, mj_core::state::State::default(), Default::default());
         assert!(matches!(
             open(&mut dashboard),
             DashboardAction::DiscoverReviewSettings { .. }

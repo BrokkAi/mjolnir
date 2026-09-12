@@ -96,7 +96,7 @@ mod worker {
     }
 
     pub(super) fn voice_worker_executable() -> Result<PathBuf> {
-        if let Some(path) = hel::hel_config::env_override_os("VOICE_WORKER") {
+        if let Some(path) = mj_core::config::env_override_os("VOICE_WORKER") {
             let path = PathBuf::from(path);
             anyhow::ensure!(
                 path.is_file(),
@@ -268,7 +268,7 @@ mod worker {
         {
             // The shared helper also handles a group that exited between the
             // timeout check and this call.
-            hel::hel_subprocess::terminate_process_group(child.id() as i32, SIGKILL);
+            mj_core::subprocess::terminate_process_group(child.id() as i32, SIGKILL);
         }
         #[cfg(not(unix))]
         if let Err(error) = child.kill()

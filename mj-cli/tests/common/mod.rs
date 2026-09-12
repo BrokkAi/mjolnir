@@ -1,5 +1,6 @@
 use std::{
     fs::{OpenOptions, TryLockError},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -121,7 +122,7 @@ impl DaemonStorage {
         let target =
             i32::try_from(pid).context("fixture daemon pid does not fit a signal target")?;
         for signal in [libc::SIGTERM, libc::SIGKILL] {
-            hel::hel_subprocess::terminate_process_group(target, signal);
+            mj_core::subprocess::terminate_process_group(target, signal);
             if self.wait_for_exit(Instant::now() + Duration::from_secs(5), Some(pid))? {
                 return Ok(());
             }
@@ -149,7 +150,7 @@ impl DaemonStorage {
     }
 
     fn request_stop(&self) -> Result<()> {
-        let output = hel::hel_subprocess::run_with_input(
+        let output = mj_core::subprocess::run_with_input(
             own_test_daemons(
                 Command::new(env!("CARGO_BIN_EXE_mj"))
                     .args(["daemon", "stop"])
@@ -223,6 +224,28 @@ impl Drop for DaemonStorage {
                 eprintln!("{message}");
             } else {
                 panic!("{message}");
+            }
+        }
+        if thread::panicking() {
+            match std::fs::read_dir(self.data.join("logs")) {
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry.and_then(|entry| {
+                            let mut file = std::fs::File::open(entry.path())?;
+                            let length = file.metadata()?.len();
+                            file.seek(SeekFrom::Start(length.saturating_sub(8192)))?;
+                            let mut bytes = Vec::new();
+                            file.take(8192).read_to_end(&mut bytes)?;
+                            Ok(bytes)
+                        }) {
+                            Ok(bytes) => {
+                                eprintln!("fixture log tail: {}", String::from_utf8_lossy(&bytes))
+                            }
+                            Err(error) => eprintln!("read fixture log: {error}"),
+                        }
+                    }
+                }
+                Err(error) => eprintln!("read fixture logs: {error}"),
             }
         }
     }

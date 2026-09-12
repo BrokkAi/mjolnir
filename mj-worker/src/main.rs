@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use hel::hel_archive::{EXPORT_REFUSED_EXIT_CODE, PushBranchError, SessionExportError};
-use hel::hel_worker_launch::WorkerLaunchConfig;
-use mj_worker::hel_worker_runtime::{
+use mj_core::archive::{EXPORT_REFUSED_EXIT_CODE, PushBranchError, SessionExportError};
+use mj_core::worker_launch::WorkerLaunchConfig;
+use mj_worker::worker_runtime::{
     AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor,
     run_daemon,
 };
@@ -200,13 +200,13 @@ fn install_stderr_logging() -> Result<()> {
 /// helpers must not inherit controller or build-tool variables either.
 fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
     if cli.login_environment_ready {
-        return hel::hel_login_environment::initialize_from_parent();
+        return mj_core::login_environment::initialize_from_parent();
     }
     let Command::Worker(args) = &cli.command;
     let needs_login = match &args.command {
         WorkerCommand::Run { config, .. } => Some(
-            hel::hel_worker_launch::WorkerLaunchConfig::read(config)?.run_mode
-                != hel::hel_worker_launch::WorkerRunMode::CheckpointOnly,
+            mj_core::worker_launch::WorkerLaunchConfig::read(config)?.run_mode
+                != mj_core::worker_launch::WorkerRunMode::CheckpointOnly,
         ),
         WorkerCommand::PrepareHarness { .. }
         | WorkerCommand::DiscoverConfig { .. }
@@ -221,9 +221,9 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
     {
         use std::os::unix::process::CommandExt;
         let mut environment = if needs_login {
-            hel::hel_login_environment::discover()?
+            mj_core::login_environment::discover()?
         } else {
-            hel::hel_login_environment::bootstrap()?
+            mj_core::login_environment::bootstrap()?
         };
         if let WorkerCommand::Run { config, .. } | WorkerCommand::PrepareHarness { config } =
             &args.command
@@ -236,7 +236,7 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
                     .context("load branch export target settings; resume the session to restore its setup")?
                     .target_environment,
             );
-            mj_worker::hel_worker_runtime::attach_session_git_environment(root, &mut environment)?;
+            mj_worker::worker_runtime::attach_session_git_environment(root, &mut environment)?;
         }
         let executable = if cfg!(target_os = "linux") {
             PathBuf::from("/proc/self/exe")
@@ -313,7 +313,7 @@ async fn run_command(command: Command) -> Result<()> {
         WorkerCommand::Proxy { root } => proxy(root).await,
         WorkerCommand::DiscoverConfig { spec } => {
             let spec = serde_json::from_slice(&std::fs::read(spec)?)?;
-            let config = mj_worker::hel_worker_runtime::discover_profile_config(spec).await?;
+            let config = mj_worker::worker_runtime::discover_profile_config(spec).await?;
             println!("{}", serde_json::to_string(&config)?);
             Ok(())
         }
@@ -321,37 +321,37 @@ async fn run_command(command: Command) -> Result<()> {
             run_acp_supervisor(AcpSupervisorSpec::read(&spec)?).await
         }
         WorkerCommand::ExportCheckpoint { spec } => {
-            let checkpoint = hel::hel_checkpoint::export_from_spec_file(&spec)?;
+            let checkpoint = mj_worker::checkpoint::export_from_spec_file(&spec)?;
             println!("{}", serde_json::to_string(&checkpoint)?);
             Ok(())
         }
         WorkerCommand::CaptureCheckpoint => {
             let checkpoint =
-                hel::hel_checkpoint::capture_from_spec_reader(&mut std::io::stdin().lock())?;
+                mj_worker::checkpoint::capture_from_spec_reader(&mut std::io::stdin().lock())?;
             println!("{}", serde_json::to_string(&checkpoint)?);
             Ok(())
         }
         WorkerCommand::PackCheckpoint => {
             let checkpoint =
-                hel::hel_checkpoint::pack_from_spec_reader(&mut std::io::stdin().lock())?;
+                mj_worker::checkpoint::pack_from_spec_reader(&mut std::io::stdin().lock())?;
             println!("{}", serde_json::to_string(&checkpoint)?);
             Ok(())
         }
         WorkerCommand::RestoreCheckpoint { spec } => {
-            hel::hel_checkpoint::restore_from_spec_file(&spec)
+            mj_worker::checkpoint::restore_from_spec_file(&spec)
         }
         WorkerCommand::InstallResource { destination } => {
-            hel::hel_resources::install_resource_stream(std::io::stdin(), &destination)
+            mj_core::resources::install_resource_stream(std::io::stdin(), &destination)
         }
-        WorkerCommand::MemoryMcp { root } => hel::hel_project_memory::run_mcp_stdio(&root),
-        WorkerCommand::ReviewMcp { socket } => hel::hel_review::mcp::run_mcp_stdio(&socket),
+        WorkerCommand::MemoryMcp { root } => mj_worker::memory_mcp::run_mcp_stdio(&root),
+        WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
         WorkerCommand::Diff {
             repository,
             base,
             branch,
         } => {
-            let diff = hel::hel_archive::session_diff(
-                &hel::hel_archive::SystemGit,
+            let diff = mj_core::archive::session_diff(
+                &mj_core::archive::SystemGit,
                 &repository,
                 base.as_deref(),
                 branch.as_deref(),
@@ -360,7 +360,7 @@ async fn run_command(command: Command) -> Result<()> {
             write_stdout(diff.as_bytes())
         }
         WorkerCommand::ReadFile { root, path } => {
-            write_stdout(&hel::hel_archive::read_session_file(&root, &path).map_err(export_error)?)
+            write_stdout(&mj_core::archive::read_session_file(&root, &path).map_err(export_error)?)
         }
         WorkerCommand::WriteFile {
             root,
@@ -368,7 +368,7 @@ async fn run_command(command: Command) -> Result<()> {
             overwrite,
             length,
         } => {
-            let bytes = hel::hel_archive::read_session_file_input(std::io::stdin().lock())
+            let bytes = mj_core::archive::read_session_file_input(std::io::stdin().lock())
                 .map_err(export_error)?;
             if bytes.len() != length {
                 return Err(export_error(SessionExportError::Refused(format!(
@@ -376,14 +376,14 @@ async fn run_command(command: Command) -> Result<()> {
                     bytes.len()
                 ))));
             }
-            hel::hel_archive::write_session_file(&root, &path, &bytes, overwrite)
+            mj_core::archive::write_session_file(&root, &path, &bytes, overwrite)
                 .map_err(export_error)
         }
         WorkerCommand::PushBranch {
             repository, branch, ..
         } => {
             let pushed =
-                hel::hel_archive::push_branch(&hel::hel_archive::SystemGit, &repository, &branch)
+                mj_core::archive::push_branch(&mj_core::archive::SystemGit, &repository, &branch)
                     .map_err(push_error)?;
             println!("{}", serde_json::to_string(&pushed)?);
             Ok(())
@@ -552,7 +552,7 @@ mod tests {
     fn an_export_precondition_failure_carries_the_refusal_exit_code() {
         let root = tempfile::tempdir().unwrap();
         let error = export_error(
-            hel::hel_archive::read_session_file(root.path(), Path::new("../secret.txt"))
+            mj_core::archive::read_session_file(root.path(), Path::new("../secret.txt"))
                 .unwrap_err(),
         );
         let refusal = error
@@ -599,7 +599,7 @@ mod tests {
     }
     #[test]
     fn file_injection_streams_large_stdin_while_draining_worker_output() {
-        use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec};
+        use mj_core::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec};
         const CHILD_ROOT: &str = "MJ_TEST_FILE_INPUT_ROOT";
         if let Some(root) = std::env::var_os(CHILD_ROOT) {
             // A noisy worker must not deadlock the controller's full stdin.

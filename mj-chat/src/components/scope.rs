@@ -30,7 +30,7 @@ struct ClickTarget<K> {
     revision: u64,
 }
 
-use crate::hel_text_input::{EditOutcome, TextInput};
+use crate::text_input::{EditOutcome, TextInput};
 
 /// A user-visible edit delivered by a [`TextField`](super::TextField).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1688,7 +1688,7 @@ pub fn apply_field_edit(input: &mut TextInput, edit: FieldEdit) -> Outcome {
             }
         }
         FieldEdit::Paste(text) => input
-            .insert_str(&crate::hel_text_input::single_line_paste(&text))
+            .insert_str(&crate::text_input::single_line_paste(&text))
             .into(),
         FieldEdit::Cursor(offset) => {
             let before = input.cursor();

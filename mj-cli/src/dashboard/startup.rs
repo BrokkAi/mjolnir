@@ -7,14 +7,14 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use hel::hel_config::{HelConfig, TargetTemplate, is_bare_project_target, raw_project_context_id};
-use hel::hel_targets::CancellableProcessExecutor;
-use hel_tui::DashboardAction;
-use mj_controller::hel_controller::{create_quick_bundle_in_config, local_project_repository};
-use mj_controller::hel_doctor::{
+use mj_controller::controller::{create_quick_bundle_in_config, local_project_repository};
+use mj_controller::doctor::{
     CheckStatus, PROBE_TIMEOUT, local_docker_runtime_check, local_podman_runtime_check,
 };
-use mj_controller::hel_setup::{DEFAULT_IMAGE, RuntimeKind, local_runtime_target};
+use mj_controller::setup::{DEFAULT_IMAGE, RuntimeKind, local_runtime_target};
+use mj_controller::targets::CancellableProcessExecutor;
+use mj_core::config::{Config, TargetTemplate, is_bare_project_target, raw_project_context_id};
+use mj_tui::DashboardAction;
 
 pub(super) fn prepare_session_launch(
     profile_id: String,
@@ -22,9 +22,9 @@ pub(super) fn prepare_session_launch(
     directory: PathBuf,
     workspace_id: String,
     cancelled: &Arc<AtomicBool>,
-) -> Result<(HelConfig, DashboardAction)> {
+) -> Result<(Config, DashboardAction)> {
     prepare_session_launch_at(
-        &hel::hel_config::config_path(),
+        &mj_core::config::config_path(),
         profile_id,
         explicit_target,
         directory,
@@ -40,9 +40,9 @@ fn prepare_session_launch_at(
     directory: PathBuf,
     workspace_id: String,
     cancelled: &Arc<AtomicBool>,
-) -> Result<(HelConfig, DashboardAction)> {
+) -> Result<(Config, DashboardAction)> {
     ensure!(!cancelled.load(Ordering::Acquire), "operation cancelled");
-    let mut config = HelConfig::load_from(config_path)?;
+    let mut config = Config::load_from(config_path)?;
     let (target_id, target) = if let Some(id) = explicit_target {
         let target = config
             .targets
@@ -66,7 +66,7 @@ fn prepare_session_launch_at(
     ensure!(!cancelled.load(Ordering::Acquire), "operation cancelled");
     if !config.targets.contains_key(&target_id) {
         // Resolve against a fresh configuration under its existing write lock.
-        config = HelConfig::update_to(config_path, |fresh| {
+        config = Config::update_to(config_path, |fresh| {
             if let Some(existing) = fresh.targets.get(&target_id) {
                 ensure!(
                     existing == &target,
@@ -86,7 +86,7 @@ fn prepare_session_launch_at(
         let source = directory
             .to_str()
             .context("container project path is not UTF-8")?;
-        let (updated, bundle_id) = HelConfig::update_to(config_path, |fresh| create_quick_bundle_in_config(fresh, source))
+        let (updated, bundle_id) = Config::update_to(config_path, |fresh| create_quick_bundle_in_config(fresh, source))
             .context("prepare the current repository for the startup target; use a local-bare startup target for a plain directory")?;
         config = updated;
         bundle_id
@@ -111,7 +111,7 @@ fn prepare_session_launch_at(
 }
 
 fn automatic_target(
-    config: &HelConfig,
+    config: &Config,
     podman: bool,
     docker: bool,
 ) -> Result<(String, TargetTemplate)> {
@@ -157,12 +157,12 @@ mod tests {
 
     fn write_config(directory: &Path) -> PathBuf {
         let path = directory.join("config.toml");
-        let mut config = HelConfig::default();
+        let mut config = Config::default();
         config.profiles.insert(
             "codex".into(),
-            hel::hel_config::HarnessProfile {
+            mj_core::config::HarnessProfile {
                 enabled: true,
-                kind: hel::hel_config::HarnessKind::Codex,
+                kind: mj_core::config::HarnessKind::Codex,
                 home: directory.join("codex"),
                 environment: Default::default(),
                 context_window_bytes: None,
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn explicit_container_startup_records_the_source_for_network_preflight() {
-        use hel::hel_targets::{CommandExecutor, CommandSpec, ProcessExecutor};
+        use mj_controller::targets::{CommandExecutor, CommandSpec, ProcessExecutor};
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("current project");
         std::fs::create_dir(&project).unwrap();
@@ -222,7 +222,7 @@ mod tests {
                 config.bundles[&bundle_id].repositories[0].local,
                 Some(project.canonicalize().unwrap())
             );
-            assert_eq!(HelConfig::load_from(&path).unwrap(), config);
+            assert_eq!(Config::load_from(&path).unwrap(), config);
         }
     }
 
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn automatic_startup_prefers_available_podman_then_docker_then_local() {
-        let config = HelConfig::default();
+        let config = Config::default();
         assert!(matches!(
             automatic_target(&config, true, true).unwrap().1,
             TargetTemplate::LocalPodman { .. }
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn automatic_startup_reuses_configured_runtime_settings_and_preserves_other_targets() {
-        let mut config = HelConfig::default();
+        let mut config = Config::default();
         let (_, custom) = local_runtime_target(RuntimeKind::Podman, "custom-image:latest");
         config.targets.insert("my-podman".into(), custom.clone());
         config

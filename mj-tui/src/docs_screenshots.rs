@@ -17,10 +17,11 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
-use hel::hel_config::{HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository};
-use hel::hel_state::{HelState, MaterializedExecutionState, STATE_VERSION, SessionState};
-use hel::hel_targets::{DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage};
+use mj_core::config::{HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository};
+use mj_core::state::{MaterializedExecutionState, STATE_VERSION, SessionState, State};
+
 use mj_client::quota::{ProfileQuota, QuotaWindow};
+use mj_core::targets::{DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage};
 
 use crate::render::render;
 use crate::test_support::{
@@ -193,7 +194,7 @@ fn documentation_dashboard() -> DashboardState {
     ]);
     let mut dashboard = DashboardState::new(
         config,
-        HelState {
+        State {
             version: STATE_VERSION,
             sessions,
             mount_history: BTreeMap::new(),
@@ -215,7 +216,7 @@ fn documentation_dashboard() -> DashboardState {
         vec![
             transcript_item(
                 1,
-                hel::hel_state::TranscriptBody::User {
+                mj_core::state::TranscriptBody::User {
                     content: vec![serde_json::json!({
                         "type": "text",
                         "text": "Rebuild the documentation around the current control plane."
@@ -277,7 +278,7 @@ fn documentation_dashboard() -> DashboardState {
 fn apply_documentation_transcript(
     dashboard: &mut DashboardState,
     session_id: &str,
-    transcript: Vec<std::sync::Arc<hel::hel_state::TranscriptItem>>,
+    transcript: Vec<std::sync::Arc<mj_core::state::TranscriptItem>>,
     running: bool,
     now_epoch_seconds: u64,
 ) {

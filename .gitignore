@@ -56,3 +56,6 @@ docs/src/content/docs/podman.md
 docs/src/content/docs/docker.md
 docs/src/content/docs/ssh.md
 docs/src/content/docs/aws.md
+
+!mj-core/src/targets/
+!mj-controller/src/targets/
