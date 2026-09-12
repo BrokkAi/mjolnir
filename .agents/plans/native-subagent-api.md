@@ -67,6 +67,18 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - Observation: clippy's `dead_code` is judged on the non-test build, so the client's `session()` and `read_file()` could not be justified by their tests alone. They gained real callers: `mj sessions --session <id>` and `mj export --kind file --path <path>`.
 - Observation: the build disk (`/mnt/optane`, which holds the symlinked `target/` and the shared build cache) was 100% full during validation. Validation ran with `CARGO_TARGET_DIR` pointed at a gitignored `target-local/` on the roomy filesystem; nothing was redirected to `/tmp` and the shared cache was left alone.
 
+- Observation: the wait loop's launch-failure rule was dead code. `build_observation` compared `ViewerLaunchFailure.id` to the session id, but `record_launch_failure` builds that id as `format!("{}-{action_id}", std::process::id())` -- a notice id for the browser's dismiss button, never a session id.
+  Evidence: `mj-cli/src/server.rs` `record_launch_failure`; `mj-controller/src/web/viewer.js` `renderLaunchFailures` uses `failure.id` only to dismiss.
+  Resolution: `ViewerLaunchFailure` carries an optional `session_id`, populated from the session already in scope at the completion arm, and the rule matches on that.
+- Observation: `pending_action_errors` in `mj-cli/src/server.rs` was inserted into and never removed from, so one failed action badged a session as errored for the daemon's whole lifetime, through every later durable reload.
+  Evidence: the only mention of the map besides the two overlay loops was the `insert` in the action-completion arm.
+  Resolution: `record_action_result` inserts on failure and removes on success, so a later successful action for the same session clears the overlay.
+- Observation: because `wait` mapped that session-scoped `has_error` to `WaitOutcome::Error`, a single earlier failure -- including a transient relay hiccup -- made every later wait on the session return `error` immediately while the turn ran on fine. The API test factory had been clearing `has_error` on its sample session to work around exactly this.
+  Evidence: `resolve_wait`'s third rule; the `snapshot.sessions[0].has_error = false` line in `api_app`.
+  Resolution: the rule is gone and the workaround with it, so every wait test now runs against a session that is carrying an error.
+- Observation: a wait on a session whose relay is unreachable blocked to its deadline and answered `timeout` with no reason, which is indistinguishable from a slow turn.
+  Resolution: `WaitResponse.relay` reports the live view's health on every response; it changes no outcome.
+
 ## Decision Log
 
 - Decision: expose the API as `/api/v1/` routes on the existing axum web viewer server rather than a new listener or the daemon's frame protocol.
@@ -153,6 +165,16 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - Decision: `mj wait` and `mj prompt --wait` exit non-zero on any outcome but `finished`.
   Rationale: the caller is a script or an orchestrating agent, and a turn that errored, was cancelled, timed out, or hit a quota limit is not a success it should continue past without looking.
   Date/Author: 2026-09-11, M5 implementation.
+
+- Decision: `wait` is turn-scoped. A launch failure for this session, a failed start, a stopped session, and the turn's own record end a wait; a session-scoped error badge does not.
+  Rationale: `has_error` is a durable property of the session with no expiry, while a wait answers one question -- how did this turn end. Reporting the badge answered the wrong question and did it wrong, because the badge outlived the failure that set it. The endings that must still be `error` all reach the caller through the turn record or the two start rules.
+  Date/Author: 2026-09-11, defect fix.
+- Decision: `WaitResponse.relay` reports the live view's health (`connected`, `disconnected`, `unreachable`, `target_missing`, `projection_integrity`) and never changes the outcome. A session with no live actor carries no `relay` field.
+  Rationale: a caller needs to tell "still working" from "the daemon cannot see the worker", and those are identical from a `timeout` alone. Making it an outcome instead would invent an ending the turn never reached; omitting it for a session with no live actor is honest where a fabricated `disconnected` would not be.
+  Date/Author: 2026-09-11, defect fix.
+- Decision: a recorded `ViewError` outranks `connected` when building `RelayHealth`.
+  Rationale: a relay that dropped mid-turn can still read as connected; the error is the specific thing standing between the caller and a finished turn.
+  Date/Author: 2026-09-11, defect fix.
 
 ## Outcomes & Retrospective
 

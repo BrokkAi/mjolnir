@@ -225,6 +225,10 @@ queued, which is what a caller that lost its turn id — or that created the
 session and never had one — wants. Queued prompts are why the explicit id
 matters: without it, an earlier prompt's outcome could answer for a later one.
 
+`wait` reports how the named turn ended, and nothing else. An error the
+session recorded for some earlier, unrelated action does not fail the turn you
+asked about; the wait keeps waiting until that turn actually ends.
+
 ```json
 {
   "outcome": "finished",
@@ -233,6 +237,7 @@ matters: without it, an earlier prompt's outcome could answer for a later one.
   "turn_id": 57,
   "turn_number": 3,
   "elapsed_ms": 42318,
+  "relay": { "state": "connected" },
   "session": { "id": "session-1" }
 }
 ```
@@ -240,7 +245,7 @@ matters: without it, an earlier prompt's outcome could answer for a later one.
 | `outcome` | What happened |
 | --- | --- |
 | `finished` | The turn completed normally. |
-| `error` | The turn failed or was rejected, the session reported an error, or the harness gave a stop reason Mjolnir does not recognize. `stop_reason` and `message` say which. |
+| `error` | The turn failed or was rejected, the session could not be launched or started, or the harness gave a stop reason Mjolnir does not recognize. `stop_reason` and `message` say which. |
 | `cancelled` | The turn was cancelled or interrupted, which is what `cancel-turn` produces. |
 | `quota_limit` | The model was at capacity and no retry is armed. |
 | `timeout` | The deadline passed with the turn still running. Wait again with the same `turn_id`. |
@@ -256,6 +261,14 @@ matters: without it, an earlier prompt's outcome could answer for a later one.
   passes first, the response carries
   `"capacity_retry": { "attempt": 2, "retry_at_ms": 1788000000000 }`. Do not
   send a prompt while that field is present.
+- `relay` describes the daemon's live view of this session, when a live actor
+  holds it: `{ "state": "unreachable", "detail": "ssh: connection refused" }`.
+  `state` is `connected`, `disconnected` (attaching, or between tries),
+  `unreachable`, `target_missing`, or `projection_integrity`; `detail` is the
+  view's own description of the problem. It is on every wait response, and it
+  never changes the outcome — it is how a `timeout` tells "the turn is still
+  working" from "the daemon cannot see the worker". A session with no live
+  actor carries no `relay` field rather than an invented reading.
 
 ### Read the transcript
 

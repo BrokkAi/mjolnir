@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use mj_controller::hel_server::api::{
-    ExportKind, ExportRequest, StartSessionRequest, WaitOutcome, WaitRequest, WaitResponse,
+    ExportKind, ExportRequest, RelayState, StartSessionRequest, WaitOutcome, WaitRequest,
+    WaitResponse,
 };
 
 use crate::api_client::{ApiClient, ExportResult};
@@ -264,6 +265,22 @@ fn report_wait(response: &WaitResponse, json: bool) -> Result<()> {
                 retry.attempt
             );
         }
+        // A turn that is still running and a worker the daemon cannot see look
+        // identical from a timeout alone, so name the relay when it is at
+        // fault.
+        if response.outcome == WaitOutcome::Timeout
+            && let Some(relay) = &response.relay
+            && relay.state != RelayState::Connected
+        {
+            let mut line = format!(
+                "the daemon's view of this session is {}",
+                relay_state_name(relay.state)
+            );
+            if let Some(detail) = &relay.detail {
+                line.push_str(&format!(": {detail}"));
+            }
+            println!("{line}");
+        }
         if let Some(final_message) = &response.final_message {
             println!();
             println!("{final_message}");
@@ -272,6 +289,16 @@ fn report_wait(response: &WaitResponse, json: bool) -> Result<()> {
     match response.outcome {
         WaitOutcome::Finished => Ok(()),
         outcome => bail!("the turn ended as {}", outcome_name(outcome)),
+    }
+}
+
+fn relay_state_name(state: RelayState) -> &'static str {
+    match state {
+        RelayState::Connected => "connected",
+        RelayState::Disconnected => "not attached",
+        RelayState::Unreachable => "unreachable",
+        RelayState::TargetMissing => "missing its target",
+        RelayState::ProjectionIntegrity => "out of step with the worker's events",
     }
 }
 

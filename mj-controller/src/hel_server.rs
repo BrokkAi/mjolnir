@@ -372,8 +372,14 @@ pub struct ViewerSnapshot {
 /// Deliberately excludes raw diagnostics, which can contain credentials.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ViewerLaunchFailure {
+    /// Identifies the notice itself, so the browser can dismiss one. It is not
+    /// a session id.
     pub id: String,
     pub workspace_id: String,
+    /// The session the failed launch was for, when one had been published.
+    /// Absent when the launch failed before any session record existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl ViewerSnapshot {

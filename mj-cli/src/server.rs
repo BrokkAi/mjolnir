@@ -1837,22 +1837,23 @@ pub(crate) async fn run_server(
                     if let Some(workspace_id) = launch_workspaces.remove(&action_id)
                         && result.is_err()
                     {
-                        record_launch_failure(&mut launch_failures, action_id, workspace_id);
+                        record_launch_failure(
+                            &mut launch_failures,
+                            action_id,
+                            workspace_id,
+                            session_id.clone(),
+                        );
                         revision = daemon_runtime.allocate_revision();
                         publish_snapshot!(revision);
                     }
                     if let Err(error) = &result {
                         tracing::warn!(action_id, %error, "phone action failed");
                     }
-                    // Nothing is waiting on the request any more, so a failure
-                    // the action itself did not record would reach no one but
-                    // this process's stderr. Preserve it as an in-memory
-                    // overlay for every later durable reload, where the
-                    // snapshot's `has_error` takes it to the phone.
-                    if let (Err(error), Some(session_id)) = (&result, &session_id)
-                    {
-                        pending_action_errors.insert(session_id.clone(), error.clone());
-                    }
+                    record_action_result(
+                        &mut pending_action_errors,
+                        session_id.as_deref(),
+                        &result,
+                    );
                     request_controller_reload(
                         &mut controller_reload_in_flight,
                         &mut controller_reload_requested,
@@ -2246,16 +2247,45 @@ fn track_started_phone_session(
     Ok(())
 }
 
+/// Carry a finished action's failure into the session projection, and clear it
+/// once a later action for the same session succeeds.
+///
+/// Nothing is waiting on the request any more, so a failure the action itself
+/// did not record would reach no one but this process's stderr; the overlay
+/// keeps it visible through every later durable reload, where the snapshot's
+/// `has_error` takes it to the phone. Clearing on success matters just as
+/// much: the overlay has no other expiry, so one transient failure would
+/// otherwise badge the session as errored for the daemon's whole lifetime.
+fn record_action_result(
+    pending_action_errors: &mut std::collections::BTreeMap<String, String>,
+    session_id: Option<&str>,
+    result: &std::result::Result<(), String>,
+) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    match result {
+        Err(error) => {
+            pending_action_errors.insert(session_id.to_owned(), error.clone());
+        }
+        Ok(()) => {
+            pending_action_errors.remove(session_id);
+        }
+    }
+}
+
 /// Retain safe notices even if provisioning removed its provisional session.
 /// This bounded, daemon-lifetime history survives durable controller reloads.
 fn record_launch_failure(
     failures: &mut Vec<mj_controller::hel_server::ViewerLaunchFailure>,
     action_id: u64,
     workspace_id: String,
+    session_id: Option<String>,
 ) {
     failures.push(mj_controller::hel_server::ViewerLaunchFailure {
         id: format!("{}-{action_id}", std::process::id()),
         workspace_id,
+        session_id,
     });
     if failures.len() > 16 {
         failures.remove(0);
@@ -4526,7 +4556,12 @@ mod tests {
         let controller = controller_with_profiles(&["codex"]);
         let mut failures = Vec::new();
         for index in 0..20 {
-            record_launch_failure(&mut failures, index, format!("workspace-{index}"));
+            record_launch_failure(
+                &mut failures,
+                index,
+                format!("workspace-{index}"),
+                Some(format!("session-{index}")),
+            );
         }
         let snapshot = viewer_snapshot(
             &controller,
@@ -4554,9 +4589,36 @@ mod tests {
         assert_eq!(failures[0].workspace_id, "workspace-4");
         assert_eq!(failures[15].workspace_id, "workspace-19");
         assert_ne!(failures[0].id, failures[1].id);
+        assert_eq!(
+            failures[15].session_id.as_deref(),
+            Some("session-19"),
+            "a wait on that session has to be able to recognize its own launch failure"
+        );
         let json = serde_json::to_value(snapshot).unwrap();
         assert_eq!(json["launch_failures"][15]["workspace_id"], "workspace-19");
-        assert_eq!(json["launch_failures"][15].as_object().unwrap().len(), 2);
+        assert_eq!(json["launch_failures"][15].as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_later_successful_action_clears_a_session_s_recorded_failure() {
+        let mut pending = std::collections::BTreeMap::new();
+
+        record_action_result(&mut pending, Some("session-1"), &Err("relay hiccup".into()));
+        assert_eq!(
+            pending.get("session-1").map(String::as_str),
+            Some("relay hiccup")
+        );
+
+        record_action_result(&mut pending, Some("session-2"), &Ok(()));
+        record_action_result(&mut pending, Some("session-1"), &Ok(()));
+        assert!(
+            pending.is_empty(),
+            "the overlay has no other expiry, so a stale error would badge the session forever"
+        );
+
+        // A completion with no session cannot clear or record anything.
+        record_action_result(&mut pending, None, &Err("orphaned".into()));
+        assert!(pending.is_empty());
     }
 
     #[test]

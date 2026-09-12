@@ -330,6 +330,60 @@ impl From<&CapacityRetry> for WaitCapacityRetry {
     }
 }
 
+/// How the daemon's live view of a session's relay is doing.
+///
+/// This reports; it never decides an outcome. A caller that gets `timeout`
+/// needs to tell "the turn is still working" from "the daemon cannot see the
+/// worker at all", and those look identical without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayState {
+    /// The daemon is attached to the worker and following its events.
+    Connected,
+    /// Not attached, with no error recorded yet: attaching, or between tries.
+    Disconnected,
+    /// The worker could not be reached.
+    Unreachable,
+    /// The session's target is gone.
+    TargetMissing,
+    /// The event stream did not line up with what the daemon had projected.
+    ProjectionIntegrity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayHealth {
+    pub state: RelayState,
+    /// The view's own description of the problem, when it recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl From<&mj_client::session::ManagedSessionView> for RelayHealth {
+    fn from(view: &mj_client::session::ManagedSessionView) -> Self {
+        use mj_client::session::ViewError;
+        // A recorded error outranks `connected`: it is the specific thing
+        // standing between the caller and a finished turn.
+        match &view.error {
+            Some(error) => Self {
+                state: match error {
+                    ViewError::Unreachable(_) => RelayState::Unreachable,
+                    ViewError::TargetMissing(_) => RelayState::TargetMissing,
+                    ViewError::ProjectionIntegrity(_) => RelayState::ProjectionIntegrity,
+                },
+                detail: Some(error.detail().to_owned()),
+            },
+            None if view.connected => Self {
+                state: RelayState::Connected,
+                detail: None,
+            },
+            None => Self {
+                state: RelayState::Disconnected,
+                detail: None,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaitResponse {
     pub outcome: WaitOutcome,
@@ -353,6 +407,11 @@ pub struct WaitResponse {
     /// must not submit its own prompt: it would collide with the retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_retry: Option<WaitCapacityRetry>,
+    /// The health of the daemon's live view of this session. Absent when no
+    /// live actor holds the session, because there is then no view to report
+    /// on and inventing one would be worse than saying nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayHealth>,
     pub session: ApiSession,
 }
 
@@ -603,8 +662,7 @@ pub fn map_stop_reason(stop_reason: &str) -> (WaitOutcome, Option<String>) {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WaitObservation {
     pub lifecycle: Option<ViewerLifecycleCategory>,
-    pub has_error: bool,
-    /// A recorded launch failure names this session's workspace.
+    /// A recorded launch failure names this session.
     pub launch_failed: bool,
     pub execution: MaterializedExecutionState,
     pub active_turn: Option<MaterializedTurn>,
@@ -661,9 +719,15 @@ impl WaitDecision {
 
 /// Decide whether this observation ends the wait.
 ///
+/// A wait answers for one turn, so only the turn's own fate ends it. In
+/// particular a session that is carrying an error from some earlier, unrelated
+/// action is not a reason to fail the turn the caller asked about: the session
+/// error badge has no expiry, and reporting it here made every later wait on
+/// that session return `error` while the turn ran on perfectly well.
+///
 /// The rules run in order, and the order is the point:
 ///
-/// 1. A launch failure, a session error, or a failed start is reported as an
+/// 1. A launch failure for this session, or a failed start, is reported as an
 ///    error even if a turn looks like it is still running, because nothing
 ///    will finish it.
 /// 2. A stopped, stopping, or failed session ends the wait as `stopped`.
@@ -674,6 +738,10 @@ impl WaitDecision {
 ///    prompt's outcome.
 /// 4. A capacity outcome with a retry armed is not an ending: the worker will
 ///    submit the retry itself, so the wait keeps waiting.
+///
+/// A turn that really did fail still reports `error`: a rejected or interrupted
+/// turn, and an unrecognized stop reason, all come back through the turn record
+/// in rule 3.
 pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Option<WaitDecision> {
     if observation.launch_failed {
         return Some(WaitDecision::simple(
@@ -685,12 +753,6 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         return Some(WaitDecision::simple(
             WaitOutcome::Error,
             Some(message.clone()),
-        ));
-    }
-    if observation.has_error {
-        return Some(WaitDecision::simple(
-            WaitOutcome::Error,
-            Some("the session reported an error".to_owned()),
         ));
     }
     let stopping = matches!(
@@ -1172,6 +1234,7 @@ async fn wait(
     loop {
         let start_status = backend.start_status(session_id.clone()).await?;
         let live = handle.as_ref().map(SessionHandle::view);
+        let relay = live.as_ref().map(RelayHealth::from);
         let durable = match live.as_ref().and_then(|view| view.snapshot.as_ref()) {
             Some(_) => None,
             None => backend.turn_state(session_id.clone()).await?,
@@ -1190,7 +1253,15 @@ async fn wait(
         };
         if let Some(decision) = resolve_wait(&observation, &request) {
             return Ok(Json(
-                finish_wait(&backend, &session_id, session_facts, observation, decision).await?,
+                finish_wait(
+                    &backend,
+                    &session_id,
+                    session_facts,
+                    observation,
+                    decision,
+                    relay,
+                )
+                .await?,
             ));
         }
 
@@ -1230,6 +1301,7 @@ async fn wait(
                     turn_number: None,
                     elapsed_ms: None,
                     capacity_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
+                    relay,
                     session: ApiSession::from(session),
                 }));
             }
@@ -1255,11 +1327,10 @@ fn build_observation(
 ) -> WaitObservation {
     let mut observation = WaitObservation {
         lifecycle: Some(session.lifecycle),
-        has_error: session.has_error,
         launch_failed: snapshot
             .launch_failures
             .iter()
-            .any(|failure| failure.id == session.id),
+            .any(|failure| failure.session_id.as_deref() == Some(session.id.as_str())),
         capacity_retry: session.capacity_retry.clone(),
         start_status,
         ..WaitObservation::default()
@@ -1290,6 +1361,7 @@ async fn finish_wait(
     mut session: ApiSession,
     observation: WaitObservation,
     decision: WaitDecision,
+    relay: Option<RelayHealth>,
 ) -> Result<WaitResponse, ApiFailure> {
     session
         .last_turn_outcome
@@ -1318,6 +1390,7 @@ async fn finish_wait(
             .capacity_retry
             .as_ref()
             .map(WaitCapacityRetry::from),
+        relay,
         session,
     })
 }
@@ -1504,10 +1577,10 @@ mod tests {
         mpsc::Receiver<super::super::BundleRequest>,
     ) {
         let (config, state) = sample_config_state();
+        // The sample record carries a recorded error. It is left in place: a
+        // session-scoped error must not answer a wait about one turn, so every
+        // wait test below runs against a session that is carrying one.
         let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-        // The sample record carries a recorded error, which every wait would
-        // otherwise answer immediately. Tests that want that say so.
-        snapshot.sessions[0].has_error = false;
         adjust(&mut snapshot);
         let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
         let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
@@ -2221,24 +2294,125 @@ mod tests {
     }
 
     #[test]
-    fn a_session_error_outranks_whatever_the_turn_record_says() {
-        let mut errored = idle(Some(completed(10, "end_turn")));
-        errored.has_error = true;
-        assert_eq!(
-            resolve_wait(&errored, &WaitRequest::default())
-                .unwrap()
-                .outcome,
-            WaitOutcome::Error
-        );
-
+    fn a_launch_failure_fails_the_wait_but_an_unrelated_session_error_does_not() {
         let mut launch_failed = idle(None);
         launch_failed.launch_failed = true;
         assert_eq!(
             resolve_wait(&launch_failed, &WaitRequest::default())
                 .unwrap()
                 .outcome,
-            WaitOutcome::Error
+            WaitOutcome::Error,
+            "nothing will finish a turn on a session that never launched"
         );
+
+        let failed_start = WaitObservation {
+            start_status: Some(StartStatus::Failed {
+                message: "the profile has no home".into(),
+            }),
+            ..idle(None)
+        };
+        let decision = resolve_wait(&failed_start, &WaitRequest::default()).unwrap();
+        assert_eq!(decision.outcome, WaitOutcome::Error);
+        assert_eq!(decision.message.as_deref(), Some("the profile has no home"));
+
+        // The session carries an error from some earlier action. The turn the
+        // caller named is running fine, so the wait keeps waiting.
+        let running = WaitObservation {
+            execution: MaterializedExecutionState::Running { started_at_ms: 1 },
+            active_turn: Some(MaterializedTurn {
+                command_id: "prompt-12".into(),
+                accepted_ordinal: Some(12),
+                turn_start_position: 13,
+                started_at_ms: 1,
+            }),
+            ..idle(Some(completed(10, "end_turn")))
+        };
+        assert_eq!(
+            resolve_wait(
+                &running,
+                &WaitRequest {
+                    turn_id: Some(12),
+                    timeout_secs: None,
+                }
+            ),
+            None,
+            "a stale session error must not report a running turn as failed"
+        );
+    }
+
+    #[test]
+    fn a_launch_failure_for_another_session_is_not_this_session_s() {
+        let (config, state) = sample_config_state();
+        let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        let session_id = snapshot.sessions[0].id.clone();
+        snapshot.launch_failures = vec![super::super::ViewerLaunchFailure {
+            id: format!("{}-4", std::process::id()),
+            workspace_id: snapshot.sessions[0].workspace_id.clone(),
+            session_id: Some("some-other-session".to_owned()),
+        }];
+
+        let observation = build_observation(&snapshot, &snapshot.sessions[0], None, None, None);
+        assert!(
+            !observation.launch_failed,
+            "another session's failed launch says nothing about this one"
+        );
+
+        snapshot.launch_failures[0].session_id = Some(session_id);
+        let observation = build_observation(&snapshot, &snapshot.sessions[0], None, None, None);
+        assert!(observation.launch_failed);
+    }
+
+    #[test]
+    fn relay_health_names_each_way_the_live_view_can_be_unusable() {
+        use mj_client::session::{ManagedSessionView, ViewError};
+
+        let connected = ManagedSessionView {
+            connected: true,
+            ..ManagedSessionView::default()
+        };
+        assert_eq!(
+            RelayHealth::from(&connected),
+            RelayHealth {
+                state: RelayState::Connected,
+                detail: None,
+            }
+        );
+        assert_eq!(
+            RelayHealth::from(&ManagedSessionView::default()).state,
+            RelayState::Disconnected,
+            "not yet attached is not the same as a failure"
+        );
+
+        for (error, expected) in [
+            (
+                ViewError::Unreachable("ssh: connection refused".into()),
+                RelayState::Unreachable,
+            ),
+            (
+                ViewError::TargetMissing("container gone".into()),
+                RelayState::TargetMissing,
+            ),
+            (
+                ViewError::ProjectionIntegrity("digest mismatch".into()),
+                RelayState::ProjectionIntegrity,
+            ),
+        ] {
+            let detail = error.detail().to_owned();
+            // Connected plus an error is what a relay that dropped mid-turn
+            // looks like; the error is the thing the caller needs.
+            let view = ManagedSessionView {
+                connected: true,
+                error: Some(error),
+                ..ManagedSessionView::default()
+            };
+            assert_eq!(
+                RelayHealth::from(&view),
+                RelayHealth {
+                    state: expected,
+                    detail: Some(detail),
+                }
+            );
+        }
     }
 
     #[tokio::test]
