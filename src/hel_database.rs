@@ -2465,6 +2465,103 @@ fn load_materialized_turn_summary_from(
     })
 }
 
+/// One page of a session's transcript, ordered by the sequence a reader pages
+/// by rather than by creation order.
+#[derive(Debug, Clone)]
+pub struct TranscriptPage {
+    pub items: Vec<Arc<TranscriptItem>>,
+    /// The newest sequence in the whole transcript, so a caller can tell
+    /// whether this page reached the end without asking for another one.
+    pub latest_seq: u64,
+    pub execution: MaterializedExecutionState,
+}
+
+/// Read the transcript items whose sequence is above `after_seq`, oldest
+/// first. Returns `None` when the session has no projection row.
+///
+/// The sequence is `COALESCE(latest_content_event_ordinal, position)`: an
+/// agent message is rewritten while it streams, so paging by position would
+/// hand a caller the message as it was first created and never send the
+/// finished text. Paging by this sequence sends the item again exactly when it
+/// changed, and a caller that keeps the highest sequence it saw resumes from
+/// there whether the session is live or long stopped.
+pub fn load_materialized_transcript_after(
+    session_id: &str,
+    after_seq: u64,
+    limit: usize,
+) -> Result<Option<TranscriptPage>> {
+    load_materialized_transcript_after_from(&database_path(), session_id, after_seq, limit)
+}
+
+fn load_materialized_transcript_after_from(
+    path: &Path,
+    session_id: &str,
+    after_seq: u64,
+    limit: usize,
+) -> Result<Option<TranscriptPage>> {
+    let connection = open_reader(path)?;
+    let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
+        return Ok(None);
+    };
+    let mut statement = connection.prepare(
+        "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
+                last_changed_at_ms, body_json
+         FROM materialized_transcript_items
+         WHERE session_id = ?1
+           AND COALESCE(latest_content_event_ordinal, position) > ?2
+         ORDER BY COALESCE(latest_content_event_ordinal, position), stable_id
+         LIMIT ?3",
+    )?;
+    let rows = statement
+        .query_map(params![session_id, after_seq, limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, Option<u64>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let items = rows
+        .into_iter()
+        .map(
+            |(
+                stable_id,
+                position,
+                latest_content_event_ordinal,
+                created_at_ms,
+                last_changed_at_ms,
+                body_json,
+            )| {
+                Ok(Arc::new(TranscriptItem {
+                    stable_id,
+                    position,
+                    latest_content_event_ordinal,
+                    created_at_ms,
+                    last_changed_at_ms,
+                    body: serde_json::from_str(&body_json).with_context(|| {
+                        format!("parse materialized transcript body for session {session_id}")
+                    })?,
+                }))
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+    let latest_seq = connection.query_row(
+        "SELECT COALESCE(MAX(COALESCE(latest_content_event_ordinal, position)), 0)
+         FROM materialized_transcript_items
+         WHERE session_id = ?1",
+        [session_id],
+        |row| row.get::<_, u64>(0),
+    )?;
+    Ok(Some(TranscriptPage {
+        items,
+        latest_seq,
+        execution: fields.execution,
+    }))
+}
+
 /// Remember that an API session-creation key produced this session, so a retry
 /// with the same key returns the same session instead of starting another.
 pub fn record_api_idempotency(key: &str, session_id: &str) -> Result<()> {

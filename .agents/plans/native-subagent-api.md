@@ -25,7 +25,7 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - [x] (2026-09-11) Design fixed and ExecPlan written.
 - [x] (2026-09-11) M1: persist the per-turn outcome in the projection and database; API module with auth, version header, sessions list/get, prompt, wait, close, cancel-turn; daemon-side backend.
 - [x] (2026-09-11) M2: start with model/effort/prompt follow-up and durable idempotency keys.
-- [ ] M3: transcript paged by seq from SQLite.
+- [x] (2026-09-11) M3: transcript paged by seq from SQLite.
 - [ ] M4: export: worker subcommands, diff, file fetch, branch push, bundle.
 - [ ] M5: CLI subcommands and the API reference page.
 
@@ -49,6 +49,9 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - Observation: `validate_action`'s prompt arm reads the session record, so session creation — which carries a first prompt before any record exists — could not reuse it. The text rules are now `validate_prompt_text` in `hel_server.rs`, called from both.
 - Observation: `create_bundle` was a handler with its validation inline, so "create the quick bundle exactly as the viewer does" meant factoring `create_quick_bundle(state, source)` out of it rather than restating 1024-character and empty-source checks in the API module.
 - Observation: the follow-up task can finish before `start_followup` returns, so the `Pending` entry has to be inserted before the task is spawned; inserting it afterwards lost the `Submitted { turn_id }` a fast fake session had already recorded.
+
+- Observation: the transcript sequence (`COALESCE(latest_content_event_ordinal, position)`) was already computed ad hoc in `mj-chat`'s `item_update_ordinal`, so M3 put it on `TranscriptItem::seq()` and the API reads that rather than recomputing the rule at the wire boundary.
+- Observation: `TranscriptPage` was declared in `hel_server/api.rs` in M1 but the loader that fills it belongs in `hel_database`, so M3 moved the type there and the API module re-exports it, the way it already re-exports `TurnSummary`.
 
 - Observation: a closed `watch` channel reports "changed" immediately and forever, so the first wait loop spun without ever letting a timer fire. The test hung rather than failing.
   Evidence: `pstree` showed the test binary alive with one busy thread and no progress; `tokio::select!` was taking the `snapshot_rx.changed()` branch on every pass because the test factory dropped the sender.
@@ -111,6 +114,13 @@ Out of scope: the issue's nice-to-haves (an `asked_question` outcome, usage and 
 - Decision: creation answers 201 as soon as the controller publishes an id, and the prompt is submitted by the backend's follow-up task.
   Rationale: provisioning a target takes minutes; holding the HTTP request open for it would make every creation look like a timeout, and the caller's next call is a wait that reports the follow-up's outcome anyway.
   Date/Author: 2026-09-11, M2 implementation.
+
+- Decision: an oversized `limit` on the transcript route is clamped to 1000 rather than refused.
+  Rationale: paging is the route's purpose, and a 400 would only make the caller retry with a smaller number it has to guess at; the response says how far the page reached through `latest_seq`.
+  Date/Author: 2026-09-11, M3 implementation.
+- Decision: each transcript item carries both flattened `text` and its raw `body`.
+  Rationale: the common caller wants to read the conversation, and flattening a tool call or a plan correctly needs the same helpers every other surface uses; a caller that needs the structure should not have to re-derive it from prose.
+  Date/Author: 2026-09-11, M3 implementation.
 
 ## Outcomes & Retrospective
 

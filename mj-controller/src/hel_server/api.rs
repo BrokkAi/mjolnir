@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result as AnyResult};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, COOKIE, HeaderValue};
 use axum::http::{Request as HttpRequest, StatusCode};
 use axum::middleware::Next;
@@ -354,6 +354,48 @@ pub struct WaitResponse {
     pub session: ApiSession,
 }
 
+/// How many transcript items a page carries when the caller names no limit,
+/// and the most it may ask for. A caller that asks for more gets the ceiling
+/// rather than an error: paging is the point, and refusing a large limit would
+/// only make the caller retry with a smaller one.
+pub const DEFAULT_TRANSCRIPT_LIMIT: usize = 200;
+pub const MAX_TRANSCRIPT_LIMIT: usize = 1_000;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptQuery {
+    /// Resume from the highest sequence the caller has already seen.
+    #[serde(default)]
+    pub after_seq: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptItemView {
+    pub stable_id: String,
+    pub position: u64,
+    /// What to pass as the next `after_seq`. It is the position for everything
+    /// but an agent message, which carries the ordinal of its latest content.
+    pub seq: u64,
+    pub role: String,
+    /// The item flattened to text, which is what a reading caller wants.
+    pub text: String,
+    pub created_at_ms: i64,
+    pub last_changed_at_ms: i64,
+    /// The stored body, for a caller that needs the structure behind the text.
+    pub body: hel::hel_transcript::TranscriptBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptResponse {
+    pub session_id: String,
+    /// The newest sequence in the whole transcript. A page whose last item
+    /// reaches this is up to date.
+    pub latest_seq: u64,
+    pub execution: MaterializedExecutionState,
+    pub items: Vec<TranscriptItemView>,
+}
+
 // ---------------------------------------------------------------------------
 // Backend
 // ---------------------------------------------------------------------------
@@ -389,13 +431,8 @@ pub enum StartStatus {
     Failed { message: String },
 }
 
-/// A page of transcript items. Served in M3.
-#[derive(Debug, Clone)]
-pub struct TranscriptPage {
-    pub items: Vec<std::sync::Arc<hel::hel_state::TranscriptItem>>,
-    pub latest_seq: u64,
-    pub execution: MaterializedExecutionState,
-}
+/// A page of transcript items, read from the durable projection.
+pub use hel::hel_database::TranscriptPage;
 
 /// A branch the daemon pushed on the caller's behalf. Served in M4.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -698,6 +735,7 @@ pub(super) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions", get(list_sessions).post(start_session))
         .route("/sessions/{session_id}", get(get_session))
         .route("/sessions/{session_id}/prompt", post(prompt))
+        .route("/sessions/{session_id}/transcript", get(transcript))
         .route("/sessions/{session_id}/wait", post(wait))
         .route("/sessions/{session_id}/close", post(close))
         .route("/sessions/{session_id}/cancel-turn", post(cancel_turn))
@@ -919,6 +957,45 @@ async fn prompt(
     }
     let turn_id = backend.prompt(session_id, request.text).await?;
     Ok((StatusCode::ACCEPTED, Json(PromptResponse { turn_id })))
+}
+
+/// Page through a session's transcript.
+///
+/// It reads the durable projection rather than the live actor, so it answers
+/// the same way while a session runs and long after it stopped.
+async fn transcript(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<TranscriptQuery>,
+) -> Result<Json<TranscriptResponse>, ApiFailure> {
+    let backend = backend(&state)?.clone();
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_TRANSCRIPT_LIMIT)
+        .clamp(1, MAX_TRANSCRIPT_LIMIT);
+    let page = backend
+        .transcript(session_id.clone(), query.after_seq.unwrap_or(0), limit)
+        .await?
+        .ok_or_else(|| ApiFailure::not_found("no transcript is recorded for that session"))?;
+    Ok(Json(TranscriptResponse {
+        session_id,
+        latest_seq: page.latest_seq,
+        execution: page.execution,
+        items: page
+            .items
+            .iter()
+            .map(|item| TranscriptItemView {
+                stable_id: item.stable_id.clone(),
+                position: item.position,
+                seq: item.seq(),
+                role: hel::hel_transcript::transcript_item_role(&item.body).to_owned(),
+                text: hel::hel_transcript::transcript_item_text(item),
+                created_at_ms: item.created_at_ms,
+                last_changed_at_ms: item.last_changed_at_ms,
+                body: item.body.clone(),
+            })
+            .collect(),
+    }))
 }
 
 async fn close(
@@ -1634,6 +1711,76 @@ mod tests {
             response.await.unwrap().unwrap().status(),
             StatusCode::CREATED
         );
+    }
+
+    #[tokio::test]
+    async fn the_transcript_clamps_its_limit_and_reads_items_as_text() {
+        let backend = Arc::new(FakeBackend {
+            transcript: Mutex::new(Some(TranscriptPage {
+                items: vec![Arc::new(hel::hel_transcript::TranscriptItem {
+                    stable_id: "item-1".into(),
+                    position: 4,
+                    latest_content_event_ordinal: Some(9),
+                    created_at_ms: 10,
+                    last_changed_at_ms: 20,
+                    body: hel::hel_transcript::TranscriptBody::Agent {
+                        chunks: vec![
+                            serde_json::json!({"content": {"type": "text", "text": "added "}}),
+                            serde_json::json!({"content": {"type": "text", "text": "the line"}}),
+                        ],
+                        streaming: false,
+                    },
+                })],
+                latest_seq: 9,
+                execution: MaterializedExecutionState::Idle,
+            })),
+            ..FakeBackend::default()
+        });
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+        let response = app
+            .oneshot(
+                bearer(Request::get(
+                    "/api/v1/sessions/session-1/transcript?after_seq=3&limit=5000",
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["latest_seq"], 9);
+        assert_eq!(
+            body["items"][0]["seq"], 9,
+            "an agent message pages by its latest content, not by where it started"
+        );
+        assert_eq!(body["items"][0]["role"], "agent");
+        assert_eq!(
+            body["items"][0]["text"], "added the line",
+            "a reading caller gets the message, not its chunks"
+        );
+        assert_eq!(body["items"][0]["body"]["kind"], "agent");
+        assert_eq!(
+            backend.transcript_limits.lock().unwrap().as_slice(),
+            [MAX_TRANSCRIPT_LIMIT],
+            "an oversized limit is clamped rather than refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_with_no_projection_row_has_no_transcript() {
+        let (app, _actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
+        let response = app
+            .oneshot(
+                bearer(Request::get("/api/v1/sessions/session-1/transcript"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

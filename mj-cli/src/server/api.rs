@@ -343,11 +343,16 @@ impl SubagentBackend for ApiBackend {
 
     fn transcript(
         &self,
-        _session_id: String,
-        _after_seq: u64,
-        _limit: usize,
+        session_id: String,
+        after_seq: u64,
+        limit: usize,
     ) -> BoxFuture<'_, Result<Option<TranscriptPage>>> {
-        Box::pin(async move { Err(not_in_this_milestone("transcript paging")) })
+        Box::pin(async move {
+            blocking("load transcript page", move || {
+                hel::hel_database::load_materialized_transcript_after(&session_id, after_seq, limit)
+            })
+            .await
+        })
     }
 
     fn diff(&self, _session_id: String) -> BoxFuture<'_, std::result::Result<String, ExportError>> {

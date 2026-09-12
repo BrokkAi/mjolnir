@@ -4760,3 +4760,75 @@ fn a_version_twenty_seven_database_migrates_and_reports_no_turn_history() {
         Some("session-1".to_owned())
     );
 }
+
+#[test]
+fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
+    // An agent message is rewritten while it streams. Paging by position would
+    // hand a caller the message as first created and never the finished text;
+    // paging by sequence sends it again exactly when it changed.
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+
+    let mut user = agent_message_mutation(2);
+    let TranscriptMutation::Upsert(item) = &mut user.transcript[0] else {
+        unreachable!();
+    };
+    item.stable_id = "user-1".into();
+    item.latest_content_event_ordinal = None;
+    item.body = TranscriptBody::User {
+        content: vec![serde_json::json!({"type": "text", "text": "go"})],
+    };
+
+    let mut rewritten = agent_message_mutation(3);
+    let TranscriptMutation::Upsert(item) = &mut rewritten.transcript[0] else {
+        unreachable!();
+    };
+    item.stable_id = "item-1".into();
+    item.position = 1;
+
+    apply_projection_page_to(&database, "session-1", |page| {
+        page.apply(
+            1,
+            RELAY_EVENT_GENESIS_DIGEST,
+            &event_digest(1),
+            &agent_message_mutation(1),
+        )?;
+        page.apply(2, &event_digest(1), &event_digest(2), &user)?;
+        page.apply(3, &event_digest(2), &event_digest(3), &rewritten)
+    })
+    .unwrap();
+
+    let page = load_materialized_transcript_after_from(&database, "session-1", 0, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| (item.stable_id.as_str(), item.seq()))
+            .collect::<Vec<_>>(),
+        [("user-1", 2), ("item-1", 3)],
+        "the rewritten agent message sorts after the user message it now follows"
+    );
+    assert_eq!(page.latest_seq, 3);
+
+    let resumed = load_materialized_transcript_after_from(&database, "session-1", 2, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.items.len(), 1);
+    assert_eq!(resumed.items[0].stable_id, "item-1");
+    let TranscriptBody::Agent { chunks, .. } = &resumed.items[0].body else {
+        panic!("the rewritten item stayed an agent message");
+    };
+    assert_eq!(
+        chunks[0]["content"]["text"], "event 3",
+        "a caller resuming from the sequence it saw gets the finished text, once"
+    );
+
+    assert!(
+        load_materialized_transcript_after_from(&database, "unknown", 0, 10)
+            .unwrap()
+            .is_none(),
+        "a session with no projection row has no transcript to page"
+    );
+}

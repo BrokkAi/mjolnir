@@ -207,6 +207,17 @@ impl TranscriptItem {
         self.stable_id.starts_with(SESSION_RESTART_ITEM_PREFIX)
     }
 
+    /// The relay ordinal a reader pages by.
+    ///
+    /// An agent message is rewritten as its content streams in, and its
+    /// `latest_content_event_ordinal` is where that stopped, so paging by it
+    /// hands a caller the finished message once instead of the partial one it
+    /// was created with. Every other body is created once, so its position is
+    /// its sequence.
+    pub fn seq(&self) -> u64 {
+        self.latest_content_event_ordinal.unwrap_or(self.position)
+    }
+
     /// Whether this item begins a turn: a user message, or the marker for a
     /// turn the harness started on its own. The recovery boundary and the
     /// scope of a plan update both key on the newest of these.
@@ -1818,6 +1829,81 @@ pub fn materialized_content_text(content: &[serde_json::Value]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     crate::hel_worker::strip_hidden_prompt_context(&text).to_owned()
+}
+
+/// What produced a transcript item, as a stable wire name.
+///
+/// The chat view has its own role enum shaped around how it renders; this is
+/// the name the HTTP API publishes, so it changes only when the transcript
+/// model does.
+pub fn transcript_item_role(body: &TranscriptBody) -> &'static str {
+    match body {
+        TranscriptBody::User { .. } => "user",
+        TranscriptBody::Agent { .. } => "agent",
+        TranscriptBody::Thought { .. } => "thought",
+        TranscriptBody::Tool { .. } => "tool",
+        TranscriptBody::TerminalOutput { .. } => "terminal",
+        TranscriptBody::Plan { .. } => "plan",
+        TranscriptBody::PlanProposal { .. } => "plan_proposal",
+        TranscriptBody::System { .. } => "system",
+    }
+}
+
+/// One transcript item flattened to the text a reader would see.
+///
+/// A caller that wants the structure reads the body itself; this is the plain
+/// reading, built from the same flatteners every other surface uses so that a
+/// tool call reads as the command it ran rather than as JSON.
+pub fn transcript_item_text(item: &TranscriptItem) -> String {
+    match &item.body {
+        TranscriptBody::User { content } => materialized_content_text(content),
+        TranscriptBody::Agent { chunks, .. } | TranscriptBody::Thought { chunks, .. } => {
+            materialized_chunks_text(chunks)
+        }
+        TranscriptBody::Tool {
+            call,
+            terminal_outputs,
+            presentation,
+            ..
+        } => {
+            let Ok(call) = ToolCall::deserialize(call) else {
+                return "[invalid tool call]".to_owned();
+            };
+            let mut text = materialized_tool_call_presentation(presentation.as_deref(), &call)
+                .summary
+                .clone();
+            if text.trim().is_empty() {
+                text = call.title.clone();
+            }
+            for record in terminal_outputs {
+                text.push('\n');
+                text.push_str(&terminal_output_detail(record));
+            }
+            sanitize_terminal_text(&text)
+        }
+        TranscriptBody::TerminalOutput { record } => {
+            sanitize_terminal_text(&terminal_output_detail(record))
+        }
+        TranscriptBody::Plan { plan } => {
+            let Ok(plan) = agent_client_protocol::schema::v1::Plan::deserialize(plan) else {
+                return String::new();
+            };
+            plan.entries
+                .iter()
+                .map(|entry| {
+                    let status = match plan_status(&entry.status) {
+                        PlanStatus::Pending => "pending",
+                        PlanStatus::Running => "running",
+                        PlanStatus::Completed => "completed",
+                    };
+                    format!("[{status}] {}", sanitize_terminal_text(&entry.content))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        TranscriptBody::PlanProposal { plan, .. } => plan.clone(),
+        TranscriptBody::System { text } => text.clone(),
+    }
 }
 
 pub fn materialized_chunks_text(chunks: &[serde_json::Value]) -> String {
