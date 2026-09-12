@@ -1770,6 +1770,16 @@ pub(crate) fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent
         }
         RelayObservation::ConfigurationUpdated { key, value } => {
             snapshot.config.insert(key.clone(), value.clone());
+            // Keep the accepted model/effort pair coherent however the change
+            // arrived. A selector Hel applied for itself has no `SetConfig`
+            // command to fold in afterwards, and a model change can retire
+            // the effort the session had stored.
+            crate::hel_acp::AcceptedSessionConfig::record_completed(
+                &mut snapshot.config,
+                key,
+                value,
+                &snapshot.config_options,
+            );
         }
         RelayObservation::CheckpointReady {
             command_id,

@@ -1818,6 +1818,54 @@ async fn out_of_band_sends_cannot_park_the_dispatching_coordinator() {
 }
 
 #[tokio::test]
+async fn a_selector_hel_applied_for_itself_is_durable_without_a_relay_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, _command_rx) = mpsc::channel(2);
+    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+
+    // Recovering a session whose saved model the harness dropped applies a
+    // selector nobody commanded. It must still reach durable state, or the
+    // next restart replays the value that stranded the session.
+    event_tx
+        .send(RuntimeEvent::ConfigApplied {
+            request_id: String::new(),
+            key: "model".into(),
+            value: "recovered".into(),
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .config
+            .get("model")
+            .map(String::as_str)
+            != Some("recovered")
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the recovered selector never became durable");
+
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn different_command_types_dispatch_in_acceptance_order() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();

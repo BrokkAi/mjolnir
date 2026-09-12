@@ -1060,10 +1060,20 @@ pub(super) fn record_runtime_event(
             value,
             config_options,
         } => {
-            relay.record_observation(RelayObservation::ConfigurationUpdated { key, value })?;
-            relay.record_observation(RelayObservation::SessionConfigured { config_options })?;
-            relay.record_command_completed(&request_id, RelayCommandOutcome::Configured)?;
-            in_flight.remove(&request_id);
+            if request_id.is_empty() {
+                // Hel applied this selector for itself, recovering a session
+                // whose saved value the harness dropped, so no relay command
+                // is waiting to be completed. Publish the catalogue the value
+                // came from first: the accepted pair is normalized against
+                // whatever options are current when the value lands.
+                relay.record_observation(RelayObservation::SessionConfigured { config_options })?;
+                relay.record_observation(RelayObservation::ConfigurationUpdated { key, value })?;
+            } else {
+                relay.record_observation(RelayObservation::ConfigurationUpdated { key, value })?;
+                relay.record_observation(RelayObservation::SessionConfigured { config_options })?;
+                relay.record_command_completed(&request_id, RelayCommandOutcome::Configured)?;
+                in_flight.remove(&request_id);
+            }
         }
         RuntimeEvent::SessionModeApplied {
             request_id,

@@ -2626,9 +2626,10 @@ async fn serve_session(
         .clone();
     // Model selection can replace the effort catalogue. Both must be
     // restored before SessionConfigured releases queued prompts.
+    let mut dropped_selectors: Vec<(&'static str, String)> = Vec::new();
     for (key, value) in [("model", accepted.model), ("effort", accepted.effort)] {
         let Some(value) = value else { continue };
-        apply_session_selector(
+        let applied = apply_session_selector(
             connection,
             &session_id,
             &mut config_options,
@@ -2636,8 +2637,23 @@ async fn serve_session(
             key,
             &value,
         )
-        .await
-        .with_context(|| format!("restore this session's accepted {key} {value:?}"))?;
+        .await;
+        if let Err(error) = applied {
+            // A stored value the harness no longer lists is an ordinary
+            // consequence of a model being renamed or withdrawn, and it is
+            // unrepairable from outside: the worker dispatches queued
+            // commands only once the session is configured, so failing here
+            // strands the session forever. Start on the harness default
+            // instead and ask the operator below. Asking the catalogue after
+            // the attempt rather than before keeps every dialect's own
+            // availability rule, including Grok's legacy model list.
+            if selector_value_is_offered(&config_options, key, &value) {
+                return Err(
+                    error.context(format!("restore this session's accepted {key} {value:?}"))
+                );
+            }
+            dropped_selectors.push((key, value));
+        }
     }
     // Startup failures must retain their cause rather than being classified
     // as a dead running bridge and retried with the same invalid settings.
@@ -2685,6 +2701,33 @@ async fn serve_session(
         },
     )
     .await?;
+
+    // The transcript keeps the evidence that this session changed selector
+    // even after the question below is answered and gone.
+    let mut config_recovery = None;
+    if !dropped_selectors.is_empty() {
+        emit_runtime_event(
+            events,
+            RuntimeEvent::Warning {
+                message: dropped_selector_warning(&dropped_selectors),
+            },
+        )
+        .await?;
+        if let Some(request) = session_config_recovery_request(&dropped_selectors, &config_options)
+        {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::ElicitationRequested {
+                    request: request.clone(),
+                },
+            )
+            .await?;
+            // Deliberately not in `pending_elicitations`: that map is for
+            // requests an ACP responder is waiting on. This one is Hel's own,
+            // and the command loop below answers it.
+            config_recovery = Some(request);
+        }
+    }
 
     while let Some(request) = requests.recv().await {
         let request = match request {
@@ -3063,14 +3106,28 @@ async fn serve_session(
                                 response,
                                 resolved,
                             }) => {
-                                if resolved
-                                    .send(resolve_pending_elicitation(
+                                let outcome = match resolve_session_config_recovery(
+                                    connection,
+                                    &session_id,
+                                    spec,
+                                    events,
+                                    &mut config_options,
+                                    &mut grok_models,
+                                    &mut config_recovery,
+                                    false,
+                                    &elicitation_id,
+                                    &response,
+                                )
+                                .await?
+                                {
+                                    Some(outcome) => outcome,
+                                    None => resolve_pending_elicitation(
                                         pending_elicitations,
                                         &elicitation_id,
                                         response,
-                                    ))
-                                    .is_err()
-                                {
+                                    ),
+                                };
+                                if resolved.send(outcome).is_err() {
                                     tracing::debug!(
                                         session_id = %session_id,
                                         operation = "resolve_elicitation",
@@ -3230,14 +3287,26 @@ async fn serve_session(
                 response,
                 resolved,
             } => {
-                if resolved
-                    .send(resolve_pending_elicitation(
-                        pending_elicitations,
-                        &elicitation_id,
-                        response,
-                    ))
-                    .is_err()
+                let outcome = match resolve_session_config_recovery(
+                    connection,
+                    &session_id,
+                    spec,
+                    events,
+                    &mut config_options,
+                    &mut grok_models,
+                    &mut config_recovery,
+                    true,
+                    &elicitation_id,
+                    &response,
+                )
+                .await?
                 {
+                    Some(outcome) => outcome,
+                    None => {
+                        resolve_pending_elicitation(pending_elicitations, &elicitation_id, response)
+                    }
+                };
+                if resolved.send(outcome).is_err() {
                     tracing::debug!(
                         session_id = %session_id,
                         operation = "resolve_elicitation",
@@ -3295,6 +3364,196 @@ fn resolve_pending_elicitation(
     answer
         .send(response)
         .map_err(|_| format!("elicitation {elicitation_id:?} was cancelled before it was answered"))
+}
+
+/// Identity of the one question Hel raises about a session's own stored
+/// configuration.
+///
+/// It is constant because the projection dedupes pending elicitations by id:
+/// a restart before the operator answers replaces the question instead of
+/// stacking another copy of it.
+pub const SESSION_CONFIG_RECOVERY_ID: &str = "session-config-recovery";
+
+/// Whether the harness currently lists `value` for `key`.
+fn selector_value_is_offered(options: &[SessionConfigOption], key: &str, value: &str) -> bool {
+    find_session_config_option(options, key)
+        .is_some_and(|option| select_contains(&option.kind, value))
+}
+
+fn dropped_selector_warning(dropped: &[(&'static str, String)]) -> String {
+    let listed = dropped
+        .iter()
+        .map(|(key, value)| format!("{key} {value:?}"))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    format!(
+        "The harness no longer offers this session's saved {listed}, so the session started on the harness default."
+    )
+}
+
+/// The one form that asks the operator to replace every selector this startup
+/// had to drop, or `None` when the harness offers no choice for any of them.
+fn session_config_recovery_request(
+    dropped: &[(&'static str, String)],
+    options: &[SessionConfigOption],
+) -> Option<ElicitationRequest> {
+    let fields: Vec<ElicitationField> = dropped
+        .iter()
+        .filter_map(|(key, _)| {
+            let choices = session_config_choices(options, key);
+            if choices.is_empty() {
+                return None;
+            }
+            let option = find_session_config_option(options, key);
+            Some(ElicitationField {
+                id: (*key).to_owned(),
+                title: option.map_or_else(|| (*key).to_owned(), |option| option.name.clone()),
+                description: None,
+                required: true,
+                secret: false,
+                custom_answer_for: None,
+                custom_answer_option: None,
+                kind: ElicitationFieldKind::SingleSelect {
+                    options: choices
+                        .into_iter()
+                        .map(|choice| ElicitationOption {
+                            value: choice.value,
+                            title: choice.name,
+                            description: choice.description,
+                            preview: None,
+                        })
+                        .collect(),
+                    // The harness default is what the session is running on,
+                    // so accepting the form unchanged records that choice and
+                    // retires the question for good.
+                    default: option.and_then(|option| match &option.kind {
+                        SessionConfigKind::Select(select) => Some(select.current_value.to_string()),
+                        _ => None,
+                    }),
+                },
+            })
+        })
+        .collect();
+    if fields.is_empty() {
+        return None;
+    }
+    Some(ElicitationRequest {
+        id: SESSION_CONFIG_RECOVERY_ID.to_owned(),
+        title: Some("Choose a replacement".into()),
+        message: dropped_selector_warning(dropped),
+        description: Some(
+            "Pick what this session should use from now on. Declining keeps the harness default."
+                .into(),
+        ),
+        fields,
+    })
+}
+
+/// Answer the recovery question Hel raised for itself.
+///
+/// Returns `None` when the id belongs to the harness instead, which the caller
+/// forwards to the ACP responder waiting on it, and otherwise the answer the
+/// caller reports back to whoever submitted the form.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_session_config_recovery(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    spec: &LaunchSpec,
+    events: &mpsc::Sender<RuntimeEvent>,
+    config_options: &mut Vec<SessionConfigOption>,
+    grok_models: &mut Option<grok::GrokModelState>,
+    pending: &mut Option<ElicitationRequest>,
+    idle: bool,
+    elicitation_id: &str,
+    response: &ElicitationResponse,
+) -> Result<Option<std::result::Result<(), String>>> {
+    let Some(request) = pending
+        .as_ref()
+        .filter(|request| request.id == elicitation_id)
+    else {
+        return Ok(None);
+    };
+    if let Err(message) = request.validate_response(response) {
+        return Ok(Some(Err(message)));
+    }
+    let mut chosen: Vec<(&'static str, String)> = Vec::new();
+    if let ElicitationResponse::Accept { content } = response {
+        // Model before effort: a model change can replace the effort catalogue.
+        for key in ["model", "effort"] {
+            if !request.fields.iter().any(|field| field.id == key) {
+                continue;
+            }
+            if let Some(ElicitationValue::String(value)) = content.get(key)
+                && !value.trim().is_empty()
+            {
+                chosen.push((key, value.clone()));
+            }
+        }
+    }
+    // The same rule the equivalent SetConfig command follows. The question
+    // stays pending so the operator can answer it once the turn ends.
+    if !idle && !chosen.is_empty() {
+        return Ok(Some(Err(
+            "configuration can only be changed while the agent is idle".into(),
+        )));
+    }
+    let action = response.action_name().to_owned();
+    *pending = None;
+    emit_runtime_event(
+        events,
+        RuntimeEvent::ElicitationResolved {
+            elicitation_id: elicitation_id.to_owned(),
+            action,
+        },
+    )
+    .await?;
+    let mut applied = Vec::new();
+    let mut refused = Vec::new();
+    for (key, value) in chosen {
+        match apply_session_selector(
+            connection,
+            session_id,
+            config_options,
+            grok_models,
+            key,
+            &value,
+        )
+        .await
+        {
+            Ok(()) => {
+                spec.accepted_config
+                    .lock()
+                    .map_err(|_| anyhow!("accepted session configuration lock was poisoned"))?
+                    .remember(key, &value, config_options);
+                // No request id: this answers Hel's own question, so there is
+                // no durable relay command to complete. The worker still
+                // records the accepted value, which is what stops the next
+                // restart from replaying the one the harness dropped.
+                emit_runtime_event(
+                    events,
+                    RuntimeEvent::ConfigApplied {
+                        request_id: String::new(),
+                        key: key.to_owned(),
+                        value: value.clone(),
+                        config_options: config_options.clone(),
+                    },
+                )
+                .await?;
+                applied.push(format!("{key} {value:?}"));
+            }
+            Err(error) => refused.push(format!("{key} {value:?} ({error:#})")),
+        }
+    }
+    let mut message = if applied.is_empty() {
+        "This session keeps the harness default configuration.".to_owned()
+    } else {
+        format!("This session now uses {}.", applied.join(" and "))
+    };
+    if !refused.is_empty() {
+        message.push_str(&format!(" The harness refused {}.", refused.join(" and ")));
+    }
+    emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+    Ok(Some(Ok(())))
 }
 
 async fn apply_session_selector(
