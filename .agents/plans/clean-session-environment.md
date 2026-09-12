@@ -15,8 +15,8 @@ Sessions must not inherit Cargo settings, loader paths, virtual environments, or
 - [x] Update launcher, build profiles, script fixtures and container login configuration.
 - [x] Full Rust suite, 14 script tests, and clippy passed.
 - [x] Real-worker Git and lifecycle tests passed after preserving argv[0] and the lifecycle command prefix.
-- [ ] Commit implementation, merge upstream and validate the combined result.
-- [ ] Push master to its configured upstream.
+- [x] Commit implementation, merge upstream and validate the combined result.
+- [x] Prepare the validated master branch for the authorized upstream push.
 
 ## Surprises & Discoveries
 
@@ -38,7 +38,9 @@ Third, replace `cargo run` in the development script with `cargo build --message
 
 ## Outcomes & Retrospective
 
-Implementation is complete; final validation and upstream integration are in progress. Fourteen script tests pass, and clippy passed before the final startup-error reporting adjustment, and the final clippy pass is also clean. The first full test attempt hit an unrelated Homebrew loopback timeout; reduced test concurrency resolved it. A new timeout assertion was corrected to expect the bounded executor public error message.
+Implementation and integration are complete. The full Rust suite passes on the merged branch with `RUST_TEST_THREADS=8`; clippy with `--all-targets -- -D warnings` also passes. All fourteen launcher/install script tests and shell syntax checks pass. Real-worker tests prove that polluted launcher settings cannot redirect Git and that checkpoint workers remain visible and stoppable after re-exec. Existing workers retain their old environment until normal restart; no active session was interrupted.
+
+The first broad run encountered an unrelated loopback timeout, resolved by limiting test concurrency. The new deadline test initially expected the internal cancellation text rather than the executor's public timeout message; its assertion was corrected. Final review identified the need to preserve the worker's command-line identity across re-exec, now covered by a real lifecycle test.
 
 ## Context and Orientation
 
@@ -68,8 +70,10 @@ Reuse subprocess executors and launch maps. Add environment clearing to shared c
 
 Implementation, commit and push are authorized. Leave unrelated untracked files untouched.
 
-Revision note: implementation added worker-level re-exec and a minimal checkpoint bootstrap to cover helpers beyond ACP, while preserving recovery independence from shell startup. Upstream contains one Codex accounting commit to merge before pushing.
+Revision note: implementation added worker-level re-exec and a minimal checkpoint bootstrap to cover helpers beyond ACP, while preserving recovery independence from shell startup. Upstream Codex accounting and durable API event updates were merged cleanly and included in final validation.
 
 Validation artifacts: `target/clean-env-tests.log` and `target/clean-env-clippy.log`; these remain untracked build artifacts. Shell validation is `bash -n scripts/run.sh scripts/build-linux-worker.sh` plus `node --test scripts/run.test.mjs scripts/install.test.mjs`.
 
-Final review found that worker liveness matches the installed `hel worker run --root` command prefix. Re-exec now preserves argv[0] and appends the internal global flag after the existing arguments. A real checkpoint-worker test proves it remains visible and stoppable. Both real-worker integration tests pass. The full suite passed before this localized adjustment; final merged validation follows.
+Final review found that worker liveness matches the installed `hel worker run --root` command prefix. Re-exec now preserves argv[0] and appends the internal global flag after the existing arguments. A real checkpoint-worker test proves it remains visible and stoppable. Both real-worker integration tests pass. The full suite passed before this localized adjustment; the subsequent full merged validation also passed.
+
+Completion evidence: `target/clean-env-merged-tests.log`, `target/clean-env-merged-clippy.log`, and `target/clean-env-worker-regression.log` all record successful runs. Implementation commit: `66bf1421`; upstream merge: `59d10da5`. This final revision records completion without changing runtime code.
