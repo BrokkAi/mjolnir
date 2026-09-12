@@ -435,7 +435,7 @@ export function renderMarkdown(source) {
 
 /// A tool call's diff summaries, as their own rows.
 ///
-/// These arrive from `format_diffstat` in `src/hel_chat/transcript.rs`, which
+/// These arrive from `format_diffstat` in `mj-core/src/transcript.rs`, which
 /// writes the path, two spaces, `+{insertions}`, a space, and `-{deletions}`
 /// using a Unicode MINUS SIGN at U+2212 rather than a hyphen. They are not
 /// Markdown — a table renderer would mangle them — and the counts are worth

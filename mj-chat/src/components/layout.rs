@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::Clear;
 
-use crate::hel_modal::{bordered_content, centered_rect, modal_area};
+use crate::modal::{bordered_content, centered_rect, modal_area};
 use crate::theme;
 
 /// Which side of an anchor an inline popup should prefer.

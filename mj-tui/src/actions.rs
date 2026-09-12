@@ -999,7 +999,7 @@ mod tests {
         assert!(matches!(
             first,
             DashboardAction::SaveSpinnerStyle {
-                style: hel::hel_config::SpinnerStyle::Pulse
+                style: mj_core::config::SpinnerStyle::Pulse
             }
         ));
         assert!(matches!(
@@ -1011,13 +1011,13 @@ mod tests {
             DashboardAction::None
         ));
 
-        dashboard.config.spinner = hel::hel_config::SpinnerStyle::Pulse;
+        dashboard.config.spinner = mj_core::config::SpinnerStyle::Pulse;
         dashboard.finish_spinner_style_save();
         assert_eq!(spinner_available(&dashboard), Availability::Ready);
         assert!(matches!(
             dashboard.dispatch_command(CommandId::CycleSpinner),
             DashboardAction::SaveSpinnerStyle {
-                style: hel::hel_config::SpinnerStyle::Wave
+                style: mj_core::config::SpinnerStyle::Wave
             }
         ));
     }
@@ -1037,7 +1037,7 @@ mod tests {
             .session_details
             .get_mut("session-1")
             .unwrap()
-            .activity = mj_chat::usage_format::SessionActivity::default();
+            .activity = mj_client::usage_format::SessionActivity::default();
         assert!(!dashboard.needs_fast_tick());
         dashboard.session_operations.insert(
             "session-1".into(),
@@ -1157,9 +1157,9 @@ mod tests {
             } => request_id,
             action => panic!("entering move review should request preparation: {action:?}"),
         };
-        let preparation = hel::hel_state::MovePreparation {
+        let preparation = mj_core::state::MovePreparation {
             source_unavailable: false,
-            selection: hel::hel_state::MoveSelection {
+            selection: mj_core::state::MoveSelection {
                 session_id: "session-1".into(),
                 profile_id: Some("codex-1".into()),
                 target_template_id: Some("podman".into()),

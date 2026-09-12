@@ -7,3 +7,10 @@ pub mod review;
 pub mod session;
 pub mod target;
 pub mod web;
+
+pub mod transcript;
+pub mod usage_format;
+
+pub mod operations;
+
+pub mod daemon;

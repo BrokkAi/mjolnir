@@ -245,7 +245,7 @@ image = "ubuntu:24.04"
     if local_startup {
         use std::os::unix::fs::PermissionsExt;
         let path = config_root.join("hel/config.toml");
-        let mut config = hel::hel_config::HelConfig::load_from(&path).unwrap();
+        let mut config = mj_core::config::Config::load_from(&path).unwrap();
         let home = storage.path().join("codex");
         fs::create_dir_all(&home).unwrap();
         // This test checks session creation, not a real Node/Codex install.
@@ -265,7 +265,7 @@ image = "ubuntu:24.04"
         config.targets.clear();
         config.targets.insert(
             "localhost".into(),
-            hel::hel_config::TargetTemplate::LocalBare,
+            mj_core::config::TargetTemplate::LocalBare,
         );
         config.save_to(&path).unwrap();
     }
@@ -279,18 +279,18 @@ image = "ubuntu:24.04"
     }
     let seeded_workspace = pending_session.then(|| {
         let database = storage.path().join("data/hel/mj.sqlite3");
-        let workspace = hel::hel_database::create_workspace_at(&database, "Pending session test").unwrap();
+        let workspace = mj_controller::database::create_workspace_at(&database, "Pending session test").unwrap();
         // A durable session that the manager cannot yet adopt. No provider or
         // container process is needed to exercise the dashboard wait path.
-        let session: hel::hel_state::SessionRecord = serde_json::from_value(serde_json::json!({
+        let session: mj_core::state::SessionRecord = serde_json::from_value(serde_json::json!({
             "id": "pending-session", "workspace_id": workspace.id,
             "title": "Pending session", "harness_kind": "codex",
             "last_profile": "codex", "bundle_id": "hel", "target_template_id": "podman",
             "state": "running", "created_at": "2026-09-07T00:00:00Z", "updated_at": "2026-09-07T00:00:00Z"
         })).unwrap();
-        let mut state = hel::hel_state::HelState::default();
+        let mut state = mj_core::state::State::default();
         state.sessions.insert(session.id.clone(), session);
-        hel::hel_database::save_state_to(&database, &state).unwrap();
+        mj_controller::database::save_state_to(&database, &state).unwrap();
         workspace.name
     });
     let mut master_fd = -1;
@@ -446,7 +446,7 @@ fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
     thread::sleep(Duration::from_millis(1100));
     drain(&mut master, &mut output);
     assert!(
-        hel::hel_database::load_state_from(&database)
+        mj_controller::database::load_state_from(&database)
             .unwrap()
             .sessions
             .is_empty()
@@ -492,7 +492,7 @@ fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
     let session = loop {
         drain(&mut master, &mut output);
         if database.exists()
-            && let Ok(state) = hel::hel_database::load_state_from(&database)
+            && let Ok(state) = mj_controller::database::load_state_from(&database)
             && let Some(session) = state.sessions.values().next()
         {
             assert_eq!(state.sessions.len(), 1);
@@ -512,7 +512,7 @@ fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
         session.project_directory.as_deref(),
         Some(workspace_root.as_path())
     );
-    let workspaces = hel::hel_database::list_workspaces_from(&database).unwrap();
+    let workspaces = mj_controller::database::list_workspaces_from(&database).unwrap();
     assert_eq!(workspaces.len(), 1);
     assert_eq!(workspaces[0].id, session.workspace_id);
     assert_eq!(
@@ -564,7 +564,7 @@ fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
     let deadline = Instant::now() + TIMEOUT;
     let created = loop {
         drain(&mut master, &mut output);
-        let state = hel::hel_database::load_state_from(&database).unwrap();
+        let state = mj_controller::database::load_state_from(&database).unwrap();
         let mut new_sessions = state
             .sessions
             .values()

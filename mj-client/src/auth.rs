@@ -3,11 +3,11 @@
 use std::path::PathBuf;
 
 use anvil_client::codex_auth::read_auth_dot_json_at;
-use hel::hel_config::{HarnessKind, HelConfig};
+use mj_core::config::{Config, HarnessKind};
 
 /// Find candidate Codex subscription auth files, preferring the session's
 /// current profile and then sorting all remaining profile IDs.
-pub fn auth_paths(config: &HelConfig, preferred: &str) -> Vec<PathBuf> {
+pub fn auth_paths(config: &Config, preferred: &str) -> Vec<PathBuf> {
     let mut profiles = config
         .profiles
         .iter()
@@ -46,14 +46,14 @@ mod tests {
 
     #[test]
     fn profile_order_prefers_current_then_sorts() {
-        let mut config = HelConfig {
+        let mut config = Config {
             profiles: BTreeMap::new(),
-            ..HelConfig::default()
+            ..Config::default()
         };
         for id in ["z", "a", "m"] {
             config.profiles.insert(
                 id.into(),
-                hel::hel_config::HarnessProfile {
+                mj_core::config::HarnessProfile {
                     enabled: true,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from(id),

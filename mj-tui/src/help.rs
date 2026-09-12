@@ -19,7 +19,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use mj_chat::hel_selection::FrameSurfaces;
+use mj_chat::selection::FrameSurfaces;
 
 use crate::actions::{Availability, COMMANDS, SCOPE_ORDER};
 use crate::mark_render_changed_cells;

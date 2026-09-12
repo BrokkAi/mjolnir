@@ -4,8 +4,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
-use mj_controller::hel_desktop::{DesktopLaunch, sibling_executable};
-use mj_controller::hel_server::{
+use mj_controller::desktop::{DesktopLaunch, sibling_executable};
+use mj_controller::server::{
     cookie_key_path, load_or_create_cookie_key, mint_desktop_session_cookie,
 };
 
@@ -17,7 +17,7 @@ pub(crate) async fn run_desktop_app() -> Result<()> {
     tokio::task::spawn_blocking(move || {
         let mut command = std::process::Command::new(&executable);
         command.env("MJ_CONTROLLER_BINARY", controller);
-        let status = hel::hel_subprocess::run_inherited(&mut command)
+        let status = mj_core::subprocess::run_inherited(&mut command)
             .with_context(|| format!("start desktop application {}", executable.display()))?;
         ensure!(
             status.success(),
@@ -69,7 +69,7 @@ pub(crate) async fn desktop_bootstrap() -> Result<()> {
 }
 
 fn desktop_executable() -> Result<PathBuf> {
-    let path = if let Some(path) = hel::hel_config::env_override_os("DESKTOP_BINARY") {
+    let path = if let Some(path) = mj_core::config::env_override_os("DESKTOP_BINARY") {
         PathBuf::from(path)
     } else {
         let current = std::env::current_exe().context("locate the mj executable")?;

@@ -6,22 +6,37 @@ mod codex_usage;
 mod grok_usage;
 mod muse_usage;
 
-pub mod hel_compaction;
-pub mod hel_controller;
-pub mod hel_desktop;
-pub mod hel_dictation;
-pub mod hel_doctor;
-pub mod hel_image;
-pub mod hel_import;
-pub mod hel_quota;
-pub mod hel_readline;
-pub mod hel_recovery;
-pub mod hel_review_host;
-pub mod hel_review_settings;
-pub mod hel_server;
-pub mod hel_session_manager;
-pub mod hel_setup;
-pub mod hel_tailscale;
-pub mod hel_utility_llm;
-pub mod hel_worker_client;
-pub mod hel_worker_upgrade;
+pub mod compaction;
+pub mod controller;
+pub mod desktop;
+pub mod dictation;
+pub mod doctor;
+pub mod image;
+pub mod import;
+pub mod quota;
+pub mod readline;
+pub mod recovery;
+pub mod review_host;
+pub mod review_settings;
+pub mod server;
+pub mod session_manager;
+pub mod setup;
+pub mod tailscale;
+pub mod utility_llm;
+pub mod worker_client;
+pub mod worker_upgrade;
+
+pub mod database;
+
+pub mod targets;
+
+pub mod termination;
+
+pub mod daemon;
+pub mod pollers;
+pub mod server_runtime;
+pub mod web_viewer;
+
+pub mod checkpoint_transfer;
+
+pub mod recovery_gate;

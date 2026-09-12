@@ -53,13 +53,18 @@ jobs:
         node scripts/generate-supplemental-third-party-notices.mjs /tmp/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt
         diff -u licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt
 
+    - name: Check crate ownership and packaged assets
+      run: |
+        node scripts/check-crate-boundaries.mjs
+        node scripts/sync-package-assets.mjs check
+
     - name: Check crate package contents and build
       run: |
         set -euo pipefail
-        # Every published crate outside the repository root keeps its own copy
+        # Every published crate keeps its own copy
         # of the licence text, because `cargo package` only collects files from
         # the crate's own directory.
-        for directory in voice-worker mj-worker mj-client mj-controller mj-chat mj-tui mj-cli mj-desktop; do
+        for directory in mj-core voice-worker mj-worker mj-client mj-controller mj-chat mj-tui mj-cli mj-desktop; do
           diff -u LICENSE "$directory/LICENSE"
         done
         # Assemble the file list for each published crate and confirm the
@@ -71,7 +76,7 @@ jobs:
           cargo package --locked --allow-dirty --list -p "$package" > "/tmp/$package-package-files.txt"
           grep -Fx LICENSE "/tmp/$package-package-files.txt"
         done
-        # The root crate also carries the generated third-party notices.
+        # The core crate also carries the generated third-party notices.
         grep -Fx licenses/THIRD_PARTY_LICENSES.html /tmp/brokk-mj-core-package-files.txt
         grep -Fx licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt /tmp/brokk-mj-core-package-files.txt
         # Only the foundation can be verified by extraction before a release:

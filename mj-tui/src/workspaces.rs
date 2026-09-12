@@ -3,11 +3,11 @@
 use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use hel::hel_workspace::WorkspaceRecord;
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TextField};
-use mj_chat::hel_selection::FrameSurfaces;
-use mj_chat::hel_text_input::TextInput;
+use mj_chat::selection::FrameSurfaces;
+use mj_chat::text_input::TextInput;
 use mj_chat::theme;
+use mj_core::workspace::WorkspaceRecord;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
@@ -1321,7 +1321,7 @@ mod tests {
     use super::*;
     use crate::test_support::{buffer_lines, cell_column, dashboard_with_session, running_session};
     use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use hel::hel_workspace::WorkspaceRecord;
+    use mj_core::workspace::WorkspaceRecord;
 
     fn entry(id: &str, name: &str) -> WorkspaceManagementEntry {
         WorkspaceManagementEntry {
@@ -1469,7 +1469,7 @@ mod tests {
 
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.workspace_names.insert(
-            hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+            mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             "A very long workspace name".into(),
         );
         let mut terminal = Terminal::new(TestBackend::new(24, 3)).unwrap();

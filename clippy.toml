@@ -18,7 +18,7 @@ disallowed-methods = [
     # Piping stdin *and* stdout/stderr to a child, then writing stdin before
     # wait_with_output, deadlocks once a pipe buffer fills: the child blocks
     # writing output nobody is draining yet, so it stops reading stdin, so the
-    # parent's write blocks too. Use hel::hel_subprocess::run_with_input,
+    # parent's write blocks too. Use mj_core::subprocess::run_with_input,
     # which feeds stdin from a thread while draining output concurrently, or
     # justify a scoped #[allow(clippy::disallowed_methods)] when stdin is
     # Stdio::null() (nothing writes while output drains, so it cannot deadlock).

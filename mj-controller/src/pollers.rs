@@ -1,0 +1,3227 @@
+//! Background feeds for the control surfaces.
+//!
+//! Everything here runs off the event loop and reports back over a channel:
+//! harness quota refreshes, worker session polling, per-session resource and
+//! deployment capacity probes, credential-sync scheduling, and the one-shot
+//! tasks that recover interrupted closes. The loop that consumes them never
+//! blocks; see [`Feed`] for the wait-then-drain shape they all share.
+
+use std::future::Future;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+use mj_core::clock::epoch_seconds;
+use mj_core::config::Config;
+use mj_core::credentials::{
+    CredentialSyncCause, CredentialSyncHandle, CredentialSyncReason, CredentialSyncSignal,
+    CredentialSyncTarget,
+};
+use mj_core::state::{
+    ManagedSessionSnapshot, MaterializedSession, SessionRecord, SessionResourceAllocation,
+    SessionState, State,
+};
+
+use crate::controller::Controller;
+use crate::quota::{QuotaManager, QuotaRefreshOutcome, QuotaRefreshRequest};
+use crate::recovery::{RecoveryCoordinator, RecoveryResult};
+use crate::session_manager::{
+    ManagedSessionView, RelaySessionTarget, RemoteSessionRequest, SessionManagerControl,
+    SessionManagerShutdown, SessionManagerUpdate, SessionManagerUpdates, ViewError,
+    spawn_remote_session_manager,
+};
+use crate::targets::{
+    CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec,
+    DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage, ImageRefresh,
+    SessionResourceProbe, SessionResourceUsage,
+};
+use crate::worker_client::CredentialSyncCoordinator;
+
+use crate::daemon;
+use mj_core::state::short_id;
+
+#[cfg(test)]
+mod runtime_feed_tests;
+
+pub const QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// When a quota reading stops counting as current. A reading only goes stale
+/// once a scheduled refresh should already have replaced it, so this is
+/// derived from the refresh interval rather than chosen next to it: a shorter
+/// threshold would label every healthy quota "stale" for part of every cycle.
+/// The extra interval is slack for a refresh that is itself still running.
+pub const QUOTA_STALE_AFTER: Duration = Duration::from_secs(2 * QUOTA_REFRESH_INTERVAL.as_secs());
+/// How often the daemon looks for a newer copy of every container image its
+/// targets use. Launches no longer pull, so this is what makes a remote
+/// `:latest` tag current, and it has to be rare enough to stay off the
+/// registry's back.
+pub const IMAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// The daemon has startup work of its own, and a pull competes with it for the
+/// network. The first refresh waits this long, then the interval takes over.
+const IMAGE_REFRESH_DELAY: Duration = Duration::from_secs(30);
+pub const RESOURCE_POLL_INTERVAL: Duration = Duration::from_secs(60);
+const RESOURCE_POLL_TIMEOUT: Duration = Duration::from_secs(15);
+pub const CAPACITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Something a control loop waits on and then drains: one awaited receive for
+/// the `select!` arm, and a non-blocking receive for the batch that follows.
+pub trait FeedSource {
+    type Item;
+
+    /// Cancel-safe: a wait that loses the race must not drop a message.
+    fn wait(&mut self) -> impl Future<Output = Option<Self::Item>>;
+
+    fn poll_now(&mut self) -> Option<Self::Item>;
+}
+
+impl<T> FeedSource for tokio::sync::mpsc::Receiver<T> {
+    type Item = T;
+
+    fn wait(&mut self) -> impl Future<Output = Option<T>> {
+        self.recv()
+    }
+
+    fn poll_now(&mut self) -> Option<T> {
+        self.try_recv().ok()
+    }
+}
+
+impl<T> FeedSource for tokio::sync::mpsc::UnboundedReceiver<T> {
+    type Item = T;
+
+    fn wait(&mut self) -> impl Future<Output = Option<T>> {
+        self.recv()
+    }
+
+    fn poll_now(&mut self) -> Option<T> {
+        self.try_recv().ok()
+    }
+}
+
+impl<T: Clone> FeedSource for tokio::sync::watch::Receiver<T> {
+    type Item = T;
+
+    async fn wait(&mut self) -> Option<T> {
+        self.changed().await.ok()?;
+        Some(self.borrow_and_update().clone())
+    }
+
+    fn poll_now(&mut self) -> Option<T> {
+        self.has_changed()
+            .ok()
+            .filter(|changed| *changed)
+            .map(|_| self.borrow_and_update().clone())
+    }
+}
+
+impl FeedSource for SessionManagerUpdates {
+    type Item = SessionManagerUpdate;
+
+    fn wait(&mut self) -> impl Future<Output = Option<SessionManagerUpdate>> {
+        self.recv()
+    }
+
+    fn poll_now(&mut self) -> Option<SessionManagerUpdate> {
+        self.try_recv().ok()
+    }
+}
+
+impl FeedSource for RecoveryCoordinator {
+    type Item = RecoveryResult;
+
+    fn wait(&mut self) -> impl Future<Output = Option<RecoveryResult>> {
+        self.result()
+    }
+
+    fn poll_now(&mut self) -> Option<RecoveryResult> {
+        self.try_result()
+    }
+}
+
+impl FeedSource for CredentialSyncCoordinator {
+    type Item = mj_core::credentials::CredentialSyncResult;
+
+    fn wait(&mut self) -> impl Future<Output = Option<Self::Item>> {
+        self.result()
+    }
+
+    fn poll_now(&mut self) -> Option<Self::Item> {
+        self.try_result()
+    }
+}
+
+/// One background feed as a control loop uses it.
+///
+/// The `select!` arm hands the message that woke the loop to [`Feed::accept`],
+/// and the drain that follows walks [`Feed::next_ready`] until the feed is
+/// empty, so a burst of updates costs one draw. A closed channel reports `None`
+/// for ever, which would leave its arm permanently ready; `accept` retires the
+/// feed instead, and [`Feed::is_open`] gates the arm.
+pub struct Feed<S: FeedSource> {
+    source: S,
+    pending: Option<S::Item>,
+    open: bool,
+}
+
+impl<S: FeedSource> Feed<S> {
+    pub fn new(source: S) -> Self {
+        Self {
+            source,
+            pending: None,
+            open: true,
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub fn wait(&mut self) -> impl Future<Output = Option<S::Item>> {
+        self.source.wait()
+    }
+
+    /// Latches the message that won the select and reports whether one arrived.
+    /// Applying it determines whether the visible state needs a redraw.
+    pub fn accept(&mut self, message: Option<S::Item>) -> bool {
+        match message {
+            Some(message) => {
+                self.pending = Some(message);
+                true
+            }
+            None => {
+                self.open = false;
+                false
+            }
+        }
+    }
+
+    /// The next message for the batch drain: the one that won the select
+    /// first, then whatever queued behind it.
+    pub fn next_ready(&mut self) -> Option<S::Item> {
+        self.pending.take().or_else(|| self.source.poll_now())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct QuotaRefreshBatch {
+    pub generation: u64,
+    pub profiles: Vec<QuotaRefreshRequest>,
+}
+
+#[derive(Debug)]
+pub enum QuotaUpdate {
+    Refreshing { profile_ids: Vec<String> },
+    Report(QuotaRefreshOutcome),
+    Finished { generation: u64 },
+}
+
+pub type WorkerPollTarget = RelaySessionTarget;
+pub type WorkerPollUpdate = SessionManagerUpdate;
+
+#[derive(Debug)]
+struct WorkerDiagnosisEpisode {
+    id: u64,
+    error: String,
+    diagnosed: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct WorkerDiagnosisTracker {
+    next_episode: u64,
+    current: std::collections::BTreeMap<String, WorkerDiagnosisEpisode>,
+    pending: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct WorkerDiagnosisCompletion {
+    pub display_error: Option<String>,
+    pub restart_episode: Option<u64>,
+}
+
+impl WorkerDiagnosisTracker {
+    pub fn observe(
+        &mut self,
+        session_id: &str,
+        connected: bool,
+        error: Option<String>,
+    ) -> Option<u64> {
+        if connected || error.is_none() {
+            self.current.remove(session_id);
+        }
+        let error = error?;
+        let episode = self
+            .current
+            .entry(session_id.to_owned())
+            .or_insert_with(|| {
+                self.next_episode = self.next_episode.wrapping_add(1).max(1);
+                WorkerDiagnosisEpisode {
+                    id: self.next_episode,
+                    error: error.clone(),
+                    diagnosed: false,
+                }
+            });
+        episode.error = error;
+        if episode.diagnosed || self.pending.contains_key(session_id) {
+            return None;
+        }
+        self.pending.insert(session_id.to_owned(), episode.id);
+        Some(episode.id)
+    }
+
+    pub fn finish(&mut self, session_id: &str, episode_id: u64) -> WorkerDiagnosisCompletion {
+        if self.pending.get(session_id) != Some(&episode_id) {
+            return WorkerDiagnosisCompletion::default();
+        }
+        self.pending.remove(session_id);
+        let Some(current) = self.current.get_mut(session_id) else {
+            return WorkerDiagnosisCompletion::default();
+        };
+        if current.id == episode_id {
+            current.diagnosed = true;
+            return WorkerDiagnosisCompletion {
+                display_error: Some(current.error.clone()),
+                restart_episode: None,
+            };
+        }
+        if !current.diagnosed {
+            self.pending.insert(session_id.to_owned(), current.id);
+            return WorkerDiagnosisCompletion {
+                display_error: None,
+                restart_episode: Some(current.id),
+            };
+        }
+        WorkerDiagnosisCompletion::default()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourcePollTarget {
+    session_id: String,
+    probe: SessionResourceProbe,
+}
+
+#[derive(Debug)]
+pub struct ResourcePollUpdate {
+    pub session_id: String,
+    pub usage: SessionResourceUsage,
+}
+
+#[derive(Debug)]
+pub struct CapacityPollUpdate {
+    pub target_id: String,
+    pub result: std::result::Result<Option<DeploymentCapacityUsage>, String>,
+    pub sampled_at_epoch_seconds: u64,
+}
+
+pub fn projected_queued_prompts(
+    controller: &Controller,
+) -> Result<std::collections::BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>> {
+    let queues = crate::database::load_materialized_queued_prompts()?;
+    Ok(controller
+        .state
+        .sessions
+        .keys()
+        .filter_map(|session_id| {
+            queues
+                .get(session_id)
+                .map(|queue| (session_id.clone(), queued_prompt_entries(queue)))
+        })
+        .collect())
+}
+
+pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshRequest> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    controller
+        .config
+        .enabled_profiles()
+        .map(|(id, profile)| {
+            let mut environment = profile.environment.clone();
+            profile
+                .kind
+                .configure_home_environment(&profile.home, &mut environment);
+            QuotaRefreshRequest {
+                profile_id: id.to_owned(),
+                harness: profile.kind,
+                source_home: profile.home.clone(),
+                environment,
+                cwd: cwd.clone(),
+            }
+        })
+        .collect()
+}
+
+pub fn spawn_quota_refresher() -> (
+    tokio::sync::watch::Sender<QuotaRefreshBatch>,
+    tokio::sync::mpsc::Receiver<QuotaUpdate>,
+) {
+    let (profiles_tx, mut profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
+    let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(32);
+    tokio::spawn(async move {
+        let mut quotas = QuotaManager::default();
+        let mut batch = QuotaRefreshBatch::default();
+        let mut interval = tokio::time::interval(QUOTA_REFRESH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = interval.tick(), if !batch.profiles.is_empty() => {
+                    if !refresh_profile_quotas(
+                        &mut quotas,
+                        batch.generation,
+                        &batch.profiles,
+                        &updates_tx,
+                    ).await {
+                        break;
+                    }
+                }
+                changed = profiles_rx.changed() => {
+                    if changed.is_err() {
+                        tracing::debug!("quota profile target feed closed; stopping quota refresher");
+                        break;
+                    }
+                    batch = profiles_rx.borrow_and_update().clone();
+                    if !refresh_profile_quotas(
+                        &mut quotas,
+                        batch.generation,
+                        &batch.profiles,
+                        &updates_tx,
+                    ).await {
+                        break;
+                    }
+                }
+            }
+        }
+        quotas.shutdown().await;
+    });
+    (profiles_tx, updates_rx)
+}
+
+async fn refresh_profile_quotas(
+    quotas: &mut QuotaManager,
+    generation: u64,
+    profiles: &[QuotaRefreshRequest],
+    updates: &tokio::sync::mpsc::Sender<QuotaUpdate>,
+) -> bool {
+    let ids = profiles
+        .iter()
+        .map(|profile| profile.profile_id.clone())
+        .collect::<Vec<_>>();
+    if updates
+        .send(QuotaUpdate::Refreshing { profile_ids: ids })
+        .await
+        .is_err()
+    {
+        tracing::debug!("quota update consumer closed before refresh started");
+        return false;
+    }
+    // Keep draining even if the UI is gone so codex clients return to the
+    // manager for a clean shutdown; just stop sending.
+    let delivered = AtomicBool::new(true);
+    quotas
+        .refresh_profiles(profiles.to_vec(), |quota| {
+            let delivered = &delivered;
+            async move {
+                if delivered.load(Ordering::Acquire)
+                    && updates.send(QuotaUpdate::Report(quota)).await.is_err()
+                {
+                    tracing::debug!("quota update consumer closed while reporting a profile");
+                    delivered.store(false, Ordering::Release);
+                }
+            }
+        })
+        .await;
+    if !delivered.into_inner() {
+        return false;
+    }
+    if updates
+        .send(QuotaUpdate::Finished { generation })
+        .await
+        .is_err()
+    {
+        tracing::debug!(
+            generation,
+            "quota update consumer closed before refresh completed"
+        );
+        false
+    } else {
+        true
+    }
+}
+
+/// Keep every configured container image current, away from any session
+/// launch.
+///
+/// `plan` is called on every tick rather than once, so a config reload changes
+/// what gets refreshed without a daemon restart. Hosts refresh concurrently;
+/// each host runs its own commands in order.
+pub fn spawn_image_refresher(
+    plan: impl Fn() -> Vec<ImageRefresh> + Send + 'static,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + IMAGE_REFRESH_DELAY,
+            IMAGE_REFRESH_INTERVAL,
+        );
+        // A refresh slower than the interval collapses the ticks it missed
+        // instead of stacking a second pull behind the first.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                // Quitting wins over a tick that came due during a long
+                // refresh, so shutdown never starts one more pull.
+                biased;
+                _ = cancellation.cancelled() => return,
+                _ = interval.tick() => refresh_images(plan(), &cancellation).await,
+            }
+        }
+    })
+}
+
+async fn refresh_images(
+    plan: Vec<ImageRefresh>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) {
+    if plan.is_empty() {
+        return;
+    }
+    // One flag for every host, so quitting kills the pulls in flight instead of
+    // waiting out a multi-gigabyte download.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut hosts = tokio::task::JoinSet::new();
+    for refresh in plan {
+        // ProcessExecutor is synchronous, and a pull is long: it belongs on a
+        // blocking thread, never on the runtime.
+        let executor = CancellableProcessExecutor::new(cancelled.clone());
+        hosts.spawn_blocking(move || {
+            let Err(error) = refresh_host_image(&refresh, &executor) else {
+                return;
+            };
+            if executor.is_cancelled() {
+                // The daemon is leaving. That is not a fault of the host.
+                tracing::debug!(
+                    host = refresh.host.label(),
+                    image = refresh.image,
+                    "container image refresh cancelled"
+                );
+                return;
+            }
+            tracing::warn!(
+                host = refresh.host.label(),
+                image = refresh.image,
+                error = format!("{error:#}"),
+                "could not refresh a container image"
+            );
+        });
+    }
+    let mut cancelling = false;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled(), if !cancelling => {
+                cancelling = true;
+                cancelled.store(true, Ordering::Release);
+            }
+            joined = hosts.join_next() => match joined {
+                None => return,
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "container image refresh task failed");
+                }
+            },
+        }
+    }
+}
+
+/// Pull one image on one host, then drop whatever that unlinked.
+///
+/// The image id before and after says whether the pull actually changed
+/// anything, which is the only part worth an `info` line.
+fn refresh_host_image(refresh: &ImageRefresh, executor: &impl CommandExecutor) -> Result<()> {
+    let cached = image_id(&refresh.image_id, executor);
+    run_refresh_command(&refresh.pull, executor)?;
+    let pulled = image_id(&refresh.image_id, executor);
+    if pulled.is_some() && pulled != cached {
+        tracing::info!(
+            host = refresh.host.label(),
+            image = refresh.image,
+            id = pulled.unwrap_or_default(),
+            "pulled a newer container image"
+        );
+    } else {
+        tracing::debug!(
+            host = refresh.host.label(),
+            image = refresh.image,
+            "container image is already current"
+        );
+    }
+    run_refresh_command(&refresh.prune, executor)?;
+    Ok(())
+}
+
+/// The host's id for an image, or `None` when it has no copy of it yet. A
+/// missing image is the ordinary first-pull case, not a fault.
+fn image_id(command: &CommandSpec, executor: &impl CommandExecutor) -> Option<String> {
+    let output = executor.execute(command).ok()?;
+    if output.status != 0 {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!id.is_empty()).then_some(id)
+}
+
+fn run_refresh_command(command: &CommandSpec, executor: &impl CommandExecutor) -> Result<()> {
+    let output = executor.execute(command)?;
+    if output.status != 0 {
+        bail!(
+            "{} failed with status {}: {}",
+            command.purpose,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+pub fn complete_manual_quota_refresh(
+    pending_generation: &mut Option<u64>,
+    completed_generation: u64,
+) -> bool {
+    if *pending_generation != Some(completed_generation) {
+        return false;
+    }
+    *pending_generation = None;
+    true
+}
+
+pub fn dashboard_worker_targets(controller: &Controller) -> Vec<WorkerPollTarget> {
+    controller
+        .state
+        .sessions
+        .values()
+        .filter(|session| session_target_is_pollable(session))
+        .filter_map(|session| {
+            let spec = match controller.reconnect_command(&session.id) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, "could not build worker poll target: {error:#}");
+                    return None;
+                }
+            };
+            Some(WorkerPollTarget {
+                session_id: session.id.clone(),
+                spec,
+                worker_recovery: match controller.worker_recovery_plan(&session.id) {
+                    Ok(plan) => Some(plan),
+                    Err(error) => {
+                        tracing::debug!(session_id = %session.id, "worker recovery target unavailable: {error:#}");
+                        None
+                    }
+                },
+                project_memory: match controller.project_memory_sync_target(&session.id) {
+                    Ok(target) => Some(target),
+                    Err(error) => {
+                        tracing::debug!(session_id = %session.id, "project memory target unavailable: {error:#}");
+                        None
+                    }
+                },
+            })
+        })
+        .collect()
+}
+
+pub fn dashboard_worker_targets_excluding(
+    controller: &Controller,
+    excluded_sessions: &std::collections::BTreeSet<String>,
+) -> Vec<WorkerPollTarget> {
+    let mut targets = dashboard_worker_targets(controller);
+    targets.retain(|target| !excluded_sessions.contains(&target.session_id));
+    targets
+}
+
+/// Sessions whose worker can answer credential requests right now. Sessions
+/// still provisioning or already disconnected would only produce connection
+/// errors, so they stay out.
+pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTarget> {
+    controller
+        .state
+        .sessions
+        .values()
+        .filter(|session| {
+            matches!(
+                session.state,
+                SessionState::Running | SessionState::Checkpointing
+            ) && session.target.is_some()
+        })
+        .filter_map(|session| {
+            let profile = controller.config.profiles.get(&session.last_profile)?;
+            let spec = match controller.reconnect_command(&session.id) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, "could not build credential sync target: {error:#}");
+                    return None;
+                }
+            };
+            let sync_github_token = target_syncs_github_token(session.target.as_ref());
+            Some(CredentialSyncTarget {
+                session_id: session.id.clone(),
+                profile_id: session.last_profile.clone(),
+                harness: profile.kind,
+                profile_home: profile.home.clone(),
+                sync_github_token,
+                spec,
+            })
+        })
+        .collect()
+}
+
+fn target_syncs_github_token(target: Option<&mj_core::state::TargetLocator>) -> bool {
+    target.is_some()
+        && !matches!(
+            target,
+            Some(mj_core::state::TargetLocator::LocalBare { .. })
+        )
+}
+
+/// One immediate sync and notice per session per cooldown, so a harness that
+/// repeats the same failed turn does not flood the UI.
+pub const IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingCredentialSync {
+    signal: CredentialSyncSignal,
+    profile_id: String,
+}
+
+/// Deduplicates the actor's sticky failure marker while retaining a newer
+/// failure until its session cooldown expires.
+#[derive(Debug, Default)]
+pub struct CredentialSyncSignalTracker {
+    handled_ordinals: std::collections::BTreeMap<String, u64>,
+    last_attempts: std::collections::BTreeMap<String, Instant>,
+    pending: std::collections::BTreeMap<String, PendingCredentialSync>,
+}
+
+impl CredentialSyncSignalTracker {
+    pub fn observe(&mut self, session_id: &str, profile_id: &str, signal: CredentialSyncSignal) {
+        if self
+            .handled_ordinals
+            .get(session_id)
+            .is_some_and(|handled| *handled >= signal.ordinal)
+        {
+            return;
+        }
+        let pending = PendingCredentialSync {
+            signal,
+            profile_id: profile_id.to_owned(),
+        };
+        match self.pending.entry(session_id.to_owned()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(pending);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry)
+                if entry.get().signal.ordinal <= pending.signal.ordinal =>
+            {
+                entry.insert(pending);
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
+    }
+
+    fn drain_due(&mut self, now: Instant) -> Vec<(String, String, CredentialSyncReason)> {
+        let due = self
+            .pending
+            .keys()
+            .filter(|session_id| {
+                self.last_attempts.get(*session_id).is_none_or(|previous| {
+                    now.saturating_duration_since(*previous) >= IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        due.into_iter()
+            .map(|session_id| {
+                let pending = self
+                    .pending
+                    .remove(&session_id)
+                    .expect("due credential sync signal disappeared");
+                self.handled_ordinals
+                    .insert(session_id.clone(), pending.signal.ordinal);
+                self.last_attempts.insert(session_id.clone(), now);
+                (session_id, pending.profile_id, pending.signal.reason)
+            })
+            .collect()
+    }
+}
+
+pub fn schedule_due_credential_syncs(
+    tracker: &mut CredentialSyncSignalTracker,
+    credential_sync: &CredentialSyncHandle,
+    now: Instant,
+) {
+    for (session_id, profile_id, reason) in tracker.drain_due(now) {
+        credential_sync.sync_profile_now(
+            &profile_id,
+            Some(CredentialSyncCause { session_id, reason }),
+        );
+    }
+}
+
+/// Turns finished credential syncs into UI notices.
+///
+/// The periodic cycle revisits every profile, so a session that keeps failing
+/// the same way would post the same notice forever. The last failure message
+/// per key is remembered and only a changed one speaks up again. Keys are the
+/// profile for a whole-sync failure and the profile plus session for a
+/// per-session failure.
+#[derive(Debug, Default)]
+pub struct CredentialSyncNotices {
+    last_failures: std::collections::BTreeMap<(String, Option<String>), String>,
+}
+
+pub fn log_credential_sync_actions(result: &mj_core::credentials::CredentialSyncResult) {
+    let sessions = result.credential_sessions();
+    if sessions > 0 {
+        tracing::info!(
+            profile_id = %result.profile_id,
+            sessions,
+            "refreshed harness credentials"
+        );
+    }
+}
+
+/// The extra option a Claude profile has after an auth failure.
+///
+/// Claude Code cannot refresh its rotating login early, so a container copy
+/// can lose the single-use refresh race with the host. A setup token does not
+/// rotate, which takes the race away rather than retrying it.
+fn setup_token_advice(profile_id: &str, harness: Option<mj_core::config::HarnessKind>) -> String {
+    if harness == Some(mj_core::config::HarnessKind::Claude) {
+        format!(
+            ", or store a long-lived token with `mj login --profile {profile_id} --setup-token`"
+        )
+    } else {
+        String::new()
+    }
+}
+
+impl CredentialSyncNotices {
+    /// Healthy no-op cycles stay out of the UI; only actions, new failures, and
+    /// answers to an event-triggered reconciliation are worth a notice.
+    pub fn notice(
+        &mut self,
+        result: &mj_core::credentials::CredentialSyncResult,
+        harness: Option<mj_core::config::HarnessKind>,
+    ) -> Option<String> {
+        let advice = setup_token_advice(&result.profile_id, harness);
+        // Event-triggered syncs always speak: the upstream per-session
+        // cooldown, not this dedup, is what keeps them rare.
+        if let Some(trigger) = &result.trigger {
+            let session_id = &trigger.session_id;
+            let sync_failure = result.failure.as_deref().or_else(|| {
+                result.failures().find_map(|(failed_session, detail)| {
+                    (failed_session == session_id).then_some(detail)
+                })
+            });
+            if let Some(detail) = sync_failure {
+                return Some(match trigger.reason {
+                    CredentialSyncReason::AuthenticationFailure => format!(
+                        "Auth failure on profile {} (session {}); credential reconciliation failed: {detail}. Run `mj login --profile {}`{advice}.",
+                        result.profile_id,
+                        short_id(session_id),
+                        result.profile_id
+                    ),
+                    CredentialSyncReason::EmptyPromptResponse => format!(
+                        "Session {} returned no response; credential reconciliation for profile {} failed: {detail}. The failure is recorded in the transcript.",
+                        short_id(session_id),
+                        result.profile_id
+                    ),
+                });
+            }
+            // The first ~80 columns are all most people read before a notice
+            // scrolls off, so the profile leads and the advice trails.
+            return Some(match (trigger.reason, result.pushed_to(session_id)) {
+                (CredentialSyncReason::AuthenticationFailure, true) => format!(
+                    "Auth failure on profile {} (session {}); refreshed credentials were pushed. Retry the prompt, and if it repeats run `mj login --profile {}`{advice}.",
+                    result.profile_id,
+                    short_id(session_id),
+                    result.profile_id
+                ),
+                (CredentialSyncReason::AuthenticationFailure, false) => format!(
+                    "Auth failure on profile {} (session {}); nothing fresher to push. Run `mj login --profile {}`{advice}.",
+                    result.profile_id,
+                    short_id(session_id),
+                    result.profile_id
+                ),
+                (CredentialSyncReason::EmptyPromptResponse, true) => format!(
+                    "Session {} returned no response; fresher credentials from profile {} were pushed. Retry the prompt.",
+                    short_id(session_id),
+                    result.profile_id
+                ),
+                (CredentialSyncReason::EmptyPromptResponse, false) => format!(
+                    "Session {} returned no response; profile {} had no newer credentials to push. The failure is recorded in the transcript.",
+                    short_id(session_id),
+                    result.profile_id
+                ),
+            });
+        }
+
+        let mut failures = std::collections::BTreeMap::new();
+        if let Some(detail) = &result.failure {
+            failures.insert(
+                (result.profile_id.clone(), None),
+                format!(
+                    "Credential sync for profile {} failed: {detail}",
+                    result.profile_id
+                ),
+            );
+        }
+        for (session_id, detail) in result.failures() {
+            failures.insert(
+                (result.profile_id.clone(), Some(session_id.to_owned())),
+                format!(
+                    "Credential sync for profile {} (session {}) failed: {detail}",
+                    result.profile_id,
+                    short_id(session_id)
+                ),
+            );
+        }
+        // A key that stopped failing is forgotten silently, so the same failure
+        // after a clean cycle is reported again.
+        self.last_failures
+            .retain(|key, _| key.0 != result.profile_id || failures.contains_key(key));
+        let mut notice = None;
+        for (key, message) in failures {
+            if self.last_failures.get(&key) != Some(&message) {
+                notice.get_or_insert_with(|| message.clone());
+            }
+            self.last_failures.insert(key, message);
+        }
+        if notice.is_some() {
+            return notice;
+        }
+
+        let mut parts = Vec::new();
+        let skills = result.skills_sessions();
+        if skills > 0 {
+            parts.push(format!(
+                "Synced skills for profile {} to {skills} session(s).",
+                result.profile_id
+            ));
+        }
+        let github_pushed = result.github_token_pushed_sessions();
+        if github_pushed > 0 {
+            parts.push(format!(
+                "Synced the GitHub CLI token to {github_pushed} session(s)."
+            ));
+        }
+        let github_removed = result.github_token_removed_sessions();
+        if github_removed > 0 {
+            parts.push(format!(
+                "Removed the GitHub CLI token from {github_removed} session(s)."
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join(" "))
+    }
+}
+
+fn dashboard_resource_targets(controller: &Controller) -> Vec<ResourcePollTarget> {
+    controller
+        .state
+        .sessions
+        .values()
+        .filter(|session| session_target_is_pollable(session))
+        .filter_map(|session| {
+            match controller.resource_probe(&session.id) {
+                Ok(probe) => Some(ResourcePollTarget {
+                    session_id: session.id.clone(),
+                    probe,
+                }),
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, "could not build resource poll target: {error:#}");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// `is_active` means visible on the active dashboard, not necessarily backed
+/// by a live target. A recoverable error stays visible so the user can resume
+/// its checkpoint, but its failed target must not keep reconnecting or being
+/// sampled.
+///
+/// `Provisioning` is excluded for the same reason `credential_sync_targets`
+/// excludes it, and for a sharper one: a session gets its `target` as soon as
+/// the target itself exists, which is *before* its worker binary has been
+/// copied into place. Polling that window means running `execve` on a file
+/// `cp` still holds open for writing, which fails with `ETXTBSY` and leaves
+/// the session recorded as unreachable. Provisioning connects to its own
+/// worker when it is ready and then marks the session `Running`, which is when
+/// there is something here to poll.
+pub fn session_target_is_pollable(session: &mj_core::state::SessionRecord) -> bool {
+    session.state.is_active()
+        && !matches!(
+            session.state,
+            SessionState::Error | SessionState::Provisioning
+        )
+        && session.target.is_some()
+}
+
+pub fn refresh_dashboard_poll_targets(
+    controller: &Controller,
+    worker_targets_tx: &tokio::sync::watch::Sender<Vec<WorkerPollTarget>>,
+    resource_targets_tx: &tokio::sync::watch::Sender<Vec<ResourcePollTarget>>,
+    credential_sync: &CredentialSyncHandle,
+    excluded_sessions: &std::collections::BTreeSet<String>,
+) {
+    let worker_targets = dashboard_worker_targets_excluding(controller, excluded_sessions);
+    worker_targets_tx.send_replace(worker_targets);
+    let mut resource_targets = dashboard_resource_targets(controller);
+    resource_targets.retain(|target| !excluded_sessions.contains(&target.session_id));
+    resource_targets_tx.send_replace(resource_targets);
+    let mut credential_targets = credential_sync_targets(controller);
+    credential_targets.retain(|target| !excluded_sessions.contains(&target.session_id));
+    credential_sync.set_targets(credential_targets);
+}
+
+pub fn spawn_aws_resource_options_resolution(
+    config: Config,
+    target_id: String,
+    updates: tokio::sync::mpsc::UnboundedSender<(
+        String,
+        std::result::Result<Vec<SessionResourceAllocation>, String>,
+    )>,
+    tracker: mj_client::operations::CriticalOperationTracker,
+) {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard = tracker.begin_cancellable(
+        format!("resolving resources for {target_id}"),
+        cancelled.clone(),
+    );
+    let _task = tokio::task::spawn_blocking(move || {
+        let controller = Controller {
+            config,
+            state: State::default(),
+        };
+        let result = controller
+            .resolve_aws_resource_options(&target_id, &CancellableProcessExecutor::new(cancelled))
+            .map_err(|error| format!("{error:#}"));
+        if let Err(error) = updates.send((target_id.clone(), result)) {
+            tracing::debug!(target_id, %error, "AWS resource options result dropped after dashboard shutdown");
+        }
+        drop(guard);
+    });
+}
+
+pub fn spawn_dashboard_resource_poller() -> (
+    tokio::sync::watch::Sender<Vec<ResourcePollTarget>>,
+    tokio::sync::mpsc::Sender<String>,
+    tokio::sync::mpsc::Receiver<ResourcePollUpdate>,
+) {
+    let (targets_tx, mut targets_rx) =
+        tokio::sync::watch::channel(Vec::<ResourcePollTarget>::new());
+    let (triggers_tx, mut triggers_rx) = tokio::sync::mpsc::channel(64);
+    let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        let mut targets = std::collections::BTreeMap::new();
+        let mut last_started = std::collections::BTreeMap::new();
+        let mut interval = tokio::time::interval(RESOURCE_POLL_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let due = targets.values().cloned().collect::<Vec<_>>();
+                    for target in due {
+                        schedule_resource_sample(target, &mut last_started, &updates_tx);
+                    }
+                }
+                changed = targets_rx.changed() => {
+                    if changed.is_err() {
+                        tracing::debug!("resource poll target feed closed; stopping resource poller");
+                        break;
+                    }
+                    targets = targets_rx
+                        .borrow_and_update()
+                        .iter()
+                        .cloned()
+                        .map(|target| (target.session_id.clone(), target))
+                        .collect();
+                    last_started.retain(|session_id, _| targets.contains_key(session_id));
+                    let due = targets.values().cloned().collect::<Vec<_>>();
+                    for target in due {
+                        schedule_resource_sample(target, &mut last_started, &updates_tx);
+                    }
+                }
+                session_id = triggers_rx.recv() => {
+                    let Some(session_id) = session_id else {
+                        break;
+                    };
+                    if let Some(target) = targets.get(&session_id).cloned() {
+                        schedule_resource_sample(target, &mut last_started, &updates_tx);
+                    }
+                }
+            }
+        }
+    });
+    (targets_tx, triggers_tx, updates_rx)
+}
+
+fn resource_sample_is_due(
+    last_started: Option<&tokio::time::Instant>,
+    now: tokio::time::Instant,
+) -> bool {
+    last_started.is_none_or(|started| now.duration_since(*started) >= RESOURCE_POLL_INTERVAL)
+}
+
+fn schedule_resource_sample(
+    target: ResourcePollTarget,
+    last_started: &mut std::collections::BTreeMap<String, tokio::time::Instant>,
+    updates: &tokio::sync::mpsc::Sender<ResourcePollUpdate>,
+) {
+    let now = tokio::time::Instant::now();
+    if !resource_sample_is_due(last_started.get(&target.session_id), now) {
+        return;
+    }
+    last_started.insert(target.session_id.clone(), now);
+    let updates = updates.clone();
+    tokio::spawn(async move {
+        let usage = match tokio::time::timeout(
+            RESOURCE_POLL_TIMEOUT,
+            collect_session_resource_usage(&target.probe),
+        )
+        .await
+        {
+            Ok(Ok(usage)) => Some(usage),
+            Ok(Err(error)) => {
+                tracing::warn!(session_id = %target.session_id, "resource probe failed: {error:#}");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(session_id = %target.session_id, "resource probe timed out");
+                None
+            }
+        };
+        let Some(usage) = usage else {
+            return;
+        };
+        if let Err(error) = updates
+            .send(ResourcePollUpdate {
+                session_id: target.session_id.clone(),
+                usage,
+            })
+            .await
+        {
+            tracing::debug!(session_id = %target.session_id, %error, "resource probe result dropped after dashboard shutdown");
+        }
+    });
+}
+
+async fn collect_session_resource_usage(
+    probe: &SessionResourceProbe,
+) -> Result<SessionResourceUsage> {
+    let memory = execute_resource_command(&probe.memory).await?;
+    let disk = match &probe.disk {
+        Some(command) => match execute_resource_command(command).await {
+            Ok(output) => Some(output),
+            Err(error) => {
+                tracing::debug!(purpose = %command.purpose, "optional disk resource probe failed: {error:#}");
+                None
+            }
+        },
+        None => None,
+    };
+    crate::targets::parse_resource_usage(
+        &memory.stdout,
+        disk.as_ref().map(|output| output.stdout.as_slice()),
+    )
+}
+
+pub fn spawn_dashboard_capacity_poller() -> (
+    tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+    tokio::sync::mpsc::Sender<()>,
+    tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
+) {
+    spawn_capacity_poller_with(|target| async move {
+        if let Some(error) = &target.probe_error {
+            bail!("capacity probe is unavailable: {error}");
+        }
+        if target.local {
+            return collect_local_capacity_with(collect_local_capacity)
+                .await
+                .map(Some);
+        }
+        tokio::time::timeout(RESOURCE_POLL_TIMEOUT, collect_capacity(&target))
+            .await
+            .context("capacity probe timed out")?
+    })
+}
+
+fn spawn_capacity_poller_with<F, Fut>(
+    collect: F,
+) -> (
+    tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+    tokio::sync::mpsc::Sender<()>,
+    tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
+)
+where
+    F: Fn(DeploymentCapacityTarget) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Option<DeploymentCapacityUsage>>> + Send + 'static,
+{
+    let (targets_tx, mut targets_rx) =
+        tokio::sync::watch::channel(Vec::<DeploymentCapacityTarget>::new());
+    let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(64);
+    let (triggers_tx, mut triggers_rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        let mut targets = Vec::new();
+        let collect = Arc::new(collect);
+        let mut samples = CapacitySamples::default();
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + CAPACITY_POLL_INTERVAL,
+            CAPACITY_POLL_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = updates_tx.closed() => break,
+                _ = interval.tick() => {
+                    samples.schedule(targets.iter().cloned(), &collect);
+                }
+                changed = targets_rx.changed() => {
+                    if changed.is_err() {
+                        tracing::debug!("capacity poll target feed closed; stopping capacity poller");
+                        break;
+                    }
+                    let updated = targets_rx.borrow_and_update().clone();
+                    samples.schedule(
+                        updated.iter().filter(|target| !targets.contains(target)).cloned(),
+                        &collect,
+                    );
+                    targets = updated;
+                }
+                trigger = triggers_rx.recv() => {
+                    if trigger.is_none() {
+                        break;
+                    }
+                    samples.schedule(targets.iter().cloned(), &collect);
+                }
+                completed = samples.tasks.join_next_with_id(), if !samples.tasks.is_empty() => {
+                    let (id, result) = match completed.expect("capacity task exists") {
+                        Ok((id, result)) => (id, result.map_err(|error| format!("{error:#}"))),
+                        Err(error) => (error.id(), Err(format!("capacity probe task failed: {error}"))),
+                    };
+                    let sampled = samples.targets.remove(&id).expect("capacity task retains its target");
+                    if let Err(error) = &result {
+                        tracing::warn!(target_id = %sampled.id, %error, "capacity probe failed");
+                    }
+                    let Ok(permit) = updates_tx.reserve().await else {
+                        break;
+                    };
+                    // A watch update and completion can become ready together.
+                    // Revalidate after backpressure, with no await between
+                    // reading the latest target and publishing the result.
+                    let current = targets_rx.borrow().iter().find(|target| target.id == sampled.id).cloned();
+                    let Some(current) = current else {
+                        continue;
+                    };
+                    if current != sampled {
+                        // A changed target gets one follow-up; its old result
+                        // must not overwrite a reading for the new configuration.
+                        // If changed() is still pending, that arm will start it.
+                        if targets.contains(&current) {
+                            samples.schedule(std::iter::once(current), &collect);
+                        }
+                        continue;
+                    }
+                    permit.send(CapacityPollUpdate {
+                        target_id: sampled.id,
+                        result,
+                        sampled_at_epoch_seconds: epoch_seconds(),
+                    });
+                }
+            }
+        }
+        samples.tasks.abort_all();
+        while let Some(completed) = samples.tasks.join_next().await {
+            match completed {
+                Ok(Err(error)) => tracing::warn!(%error, "capacity probe failed during shutdown"),
+                Err(error) if !error.is_cancelled() => {
+                    tracing::error!(%error, "capacity probe task failed during shutdown");
+                }
+                _ => {}
+            }
+        }
+    });
+    (targets_tx, triggers_tx, updates_rx)
+}
+
+#[derive(Default)]
+struct CapacitySamples {
+    tasks: tokio::task::JoinSet<Result<Option<DeploymentCapacityUsage>>>,
+    targets: std::collections::HashMap<tokio::task::Id, DeploymentCapacityTarget>,
+}
+
+impl CapacitySamples {
+    fn schedule<F, Fut>(
+        &mut self,
+        targets: impl IntoIterator<Item = DeploymentCapacityTarget>,
+        collect: &Arc<F>,
+    ) where
+        F: Fn(DeploymentCapacityTarget) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<DeploymentCapacityUsage>>> + Send + 'static,
+    {
+        for target in targets {
+            if self.targets.values().any(|running| running.id == target.id) {
+                continue;
+            }
+            let collect = collect.clone();
+            let sampled = target.clone();
+            let task = self.tasks.spawn(async move {
+                let started = Instant::now();
+                let target_id = sampled.id.clone();
+                let result = collect(sampled).await;
+                tracing::debug!(
+                    %target_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    success = result.is_ok(),
+                    "capacity probe completed",
+                );
+                result
+            });
+            self.targets.insert(task.id(), target);
+        }
+    }
+}
+
+async fn collect_capacity(
+    target: &DeploymentCapacityTarget,
+) -> Result<Option<DeploymentCapacityUsage>> {
+    if let Some(error) = &target.probe_error {
+        anyhow::bail!("capacity probe is unavailable: {error}");
+    }
+    match target.kind {
+        DeploymentCapacityKind::Host => {
+            let mut last_error = None;
+            for command in &target.probes {
+                match execute_resource_command(command).await {
+                    Ok(output) => {
+                        return crate::targets::parse_host_capacity(&output.stdout).map(Some);
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no host probe is configured")))
+        }
+        DeploymentCapacityKind::AwsFleet => {
+            if target.probes.is_empty() {
+                return Ok(None);
+            }
+            let mut tasks = tokio::task::JoinSet::new();
+            for command in target.probes.clone() {
+                tasks.spawn(async move {
+                    let output = execute_resource_command(&command).await?;
+                    crate::targets::parse_aws_allocated_capacity(&output.stdout)
+                });
+            }
+            let mut usages = Vec::new();
+            while let Some(result) = tasks.join_next().await {
+                usages.push(result.context("join EC2 capacity probe")??);
+            }
+            aggregate_aws_capacity(&usages).map(Some)
+        }
+    }
+}
+
+pub fn aggregate_aws_capacity(
+    usages: &[DeploymentCapacityUsage],
+) -> Result<DeploymentCapacityUsage> {
+    let mut total = DeploymentCapacityUsage {
+        cpu_percent: None,
+        memory_used_bytes: 0,
+        memory_total_bytes: 0,
+        logical_cores: 0,
+        disk_total_bytes: Some(0),
+    };
+    for usage in usages {
+        total.memory_total_bytes = total
+            .memory_total_bytes
+            .checked_add(usage.memory_total_bytes)
+            .context("aggregate EC2 RAM overflow")?;
+        total.logical_cores = total
+            .logical_cores
+            .checked_add(usage.logical_cores)
+            .context("aggregate EC2 core count overflow")?;
+        total.disk_total_bytes = Some(
+            total
+                .disk_total_bytes
+                .unwrap_or(0)
+                .checked_add(usage.disk_total_bytes.unwrap_or(0))
+                .context("aggregate EC2 disk overflow")?,
+        );
+    }
+    Ok(total)
+}
+
+fn collect_local_capacity() -> Result<DeploymentCapacityUsage> {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    // Frequency is unused and scans every core in parallel on each refresh.
+    system.refresh_cpu_usage();
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    system.refresh_cpu_usage();
+    Ok(DeploymentCapacityUsage {
+        cpu_percent: Some(system.global_cpu_usage().round().clamp(0.0, 100.0) as u8),
+        memory_used_bytes: system
+            .total_memory()
+            .saturating_sub(system.available_memory()),
+        memory_total_bytes: system.total_memory(),
+        logical_cores: system
+            .cpus()
+            .len()
+            .try_into()
+            .context("logical CPU count overflow")?,
+        disk_total_bytes: None,
+    })
+}
+
+async fn collect_local_capacity_with(
+    collect: impl FnOnce() -> Result<DeploymentCapacityUsage> + Send + 'static,
+) -> Result<DeploymentCapacityUsage> {
+    // A blocking sample cannot be cancelled. Keep its slot occupied
+    // until it exits, even when the deadline has elapsed.
+    let mut sample = tokio::task::spawn_blocking(move || {
+        let result = collect();
+        // Shutdown can drop the awaiting future before this thread exits.
+        if let Err(error) = &result {
+            tracing::warn!(%error, "local capacity sample failed");
+        }
+        result
+    });
+    match tokio::time::timeout(RESOURCE_POLL_TIMEOUT, &mut sample).await {
+        Ok(result) => result.context("join local capacity probe")?,
+        Err(_) => {
+            match sample.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "timed-out capacity probe failed"),
+                Err(error) => tracing::error!(%error, "timed-out capacity probe task failed"),
+            }
+            bail!("capacity probe timed out")
+        }
+    }
+}
+
+async fn execute_resource_command(command: &CommandSpec) -> Result<CommandOutput> {
+    let mut process = tokio::process::Command::new(&command.program);
+    process
+        .args(&command.args)
+        .envs(&command.env)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let child = process
+        .spawn()
+        .with_context(|| format!("start {} for {}", command.program, command.purpose))?;
+    // stdin is null; nothing writes while output drains, so this cannot hit
+    // the write-then-wait deadlock the disallowed_methods lint guards against.
+    #[allow(clippy::disallowed_methods)]
+    let output = child
+        .wait_with_output()
+        .await
+        .with_context(|| format!("wait for {}", command.purpose))?;
+    let command_output = CommandOutput {
+        status: output.status.code().unwrap_or(-1),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    };
+    if command_output.status != 0 {
+        bail!(
+            "{} failed with status {}: {}",
+            command.purpose,
+            command_output.status,
+            String::from_utf8_lossy(&command_output.stderr).trim()
+        );
+    }
+    Ok(command_output)
+}
+
+pub struct RemoteDashboardWorkerPoller {
+    pub targets: tokio::sync::watch::Sender<Vec<WorkerPollTarget>>,
+    pub updates: SessionManagerUpdates,
+    pub control: SessionManagerControl,
+    pub shutdown: SessionManagerShutdown,
+    pub state: tokio::sync::watch::Receiver<RuntimeStateUpdate>,
+    /// Reviews the daemon is running for this workspace's sessions.
+    pub reviews: tokio::sync::watch::Receiver<Vec<crate::review_host::RuntimeReviewView>>,
+    /// Background events the daemon wants reported once, oldest first.
+    pub notices: tokio::sync::watch::Receiver<Vec<daemon::RuntimeNotice>>,
+    pub config: tokio::sync::watch::Receiver<mj_core::config::Config>,
+}
+
+/// Records and lifecycle ownership must reach the surface in the same frame.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeStateUpdate {
+    pub workspace_names: std::collections::BTreeMap<String, String>,
+    pub revision: u64,
+    pub records: Vec<SessionRecord>,
+    pub lifecycles: Vec<daemon::RuntimeLifecycleView>,
+    pub moves: Vec<mj_core::state::MoveOperation>,
+}
+
+/// What a session looked like the last time a view was published for it.
+///
+/// The poller compares this before reading anything, so a session that has not
+/// moved costs one comparison rather than a full transcript load. Nothing here
+/// grows with the transcript: the projection is identified by its ordinal and
+/// digest, and the operational state is bounded by the relay's own command and
+/// configuration surface.
+#[derive(Debug, Clone, PartialEq)]
+struct PublishedView {
+    projection_ordinal: u64,
+    projection_digest: String,
+    operational: Option<mj_core::relay::RelayOperationalState>,
+    connected: bool,
+    error: Option<String>,
+}
+
+impl PublishedView {
+    fn of(runtime: &crate::daemon::RuntimeSessionView) -> Self {
+        Self {
+            projection_ordinal: runtime.projection_ordinal,
+            projection_digest: runtime.projection_digest.clone(),
+            operational: runtime.operational.clone(),
+            connected: runtime.connected,
+            error: runtime.error.as_ref().map(|error| format!("{error:?}")),
+        }
+    }
+
+    fn matches(&self, runtime: &crate::daemon::RuntimeSessionView) -> bool {
+        *self == Self::of(runtime)
+    }
+}
+
+const PROJECTION_CONVERGENCE_RETRIES: u8 = 20;
+const PROJECTION_CONVERGENCE_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectionMismatch {
+    published_ordinal: u64,
+    published_digest: String,
+    durable_ordinal: u64,
+    durable_digest: String,
+}
+
+#[derive(Default)]
+struct ProjectionConvergence {
+    attempts: std::collections::BTreeMap<String, (ProjectionMismatch, u8)>,
+}
+
+impl ProjectionConvergence {
+    fn converged(&mut self, session_id: &str) {
+        self.attempts.remove(session_id);
+    }
+
+    /// Give a lifecycle rollback and the daemon's cached relay view a bounded
+    /// window to converge. Repeating the same mismatch eventually reports the
+    /// integrity failure instead of hiding it indefinitely.
+    fn should_retry(&mut self, session_id: &str, mismatch: ProjectionMismatch) -> bool {
+        let entry = self
+            .attempts
+            .entry(session_id.to_owned())
+            .or_insert_with(|| (mismatch.clone(), 0));
+        if entry.0 != mismatch {
+            *entry = (mismatch, 0);
+        }
+        entry.1 = entry.1.saturating_add(1);
+        entry.1 <= PROJECTION_CONVERGENCE_RETRIES
+    }
+}
+
+/// Read-only updates shared by the dashboard and workspace preview. A snapshot
+/// precedes its session views, so consumers can establish membership first.
+pub enum RuntimeFeedUpdate {
+    Snapshot(Box<daemon::RuntimeSnapshot>),
+    Session {
+        session_id: String,
+        view: Box<ManagedSessionView>,
+    },
+    Error(String),
+}
+
+/// Dropping a subscription cancels even a pending daemon long poll. The task
+/// owns no writer or relay connection; blocking projection reads are bounded.
+pub struct RuntimeFeed {
+    pub updates: tokio::sync::mpsc::Receiver<RuntimeFeedUpdate>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for RuntimeFeed {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+type StoredProjection = Option<(MaterializedSession, mj_core::state::ProjectionWindow)>;
+
+async fn load_runtime_projection(session_id: String) -> Result<StoredProjection> {
+    static READERS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
+    let permit = Arc::clone(&READERS)
+        .acquire_owned()
+        .await
+        .context("projection readers stopped")?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let result = crate::database::load_materialized_projection_tail(
+            &session_id,
+            crate::database::PROJECTION_TAIL_ITEMS,
+        );
+        // A blocking SQLite read can outlive cancellation of its subscriber.
+        if let Err(error) = &result {
+            tracing::warn!(%session_id, %error, "could not load runtime projection");
+        }
+        result
+    })
+    .await
+    .context("projection load task failed")?
+}
+
+fn spawn_runtime_feed_with<P, PF, L, LF>(workspace_id: String, poll: P, load: L) -> RuntimeFeed
+where
+    P: Fn(String, u64) -> PF + Send + 'static,
+    PF: Future<Output = Result<daemon::RuntimeSnapshot>> + Send,
+    L: Fn(String) -> LF + Clone + Send + 'static,
+    LF: Future<Output = Result<StoredProjection>> + Send + 'static,
+{
+    let (tx, updates) = tokio::sync::mpsc::channel(32);
+    let task = tokio::spawn(async move {
+        let result = run_runtime_feed(workspace_id, poll, load, &tx).await;
+        if let Err(error) = result {
+            let message = format!("Runtime feed stopped: {error:#}");
+            tracing::error!(%message);
+            let _ = tx.send(RuntimeFeedUpdate::Error(message)).await;
+        }
+    });
+    RuntimeFeed { updates, task }
+}
+
+async fn run_runtime_feed<P, PF, L, LF>(
+    workspace_id: String,
+    poll: P,
+    load: L,
+    tx: &tokio::sync::mpsc::Sender<RuntimeFeedUpdate>,
+) -> Result<()>
+where
+    P: Fn(String, u64) -> PF,
+    PF: Future<Output = Result<daemon::RuntimeSnapshot>>,
+    L: Fn(String) -> LF + Clone + Send + 'static,
+    LF: Future<Output = Result<StoredProjection>> + Send + 'static,
+{
+    let mut revision = 0;
+    let mut convergence = ProjectionConvergence::default();
+    let mut published = std::collections::BTreeMap::<String, PublishedView>::new();
+    loop {
+        let mut snapshot = match poll(workspace_id.clone(), revision).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if tx
+                    .send(RuntimeFeedUpdate::Error(format!(
+                        "Could not refresh sessions: {error:#}"
+                    )))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        };
+        let snapshot_revision = snapshot.revision;
+        let sessions = std::mem::take(&mut snapshot.sessions);
+        published.retain(|id, _| sessions.iter().any(|session| &session.session_id == id));
+        convergence
+            .attempts
+            .retain(|id, _| sessions.iter().any(|session| &session.session_id == id));
+        if tx
+            .send(RuntimeFeedUpdate::Snapshot(Box::new(snapshot)))
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        let mut pending = sessions
+            .into_iter()
+            .filter(|runtime| {
+                !published
+                    .get(&runtime.session_id)
+                    .is_some_and(|last| last.matches(runtime))
+            })
+            .collect::<std::collections::VecDeque<_>>();
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut retry = false;
+        while !pending.is_empty() || !tasks.is_empty() {
+            // Independent session reads overlap, without flooding SQLite or
+            // leaving an unbounded number of blocking reads after cancellation.
+            while tasks.len() < 4 {
+                let Some(runtime) = pending.pop_front() else {
+                    break;
+                };
+                let load = load.clone();
+                tasks.spawn(async move {
+                    let stored = if runtime.operational.is_some() {
+                        load(runtime.session_id.clone()).await
+                    } else {
+                        Ok(None)
+                    };
+                    (runtime, stored)
+                });
+            }
+            let Some(result) = tasks.join_next().await else {
+                break;
+            };
+            let (runtime, stored) = result.context("join runtime projection reader")?;
+            let session_id = runtime.session_id.clone();
+            let fingerprint = PublishedView::of(&runtime);
+            let Some(view) = runtime_projection_view(runtime, stored, &mut convergence) else {
+                retry = true;
+                continue;
+            };
+            if view.snapshot.is_some() {
+                published.insert(session_id.clone(), fingerprint);
+            } else {
+                published.remove(&session_id);
+            }
+            if tx
+                .send(RuntimeFeedUpdate::Session {
+                    session_id,
+                    view: Box::new(view),
+                })
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        if retry {
+            tokio::time::sleep(PROJECTION_CONVERGENCE_RETRY_DELAY).await;
+        } else {
+            revision = revision.max(snapshot_revision);
+        }
+    }
+}
+
+fn runtime_projection_view(
+    runtime: daemon::RuntimeSessionView,
+    stored: Result<StoredProjection>,
+    convergence: &mut ProjectionConvergence,
+) -> Option<ManagedSessionView> {
+    let Some(operational) = runtime.operational else {
+        return Some(ManagedSessionView {
+            snapshot: None,
+            connected: runtime.connected,
+            error: runtime.error,
+        });
+    };
+    let detail = match stored {
+        Ok(Some((materialized, window)))
+            if materialized.applied_event_ordinal > runtime.projection_ordinal
+                || (materialized.applied_event_ordinal == runtime.projection_ordinal
+                    && materialized.applied_event_digest == runtime.projection_digest) =>
+        {
+            convergence.converged(&runtime.session_id);
+            return Some(ManagedSessionView {
+                snapshot: Some(ManagedSessionSnapshot {
+                    materialized,
+                    window,
+                    operational,
+                    latest_credential_sync_signal: runtime.latest_credential_sync_signal,
+                    worker_build: None,
+                }),
+                connected: runtime.connected,
+                error: runtime.error,
+            });
+        }
+        Ok(Some((materialized, _))) => {
+            let mismatch = ProjectionMismatch {
+                published_ordinal: runtime.projection_ordinal,
+                published_digest: runtime.projection_digest,
+                durable_ordinal: materialized.applied_event_ordinal,
+                durable_digest: materialized.applied_event_digest.clone(),
+            };
+            if convergence.should_retry(&runtime.session_id, mismatch) {
+                return None;
+            }
+            if materialized.applied_event_ordinal < runtime.projection_ordinal {
+                format!(
+                    "daemon published projection {} but SQLite contains only {} after a bounded convergence retry",
+                    runtime.projection_ordinal, materialized.applied_event_ordinal
+                )
+            } else {
+                format!(
+                    "daemon and SQLite projection digests differ at ordinal {} after a bounded convergence retry",
+                    runtime.projection_ordinal
+                )
+            }
+        }
+        Ok(None) => "daemon published a session with no durable projection".into(),
+        Err(error) => format!("load daemon-owned projection: {error:#}"),
+    };
+    Some(ManagedSessionView {
+        snapshot: None,
+        connected: false,
+        error: Some(ViewError::ProjectionIntegrity(detail)),
+    })
+}
+
+pub fn spawn_remote_dashboard_worker_poller(
+    workspace_id: String,
+) -> Result<RemoteDashboardWorkerPoller> {
+    let channels = spawn_remote_session_manager()?;
+    let crate::session_manager::RemoteSessionManagerChannels {
+        targets,
+        control,
+        updates,
+        shutdown,
+        publisher,
+        mut requests,
+    } = channels;
+    let (state_tx, state_rx) = tokio::sync::watch::channel(RuntimeStateUpdate::default());
+    let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(Vec::new());
+    let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::new());
+    let (config_tx, config_rx) = tokio::sync::watch::channel(mj_core::config::Config::default());
+    tokio::spawn(async move {
+        let mut feed = spawn_runtime_feed_with(
+            workspace_id,
+            |workspace, revision| poll_daemon_runtime(workspace, revision, true),
+            load_runtime_projection,
+        );
+        let mut request_order = crate::session_manager::SessionRequestOrder::new();
+        loop {
+            tokio::select! {
+                request = requests.recv() => {
+                    let Some(request) = request else { return; };
+                    request_order.dispatch(request, forward_remote_session_request);
+                }
+                update = feed.updates.recv() => {
+                    match update {
+                        Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
+                            config_tx.send_if_modified(|config| {
+                                if *config == snapshot.config { false }
+                                else { *config = snapshot.config.clone(); true }
+                            });
+                            state_tx.send_replace(RuntimeStateUpdate {
+                                workspace_names: snapshot.workspace_names,
+                                revision: snapshot.revision,
+                                records: snapshot.records,
+                                lifecycles: snapshot.lifecycles,
+                                moves: snapshot.moves,
+                            });
+                            reviews_tx.send_replace(snapshot.reviews);
+                            notices_tx.send_replace(snapshot.notices);
+                        }
+                        Some(RuntimeFeedUpdate::Session { session_id, view }) => {
+                            if publisher.publish(session_id, *view).await.is_err() { return; }
+                        }
+                        Some(RuntimeFeedUpdate::Error(error)) => {
+                            tracing::warn!(%error, "could not refresh sessions from controller daemon");
+                        }
+                        None => return,
+                    }
+                }
+            }
+        }
+    });
+    Ok(RemoteDashboardWorkerPoller {
+        targets,
+        updates,
+        control,
+        shutdown,
+        state: state_rx,
+        reviews: reviews_rx,
+        notices: notices_rx,
+        config: config_rx,
+    })
+}
+
+async fn poll_daemon_runtime(
+    workspace_id: String,
+    after_revision: u64,
+    all_workspaces: bool,
+) -> Result<daemon::RuntimeSnapshot> {
+    let mut daemon = mj_client::daemon::connect_existing().await?;
+    daemon
+        .runtime_snapshot(workspace_id, after_revision, all_workspaces)
+        .await
+}
+
+async fn forward_remote_session_request(request: RemoteSessionRequest) {
+    match request {
+        RemoteSessionRequest::Submit {
+            session_id,
+            command_id,
+            command,
+            admission,
+            reply,
+        } => {
+            if admission.is_some() {
+                let _ = reply.send(Err(
+                    "review delivery admissions cannot cross the daemon request bridge".into(),
+                ));
+                return;
+            }
+            let result = async {
+                mj_client::daemon::connect_existing()
+                    .await?
+                    .submit_session_command(session_id, command_id, command, None)
+                    .await
+            }
+            .await
+            .map_err(|error| format!("{error:#}"));
+            let _ = reply.send(result);
+        }
+        RemoteSessionRequest::Sync { session_id, reply } => {
+            let result = async {
+                mj_client::daemon::connect_existing()
+                    .await?
+                    .sync_session(session_id)
+                    .await
+            }
+            .await
+            .map_err(|error| format!("{error:#}"));
+            let _ = reply.send(result);
+        }
+        RemoteSessionRequest::RespondElicitation {
+            session_id,
+            elicitation_id,
+            response,
+            reply,
+        } => {
+            let result = async {
+                mj_client::daemon::connect_existing()
+                    .await?
+                    .respond_elicitation(session_id, elicitation_id, response)
+                    .await
+            }
+            .await
+            .map_err(|error| format!("{error:#}"));
+            let _ = reply.send(result);
+        }
+        RemoteSessionRequest::StopBackgroundTask {
+            session_id,
+            background_task_id,
+            reply,
+        } => {
+            let result = async {
+                mj_client::daemon::connect_existing()
+                    .await?
+                    .stop_background_task(session_id, background_task_id)
+                    .await
+            }
+            .await
+            .map_err(|error| format!("{error:#}"));
+            let _ = reply.send(result);
+        }
+        RemoteSessionRequest::Reviewer {
+            session_id,
+            role,
+            action,
+            mut reply,
+        } => {
+            let result = tokio::select! {
+                _ = reply.closed() => return,
+                result = async {
+                    mj_client::daemon::connect_existing()
+                        .await?
+                        .reviewer_action(session_id, role, action)
+                        .await
+                } => result,
+            }
+            .map_err(|error| format!("{error:#}"));
+            let _ = reply.send(result);
+        }
+    }
+}
+
+pub fn queued_prompt_projection(
+    session: &MaterializedSession,
+) -> Vec<mj_core::relay::QueuedPrompt> {
+    queued_prompt_entries(&session.queued_prompts)
+}
+
+fn queued_prompt_entries(
+    prompts: &[mj_core::state::MaterializedQueuedPrompt],
+) -> Vec<mj_core::relay::QueuedPrompt> {
+    prompts
+        .iter()
+        .map(|prompt| mj_core::relay::QueuedPrompt {
+            id: prompt.command_id.clone(),
+            text: mj_core::transcript::materialized_content_text(&prompt.content),
+            attachments: Vec::new(),
+            created_at_ms: prompt.queued_at_ms,
+        })
+        .collect()
+}
+
+pub enum LifecycleSuccess {
+    Created,
+    Resumed {
+        profile_id: String,
+        target_id: String,
+    },
+    Moved(mj_core::state::MoveOutcome),
+    Closed,
+    ForceStopped,
+    DestroyedStopped,
+    ForceDestroyed,
+}
+
+pub struct LifecycleUpdate {
+    pub session_id: String,
+    pub result: std::result::Result<LifecycleSuccess, String>,
+    pub deferred_cleanup: bool,
+}
+
+pub fn interrupted_close_session_ids(controller: &Controller) -> Vec<String> {
+    controller
+        .state
+        .sessions
+        .values()
+        .filter(|session| {
+            matches!(
+                session.state,
+                SessionState::Closing | SessionState::Destroying
+            ) && session.target.is_some()
+        })
+        .map(|session| session.id.clone())
+        .collect()
+}
+
+pub fn spawn_interrupted_close_recovery(
+    session_id: String,
+    session_manager: SessionManagerControl,
+    recovery_observer: crate::recovery_gate::RecoveryObserver,
+    cancelled: Arc<AtomicBool>,
+    updates: tokio::sync::mpsc::UnboundedSender<LifecycleUpdate>,
+    tracker: Option<mj_client::operations::CriticalOperationTracker>,
+) -> tokio::task::JoinHandle<()> {
+    let guard = tracker.map(|tracker| {
+        tracker.begin_cancellable(
+            format!(
+                "recovering session {}",
+                mj_core::state::short_id(&session_id)
+            ),
+            cancelled.clone(),
+        )
+    });
+    let runtime = tokio::runtime::Handle::current();
+    tokio::spawn(async move {
+        let operation_session_id = session_id.clone();
+        let joined = tokio::task::spawn_blocking(move || {
+            (|| -> Result<bool> {
+                let _recovery_reservation = reserve_recovery_or_cancel(
+                    &recovery_observer,
+                    &operation_session_id,
+                    &cancelled,
+                )?;
+                let mut controller = Controller::load()?;
+                let executor = CancellableProcessExecutor::new(cancelled);
+                runtime.block_on(controller.recover_interrupted_close_managed(
+                    &operation_session_id,
+                    &executor,
+                    &session_manager,
+                ))
+            })()
+            .map_err(|error| format!("{error:#}"))
+        })
+        .await;
+        let (result, deferred_cleanup) = match joined {
+            Ok(Ok(deferred_cleanup)) => (Ok(LifecycleSuccess::Closed), deferred_cleanup),
+            Ok(Err(error)) => (Err(error), false),
+            Err(error) => (
+                Err(format!("interrupted close recovery task failed: {error}")),
+                false,
+            ),
+        };
+        if let Err(error) = updates.send(LifecycleUpdate {
+            session_id: session_id.clone(),
+            result,
+            deferred_cleanup,
+        }) {
+            tracing::debug!(%session_id, %error, "interrupted close result dropped after dashboard shutdown");
+        }
+        drop(guard);
+    })
+}
+
+pub fn reserve_recovery_or_cancel(
+    observer: &crate::recovery_gate::RecoveryObserver,
+    session_id: &str,
+    cancelled: &AtomicBool,
+) -> Result<crate::recovery_gate::RecoveryReservation> {
+    let reservation = observer.reserve(session_id);
+    // The reservation stops the next copy; cancelling preempts the one already
+    // running so a lifecycle operation never queues behind a long or wedged
+    // copy.
+    observer.cancel_busy(session_id);
+    while observer.is_busy(session_id) {
+        if cancelled.load(Ordering::Acquire) {
+            bail!("operation cancelled while waiting for recovery copy");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Ok(reservation)
+}
+
+pub fn project_worker_title(
+    controller: &mut Controller,
+    update: &WorkerPollUpdate,
+) -> Option<Option<String>> {
+    let snapshot = update.view.snapshot.as_ref()?;
+    let session = controller.state.sessions.get_mut(&update.session_id)?;
+    let title = snapshot.resolved_title();
+    if session.acp_session_title == title {
+        return None;
+    }
+    session.acp_session_title = title.clone();
+    Some(title)
+}
+
+pub fn apply_worker_record_update(controller: &mut Controller, update: &WorkerPollUpdate) {
+    let Some(title) = project_worker_title(controller, update) else {
+        return;
+    };
+    let session_id = update.session_id.clone();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            crate::database::set_session_acp_title(&session_id, title.as_deref())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "could not persist relay title"),
+            Err(error) => tracing::warn!(%error, "relay title persistence task failed"),
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// The poller used to re-read and re-deserialise every live session's whole
+    /// transcript on every runtime snapshot, then compare ordinals to discover
+    /// that nothing had moved. On a real session that is 28,066 rows and
+    /// 635 MiB, per poll. The comparison has to happen before the read.
+    #[test]
+    fn an_unchanged_session_is_recognised_without_reading_its_transcript() {
+        let runtime = runtime_view("session-1", 42, "digest-42");
+        let published = PublishedView::of(&runtime);
+
+        assert!(
+            published.matches(&runtime),
+            "an identical snapshot was treated as a change, so it would be re-read"
+        );
+
+        // Anything a viewer would notice has to defeat the skip.
+        let advanced = runtime_view("session-1", 43, "digest-43");
+        assert!(
+            !published.matches(&advanced),
+            "a moved projection was mistaken for an unchanged one"
+        );
+
+        // A digest change at the same ordinal is a rewritten projection, not a
+        // quiet one: the convergence path exists precisely for this.
+        let rewritten = runtime_view("session-1", 42, "digest-other");
+        assert!(
+            !published.matches(&rewritten),
+            "a rewritten projection at the same ordinal was skipped"
+        );
+
+        // The transcript can stand still while the agent starts a turn, and a
+        // viewer has to see that.
+        let mut busy = runtime_view("session-1", 42, "digest-42");
+        busy.connected = false;
+        assert!(
+            !published.matches(&busy),
+            "a disconnect was skipped as unchanged"
+        );
+    }
+
+    fn runtime_view(
+        session_id: &str,
+        projection_ordinal: u64,
+        projection_digest: &str,
+    ) -> crate::daemon::RuntimeSessionView {
+        crate::daemon::RuntimeSessionView {
+            session_id: session_id.to_owned(),
+            projection_ordinal,
+            projection_digest: projection_digest.to_owned(),
+            operational: None,
+            latest_credential_sync_signal: None,
+            connected: true,
+            error: None,
+        }
+    }
+    use super::*;
+
+    fn podman_controller(state: SessionState) -> Controller {
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let mut config = Config::default();
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: PathBuf::from("/home/dev/.codex"),
+                environment: Default::default(),
+                context_window_bytes: None,
+            },
+        );
+        config.targets.insert(
+            "podman".into(),
+            mj_core::config::TargetTemplate::LocalPodman {
+                container: mj_core::config::ContainerTemplate {
+                    image: "ubuntu:24.04".into(),
+                    pull_policy: Default::default(),
+                    platform: None,
+                    cpus: None,
+                    memory: None,
+                    environment: std::collections::BTreeMap::new(),
+                    workspace_storage: Default::default(),
+                },
+            },
+        );
+        config.bundles.insert(
+            "project".into(),
+            mj_core::config::ProjectBundle {
+                primary_repo: "project".into(),
+                repositories: vec![mj_core::config::ProjectRepository {
+                    id: "project".into(),
+                    github: Some("owner/project".into()),
+                    local: None,
+                    destination: "project".into(),
+                    git_ref: None,
+                }],
+            },
+        );
+        let mut app_state = State::default();
+        app_state.sessions.insert(
+            session_id.into(),
+            mj_core::state::SessionRecord {
+                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                archived: false,
+                container_cpus: None,
+                container_memory: None,
+                id: session_id.into(),
+                title: "poll target".into(),
+                harness_kind: mj_core::config::HarnessKind::Codex,
+                last_profile: "codex".into(),
+                bundle_id: "project".into(),
+                project_directory: None,
+                managed_worktree: None,
+                target_template_id: "podman".into(),
+                resource_allocation: None,
+                additional_mounts: Vec::new(),
+                state,
+                target: Some(mj_core::state::TargetLocator::LocalPodman {
+                    container_id: "a".repeat(64),
+                    workspace_storage: Default::default(),
+                }),
+                native_session_id: None,
+                acp_session_title: None,
+                session_title_override: None,
+                created_at: "2026-08-27T00:00:00Z".into(),
+                updated_at: "2026-08-27T00:00:00Z".into(),
+                viewed_through_event_ordinal: 0,
+                draft_input: String::new(),
+                last_error: None,
+                last_checkpoint_error: None,
+                checkpoint: None,
+            },
+        );
+        Controller {
+            config,
+            state: app_state,
+        }
+    }
+
+    #[test]
+    fn recoverable_error_session_stays_out_of_live_target_pollers() {
+        let running = podman_controller(SessionState::Running);
+        assert_eq!(dashboard_worker_targets(&running).len(), 1);
+        assert_eq!(dashboard_resource_targets(&running).len(), 1);
+        assert_eq!(credential_sync_targets(&running).len(), 1);
+
+        let recoverable_error = podman_controller(SessionState::Error);
+        assert!(dashboard_worker_targets(&recoverable_error).is_empty());
+        assert!(dashboard_resource_targets(&recoverable_error).is_empty());
+        assert!(credential_sync_targets(&recoverable_error).is_empty());
+    }
+
+    /// A session gets its `target` as soon as the target exists, which is
+    /// before its worker binary has finished being copied into place. Polling
+    /// that window runs `execve` on a file `cp` still holds open for writing:
+    /// `ETXTBSY`, and a session recorded as unreachable while it was merely
+    /// still being built.
+    #[test]
+    fn a_provisioning_session_is_not_polled_before_its_worker_exists() {
+        let provisioning = podman_controller(SessionState::Provisioning);
+        assert!(
+            provisioning
+                .state
+                .sessions
+                .values()
+                .all(|session| session.target.is_some())
+        );
+
+        assert!(dashboard_worker_targets(&provisioning).is_empty());
+        assert!(dashboard_resource_targets(&provisioning).is_empty());
+
+        // Provisioning connects to its own worker and then marks the session
+        // running, which is when there is something to poll.
+        let running = podman_controller(SessionState::Running);
+        assert_eq!(dashboard_worker_targets(&running).len(), 1);
+        assert_eq!(dashboard_resource_targets(&running).len(), 1);
+    }
+
+    #[test]
+    fn lifecycle_owned_session_stays_out_of_worker_targets() {
+        let controller = podman_controller(SessionState::Running);
+        assert_eq!(dashboard_worker_targets(&controller).len(), 1);
+
+        let excluded = controller
+            .state
+            .sessions
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(dashboard_worker_targets_excluding(&controller, &excluded).is_empty());
+    }
+
+    #[test]
+    fn projection_rollback_race_retries_before_reporting_integrity_failure() {
+        let mismatch = ProjectionMismatch {
+            published_ordinal: 39,
+            published_digest: "published".into(),
+            durable_ordinal: 36,
+            durable_digest: "durable".into(),
+        };
+        let mut convergence = ProjectionConvergence::default();
+
+        for _ in 0..PROJECTION_CONVERGENCE_RETRIES {
+            assert!(convergence.should_retry("session-1", mismatch.clone()));
+        }
+        assert!(
+            !convergence.should_retry("session-1", mismatch),
+            "a persistent mismatch must still become an integrity error"
+        );
+
+        convergence.converged("session-1");
+        assert!(convergence.attempts.is_empty());
+    }
+
+    #[test]
+    fn a_changed_projection_mismatch_gets_its_own_convergence_window() {
+        let mut convergence = ProjectionConvergence::default();
+        let stale_lineage = ProjectionMismatch {
+            published_ordinal: 39,
+            published_digest: "old-lineage".into(),
+            durable_ordinal: 36,
+            durable_digest: "checkpoint".into(),
+        };
+        for _ in 0..=PROJECTION_CONVERGENCE_RETRIES {
+            convergence.should_retry("session-1", stale_lineage.clone());
+        }
+        let equal_frontier_different_lineage = ProjectionMismatch {
+            published_ordinal: 39,
+            published_digest: "old-lineage".into(),
+            durable_ordinal: 39,
+            durable_digest: "new-lineage".into(),
+        };
+
+        assert!(convergence.should_retry("session-1", equal_frontier_different_lineage));
+    }
+
+    #[test]
+    fn worker_diagnosis_is_coalesced_for_one_unreachable_episode() {
+        let mut tracker = WorkerDiagnosisTracker::default();
+        let episode = tracker
+            .observe("session-1", false, Some("connection refused".into()))
+            .unwrap();
+
+        assert_eq!(
+            tracker.observe("session-1", false, Some("still unreachable".into())),
+            None
+        );
+        assert_eq!(
+            tracker.finish("session-1", episode),
+            WorkerDiagnosisCompletion {
+                display_error: Some("still unreachable".into()),
+                restart_episode: None,
+            }
+        );
+        assert_eq!(
+            tracker.observe("session-1", false, Some("third poll".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_worker_diagnosis_is_not_published_after_reconnect() {
+        let mut tracker = WorkerDiagnosisTracker::default();
+        let first = tracker
+            .observe("session-1", false, Some("first outage".into()))
+            .unwrap();
+        assert_eq!(tracker.observe("session-1", true, None), None);
+        assert_eq!(
+            tracker.observe("session-1", false, Some("new outage".into())),
+            None
+        );
+
+        let completion = tracker.finish("session-1", first);
+        assert_eq!(completion.display_error, None);
+        let second = completion.restart_episode.unwrap();
+        assert_eq!(
+            tracker.finish("session-1", second).display_error.as_deref(),
+            Some("new outage")
+        );
+    }
+
+    #[test]
+    fn stale_worker_diagnosis_is_not_published_after_a_terminal_poll_error() {
+        let mut tracker = WorkerDiagnosisTracker::default();
+        let episode = tracker
+            .observe("session-1", false, Some("relay failed".into()))
+            .unwrap();
+
+        assert_eq!(tracker.observe("session-1", false, None), None);
+        assert_eq!(
+            tracker.finish("session-1", episode),
+            WorkerDiagnosisCompletion::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_refresh_completion_keeps_its_generation() {
+        let mut quotas = QuotaManager::default();
+        let (updates, mut received) = tokio::sync::mpsc::channel(4);
+        assert!(refresh_profile_quotas(&mut quotas, 42, &[], &updates).await);
+        assert!(matches!(
+            received.recv().await,
+            Some(QuotaUpdate::Refreshing {
+                profile_ids,
+            }) if profile_ids.is_empty()
+        ));
+        assert!(matches!(
+            received.recv().await,
+            Some(QuotaUpdate::Finished { generation: 42 })
+        ));
+
+        let mut pending = Some(43);
+        assert!(!complete_manual_quota_refresh(&mut pending, 42));
+        assert_eq!(pending, Some(43));
+        assert!(complete_manual_quota_refresh(&mut pending, 43));
+        assert_eq!(pending, None);
+        quotas.shutdown().await;
+    }
+
+    #[test]
+    fn quota_refresh_requests_exclude_disabled_profiles() {
+        let mut controller = podman_controller(SessionState::Stopped);
+        let mut disabled = controller.config.profiles["codex"].clone();
+        disabled.enabled = false;
+        controller
+            .config
+            .profiles
+            .insert("reserve".into(), disabled);
+
+        let requests = quota_refresh_profiles(&controller);
+
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            ["codex"]
+        );
+    }
+
+    #[test]
+    fn resource_samples_are_throttled_to_one_per_minute() {
+        let started = tokio::time::Instant::now();
+        assert!(!resource_sample_is_due(
+            Some(&started),
+            started + Duration::from_secs(59),
+        ));
+        assert!(resource_sample_is_due(
+            Some(&started),
+            started + RESOURCE_POLL_INTERVAL,
+        ));
+    }
+
+    struct PendingCapacityProbe {
+        target: DeploymentCapacityTarget,
+        finish: tokio::sync::oneshot::Sender<Result<Option<DeploymentCapacityUsage>>>,
+    }
+
+    struct CapacityPollerFixture {
+        targets: tokio::sync::watch::Sender<Vec<DeploymentCapacityTarget>>,
+        triggers: tokio::sync::mpsc::Sender<()>,
+        updates: tokio::sync::mpsc::Receiver<CapacityPollUpdate>,
+        started: tokio::sync::mpsc::UnboundedReceiver<PendingCapacityProbe>,
+    }
+
+    impl CapacityPollerFixture {
+        fn new() -> Self {
+            let (started_tx, started) = tokio::sync::mpsc::unbounded_channel();
+            let (targets, triggers, updates) = spawn_capacity_poller_with(move |target| {
+                let started_tx = started_tx.clone();
+                async move {
+                    let (finish, result) = tokio::sync::oneshot::channel();
+                    started_tx
+                        .send(PendingCapacityProbe { target, finish })
+                        .unwrap();
+                    result.await.context("test probe completion dropped")?
+                }
+            });
+            Self {
+                targets,
+                triggers,
+                updates,
+                started,
+            }
+        }
+
+        async fn assert_no_start(&mut self) {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1), self.started.recv())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    fn capacity_target(id: &str) -> DeploymentCapacityTarget {
+        DeploymentCapacityTarget {
+            id: id.into(),
+            host: id.into(),
+            target_ids: vec![id.into()],
+            kind: DeploymentCapacityKind::Host,
+            local: true,
+            probes: Vec::new(),
+            probe_error: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_samples_follow_timer_and_manual_refresh_not_unchanged_publications() {
+        let mut fixture = CapacityPollerFixture::new();
+        let targets = vec![capacity_target("local")];
+        fixture.targets.send_replace(targets.clone());
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+
+        fixture.targets.send_replace(targets);
+        fixture.assert_no_start().await;
+        tokio::time::advance(Duration::from_secs(29)).await;
+        fixture.assert_no_start().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+
+        fixture.triggers.send(()).await.unwrap();
+        fixture
+            .started
+            .recv()
+            .await
+            .unwrap()
+            .finish
+            .send(Ok(None))
+            .unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+        fixture.assert_no_start().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_busy_targets_coalesce_requests_without_blocking_other_targets() {
+        let mut fixture = CapacityPollerFixture::new();
+        let first_target = capacity_target("first");
+        fixture.targets.send_replace(vec![first_target.clone()]);
+        let first = fixture.started.recv().await.unwrap();
+        fixture
+            .targets
+            .send_replace(vec![first_target, capacity_target("second")]);
+        let second = fixture.started.recv().await.unwrap();
+        assert_eq!(second.target.id, "second");
+
+        fixture.triggers.send(()).await.unwrap();
+        fixture.assert_no_start().await;
+        tokio::time::advance(CAPACITY_POLL_INTERVAL).await;
+        fixture.assert_no_start().await;
+        first.finish.send(Ok(None)).unwrap();
+        second.finish.send(Ok(None)).unwrap();
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+        assert!(fixture.updates.recv().await.unwrap().result.is_ok());
+        fixture.assert_no_start().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_changed_targets_get_one_follow_up_and_removed_results_are_discarded() {
+        let mut fixture = CapacityPollerFixture::new();
+        let mut target = capacity_target("local");
+        fixture.targets.send_replace(vec![target.clone()]);
+        let first = fixture.started.recv().await.unwrap();
+        target.host = "new-host".into();
+        fixture.targets.send_replace(vec![target.clone()]);
+        fixture.assert_no_start().await;
+        first.finish.send(Ok(None)).unwrap();
+        let changed = fixture.started.recv().await.unwrap();
+        assert_eq!(changed.target, target);
+        assert!(
+            fixture.updates.try_recv().is_err(),
+            "old configuration result escaped"
+        );
+        changed
+            .finish
+            .send(Err(anyhow::anyhow!("new host unavailable")))
+            .unwrap();
+        assert!(
+            fixture
+                .updates
+                .recv()
+                .await
+                .unwrap()
+                .result
+                .unwrap_err()
+                .contains("new host unavailable")
+        );
+
+        fixture.triggers.send(()).await.unwrap();
+        let removed = fixture.started.recv().await.unwrap();
+        fixture.targets.send_replace(Vec::new());
+        fixture.assert_no_start().await;
+        removed.finish.send(Ok(None)).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), fixture.updates.recv())
+                .await
+                .is_err()
+        );
+        fixture.targets.send_replace(vec![target]);
+        let mut last = fixture.started.recv().await.unwrap();
+        drop(fixture.updates);
+        last.finish.closed().await;
+    }
+
+    #[tokio::test]
+    async fn capacity_probe_panics_are_reported_and_do_not_prevent_retry() {
+        let first = AtomicBool::new(true);
+        let (targets, triggers, mut updates) = spawn_capacity_poller_with(move |_| {
+            if first.swap(false, Ordering::SeqCst) {
+                panic!("test capacity probe panic");
+            }
+            async { Ok(None) }
+        });
+        targets.send_replace(vec![capacity_target("local")]);
+        let failure = updates.recv().await.unwrap();
+        assert_eq!(failure.target_id, "local");
+        assert!(
+            failure
+                .result
+                .unwrap_err()
+                .contains("test capacity probe panic")
+        );
+        triggers.send(()).await.unwrap();
+        assert!(updates.recv().await.unwrap().result.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_results_are_revalidated_after_output_backpressure() {
+        let mut fixture = CapacityPollerFixture::new();
+        let mut targets: Vec<_> = (0..65).map(|id| capacity_target(&id.to_string())).collect();
+        fixture.targets.send_replace(targets.clone());
+        let mut pending = Vec::new();
+        for _ in 0..65 {
+            pending.push(fixture.started.recv().await.unwrap());
+        }
+        let last = pending.pop().unwrap();
+        let last_id = last.target.id;
+        for probe in pending {
+            probe.finish.send(Ok(None)).unwrap();
+        }
+        fixture.assert_no_start().await;
+        assert_eq!(fixture.updates.len(), 64);
+        last.finish.send(Ok(None)).unwrap();
+        fixture.assert_no_start().await;
+
+        targets
+            .iter_mut()
+            .find(|target| target.id == last_id)
+            .unwrap()
+            .host = "changed".into();
+        fixture.targets.send_replace(targets);
+        for _ in 0..64 {
+            let update = fixture.updates.recv().await.unwrap();
+            assert_ne!(update.target_id, last_id);
+        }
+        let changed = fixture.started.recv().await.unwrap();
+        assert_eq!(changed.target.id, last_id);
+        assert_eq!(changed.target.host, "changed");
+        assert!(
+            fixture.updates.try_recv().is_err(),
+            "stale blocked result escaped"
+        );
+        changed.finish.send(Ok(None)).unwrap();
+        assert_eq!(fixture.updates.recv().await.unwrap().target_id, last_id);
+        fixture.assert_no_start().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let sample = tokio::spawn(collect_local_capacity_with(move || {
+            started_tx.send(()).unwrap();
+            // Dropping finish_tx on a test failure also releases this thread.
+            finish_rx.recv().context("test sample was cancelled")?;
+            Ok(DeploymentCapacityUsage {
+                cpu_percent: Some(10),
+                memory_used_bytes: 1,
+                memory_total_bytes: 2,
+                logical_cores: 4,
+                disk_total_bytes: None,
+            })
+        }));
+        started_rx.await.unwrap();
+        tokio::time::advance(RESOURCE_POLL_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !sample.is_finished(),
+            "timeout released a still-running blocking sample"
+        );
+        finish_tx.send(()).unwrap();
+        assert!(
+            sample
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
+    }
+
+    #[test]
+    fn a_new_credential_signal_waits_out_the_cooldown_without_being_lost() {
+        let signal = |ordinal, reason| CredentialSyncSignal { ordinal, reason };
+        let mut tracker = CredentialSyncSignalTracker::default();
+        let started = Instant::now();
+        tracker.observe(
+            "session",
+            "work",
+            signal(41, CredentialSyncReason::AuthenticationFailure),
+        );
+        assert_eq!(
+            tracker.drain_due(started),
+            vec![(
+                "session".into(),
+                "work".into(),
+                CredentialSyncReason::AuthenticationFailure
+            )]
+        );
+
+        tracker.observe(
+            "session",
+            "work",
+            signal(42, CredentialSyncReason::AuthenticationFailure),
+        );
+        assert!(
+            tracker
+                .drain_due(started + Duration::from_secs(60))
+                .is_empty()
+        );
+        tracker.observe(
+            "session",
+            "new-profile",
+            signal(43, CredentialSyncReason::EmptyPromptResponse),
+        );
+        assert_eq!(tracker.pending["session"].signal.ordinal, 43);
+
+        // No repeated observation is needed: the loop timer drains the sticky
+        // failure once its cooldown expires.
+        assert_eq!(
+            tracker.drain_due(started + IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN),
+            vec![(
+                "session".into(),
+                "new-profile".into(),
+                CredentialSyncReason::EmptyPromptResponse
+            )]
+        );
+        tracker.observe(
+            "session",
+            "new-profile",
+            signal(43, CredentialSyncReason::EmptyPromptResponse),
+        );
+        assert!(
+            tracker
+                .drain_due(started + (IMMEDIATE_CREDENTIAL_SYNC_COOLDOWN * 2))
+                .is_empty()
+        );
+
+        tracker.observe(
+            "other",
+            "personal",
+            signal(1, CredentialSyncReason::AuthenticationFailure),
+        );
+        assert_eq!(
+            tracker.drain_due(started + Duration::from_secs(60)),
+            vec![(
+                "other".into(),
+                "personal".into(),
+                CredentialSyncReason::AuthenticationFailure
+            )]
+        );
+    }
+
+    #[test]
+    fn a_healthy_credential_cycle_stays_out_of_the_ui() {
+        let result = mj_core::credentials::CredentialSyncResult {
+            profile_id: "work".into(),
+            trigger: None,
+            failure: None,
+            outcomes: Vec::new(),
+        };
+        assert_eq!(CredentialSyncNotices::default().notice(&result, None), None);
+    }
+
+    #[test]
+    fn github_tokens_sync_to_every_remote_target_but_raw_localhost() {
+        use mj_core::state::TargetLocator;
+
+        let remotes = [
+            TargetLocator::LocalPodman {
+                container_id: "podman".into(),
+                workspace_storage: Default::default(),
+            },
+            TargetLocator::AppleContainer {
+                container_id: "apple".into(),
+            },
+            TargetLocator::AwsEc2 {
+                instance_id: "i-123".into(),
+                address: Some("example.invalid".into()),
+            },
+            TargetLocator::SshBare {
+                host: "ssh.example".into(),
+                workspace: "/workspace".into(),
+                worker_id: None,
+            },
+            TargetLocator::SshPodman {
+                host: "ssh.example".into(),
+                container_id: "remote-podman".into(),
+                workspace_storage: Default::default(),
+            },
+            TargetLocator::SshDocker {
+                host: "ssh.example".into(),
+                container_id: "remote-docker".into(),
+            },
+        ];
+        for target in &remotes {
+            assert!(target_syncs_github_token(Some(target)), "{target:?}");
+        }
+        assert!(!target_syncs_github_token(Some(
+            &TargetLocator::LocalBare {
+                worker_root: "/tmp/worker".into(),
+            }
+        )));
+        assert!(!target_syncs_github_token(None));
+    }
+
+    #[test]
+    fn an_authentication_failure_notice_says_whether_anything_was_pushed() {
+        use mj_core::credentials::{
+            CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult,
+        };
+
+        let mut notices = CredentialSyncNotices::default();
+        let pushed = CredentialSyncResult {
+            profile_id: "work".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: "018f9dd2-a3b4".into(),
+                reason: CredentialSyncReason::AuthenticationFailure,
+            }),
+            failure: None,
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: "018f9dd2-a3b4".into(),
+                outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            }],
+        };
+        let notice = notices.notice(&pushed, None).unwrap();
+        assert!(notice.contains("were pushed"), "{notice}");
+        assert!(notice.contains("mj login --profile work"), "{notice}");
+
+        let nothing_to_push = CredentialSyncResult {
+            trigger: Some(CredentialSyncCause {
+                session_id: "018f9dd2-a3b4".into(),
+                reason: CredentialSyncReason::AuthenticationFailure,
+            }),
+            outcomes: Vec::new(),
+            ..pushed
+        };
+        let notice = notices.notice(&nothing_to_push, None).unwrap();
+        assert!(notice.contains("nothing fresher"), "{notice}");
+        assert!(notice.contains("mj login --profile work"), "{notice}");
+        // The per-session cooldown upstream limits these; the dedup must not.
+        assert_eq!(notices.notice(&nothing_to_push, None), Some(notice));
+    }
+
+    #[test]
+    fn a_claude_authentication_failure_offers_the_long_lived_token() {
+        use mj_core::config::HarnessKind;
+        use mj_core::credentials::{CredentialSyncOutcome, CredentialSyncResult};
+
+        let result = CredentialSyncResult {
+            profile_id: "claude-max".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: "018f9dd2-a3b4".into(),
+                reason: CredentialSyncReason::AuthenticationFailure,
+            }),
+            failure: None,
+            outcomes: Vec::new(),
+        };
+
+        let claude = CredentialSyncNotices::default()
+            .notice(&result, Some(HarnessKind::Claude))
+            .unwrap();
+        assert!(
+            claude.ends_with(
+                "Run `mj login --profile claude-max`, or store a long-lived token with `mj login --profile claude-max --setup-token`."
+            ),
+            "{claude}"
+        );
+
+        // Only Claude can rotate ahead of expiry this way.
+        let codex = CredentialSyncNotices::default()
+            .notice(&result, Some(HarnessKind::Codex))
+            .unwrap();
+        assert!(
+            codex.ends_with("Run `mj login --profile claude-max`."),
+            "{codex}"
+        );
+
+        // The advice also reaches a failed reconciliation, not only a clean one.
+        let failed = CredentialSyncResult {
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: "018f9dd2-a3b4".into(),
+                outcome: Err("worker proxy disconnected".into()),
+            }],
+            ..result
+        };
+        let claude_failure = CredentialSyncNotices::default()
+            .notice(&failed, Some(HarnessKind::Claude))
+            .unwrap();
+        assert!(
+            claude_failure.contains("--setup-token`."),
+            "{claude_failure}"
+        );
+    }
+
+    #[test]
+    fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
+        use mj_core::credentials::{
+            CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult,
+        };
+
+        let result = CredentialSyncResult {
+            profile_id: "work".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: "018f9dd2-a3b4".into(),
+                reason: CredentialSyncReason::EmptyPromptResponse,
+            }),
+            failure: None,
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: "018f9dd2-a3b4".into(),
+                outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            }],
+        };
+        let notice = CredentialSyncNotices::default()
+            .notice(&result, None)
+            .unwrap();
+        assert!(notice.contains("returned no response"), "{notice}");
+        assert!(notice.contains("were pushed"), "{notice}");
+        assert!(!notice.contains("Auth failure"), "{notice}");
+    }
+
+    #[test]
+    fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
+        use mj_core::credentials::CredentialSyncResult;
+
+        let result = CredentialSyncResult {
+            profile_id: "work".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: "018f9dd2-a3b4".into(),
+                reason: CredentialSyncReason::AuthenticationFailure,
+            }),
+            failure: Some("controller credential file is unreadable".into()),
+            outcomes: Vec::new(),
+        };
+        let notice = CredentialSyncNotices::default()
+            .notice(&result, None)
+            .unwrap();
+        assert!(notice.contains("reconciliation failed"), "{notice}");
+        assert!(notice.contains("credential file is unreadable"), "{notice}");
+        assert!(!notice.contains("nothing fresher"), "{notice}");
+    }
+
+    #[test]
+    fn a_failed_credential_sync_is_reported() {
+        use mj_core::credentials::{CredentialSyncOutcome, CredentialSyncResult};
+
+        let result = CredentialSyncResult {
+            profile_id: "work".into(),
+            trigger: None,
+            failure: None,
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: "018f9dd2-a3b4".into(),
+                outcome: Err("worker proxy disconnected".into()),
+            }],
+        };
+        let notice = CredentialSyncNotices::default()
+            .notice(&result, None)
+            .unwrap();
+        assert!(notice.contains("worker proxy disconnected"), "{notice}");
+    }
+
+    #[test]
+    fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
+        use mj_core::credentials::{
+            CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult,
+        };
+
+        let failed = |detail: &str| CredentialSyncResult {
+            profile_id: "work".into(),
+            trigger: None,
+            failure: None,
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: "018f9dd2-a3b4".into(),
+                outcome: Err(detail.to_owned()),
+            }],
+        };
+        let mut notices = CredentialSyncNotices::default();
+
+        assert!(
+            notices
+                .notice(&failed("worker proxy disconnected"), None)
+                .is_some()
+        );
+        assert_eq!(
+            notices.notice(&failed("worker proxy disconnected"), None),
+            None
+        );
+
+        let changed = notices.notice(&failed("container is gone"), None).unwrap();
+        assert!(changed.contains("container is gone"), "{changed}");
+        assert_eq!(notices.notice(&failed("container is gone"), None), None);
+
+        // A clean cycle forgets the failure, so a recurrence is reported again.
+        let healthy = CredentialSyncResult {
+            profile_id: "work".into(),
+            trigger: None,
+            failure: None,
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: "018f9dd2-a3b4".into(),
+                outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            }],
+        };
+        assert_eq!(notices.notice(&healthy, None), None);
+        assert!(notices.notice(&failed("container is gone"), None).is_some());
+    }
+
+    #[test]
+    fn a_repeated_whole_sync_failure_is_reported_once_per_profile() {
+        use mj_core::credentials::CredentialSyncResult;
+
+        let failed = |profile_id: &str| CredentialSyncResult {
+            profile_id: profile_id.to_owned(),
+            trigger: None,
+            failure: Some("controller home is unreadable".into()),
+            outcomes: Vec::new(),
+        };
+        let mut notices = CredentialSyncNotices::default();
+
+        let notice = notices.notice(&failed("work"), None).unwrap();
+        assert!(notice.contains("profile work"), "{notice}");
+        assert_eq!(notices.notice(&failed("work"), None), None);
+        // Another profile failing the same way is its own key.
+        assert!(notices.notice(&failed("personal"), None).is_some());
+        assert_eq!(notices.notice(&failed("work"), None), None);
+    }
+
+    #[test]
+    fn skills_and_github_syncs_speak_while_harness_credentials_stay_out_of_the_notice() {
+        use mj_core::credentials::{
+            CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult,
+        };
+
+        let result = CredentialSyncResult {
+            profile_id: "work".into(),
+            trigger: None,
+            failure: None,
+            outcomes: vec![
+                CredentialSyncOutcome {
+                    session_id: "018f9dd2-a3b4".into(),
+                    outcome: Ok(vec![
+                        CredentialSyncAction::Pushed,
+                        CredentialSyncAction::SkillsPushed,
+                        CredentialSyncAction::GithubTokenPushed,
+                    ]),
+                },
+                CredentialSyncOutcome {
+                    session_id: "018f9dd2-bbbb".into(),
+                    outcome: Ok(vec![
+                        CredentialSyncAction::SkillsPushed,
+                        CredentialSyncAction::GithubTokenRemoved,
+                    ]),
+                },
+            ],
+        };
+        let notice = CredentialSyncNotices::default()
+            .notice(&result, None)
+            .unwrap();
+        assert!(!notice.contains("harness credentials"), "{notice}");
+        assert!(
+            notice.contains("Synced skills for profile work to 2 session(s)."),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("Synced the GitHub CLI token to 1 session(s)."),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("Removed the GitHub CLI token from 1 session(s)."),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn aws_capacity_sums_live_instance_allocations() {
+        let total = aggregate_aws_capacity(&[
+            DeploymentCapacityUsage {
+                cpu_percent: None,
+                memory_used_bytes: 0,
+                memory_total_bytes: 8,
+                logical_cores: 2,
+                disk_total_bytes: Some(100),
+            },
+            DeploymentCapacityUsage {
+                cpu_percent: None,
+                memory_used_bytes: 0,
+                memory_total_bytes: 16,
+                logical_cores: 4,
+                disk_total_bytes: Some(200),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(total.memory_total_bytes, 24);
+        assert_eq!(total.logical_cores, 6);
+        assert_eq!(total.disk_total_bytes, Some(300));
+    }
+
+    /// A background refresh is a chore, not a launch. One host that cannot
+    /// reach its registry must not cost the other hosts their pull, and the
+    /// failure has to say which host, which image, and what the engine
+    /// reported. `refresh_images` gives every host its own task for the same
+    /// reason.
+    #[test]
+    fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
+        struct FailingPullExecutor {
+            failing_image: String,
+            commands: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+        }
+
+        impl CommandExecutor for FailingPullExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands
+                    .lock()
+                    .unwrap()
+                    .push((command.program.clone(), command.args.clone()));
+                if command.args.contains(&"pull".to_owned())
+                    && command.args.contains(&self.failing_image)
+                {
+                    return Ok(CommandOutput {
+                        status: 125,
+                        stdout: Vec::new(),
+                        stderr: b"short-name resolution failed".to_vec(),
+                    });
+                }
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"sha256:1111\n".to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        let failing_image = "ghcr.io/example/broken:latest";
+        let broken = crate::targets::image_refresh(
+            crate::targets::ImageHost::LocalPodman,
+            failing_image,
+            None,
+            mj_core::config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed");
+        let healthy = crate::targets::image_refresh(
+            crate::targets::ImageHost::LocalDocker,
+            "ghcr.io/example/dev:latest",
+            None,
+            mj_core::config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed");
+        let executor = FailingPullExecutor {
+            failing_image: failing_image.to_owned(),
+            commands: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let reported = refresh_host_image(&broken, &executor)
+            .expect_err("a failed pull has to reach the caller");
+        let reported = format!("{reported:#}");
+        assert!(
+            reported.contains("short-name resolution failed"),
+            "{reported}"
+        );
+        assert!(reported.contains(failing_image), "{reported}");
+
+        refresh_host_image(&healthy, &executor).expect("the second host still refreshes");
+
+        let commands = executor.commands.lock().unwrap();
+        let ran = |program: &str, args: &[&str]| {
+            commands
+                .iter()
+                .any(|(command, arguments)| command == program && arguments == args)
+        };
+        assert!(ran("podman", &["pull", failing_image]), "{commands:?}");
+        assert!(
+            !ran("podman", &["image", "prune", "-f"]),
+            "a host that could not pull has nothing to prune: {commands:?}"
+        );
+        assert!(
+            ran("docker", &["pull", "ghcr.io/example/dev:latest"]),
+            "{commands:?}"
+        );
+        assert!(ran("docker", &["image", "prune", "-f"]), "{commands:?}");
+    }
+}

@@ -10,14 +10,15 @@ use ratatui::widgets::{
     Block, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap,
 };
 
-use hel::hel_config::{HarnessKind, HelConfig, PermissionMode};
-use hel::hel_state::{SessionRecord, SessionState, SessionTransitionKind};
-use hel::hel_targets::DeploymentCapacityKind;
+use mj_core::config::{Config, HarnessKind, PermissionMode};
+use mj_core::state::{SessionRecord, SessionState, SessionTransitionKind};
+
+use mj_chat::chat::render_agent_message_head;
 use mj_chat::components::{render_scrollbar, scrollbar_geometry};
-use mj_chat::hel_chat::render_agent_message_head;
 use mj_chat::theme;
 use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow};
 use mj_client::review::RuntimeReviewView;
+use mj_core::targets::DeploymentCapacityKind;
 
 use crate::dialogs::{
     render_config_id_editor, render_confirmation, render_container_editor,
@@ -750,7 +751,7 @@ fn session_activity_line(
         let (label, started_at) = operation_status(operation);
         format!(
             "{label} {}",
-            mj_chat::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
+            mj_client::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
         )
     } else if facts.state == SessionState::Error {
         "Error".to_owned()
@@ -758,7 +759,7 @@ fn session_activity_line(
         let started_at = session_updated_at_epoch_seconds(session).unwrap_or(now_epoch_seconds);
         format!(
             "Launch {}",
-            mj_chat::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
+            mj_client::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
         )
     } else if facts.unreachable {
         "Unreachable".to_owned()
@@ -963,8 +964,8 @@ impl SessionRowFacts<'_> {
         review: Option<&RuntimeReviewView>,
         operation: Option<&SessionOperationDisplay>,
     ) -> &'static str {
-        use hel::hel_review::driver::TurnReviewPhase;
-        use hel::hel_review::verdict::ReviewVerdict;
+        use mj_core::review::driver::TurnReviewPhase;
+        use mj_core::review::verdict::ReviewVerdict;
 
         if operation.is_some() {
             return "◐";
@@ -1065,7 +1066,7 @@ pub(crate) fn session_display_clock(
         None
     };
     if let Some(started_at) = started_at {
-        return Some(mj_chat::usage_format::format_clock(
+        return Some(mj_client::usage_format::format_clock(
             now_epoch_seconds.saturating_sub(started_at),
         ));
     }
@@ -1082,8 +1083,8 @@ pub(crate) fn session_display_clock(
     if detail.activity.is_idle(detail.current_turn_started_at)
         || matches!(
             detail.activity.execution,
-            Some(hel::hel_worker::RelayExecutionState::Closing)
-                | Some(hel::hel_worker::RelayExecutionState::Closed)
+            Some(mj_core::relay::RelayExecutionState::Closing)
+                | Some(mj_core::relay::RelayExecutionState::Closed)
         )
     {
         return None;
@@ -1406,7 +1407,7 @@ fn session_transition_line(
     now_epoch_seconds: u64,
     target: &str,
     width: u16,
-    config: &HelConfig,
+    config: &Config,
     failure: Option<&str>,
 ) -> Line<'static> {
     let started_at = operation
@@ -1431,7 +1432,8 @@ fn session_transition_line(
         })
         .filter(|stages| !stages.is_empty())
         .unwrap_or_else(|| "waiting".to_owned());
-    let elapsed = mj_chat::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at));
+    let elapsed =
+        mj_client::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at));
     let (profile, _) = operation
         .and_then(|operation| operation.resume_destination.clone())
         .unwrap_or_else(|| {
@@ -1463,13 +1465,13 @@ fn session_transition_line(
 }
 
 /// A session the dashboard has heard nothing operational about yet.
-static EMPTY_ACTIVITY: std::sync::LazyLock<mj_chat::usage_format::SessionActivity> =
-    std::sync::LazyLock::new(mj_chat::usage_format::SessionActivity::default);
+static EMPTY_ACTIVITY: std::sync::LazyLock<mj_client::usage_format::SessionActivity> =
+    std::sync::LazyLock::new(mj_client::usage_format::SessionActivity::default);
 
 fn session_target_label(
     session: &SessionRecord,
     operation: Option<&SessionOperationDisplay>,
-    config: &HelConfig,
+    config: &Config,
 ) -> String {
     let target_id = operation
         .and_then(|operation| operation.resume_destination.as_ref())
@@ -1481,7 +1483,7 @@ fn session_target_label(
 fn session_permission_badge(
     session: &SessionRecord,
     operation: Option<&SessionOperationDisplay>,
-    config: &HelConfig,
+    config: &Config,
 ) -> Option<Span<'static>> {
     let target_id = operation
         .and_then(|operation| operation.resume_destination.as_ref())
@@ -1510,7 +1512,7 @@ fn permission_badge(mode: Option<PermissionMode>) -> Option<Span<'static>> {
     })
 }
 
-fn capacity_target_labels(target_ids: &[String], config: &HelConfig) -> Line<'static> {
+fn capacity_target_labels(target_ids: &[String], config: &Config) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, target_id) in target_ids.iter().enumerate() {
         if index > 0 {
@@ -2640,13 +2642,14 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
 
-    use hel::hel_config::{HarnessKind, HelConfig};
-    use hel::hel_state::{
-        HelState, MaterializedExecutionState, STATE_VERSION, SessionState, TranscriptBody,
+    use mj_core::config::{Config, HarnessKind};
+    use mj_core::state::{
+        MaterializedExecutionState, STATE_VERSION, SessionState, State, TranscriptBody,
     };
-    use hel::hel_targets::{DeploymentCapacityUsage, ProvisionStage};
-    use mj_chat::hel_selection::SurfaceId;
+
+    use mj_chat::selection::SurfaceId;
     use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow};
+    use mj_core::targets::{DeploymentCapacityUsage, ProvisionStage};
 
     use super::*;
     use crate::test_support::*;
@@ -2659,7 +2662,7 @@ mod tests {
         detail: Option<&SessionDetail>,
         operation: Option<&SessionOperationDisplay>,
         now_epoch_seconds: u64,
-        config: &HelConfig,
+        config: &Config,
     ) -> String {
         session_activity_line(
             "",
@@ -2742,7 +2745,7 @@ mod tests {
             .get_mut("session-1")
             .unwrap()
             .queued_prompts
-            .push(hel::hel_worker::QueuedPrompt {
+            .push(mj_core::relay::QueuedPrompt {
                 id: "queued-1".into(),
                 text: "later".into(),
                 attachments: Vec::new(),
@@ -2780,7 +2783,7 @@ mod tests {
             .session_title_override = Some("長いセッション名のテスト".repeat(4));
         let mut session = materialized_session_for("session-1", Vec::new());
         session.pending_elicitations = vec![
-            hel::hel_elicitation::ElicitationRequest::from_acp_params(
+            mj_core::elicitation::ElicitationRequest::from_acp_params(
                 "request-1",
                 serde_json::json!({
                     "mode": "form",
@@ -2990,7 +2993,7 @@ mod tests {
 
     #[test]
     fn actual_sessions_renderer_keeps_actions_and_row_shapes_across_widths() {
-        use hel::hel_config::SessionsSide;
+        use mj_core::config::SessionsSide;
 
         for (width, expected_sidebar) in [(80, 40), (120, 40), (180, 60)] {
             for side in [SessionsSide::Left, SessionsSide::Right] {
@@ -3001,7 +3004,7 @@ mod tests {
                     .get_mut("session-1")
                     .expect("fixture detail")
                     .queued_prompts
-                    .push(hel::hel_worker::QueuedPrompt {
+                    .push(mj_core::relay::QueuedPrompt {
                         id: "queued".into(),
                         text: "follow-up".into(),
                         attachments: Vec::new(),
@@ -3045,7 +3048,7 @@ mod tests {
             let detail = dashboard.session_details.get_mut("session-1").unwrap();
             detail.current_turn_started_at = Some(now_seconds().saturating_sub(elapsed));
             detail.pending_elicitations.clear();
-            detail.queued_prompts.push(hel::hel_worker::QueuedPrompt {
+            detail.queued_prompts.push(mj_core::relay::QueuedPrompt {
                 id: "queued-1".into(),
                 text: "next task".into(),
                 attachments: Vec::new(),
@@ -3397,7 +3400,7 @@ mod tests {
         second.project_directory = Some("/projects/shared".into());
         second.session_title_override = Some("Second session".into());
         second.created_at = "2026-08-10T00:00:00Z".into();
-        let state = HelState {
+        let state = State {
             version: STATE_VERSION,
             sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
             mount_history: BTreeMap::new(),
@@ -3518,7 +3521,7 @@ mod tests {
         second.id = "session-beta".into();
         second.project_directory = Some("/projects/beta".into());
         second.created_at = "2026-08-10T00:00:00Z".into();
-        let state = HelState {
+        let state = State {
             version: STATE_VERSION,
             sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
             mount_history: BTreeMap::new(),
@@ -3559,7 +3562,7 @@ mod tests {
         second.id = "session-beta".into();
         second.project_directory = Some("/projects/beta".into());
         second.created_at = "2026-08-10T00:00:00Z".into();
-        let state = HelState {
+        let state = State {
             version: STATE_VERSION,
             sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
             mount_history: BTreeMap::new(),
@@ -3640,7 +3643,7 @@ mod tests {
         let mut beta_second = beta_first.clone();
         beta_second.id = "session-beta-second".into();
         beta_second.created_at = "2026-08-11T00:00:00Z".into();
-        let state = HelState {
+        let state = State {
             version: STATE_VERSION,
             sessions: [alpha, beta_first, beta_second]
                 .into_iter()
@@ -3733,9 +3736,9 @@ mod tests {
         );
 
         let foreground = SessionDetail {
-            activity: mj_chat::usage_format::SessionActivity {
+            activity: mj_client::usage_format::SessionActivity {
                 foreground_tool_started_at_ms: Some(1),
-                ..mj_chat::usage_format::SessionActivity::default()
+                ..mj_client::usage_format::SessionActivity::default()
             },
             ..SessionDetail::default()
         };
@@ -3747,14 +3750,14 @@ mod tests {
 
         let unread_background = SessionDetail {
             unread_agent_messages: 1,
-            activity: mj_chat::usage_format::SessionActivity {
-                background_commands: vec![hel::hel_worker::BackgroundCommand {
+            activity: mj_client::usage_format::SessionActivity {
+                background_commands: vec![mj_core::relay::BackgroundCommand {
                     id: "test-background".into(),
                     started_at_ms: 1,
                     command: "cargo test".into(),
                     can_stop: false,
                 }],
-                ..mj_chat::usage_format::SessionActivity::default()
+                ..mj_client::usage_format::SessionActivity::default()
             },
             ..SessionDetail::default()
         };
@@ -3794,7 +3797,7 @@ mod tests {
 
         let needs_input = SessionDetail {
             pending_elicitations: vec![
-                hel::hel_elicitation::ElicitationRequest::from_acp_params(
+                mj_core::elicitation::ElicitationRequest::from_acp_params(
                     "request-1",
                     serde_json::json!({
                         "mode": "form",
@@ -3917,7 +3920,7 @@ mod tests {
 
     #[test]
     fn dashboard_replaces_too_short_layout_with_required_height() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         let mut terminal = Terminal::new(TestBackend::new(120, 10)).expect("terminal");
         terminal
             .draw(|frame| render(frame, &mut dashboard))
@@ -3956,7 +3959,7 @@ mod tests {
 
     #[test]
     fn dashboard_replaces_layouts_narrower_than_80_columns() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         let mut terminal = Terminal::new(TestBackend::new(79, 24)).expect("terminal");
         terminal
             .draw(|frame| render(frame, &mut dashboard))
@@ -3989,7 +3992,7 @@ mod tests {
 
     #[test]
     fn new_session_picker_keeps_choices_and_controls_visible_at_minimum_width() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         assert_eq!(dashboard.handle_key(alt_key('w')), DashboardAction::None);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
         terminal
@@ -4011,7 +4014,7 @@ mod tests {
 
     #[test]
     fn the_footer_is_one_row_that_a_notice_takes_over() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         dashboard.set_workspace_name("personal".into());
         dashboard.set_notice("Transient dashboard message");
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
@@ -4313,7 +4316,7 @@ mod tests {
     /// plain lie.
     #[test]
     fn the_empty_prompt_distinguishes_no_session_from_no_conversation() {
-        let mut empty = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut empty = DashboardState::new(config(), State::default(), BTreeMap::new());
         let lines = drawn(&mut empty, 120, 44).join("\n");
         assert!(lines.contains("No live session"), "{lines}");
         assert!(lines.contains("Alt-N to create one"), "{lines}");
@@ -4351,8 +4354,8 @@ mod tests {
     #[test]
     fn the_session_sidebar_spans_all_other_panes_on_either_side() {
         for side in [
-            hel::hel_config::SessionsSide::Left,
-            hel::hel_config::SessionsSide::Right,
+            mj_core::config::SessionsSide::Left,
+            mj_core::config::SessionsSide::Right,
         ] {
             for (width, height) in [(140, 32), (80, 20), (80, 16)] {
                 let mut dashboard = dashboard_with_session(running_session());
@@ -4368,7 +4371,7 @@ mod tests {
                     assert!(pane.height > 0);
                 }
                 for pane in [transcript, prompt] {
-                    if side == hel::hel_config::SessionsSide::Left {
+                    if side == mj_core::config::SessionsSide::Left {
                         assert_eq!(sessions.right(), pane.x);
                     } else {
                         assert_eq!(pane.right(), sessions.x);
@@ -4376,7 +4379,7 @@ mod tests {
                 }
                 let support_in_content = targets.width == transcript.width;
                 if support_in_content {
-                    if side == hel::hel_config::SessionsSide::Left {
+                    if side == mj_core::config::SessionsSide::Left {
                         assert_eq!(sessions.right(), targets.x);
                     } else {
                         assert_eq!(targets.right(), sessions.x);
@@ -4442,8 +4445,8 @@ mod tests {
             .as_secs()
     }
 
-    fn host_usage(cpu_percent: u8) -> hel::hel_targets::DeploymentCapacityUsage {
-        hel::hel_targets::DeploymentCapacityUsage {
+    fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
+        mj_core::targets::DeploymentCapacityUsage {
             cpu_percent: Some(cpu_percent),
             memory_used_bytes: 1,
             memory_total_bytes: 4,
@@ -4504,7 +4507,7 @@ mod tests {
     fn add_deepseek_profile(dashboard: &mut DashboardState) {
         dashboard.config.profiles.insert(
             "deepseek".into(),
-            hel::hel_config::HarnessProfile {
+            mj_core::config::HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
                 kind: HarnessKind::Deepseek,
@@ -4526,8 +4529,9 @@ mod tests {
     /// rows and in the minimized grid, from the one fact the daemon forwards.
     #[test]
     fn background_work_reaches_both_session_row_forms() {
-        let started_at_ms = i64::try_from(hel::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
-        let activity = mj_chat::usage_format::SessionActivity {
+        let started_at_ms =
+            i64::try_from(mj_core::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
+        let activity = mj_client::usage_format::SessionActivity {
             capacity_retry: None,
             activity_turn_started_at_ms: None,
             prompt_in_flight: false,
@@ -4535,7 +4539,7 @@ mod tests {
             execution: None,
             harness_turn_started_at_ms: None,
             foreground_tool_started_at_ms: None,
-            background_commands: vec![hel::hel_worker::BackgroundCommand {
+            background_commands: vec![mj_core::relay::BackgroundCommand {
                 id: "test-background".into(),
                 started_at_ms,
                 command: "cargo test".into(),
@@ -4617,8 +4621,8 @@ mod tests {
         second.created_at = "2026-08-10T00:00:00Z".into();
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
-                version: hel::hel_state::STATE_VERSION,
+            State {
+                version: mj_core::state::STATE_VERSION,
                 sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
                 mount_history: BTreeMap::new(),
                 container_sizes: BTreeMap::new(),
@@ -4627,8 +4631,8 @@ mod tests {
         );
         dashboard.set_session_reviews([RuntimeReviewView {
             session_id: "session-second".into(),
-            tier: hel::hel_review::lanes::ReviewTier::Quick,
-            phase: hel::hel_review::driver::TurnReviewPhase::Running { roles: Vec::new() },
+            tier: mj_core::review::lanes::ReviewTier::Quick,
+            phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
             roles: Vec::new(),
             status: "the reviewer is reading the change…".into(),
             verdict: None,
@@ -4660,8 +4664,8 @@ mod tests {
         // must not pair a live review with the primary's idle marker.
         dashboard.set_session_reviews([RuntimeReviewView {
             session_id: "session-second".into(),
-            tier: hel::hel_review::lanes::ReviewTier::Quick,
-            phase: hel::hel_review::driver::TurnReviewPhase::Running { roles: Vec::new() },
+            tier: mj_core::review::lanes::ReviewTier::Quick,
+            phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
             roles: Vec::new(),
             status: "the reviewer is reading the change…".into(),
             verdict: None,
@@ -4695,7 +4699,7 @@ mod tests {
         }
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -4983,7 +4987,7 @@ mod tests {
     /// there must still draw rather than fall over on an empty list.
     #[test]
     fn the_minimized_list_draws_with_no_sessions() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         minimize_all_panes(&mut dashboard);
 
         let lines = drawn(&mut dashboard, 200, 50);
@@ -5074,8 +5078,8 @@ mod tests {
 
     /// A fleet with `count` machines running, which is what its probe list
     /// records: one probe per live instance.
-    fn fleet_target(count: usize) -> hel::hel_targets::DeploymentCapacityTarget {
-        hel::hel_targets::DeploymentCapacityTarget {
+    fn fleet_target(count: usize) -> mj_core::targets::DeploymentCapacityTarget {
+        mj_core::targets::DeploymentCapacityTarget {
             id: "aws:ec2".into(),
             host: "ec2".into(),
             target_ids: vec!["ec2".into()],
@@ -5083,7 +5087,7 @@ mod tests {
             local: false,
             probes: (0..count)
                 .map(|index| {
-                    hel::hel_targets::CommandSpec::new("true", [format!("instance-{index}")])
+                    mj_core::targets::CommandSpec::new("true", [format!("instance-{index}")])
                 })
                 .collect(),
             probe_error: None,
@@ -5101,7 +5105,7 @@ mod tests {
             if count > 0 {
                 dashboard.apply_deployment_capacity(
                     "aws:ec2",
-                    Ok(Some(hel::hel_targets::DeploymentCapacityUsage {
+                    Ok(Some(mj_core::targets::DeploymentCapacityUsage {
                         cpu_percent: None,
                         memory_used_bytes: 0,
                         memory_total_bytes: 8,
@@ -5250,7 +5254,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.set_deployment_capacity_targets(vec![
             test_capacity_target(),
-            hel::hel_targets::DeploymentCapacityTarget {
+            mj_core::targets::DeploymentCapacityTarget {
                 id: "morannon".into(),
                 host: "morannon".into(),
                 ..test_capacity_target()
@@ -5398,7 +5402,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.set_deployment_capacity_targets(
             (0..8)
-                .map(|index| hel::hel_targets::DeploymentCapacityTarget {
+                .map(|index| mj_core::targets::DeploymentCapacityTarget {
                     id: format!("host-{index}"),
                     host: format!("a-rather-long-host-name-{index}"),
                     ..test_capacity_target()
@@ -5490,7 +5494,7 @@ mod tests {
     /// and no staleness marker: the number on screen is the current one.
     #[test]
     fn capacity_pane_renders_grouped_host_load_without_sample_clock() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         let mut target = test_capacity_target();
         target.target_ids = vec!["podman".into(), "mac-container".into()];
         dashboard.set_deployment_capacity_targets(vec![target]);
@@ -5542,10 +5546,10 @@ mod tests {
     fn dashboard_colors_named_host_permission_badges() {
         let mut config = config();
         let container = match config.targets["podman"].clone() {
-            hel::hel_config::TargetTemplate::LocalPodman { container } => container,
+            mj_core::config::TargetTemplate::LocalPodman { container } => container,
             _ => unreachable!(),
         };
-        let ssh = |host: &str| hel::hel_config::SshConnection {
+        let ssh = |host: &str| mj_core::config::SshConnection {
             host: host.into(),
             user: None,
             identity_file: None,
@@ -5553,7 +5557,7 @@ mod tests {
         };
         config.targets.insert(
             "precision-3260".into(),
-            hel::hel_config::TargetTemplate::SshBare {
+            mj_core::config::TargetTemplate::SshBare {
                 ssh: ssh("precision-3260"),
                 permissions: PermissionMode::Yolo,
                 workspace_prefix: ".local/share/hel/workspaces".into(),
@@ -5561,14 +5565,14 @@ mod tests {
         );
         config.targets.insert(
             "morannon-podman".into(),
-            hel::hel_config::TargetTemplate::SshPodman {
+            mj_core::config::TargetTemplate::SshPodman {
                 ssh: ssh("morannon"),
                 container,
             },
         );
         config.targets.insert(
             "morannon-raw".into(),
-            hel::hel_config::TargetTemplate::SshBare {
+            mj_core::config::TargetTemplate::SshBare {
                 ssh: ssh("morannon"),
                 permissions: PermissionMode::Guardian,
                 workspace_prefix: ".local/share/hel/workspaces".into(),
@@ -5577,7 +5581,7 @@ mod tests {
         let mut session = running_session();
         session.target_template_id = "precision-3260".into();
         session.project_directory = Some("/home/dev/hel".into());
-        let state = HelState {
+        let state = State {
             version: STATE_VERSION,
             sessions: BTreeMap::from([(session.id.clone(), session)]),
             mount_history: BTreeMap::new(),
@@ -5585,7 +5589,7 @@ mod tests {
         };
         let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
         let capacity_target =
-            |host: &str, target_ids: &[&str]| hel::hel_targets::DeploymentCapacityTarget {
+            |host: &str, target_ids: &[&str]| mj_core::targets::DeploymentCapacityTarget {
                 id: format!("ssh:{host}"),
                 host: host.into(),
                 target_ids: target_ids.iter().map(|id| (*id).into()).collect(),
@@ -5659,7 +5663,7 @@ mod tests {
     /// rendering exactly like a reading taken a moment ago.
     #[test]
     fn capacity_rows_mark_a_failed_probe_and_a_sample_that_stopped_refreshing() {
-        let mut failed = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut failed = DashboardState::new(config(), State::default(), BTreeMap::new());
         failed.set_deployment_capacity_targets(vec![test_capacity_target()]);
         failed.apply_deployment_capacity(
             "local",
@@ -5675,7 +5679,7 @@ mod tests {
         assert!(rendered.contains("37% CPU · 75% RAM"), "{rendered}");
         assert!(rendered.contains("stale: probe timed out"), "{rendered}");
 
-        let mut aged = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut aged = DashboardState::new(config(), State::default(), BTreeMap::new());
         aged.set_deployment_capacity_targets(vec![test_capacity_target()]);
         aged.apply_deployment_capacity(
             "local",
@@ -5728,7 +5732,7 @@ mod tests {
             session.id = format!("archived-{index:02}");
             sessions.insert(session.id.clone(), session);
         }
-        let state = HelState {
+        let state = State {
             version: STATE_VERSION,
             sessions,
             mount_history: BTreeMap::new(),
@@ -5789,7 +5793,7 @@ mod tests {
                 .profiles
                 .insert(format!("profile-{index:02}"), profile.clone());
         }
-        let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
         dashboard.focus = Focus::Quota;
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test terminal");
 
@@ -5868,7 +5872,7 @@ mod tests {
         let line = session_transition_line(
             "› ",
             &session,
-            hel::hel_state::SessionTransitionKind::Moving,
+            mj_core::state::SessionTransitionKind::Moving,
             Some(&operation),
             1_012,
             "podman",
@@ -6048,7 +6052,7 @@ mod tests {
         second.state = SessionState::Running;
         let mut dashboard = DashboardState::new(
             config(),
-            HelState {
+            State {
                 version: STATE_VERSION,
                 sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
                 mount_history: BTreeMap::new(),
@@ -6105,7 +6109,7 @@ mod tests {
     #[test]
     fn existing_sessions_remain_visible_when_setup_has_no_accounts_or_targets() {
         let mut dashboard = dashboard_with_session(running_session());
-        dashboard.set_config(HelConfig::default());
+        dashboard.set_config(Config::default());
         let rendered = drawn(&mut dashboard, 120, 40).join("\n");
         assert!(rendered.contains("Sessions"), "{rendered}");
         assert!(rendered.contains("ACP pretty name"), "{rendered}");
@@ -6121,7 +6125,7 @@ mod tests {
     #[test]
     fn empty_config_renders_onboarding_with_the_workspace_name() {
         let mut dashboard =
-            DashboardState::new(HelConfig::default(), HelState::default(), BTreeMap::new());
+            DashboardState::new(Config::default(), State::default(), BTreeMap::new());
         dashboard.set_workspace_name("personal".into());
         let backend = TestBackend::new(100, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -6144,9 +6148,9 @@ mod tests {
 
     #[test]
     fn workspace_name_does_not_change_with_dashboard_updates() {
-        let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         dashboard.set_workspace_name("acme-workspace".into());
-        dashboard.set_state(HelState::default());
+        dashboard.set_state(State::default());
         dashboard.set_quotas(BTreeMap::new());
 
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
@@ -6168,7 +6172,7 @@ mod tests {
     fn quota_render_includes_errors_and_refresh_age_in_title() {
         let mut dashboard = DashboardState::new(
             config(),
-            HelState::default(),
+            State::default(),
             BTreeMap::from([(
                 "codex-1".into(),
                 ProfileQuota {
@@ -6205,7 +6209,7 @@ mod tests {
     fn quota_render_shows_login_expired_without_unavailable_prefix() {
         let mut dashboard = DashboardState::new(
             config(),
-            HelState::default(),
+            State::default(),
             BTreeMap::from([(
                 "claude-1".into(),
                 ProfileQuota {
@@ -6238,7 +6242,7 @@ mod tests {
     fn deepseek_quota_row_shows_api_without_bars_or_reset_dates() {
         let mut config = config();
         config.profiles.get_mut("codex-1").unwrap().kind = HarnessKind::Deepseek;
-        let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
         dashboard.quota_refreshing.insert("codex-1".into());
         let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
         terminal
@@ -6336,7 +6340,7 @@ mod tests {
         };
         let mut dashboard = DashboardState::new(
             config(),
-            HelState::default(),
+            State::default(),
             BTreeMap::from([("codex-1".into(), quota)]),
         );
         let mut terminal = Terminal::new(TestBackend::new(140, 28)).expect("terminal");
@@ -6472,7 +6476,7 @@ mod tests {
         };
         let mut dashboard = DashboardState::new(
             config(),
-            HelState::default(),
+            State::default(),
             BTreeMap::from([("codex-1".into(), quota)]),
         );
         let mut terminal = Terminal::new(TestBackend::new(140, 28)).expect("terminal");
@@ -6540,7 +6544,7 @@ mod tests {
         };
         let mut dashboard = DashboardState::new(
             config(),
-            HelState::default(),
+            State::default(),
             BTreeMap::from([("codex-1".into(), quota)]),
         );
         let mut terminal = Terminal::new(TestBackend::new(80, 28)).expect("terminal");

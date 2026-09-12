@@ -20,15 +20,16 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use std::path::PathBuf;
 
-use hel::hel_config::{HarnessKind, mount_history_host};
-use hel::hel_state::{MoveOperation, MovePhase, ResumeQueueDisposition};
-use hel::hel_targets::{AdditionalMount, default_mount_destination, validate_additional_mounts};
+use mj_core::config::{HarnessKind, mount_history_host};
+use mj_core::state::{MoveOperation, MovePhase, ResumeQueueDisposition};
+
 use mj_chat::components::{
     Button, Checkbox, ChoiceList, ControlKind, Dialog, Interaction, Outcome, TextField,
 };
-use mj_chat::hel_selection::FrameSurfaces;
-use mj_chat::hel_text_input::TextInput;
-use mj_chat::{components::PathField, hel_path_input::PathInput};
+use mj_chat::selection::FrameSurfaces;
+use mj_chat::text_input::TextInput;
+use mj_chat::{components::PathField, path_input::PathInput};
+use mj_core::targets::{AdditionalMount, default_mount_destination, validate_additional_mounts};
 
 use crate::widgets::{
     centered_modal, centered_modal_fixed, dismissible_modal_title, modal_area, popup_height,
@@ -245,7 +246,7 @@ pub(crate) struct RepositoryOriginDialog {
 pub(crate) enum Confirmation {
     RepairRepositoryRemotes {
         action: Box<DashboardAction>,
-        repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
         previous: Box<Mode>,
     },
     ConfigurationRepair {
@@ -889,16 +890,16 @@ pub(crate) fn render_target_actions(
     form.end_frame(DialogControl::TargetList);
 }
 
-fn target_kind_label(target: &hel::hel_config::TargetTemplate) -> &'static str {
+fn target_kind_label(target: &mj_core::config::TargetTemplate) -> &'static str {
     match target {
-        hel::hel_config::TargetTemplate::LocalBare => "local bare",
-        hel::hel_config::TargetTemplate::LocalPodman { .. } => "local Podman",
-        hel::hel_config::TargetTemplate::LocalDocker { .. } => "local Docker",
-        hel::hel_config::TargetTemplate::AppleContainer { .. } => "Apple container",
-        hel::hel_config::TargetTemplate::AwsEc2 { .. } => "AWS EC2",
-        hel::hel_config::TargetTemplate::SshBare { .. } => "SSH bare",
-        hel::hel_config::TargetTemplate::SshPodman { .. } => "SSH Podman",
-        hel::hel_config::TargetTemplate::SshDocker { .. } => "SSH Docker",
+        mj_core::config::TargetTemplate::LocalBare => "local bare",
+        mj_core::config::TargetTemplate::LocalPodman { .. } => "local Podman",
+        mj_core::config::TargetTemplate::LocalDocker { .. } => "local Docker",
+        mj_core::config::TargetTemplate::AppleContainer { .. } => "Apple container",
+        mj_core::config::TargetTemplate::AwsEc2 { .. } => "AWS EC2",
+        mj_core::config::TargetTemplate::SshBare { .. } => "SSH bare",
+        mj_core::config::TargetTemplate::SshPodman { .. } => "SSH Podman",
+        mj_core::config::TargetTemplate::SshDocker { .. } => "SSH Docker",
     }
 }
 
@@ -2020,7 +2021,7 @@ impl DashboardState {
     pub fn show_remote_repair_confirmation(
         &mut self,
         bundle_id: String,
-        repairs: Vec<hel::hel_local_git::LocalRemoteRepair>,
+        repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
         retry: DashboardAction,
     ) {
         let previous = Box::new(self.mode.clone());
@@ -2489,7 +2490,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
 
-    use hel::hel_state::SessionState;
+    use mj_core::state::SessionState;
 
     use super::*;
     use crate::test_support::*;
@@ -2502,7 +2503,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.show_close_failure("session-1".into(), "prior dialog");
         let previous = dashboard.mode.clone();
-        let repair = hel::hel_local_git::LocalRemoteRepair {
+        let repair = mj_core::local_git::LocalRemoteRepair {
             path: "/project".into(),
             branch: "main".into(),
             missing_remote: "upstream".into(),
@@ -2958,8 +2959,8 @@ mod tests {
     #[test]
     fn setup_opens_in_place_and_container_settings_remain_available() {
         let mut empty = DashboardState::new(
-            hel::hel_config::HelConfig {
-                version: hel::hel_config::CONFIG_VERSION,
+            mj_core::config::Config {
+                version: mj_core::config::CONFIG_VERSION,
                 sessions_side: Default::default(),
                 advanced: Default::default(),
                 show_stopped_sessions: false,
@@ -2973,7 +2974,7 @@ mod tests {
                 bundles: Default::default(),
                 targets: Default::default(),
             },
-            hel::hel_state::HelState::default(),
+            mj_core::state::State::default(),
             Default::default(),
         );
         assert_eq!(
@@ -3767,7 +3768,7 @@ mod tests {
     #[test]
     fn dirty_local_confirmation_continues_or_cancels_from_its_buttons() {
         let create = |allow_dirty_local| DashboardAction::CreateSession {
-            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "codex-1".into(),
             bundle_id: "hel".into(),
             project_directory: None,
@@ -3883,7 +3884,7 @@ mod tests {
     #[test]
     fn missing_checkpoint_history_dialog_accepts_a_replacement_origin() {
         let launch = DashboardAction::ResumeSession {
-            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             session_id: "session-1".into(),
             profile_id: "codex-1".into(),
             target_template_id: "podman".into(),

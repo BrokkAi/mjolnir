@@ -19,12 +19,12 @@ const repositoryRoot = path.resolve(
 );
 const manifestPath = path.join(repositoryRoot, "Cargo.toml");
 const internalPackages = [
-  "hel",
+  "mj-core",
   "mj-worker",
   "mj-client",
   "mj-controller",
   "mj-chat",
-  "hel-tui",
+  "mj-tui",
 ];
 
 function expectedManifest(manifest) {

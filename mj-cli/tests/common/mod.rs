@@ -121,7 +121,7 @@ impl DaemonStorage {
         let target =
             i32::try_from(pid).context("fixture daemon pid does not fit a signal target")?;
         for signal in [libc::SIGTERM, libc::SIGKILL] {
-            hel::hel_subprocess::terminate_process_group(target, signal);
+            mj_core::subprocess::terminate_process_group(target, signal);
             if self.wait_for_exit(Instant::now() + Duration::from_secs(5), Some(pid))? {
                 return Ok(());
             }
@@ -149,7 +149,7 @@ impl DaemonStorage {
     }
 
     fn request_stop(&self) -> Result<()> {
-        let output = hel::hel_subprocess::run_with_input(
+        let output = mj_core::subprocess::run_with_input(
             own_test_daemons(
                 Command::new(env!("CARGO_BIN_EXE_mj"))
                     .args(["daemon", "stop"])

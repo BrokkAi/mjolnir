@@ -1,0 +1,69 @@
+[package]
+name = "brokk-mj-core"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Session control plane for ACP coding agents"
+license = "GPL-3.0-only"
+repository = "https://github.com/BrokkAi/mjolnir"
+publish = true
+include = [
+    "src/**/*.rs",
+    # Recorded ACP bridge traffic the step-clock tests replay.
+    "src/**/testdata/**/*.jsonl",
+    "Cargo.toml",
+    "Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+    "licenses/THIRD_PARTY_LICENSES.html",
+    "licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt",
+]
+
+[lib]
+name = "mj_core"
+
+[features]
+default = []
+test-hooks = []
+
+[lints]
+workspace = true
+
+[dependencies]
+agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
+anyhow = "1"
+base64 = "0.22"
+# Grok Build keys long session directories by BLAKE3; Hel has to reproduce that
+# name exactly to restore a checkpoint. `default-features = false` keeps the
+# cross-compiled musl build free of the optional Rayon and SIMD extras.
+blake3 = { version = "1", default-features = false, features = ["std"] }
+# `clock` enables local-time support so `Local` can render reset timestamps in
+# the machine's wall-clock time (DST-correct); `default-features = false` drops
+# the wasm-only bits.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dirs = "6"
+getrandom = "0.3"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+libc = "0.2"
+rayon = "1"
+regex = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+zstd = "0.13"
+serde_yaml = "0.9"
+sha2 = "0.10"
+similar = "2.7"
+tar = "0.4"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
+toml = "0.8"
+tracing = "0.1"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25.1"
+url = "2"
+zip = { version = "2", default-features = false, features = ["deflate", "zstd"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }

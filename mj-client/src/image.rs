@@ -13,7 +13,7 @@ use image::{
 
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_OUTPUT_BYTES: usize = hel::hel_attachment::MAX_IMAGE_BYTES;
+const MAX_OUTPUT_BYTES: usize = mj_core::attachment::MAX_IMAGE_BYTES;
 const MAX_JPEG_DIMENSION: u32 = 65_535;
 const JPEG_QUALITIES: [u8; 3] = [90, 85, 80];
 

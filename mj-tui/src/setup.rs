@@ -10,15 +10,15 @@ use crate::{
     widgets::{centered_modal_fixed, dismissible_modal_title},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use hel::hel_config::HelConfig;
 use mj_chat::components::PathField;
 use mj_chat::components::{
     ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, Interaction, PopupSide, TextField,
 };
-use mj_chat::hel_path_input::PathInput;
-use mj_chat::hel_selection::FrameSurfaces;
-use mj_chat::hel_text_input::TextInput;
+use mj_chat::path_input::PathInput;
+use mj_chat::selection::FrameSurfaces;
+use mj_chat::text_input::TextInput;
 use mj_chat::theme;
+use mj_core::config::Config;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -283,10 +283,7 @@ fn preferred_size(draft: &Value) -> SetupSize {
     }
 }
 
-fn changed_profile_ids(
-    draft: &HelConfig,
-    current: &HelConfig,
-) -> std::collections::BTreeSet<String> {
+fn changed_profile_ids(draft: &Config, current: &Config) -> std::collections::BTreeSet<String> {
     draft
         .profiles
         .keys()
@@ -357,7 +354,7 @@ impl SetupDialog {
         }
     }
 
-    fn new(config: &HelConfig) -> Self {
+    fn new(config: &Config) -> Self {
         let mut draft = serde_json::to_value(config).expect("configuration serializes");
         let original = draft.to_string();
         schema::expand(&mut draft, &mut Vec::new());
@@ -603,12 +600,12 @@ impl SetupDialog {
         };
         if editor.adding
             || schema::path_kind(&editor.path) != Some(schema::PathKind::Target)
-            || !hel::hel_path_input::needs_home(std::path::Path::new(editor.input.value()))
+            || !mj_core::path_input::needs_home(std::path::Path::new(editor.input.value()))
                 .map_err(|e| e.to_string())?
         {
             return Ok(None);
         }
-        let target: hel::hel_config::TargetTemplate =
+        let target: mj_core::config::TargetTemplate =
             serde_json::from_value(self.draft["targets"][&editor.path[1]].clone())
                 .map_err(|e| e.to_string())?;
         self.notice = Some("Resolving path…".into());
@@ -668,9 +665,9 @@ impl SetupDialog {
                 }
                 Some(schema::PathKind::RelativeDestination) => {
                     let path = std::path::Path::new(editor.input.value());
-                    hel::hel_config::validate_relative_destination(path)
+                    mj_core::config::validate_relative_destination(path)
                         .map_err(|error| error.to_string())?;
-                    if hel::hel_path_input::needs_home(path).map_err(|error| error.to_string())? {
+                    if mj_core::path_input::needs_home(path).map_err(|error| error.to_string())? {
                         return Err("Repository destinations must be safe relative paths; ~ is not supported.".into());
                     }
                 }
@@ -746,7 +743,7 @@ impl SetupDialog {
         if self.saving || self.read_only.is_some() {
             return DashboardAction::None;
         }
-        let result = serde_json::from_value::<HelConfig>(self.draft.clone())
+        let result = serde_json::from_value::<Config>(self.draft.clone())
             .map_err(|error| error.to_string())
             .and_then(|config| {
                 if let Some(snapshot) = &self.review_validation
@@ -781,8 +778,8 @@ impl SetupDialog {
     /// expanded schema and all navigation/discovery fields are transient UI
     /// state and must not make a freshly opened Setup dialog dirty.
     pub(crate) fn is_dirty(&self) -> bool {
-        let original = serde_json::from_str::<HelConfig>(&self.original);
-        let current = serde_json::from_value::<HelConfig>(self.draft.clone());
+        let original = serde_json::from_str::<Config>(&self.original);
+        let current = serde_json::from_value::<Config>(self.draft.clone());
         match (original, current) {
             (Ok(original), Ok(current)) => original != current,
             (Err(_), _) => true,
@@ -795,7 +792,7 @@ impl SetupDialog {
     }
 
     fn open_review(&mut self, dashboard: &mut DashboardState) -> DashboardAction {
-        let config = match serde_json::from_value::<HelConfig>(self.draft.clone()) {
+        let config = match serde_json::from_value::<Config>(self.draft.clone()) {
             Ok(config) => config,
             Err(error) => {
                 self.notice = Some(format!(
@@ -820,7 +817,7 @@ impl SetupDialog {
         action
     }
 
-    fn sync_review(&mut self, review: &hel::hel_config::ReviewConfig) {
+    fn sync_review(&mut self, review: &mj_core::config::ReviewConfig) {
         self.draft["review"] = serde_json::to_value(review).expect("review serializes");
     }
 
@@ -1158,7 +1155,7 @@ impl DashboardState {
         self.mark_render_changed();
     }
 
-    pub fn setup_saved(&mut self, generation: u64, result: Result<HelConfig, String>) {
+    pub fn setup_saved(&mut self, generation: u64, result: Result<Config, String>) {
         let current =
             setup_dialog_mut(&mut self.mode).is_some_and(|dialog| dialog.generation == generation);
         if !current {
@@ -1187,7 +1184,7 @@ impl DashboardState {
         }
     }
 
-    pub fn setup_discovered(&mut self, generation: u64, result: Result<HelConfig, String>) {
+    pub fn setup_discovered(&mut self, generation: u64, result: Result<Config, String>) {
         let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
             return;
         };
@@ -1199,7 +1196,7 @@ impl DashboardState {
             Ok(config) => {
                 // Reconcile against the current draft, including edits made
                 // while discovery was running, rather than dropping collisions.
-                let current: HelConfig = match serde_json::from_value(dialog.draft.clone()) {
+                let current: Config = match serde_json::from_value(dialog.draft.clone()) {
                     Ok(current) => current,
                     Err(error) => {
                         dialog.notice = Some(format!(
@@ -1615,9 +1612,9 @@ mod tests {
             panic!("setup");
         };
         assert!(dialog.editor.is_none(), "{:?}", dialog.notice);
-        let config: HelConfig = serde_json::from_value(dialog.draft.clone()).unwrap();
+        let config: Config = serde_json::from_value(dialog.draft.clone()).unwrap();
         let expected =
-            hel::hel_path_input::expand_local(std::path::Path::new("~/.codex4")).unwrap();
+            mj_core::path_input::expand_local(std::path::Path::new("~/.codex4")).unwrap();
         let profile = &config.profiles["codex-1"];
         assert_eq!(profile.home, expected);
         let mut environment = profile.environment.clone();
@@ -1770,7 +1767,7 @@ mod tests {
             let Mode::Setup(dialog) = &dashboard.mode else {
                 panic!("setup");
             };
-            mj_chat::hel_modal::centered_rect_fixed(
+            mj_chat::modal::centered_rect_fixed(
                 dialog.preferred_width,
                 dialog.preferred_height,
                 Rect::new(0, 0, 100, 30),
@@ -1849,11 +1846,11 @@ mod tests {
                 .unwrap();
             let rect = dashboard
                 .frame_surfaces()
-                .surface(mj_chat::hel_selection::SurfaceId::ModalBody)
+                .surface(mj_chat::selection::SurfaceId::ModalBody)
                 .expect("rendered Setup modal surface")
                 .rect;
             assert!(
-                rect.width < mj_chat::hel_modal::modal_area(area).width,
+                rect.width < mj_chat::modal::modal_area(area).width,
                 "setup should be compact: {rect:?}"
             );
             assert_eq!(expected.get_or_insert(rect), &rect);
@@ -1896,7 +1893,7 @@ mod tests {
         else {
             panic!("{action:?}");
         };
-        let saved: HelConfig = serde_json::from_str(&updated).unwrap();
+        let saved: Config = serde_json::from_str(&updated).unwrap();
         assert_eq!(saved.theme, theme::UiTheme::Light);
         assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
         dashboard.setup_saved(generation, Ok(saved));
@@ -2016,13 +2013,13 @@ mod tests {
         discovered.profiles.get_mut("codex-1").unwrap().home = "/profiles/new-codex".into();
         discovered
             .targets
-            .insert("podman".into(), hel::hel_config::TargetTemplate::LocalBare);
+            .insert("podman".into(), mj_core::config::TargetTemplate::LocalBare);
         discovered.bundles.get_mut("hel").unwrap().repositories[0].github =
             Some("owner/new-repository".into());
         for _ in 0..2 {
             dashboard.setup_discovered(generation, Ok(discovered.clone()));
             let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-            let draft: HelConfig = serde_json::from_value(dialog.draft.clone()).unwrap();
+            let draft: Config = serde_json::from_value(dialog.draft.clone()).unwrap();
             assert_eq!(draft.profiles["codex-1"], original.profiles["codex-1"]);
             assert_eq!(
                 draft.profiles["codex-1-2"].home,
@@ -2031,7 +2028,7 @@ mod tests {
             assert_eq!(draft.targets["podman"], original.targets["podman"]);
             assert!(matches!(
                 draft.targets["podman-2"],
-                hel::hel_config::TargetTemplate::LocalBare
+                mj_core::config::TargetTemplate::LocalBare
             ));
             assert_eq!(draft.bundles["hel"], original.bundles["hel"]);
             assert_eq!(draft.bundles.len(), original.bundles.len() + 1);
@@ -2053,7 +2050,7 @@ mod tests {
         let mut detected = dashboard.config.clone();
         detected.targets.insert(
             "stale-discovery".into(),
-            hel::hel_config::TargetTemplate::LocalBare,
+            mj_core::config::TargetTemplate::LocalBare,
         );
         dashboard.setup_discovered(old, Ok(detected));
         dashboard.setup_saved(old, Ok(dashboard.config.clone()));
@@ -2088,7 +2085,7 @@ mod tests {
         let DashboardAction::SaveSetup { updated, .. } = action else {
             panic!("{action:?}");
         };
-        let saved: HelConfig = serde_json::from_str(&updated).unwrap();
+        let saved: Config = serde_json::from_str(&updated).unwrap();
         assert!(!saved.startup.prompt);
         assert_eq!(saved.startup.profile.as_deref(), Some("claude-1"));
         let generation = setup_dialog_mut(&mut dashboard.mode).unwrap().generation;
@@ -2142,7 +2139,7 @@ mod tests {
         let DashboardAction::SaveSetup { updated, .. } = action else {
             panic!("expected Setup save, got {action:?}")
         };
-        let saved: HelConfig = serde_json::from_str(&updated).unwrap();
+        let saved: Config = serde_json::from_str(&updated).unwrap();
         assert!(saved.advanced.show_stopped_sessions);
         assert!(!saved.show_stopped_sessions);
     }
@@ -2187,9 +2184,9 @@ mod tests {
         let DashboardAction::SaveSetup { updated, .. } = action else {
             panic!("{action:?}");
         };
-        let saved: HelConfig = serde_json::from_str(&updated).unwrap();
+        let saved: Config = serde_json::from_str(&updated).unwrap();
         assert!(
-            matches!(&saved.targets["builder"], hel::hel_config::TargetTemplate::SshDocker { ssh, .. } if ssh.host == "builder.example.test")
+            matches!(&saved.targets["builder"], mj_core::config::TargetTemplate::SshDocker { ssh, .. } if ssh.host == "builder.example.test")
         );
         let generation = setup_dialog_mut(&mut dashboard.mode).unwrap().generation;
         dashboard.setup_saved(generation, Err("disk full".into()));
@@ -2286,7 +2283,7 @@ mod tests {
             panic!("setup save remains pending")
         };
         let generation = dialog.generation;
-        let updated: HelConfig = serde_json::from_str(match &action {
+        let updated: Config = serde_json::from_str(match &action {
             DashboardAction::SaveSetup { updated, .. } => updated,
             _ => unreachable!(),
         })
@@ -2367,7 +2364,7 @@ mod tests {
         else {
             panic!("unverified capabilities must not prevent saving account changes")
         };
-        let saved: HelConfig = serde_json::from_str(&updated).unwrap();
+        let saved: Config = serde_json::from_str(&updated).unwrap();
         assert_eq!(saved.review.profile.as_deref(), Some("codex-1"));
         assert_ne!(
             saved.profiles["codex-1"].home,
@@ -2444,7 +2441,7 @@ mod tests {
             .unwrap()
             .context_window_bytes = Some(250000);
         let dialog = SetupDialog::new(&original);
-        let decoded: HelConfig = serde_json::from_value(dialog.draft).unwrap();
+        let decoded: Config = serde_json::from_value(dialog.draft).unwrap();
         assert_eq!(decoded, original);
     }
 }

@@ -1,8 +1,8 @@
 //! Pure target and resume compatibility contracts shared by control surfaces.
 
 use anyhow::{Result, bail};
-use hel::hel_config::{HelConfig, TargetTemplate, is_bare_project_target};
-use hel::hel_state::{ManagedWorktreeTarget, SessionRecord};
+use mj_core::config::{Config, TargetTemplate, is_bare_project_target};
+use mj_core::state::{ManagedWorktreeTarget, SessionRecord};
 
 // Published from containers/Containerfile.agent-dev by
 // .github/workflows/publish-agent-dev-image.yml. It already carries Node, Rust,
@@ -64,7 +64,7 @@ pub enum ResumePlan {
 /// row of a target picker.
 pub fn resume_compatibility(
     session: &SessionRecord,
-    config: &HelConfig,
+    config: &Config,
     target_id: &str,
 ) -> Result<ResumePlan, String> {
     let Some(target) = config.targets.get(target_id) else {
@@ -129,7 +129,7 @@ const BUNDLE_ON_LOCAL_BARE: &str = "this session was created from a project bund
 /// machine. Only a single repository already on this machine can become one.
 fn workspace_to_raw_compatibility(
     session: &SessionRecord,
-    config: &HelConfig,
+    config: &Config,
 ) -> Result<ResumePlan, String> {
     let Some(bundle) = config.bundles.get(&session.bundle_id) else {
         return Err(BUNDLE_ON_LOCAL_BARE.to_owned());

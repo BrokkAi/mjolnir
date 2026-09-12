@@ -5,8 +5,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use hel::hel_workspace::PaneSizes;
-use mj_chat::hel_chat::Notices;
+use mj_chat::chat::Notices;
+use mj_core::workspace::PaneSizes;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -220,7 +220,7 @@ impl Drop for PaneSizePersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hel::hel_workspace::PaneSize;
+    use mj_core::workspace::PaneSize;
     use std::sync::{Arc, Mutex};
     use tokio::sync::{mpsc, oneshot};
 

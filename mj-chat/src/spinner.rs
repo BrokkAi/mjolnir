@@ -12,7 +12,7 @@
 
 use std::sync::LazyLock;
 
-pub use hel::hel_config::SpinnerStyle;
+pub use mj_core::config::SpinnerStyle;
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};

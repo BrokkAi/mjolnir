@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use hel::hel_targets::{CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec};
+use crate::targets::{CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec};
 
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -177,7 +177,7 @@ async fn query_with(
         .build()
         .map_err(|error| ClaudeUsageError::Query(error.to_string()))?;
     let credentials = read_credentials(&home).await?;
-    match oauth_access_token(&credentials, hel::clock::epoch_millis()) {
+    match oauth_access_token(&credentials, mj_core::clock::epoch_millis()) {
         Ok(token) => match query_api(&client, usage_url, token).await {
             Err(ClaudeUsageError::LoginExpired) if oauth_has_refresh_token(&credentials) => {
                 refresh_and_retry(
@@ -253,7 +253,7 @@ async fn refresh_and_retry(
         Ok(credentials) => credentials,
         Err(error) => return Err(refresh_error.unwrap_or(error)),
     };
-    let token = match oauth_access_token(&credentials, hel::clock::epoch_millis()) {
+    let token = match oauth_access_token(&credentials, mj_core::clock::epoch_millis()) {
         Ok(token) => token,
         Err(error) => return Err(refresh_error.unwrap_or(error)),
     };
@@ -879,7 +879,7 @@ mod tests {
         let fresh = credentials(
             "fresh",
             Some("rotated"),
-            hel::clock::epoch_millis() + 60_000,
+            mj_core::clock::epoch_millis() + 60_000,
         );
         let commands = Arc::new(Mutex::new(Vec::new()));
         let executor = RefreshExecutor {
@@ -921,7 +921,7 @@ mod tests {
     #[tokio::test]
     async fn authoritative_rejection_refreshes_once_and_retries_with_new_credentials() {
         let home = tempfile::tempdir().unwrap();
-        let fresh_expiry = hel::clock::epoch_millis() + 60_000;
+        let fresh_expiry = mj_core::clock::epoch_millis() + 60_000;
         std::fs::write(
             home.path().join(".credentials.json"),
             serde_json::to_vec(&credentials("old", Some("refresh"), fresh_expiry)).unwrap(),
@@ -961,7 +961,7 @@ mod tests {
             serde_json::to_vec(&credentials(
                 "current",
                 Some("refresh"),
-                hel::clock::epoch_millis() + 60_000,
+                mj_core::clock::epoch_millis() + 60_000,
             ))
             .unwrap(),
         )
@@ -1000,7 +1000,7 @@ mod tests {
             serde_json::to_vec(&credentials(
                 "rejected",
                 Some("refresh"),
-                hel::clock::epoch_millis() + 60_000,
+                mj_core::clock::epoch_millis() + 60_000,
             ))
             .unwrap(),
         )
@@ -1043,7 +1043,7 @@ mod tests {
             replacement: Some(credentials(
                 "fresh",
                 Some("rotated"),
-                hel::clock::epoch_millis() + 60_000,
+                mj_core::clock::epoch_millis() + 60_000,
             )),
             status: 1,
             commands: Arc::new(Mutex::new(Vec::new())),

@@ -142,7 +142,7 @@ fn write_log_messages(mut file: File, receiver: mpsc::Receiver<LogMessage>) {
 
 impl ControllerLog {
     pub(crate) fn start(command: &'static str) -> Result<Self> {
-        let directory = hel::hel_config::data_dir().join("logs");
+        let directory = mj_core::config::data_dir().join("logs");
         fs::create_dir_all(&directory)
             .with_context(|| format!("create Mjolnir log directory {}", directory.display()))?;
         prune_logs(&directory, RETAINED_LOGS.saturating_sub(1))?;

@@ -13,13 +13,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, Subcommand};
-use hel::hel_archive::verify_archive_streaming;
-use hel::hel_config::{HarnessKind, HelConfig, sessions_dir};
-use hel::hel_projection::materialized_session_from_canonical;
-use hel::hel_state::{HelState, SessionRecord};
-use hel_tui::{ImportProfileOption, ImportSessionOption};
-use mj_controller::hel_controller::Controller;
-use mj_controller::hel_import::{
+use mj_core::config::{Config, HarnessKind, sessions_dir};
+use mj_core::state::{SessionRecord, State};
+
+use mj_controller::controller::Controller;
+use mj_controller::import::{
     BundleResolution, ClaudeImportRequest, ClaudeSessionSelection, ClaudeTranscript,
     CodexImportRequest, GrokImportRequest, ImportArchiveProgress, ImportControl,
     ImportedClaudeSession, KimiImportRequest, NativeImportRequest, SessionEditTargets,
@@ -28,6 +26,7 @@ use mj_controller::hel_import::{
     locate_codex_session, locate_grok_session, locate_kimi_session, locate_native_session,
     read_native_transcript, resolve_bundle, scan_native_sessions, session_edit_targets,
 };
+use mj_tui::{ImportProfileOption, ImportSessionOption};
 
 const IMPORT_CANCELLED_MESSAGE: &str = "Import cancelled; no Mjolnir files were changed.";
 const DIRTY_IMPORT_WARNING: &str =
@@ -119,7 +118,7 @@ const fn import_label(harness: HarnessKind) -> &'static str {
 
 /// Where a harness keeps the sessions Mjolnir may read. Never modified.
 fn harness_config_home(harness: HarnessKind) -> Result<PathBuf> {
-    mj_controller::hel_import::harness_config_home(harness)
+    mj_controller::import::harness_config_home(harness)
 }
 
 /// The harness's own importer, already bound to the session that was located.
@@ -127,8 +126,8 @@ fn harness_config_home(harness: HarnessKind) -> Result<PathBuf> {
 /// steps around it be written once.
 type HarnessImport = Box<
     dyn FnOnce(
-        &HelConfig,
-        &mut HelState,
+        &Config,
+        &mut State,
         &ClaudeTranscript,
         &str,
         Option<&str>,
@@ -155,7 +154,7 @@ fn locate_for_import(
                 native_session_id: source.native_session_id.clone(),
                 source_path: source.source_path.clone(),
                 import: Box::new(move |config, state, transcript, bundle_id, title| {
-                    mj_controller::hel_import::import_native_session(
+                    mj_controller::import::import_native_session(
                         config,
                         state,
                         NativeImportRequest {
@@ -284,7 +283,7 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
     let transcript = read_native_transcript(harness, &located.source_path)?;
     println!("Original cwd: {}", transcript.cwd.display());
 
-    let mut state = HelState::load()?;
+    let mut state = mj_controller::database::load_state_migrating()?;
     state.validate()?;
     let targets = session_edit_targets(&transcript, &home)?;
     if !confirm_import_safety(&targets, args.allow_dirty_local, args.allow_omitted_non_git)? {
@@ -294,7 +293,7 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
     // Resolve and persist a synthesized bundle while holding the config lock;
     // the archive scan then runs outside that lock so other settings do not
     // wait behind a large import.
-    let (config, bundle_id) = HelConfig::update(|config| {
+    let (config, bundle_id) = Config::update(|config| {
         resolve_import_bundle(config, &transcript, &targets, args.bundle.as_deref())
     })?;
     let imported = (located.import)(
@@ -325,7 +324,7 @@ fn import_success_message(imported: &ImportedClaudeSession) -> String {
 }
 
 fn resolve_import_bundle(
-    config: &mut HelConfig,
+    config: &mut Config,
     transcript: &ClaudeTranscript,
     targets: &SessionEditTargets,
     requested_bundle: Option<&str>,
@@ -380,7 +379,7 @@ fn confirm_import_safety(
         };
         bail!("pass {flags} to acknowledge import safety warnings");
     }
-    let answer = mj_controller::hel_readline::LineReader::default()
+    let answer = mj_controller::readline::LineReader::default()
         .read_line("Proceed? [y/N]: ")?
         .unwrap_or_default();
     Ok(matches!(
@@ -399,17 +398,6 @@ pub(crate) fn persist_imported_session(session: &SessionRecord) -> Result<()> {
                 .persist_imported_session(session)
                 .await
         })
-}
-
-pub(crate) fn persist_imported_session_locally(session: &SessionRecord) -> Result<()> {
-    hel::hel_database::save_session(session)?;
-    let checkpoint = session
-        .checkpoint
-        .as_ref()
-        .context("imported session has no checkpoint")?;
-    let canonical = verify_archive_streaming(&checkpoint.archive_path)?.canonical_session;
-    let materialized = materialized_session_from_canonical(session.id.clone(), &canonical)?;
-    hel::hel_database::save_materialized_session(&materialized)
 }
 
 #[derive(Clone)]
@@ -468,7 +456,7 @@ pub(crate) struct DashboardImportRequest {
 
 pub(crate) fn discover_import_profile(
     profile_id: String,
-    harness_kind: hel::hel_config::HarnessKind,
+    harness_kind: mj_core::config::HarnessKind,
     home: PathBuf,
     mut publish: impl FnMut(&ImportProfileOption),
 ) -> ImportProfileOption {
@@ -494,7 +482,7 @@ pub(crate) fn discover_import_profile(
 }
 
 fn import_session_option(
-    session: mj_controller::hel_import::NativeSessionListing,
+    session: mj_controller::import::NativeSessionListing,
 ) -> ImportSessionOption {
     let project_directory = display_home_relative(&session.cwd);
     let details = format!(
@@ -679,7 +667,7 @@ fn report_import_archive_progress(
 }
 
 fn resolve_background_import_bundle(
-    config: &mut HelConfig,
+    config: &mut Config,
     transcript: &ClaudeTranscript,
     profile_home: &std::path::Path,
     safety_accepted: bool,

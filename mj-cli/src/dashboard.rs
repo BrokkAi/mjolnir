@@ -19,34 +19,34 @@ mod startup;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use hel::hel_config::{HelConfig, config_path};
-use hel::hel_credentials::CredentialSyncHandle;
-use hel::hel_database::DetachedSessionDraft;
-use hel::hel_state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
-use hel::hel_targets::DeploymentCapacityTarget;
-use hel_tui::{
+use mj_controller::database::DetachedSessionDraft;
+use mj_core::config::{Config, config_path};
+use mj_core::credentials::CredentialSyncHandle;
+use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
+
+use mj_chat::chat::ChatElicitationDraft;
+use mj_chat::components::Outcome;
+use mj_chat::selection::{
+    FrameSurfaces, SelectionAction, SelectionRange, SelectionState, SurfaceId,
+};
+use mj_controller::controller::Controller;
+use mj_controller::session_manager::{
+    SessionManagerControl, SessionManagerShutdown, SessionManagerUpdates, ViewError,
+};
+use mj_controller::targets::DeploymentCapacityTarget;
+use mj_controller::worker_client::CredentialSyncCoordinator;
+use mj_tui::{
     CommandId, DashboardAction, DashboardState, ImportProfileOption,
     PreparedMaterializedSessionDetail, SessionOperationKind, render_combined,
     resume_profile_placeholders,
 };
-use mj_chat::components::Outcome;
-use mj_chat::hel_chat::ChatElicitationDraft;
-use mj_chat::hel_selection::{
-    FrameSurfaces, SelectionAction, SelectionRange, SelectionState, SurfaceId,
-};
-use mj_controller::hel_controller::Controller;
-use mj_controller::hel_session_manager::{
-    SessionManagerControl, SessionManagerShutdown, SessionManagerUpdates, ViewError,
-};
-use mj_controller::hel_worker_client::CredentialSyncCoordinator;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio_stream::StreamExt as _;
@@ -188,112 +188,7 @@ pub(crate) enum DashboardExit {
     Interrupted,
 }
 
-#[derive(Clone)]
-pub(crate) struct CriticalOperationTracker {
-    inner: Arc<CriticalOperationTrackerInner>,
-}
-
-struct CriticalOperationTrackerInner {
-    next_id: AtomicU64,
-    operations: Mutex<BTreeMap<u64, CriticalOperation>>,
-    changed: watch::Sender<u64>,
-}
-
-struct CriticalOperation {
-    label: String,
-    cancelled: Option<Arc<AtomicBool>>,
-}
-
-pub(crate) struct CriticalOperationGuard {
-    id: u64,
-    tracker: CriticalOperationTracker,
-}
-
-impl CriticalOperationTracker {
-    fn new() -> (Self, watch::Receiver<u64>) {
-        let (changed, receiver) = watch::channel(0);
-        (
-            Self {
-                inner: Arc::new(CriticalOperationTrackerInner {
-                    next_id: AtomicU64::new(1),
-                    operations: Mutex::new(BTreeMap::new()),
-                    changed,
-                }),
-            },
-            receiver,
-        )
-    }
-
-    pub(crate) fn begin(&self, label: impl Into<String>) -> CriticalOperationGuard {
-        self.begin_inner(label.into(), None)
-    }
-
-    pub(crate) fn begin_cancellable(
-        &self,
-        label: impl Into<String>,
-        cancelled: Arc<AtomicBool>,
-    ) -> CriticalOperationGuard {
-        self.begin_inner(label.into(), Some(cancelled))
-    }
-
-    fn begin_inner(
-        &self,
-        label: String,
-        cancelled: Option<Arc<AtomicBool>>,
-    ) -> CriticalOperationGuard {
-        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        self.inner
-            .operations
-            .lock()
-            .expect("critical operation tracker lock")
-            .insert(id, CriticalOperation { label, cancelled });
-        self.inner.changed.send_modify(|generation| {
-            *generation = generation.wrapping_add(1);
-        });
-        CriticalOperationGuard {
-            id,
-            tracker: self.clone(),
-        }
-    }
-
-    fn blockers(&self) -> Vec<String> {
-        self.inner
-            .operations
-            .lock()
-            .expect("critical operation tracker lock")
-            .values()
-            .map(|operation| operation.label.clone())
-            .collect()
-    }
-
-    fn cancel_all(&self) {
-        for operation in self
-            .inner
-            .operations
-            .lock()
-            .expect("critical operation tracker lock")
-            .values()
-        {
-            if let Some(cancelled) = operation.cancelled.as_ref() {
-                cancelled.store(true, Ordering::Release);
-            }
-        }
-    }
-}
-
-impl Drop for CriticalOperationGuard {
-    fn drop(&mut self) {
-        self.tracker
-            .inner
-            .operations
-            .lock()
-            .expect("critical operation tracker lock")
-            .remove(&self.id);
-        self.tracker.inner.changed.send_modify(|generation| {
-            *generation = generation.wrapping_add(1);
-        });
-    }
-}
+pub(crate) use mj_client::operations::CriticalOperationTracker;
 
 fn shutdown_wait_notice(blockers: &[String]) -> Option<String> {
     match blockers {
@@ -332,13 +227,13 @@ pub(crate) struct DashboardContext {
     known_workspace_layouts: BTreeSet<String>,
     /// One notifications bar for the whole process: the dashboard and every
     /// chat view opened from it report through this shared handle.
-    notices: mj_chat::hel_chat::Notices,
+    notices: mj_chat::chat::Notices,
     /// Terminal input remains owned by this event loop, including during Setup.
     events: Option<event::EventStream>,
     /// The conversation on screen. One chat stays warm at a time; its feeds
     /// keep running while another pane has the keyboard, so switching back is
     /// a redraw rather than a rebuild.
-    pub(crate) active_chat: Option<mj_chat::hel_chat::ActiveChat>,
+    pub(crate) active_chat: Option<mj_chat::chat::ActiveChat>,
     /// In-memory form drafts for sessions that are not currently attached.
     /// Each value retains its complete request identity (and may contain one
     /// primary and one deferred reviewer form), so an id reused by a changed
@@ -390,7 +285,7 @@ pub(crate) struct DashboardContext {
     runtime_state: Feed<watch::Receiver<RuntimeStateUpdate>>,
     /// Reviews the daemon is running. The chat renders one of these rather
     /// than driving a review of its own.
-    runtime_reviews: Feed<watch::Receiver<Vec<mj_controller::hel_review_host::RuntimeReviewView>>>,
+    runtime_reviews: Feed<watch::Receiver<Vec<mj_controller::review_host::RuntimeReviewView>>>,
     /// Background events the daemon reported. Only ones newer than
     /// `reported_notice_id` reach the notice bar, so a surface that attaches
     /// late does not replay a backlog.
@@ -398,8 +293,8 @@ pub(crate) struct DashboardContext {
     reported_notice_id: Option<u64>,
     /// Last complete review projection, retained even while the session list
     /// is on screen so a subsequently opened chat starts in the right state.
-    runtime_review_views: BTreeMap<String, mj_controller::hel_review_host::RuntimeReviewView>,
-    runtime_config: Feed<watch::Receiver<HelConfig>>,
+    runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView>,
+    runtime_config: Feed<watch::Receiver<Config>>,
     config_reload_in_flight: bool,
     remote_lifecycle_sessions: BTreeSet<String>,
     remote_lifecycle_operations: BTreeMap<String, String>,
@@ -501,8 +396,11 @@ pub(super) fn retain_workspace_sessions(
         .values_mut()
         .filter(|session| session.state.is_active())
     {
-        let frontier =
-            hel::hel_database::client_read_frontier(client_id, &session.workspace_id, &session.id)?;
+        let frontier = mj_controller::database::client_read_frontier(
+            client_id,
+            &session.workspace_id,
+            &session.id,
+        )?;
         session.viewed_through_event_ordinal = frontier;
     }
     Ok(())
@@ -522,7 +420,7 @@ pub(crate) async fn run_dashboard_for_workspace(
     }
 
     tokio::task::spawn_blocking(|| {
-        mj_controller::hel_setup::initialize_local_startup_config(&config_path())
+        mj_controller::setup::initialize_local_startup_config(&config_path())
     })
     .await
     .context("initialize startup configuration task failed")??;
@@ -533,7 +431,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         let action = context.dashboard.begin_workspace_manager();
         actions::apply_dashboard_action(&mut context, action).await?;
     }
-    let termination = hel::termination::Coordinator::install().token();
+    let termination = mj_controller::termination::Coordinator::install().token();
     // `interval_at` so the first tick is a period away rather than immediate,
     // and `Delay` so a tick that was gated off does not fire a burst to catch
     // up when it comes back.
@@ -556,7 +454,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         }
         context.draw()?;
         let mut action = DashboardAction::None;
-        let mut chat_outcome = mj_chat::hel_chat::ChatEventOutcome::None;
+        let mut chat_outcome = mj_chat::chat::ChatEventOutcome::None;
         // The winning arm takes the message that woke the loop; the drains
         // below batch whatever is queued behind it, so one wakeup is one draw.
         tokio::select! {
@@ -657,7 +555,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // and history I/O, dictation, and the session view. They run
             // whether or not the chat is on screen, which is what keeps an
             // off-screen chat current.
-            outcome = mj_chat::hel_chat::ActiveChat::pump(context.active_chat.as_mut()) => {
+            outcome = mj_chat::chat::ActiveChat::pump(context.active_chat.as_mut()) => {
                 // A warm chat may be hidden by another tab or selection.
                 // Only visible conversation updates advance its read receipt.
                 context.dirty |= outcome == Outcome::Changed && context.visible_chat().is_some();
@@ -840,7 +738,7 @@ impl DashboardContext {
         if let Some(ordinal) = self
             .active_chat
             .as_ref()
-            .map(mj_chat::hel_chat::ActiveChat::latest_event_ordinal)
+            .map(mj_chat::chat::ActiveChat::latest_event_ordinal)
         {
             self.record_detach(ordinal);
         }
@@ -955,7 +853,7 @@ impl DashboardContext {
         let launch_directory = std::env::current_dir().context("read the launch directory")?;
         let mut controller = Controller::load()?;
         retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
-        let workspaces = hel::hel_database::list_workspaces()?;
+        let workspaces = mj_controller::database::list_workspaces()?;
         let workspace_names = workspaces
             .iter()
             .map(|workspace| (workspace.id.clone(), workspace.name.clone()))
@@ -963,7 +861,7 @@ impl DashboardContext {
         let layouts = workspaces
             .iter()
             .map(|workspace| {
-                hel::hel_database::load_workspace_pane_sizes(&workspace.id)
+                mj_controller::database::load_workspace_pane_sizes(&workspace.id)
                     .map(|sizes| (workspace.id.clone(), sizes))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
@@ -977,7 +875,7 @@ impl DashboardContext {
             dashboard.cache_workspace_pane_sizes(id, *sizes);
         }
         dashboard.set_active_workspace(Some(workspace_id.to_owned()));
-        let notices = mj_chat::hel_chat::Notices::default();
+        let notices = mj_chat::chat::Notices::default();
         dashboard.share_notices(notices.clone());
         for (session_id, queued) in projected_queued_prompts(&controller)? {
             dashboard.apply_queued_prompts(&session_id, queued);
@@ -996,15 +894,13 @@ impl DashboardContext {
         let runtime_state_rx = remote_worker.state;
         dashboard.set_move_operations(runtime_state_rx.borrow().moves.clone());
         let runtime_reviews_rx = remote_worker.reviews;
-        let runtime_review_views: BTreeMap<
-            String,
-            mj_controller::hel_review_host::RuntimeReviewView,
-        > = runtime_reviews_rx
-            .borrow()
-            .iter()
-            .cloned()
-            .map(|review| (review.session_id.clone(), review))
-            .collect();
+        let runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView> =
+            runtime_reviews_rx
+                .borrow()
+                .iter()
+                .cloned()
+                .map(|review| (review.session_id.clone(), review))
+                .collect();
         dashboard.set_session_reviews(runtime_review_views.values().cloned());
         let runtime_notices_rx = remote_worker.notices;
         // Notices already queued when this surface attaches belong to whatever
@@ -1162,9 +1058,9 @@ impl DashboardContext {
             let seeded = tokio::task::spawn_blocking({
                 let session_id = session_id.clone();
                 move || {
-                    hel::hel_database::load_materialized_projection_tail(
+                    mj_controller::database::load_materialized_projection_tail(
                         &session_id,
-                        mj_chat::hel_chat::TAIL_SEED_ITEMS,
+                        mj_chat::chat::TAIL_SEED_ITEMS,
                     )
                 }
             })
@@ -1297,7 +1193,7 @@ impl DashboardContext {
     /// row's highlight, or handing it the keyboard, would report the wrong
     /// conversation, so it stays hidden until selected again. Its feeds keep
     /// running while an attach is pending, failed, or cancelled.
-    pub(crate) fn visible_chat(&mut self) -> Option<&mut mj_chat::hel_chat::ActiveChat> {
+    pub(crate) fn visible_chat(&mut self) -> Option<&mut mj_chat::chat::ActiveChat> {
         let Self {
             active_chat,
             opening_chat_session,
@@ -1470,7 +1366,7 @@ impl DashboardContext {
         // to avoid.
         let invalidated = self
             .visible_chat()
-            .is_some_and(mj_chat::hel_chat::ActiveChat::transcript_selection_invalidated);
+            .is_some_and(mj_chat::chat::ActiveChat::transcript_selection_invalidated);
         if invalidated && self.selection.active_surface() == Some(SurfaceId::Transcript) {
             self.selection.clear();
             self.dirty = true;
@@ -1668,7 +1564,7 @@ impl DashboardContext {
             if let Some(ordinal) = self
                 .active_chat
                 .as_ref()
-                .map(mj_chat::hel_chat::ActiveChat::latest_event_ordinal)
+                .map(mj_chat::chat::ActiveChat::latest_event_ordinal)
             {
                 // A completed lifecycle retires the warm actor without
                 // passing through the normal session-switch path. Preserve
@@ -1744,11 +1640,7 @@ impl DashboardContext {
         });
     }
 
-    fn restore_question_draft(
-        &mut self,
-        session_id: &str,
-        chat: &mut mj_chat::hel_chat::ActiveChat,
-    ) {
+    fn restore_question_draft(&mut self, session_id: &str, chat: &mut mj_chat::chat::ActiveChat) {
         let Some(drafts) = self.question_drafts.remove(session_id) else {
             return;
         };
@@ -1808,7 +1700,7 @@ impl DashboardContext {
             ));
             return;
         };
-        let header = mj_chat::hel_chat::SessionHeaderIdentity {
+        let header = mj_chat::chat::SessionHeaderIdentity {
             target: session_record
                 .project_target(&self.controller.config, &session_record.target_template_id),
             profile: session_record.last_profile.clone(),
@@ -1824,13 +1716,13 @@ impl DashboardContext {
             .composer_drafts
             .open(&session_id, &session_record.draft_input)
             .text;
-        let context = mj_chat::hel_chat::ChatSessionContext {
+        let context = mj_chat::chat::ChatSessionContext {
             config: self.controller.config.clone(),
             session: session_record,
-            reviewer_stager: mj_controller::hel_controller::reviewer_stager(),
+            reviewer_stager: mj_controller::controller::reviewer_stager(),
         };
         let (persistence_tx, mut persistence_rx) =
-            tokio::sync::mpsc::unbounded_channel::<mj_chat::hel_chat::ChatDaemonRequest>();
+            tokio::sync::mpsc::unbounded_channel::<mj_chat::chat::ChatDaemonRequest>();
         let refusals = self.dashboard_io_tx.clone();
         tokio::spawn(async move {
             while let Some(request) = persistence_rx.recv().await {
@@ -1838,22 +1730,22 @@ impl DashboardContext {
                 // pressed the key, so it comes back to the chat rather than
                 // only into the log.
                 let refusal_session = match &request {
-                    mj_chat::hel_chat::ChatDaemonRequest::StartTurnReview { session_id }
-                    | mj_chat::hel_chat::ChatDaemonRequest::ResolveTurnReview {
-                        session_id, ..
-                    } => Some(session_id.clone()),
+                    mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id }
+                    | mj_chat::chat::ChatDaemonRequest::ResolveTurnReview { session_id, .. } => {
+                        Some(session_id.clone())
+                    }
                     _ => None,
                 };
                 let result = async {
                     let mut daemon = crate::daemon::connect_or_start().await?;
                     match request {
-                        mj_chat::hel_chat::ChatDaemonRequest::SaveReview { session_id, review } => {
+                        mj_chat::chat::ChatDaemonRequest::SaveReview { session_id, review } => {
                             daemon.save_active_review(session_id, review).await
                         }
-                        mj_chat::hel_chat::ChatDaemonRequest::ClearReview { session_id } => {
+                        mj_chat::chat::ChatDaemonRequest::ClearReview { session_id } => {
                             daemon.clear_active_review(session_id).await
                         }
-                        mj_chat::hel_chat::ChatDaemonRequest::RememberReviewerSelection {
+                        mj_chat::chat::ChatDaemonRequest::RememberReviewerSelection {
                             workspace_id,
                             selection,
                         } => {
@@ -1861,10 +1753,10 @@ impl DashboardContext {
                                 .remember_reviewer_selection(workspace_id, selection)
                                 .await
                         }
-                        mj_chat::hel_chat::ChatDaemonRequest::StartTurnReview { session_id } => {
+                        mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
                             daemon.start_turn_review(session_id).await
                         }
-                        mj_chat::hel_chat::ChatDaemonRequest::ResolveTurnReview {
+                        mj_chat::chat::ChatDaemonRequest::ResolveTurnReview {
                             session_id,
                             resolution,
                         } => daemon.resolve_turn_review(session_id, resolution).await,
@@ -1903,8 +1795,13 @@ impl DashboardContext {
                     .wait_for_session(&session_id, attachment::ATTACH_TIMEOUT)
                     .await
                     .map_err(|error| format!("{error:#}"))?;
+                let review_state = managed
+                    .client()
+                    .review_state()
+                    .await
+                    .map_err(|error| format!("{error:#}"));
                 tokio_util::task::AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
-                    mj_chat::hel_chat::ActiveChat::prepare_with_persistence(
+                    mj_chat::chat::ActiveChat::prepare_with_persistence(
                         managed.client(),
                         &bundle_id,
                         Some(context),
@@ -1914,6 +1811,7 @@ impl DashboardContext {
                         notices,
                         Some(persistence_tx),
                     )
+                    .with_review_state(review_state)
                 }))
                 .await
                 .map_err(|error| format!("chat preparation task failed: {error}"))
@@ -2593,14 +2491,13 @@ impl DashboardContext {
     }
 
     /// Applies what the chat view asked for after handling its own input.
-    async fn apply_chat_outcome(&mut self, outcome: mj_chat::hel_chat::ChatEventOutcome) {
+    async fn apply_chat_outcome(&mut self, outcome: mj_chat::chat::ChatEventOutcome) {
         match outcome {
-            mj_chat::hel_chat::ChatEventOutcome::None
-            | mj_chat::hel_chat::ChatEventOutcome::Handled => {}
-            mj_chat::hel_chat::ChatEventOutcome::CycleFocus { reverse } => {
+            mj_chat::chat::ChatEventOutcome::None | mj_chat::chat::ChatEventOutcome::Handled => {}
+            mj_chat::chat::ChatEventOutcome::CycleFocus { reverse } => {
                 self.dashboard.cycle_focus(reverse);
             }
-            mj_chat::hel_chat::ChatEventOutcome::QuitDetach { .. } => {
+            mj_chat::chat::ChatEventOutcome::QuitDetach { .. } => {
                 self.request_shutdown();
             }
         }
@@ -2615,7 +2512,7 @@ impl DashboardContext {
         let session_id = self
             .active_chat
             .as_ref()
-            .map(mj_chat::hel_chat::ActiveChat::session_id)?
+            .map(mj_chat::chat::ActiveChat::session_id)?
             .to_owned();
         let draft = self.composer_drafts.get(&session_id)?.clone();
         let last_seen_event_ordinal = detach_read_frontier(
@@ -2732,7 +2629,7 @@ fn route_prompt_selection(
 /// same early retirement signal so its closing relay feed is not reported as
 /// a lost connection while the session row already says Stopping.
 fn mark_active_chat_retiring_for_remote_lifecycle(
-    active_chat: Option<&mut mj_chat::hel_chat::ActiveChat>,
+    active_chat: Option<&mut mj_chat::chat::ActiveChat>,
     session_id: &str,
     kind: SessionOperationKind,
 ) {
@@ -2833,7 +2730,7 @@ fn dispatch_event(
     context: &mut DashboardContext,
     event: Event,
     action: &mut DashboardAction,
-    chat_outcome: &mut mj_chat::hel_chat::ChatEventOutcome,
+    chat_outcome: &mut mj_chat::chat::ChatEventOutcome,
 ) -> bool {
     let dashboard_modal = context.dashboard.modal_open();
     let geometry_event = matches!(&event, Event::Resize(..) | Event::Mouse(_));
@@ -2873,9 +2770,9 @@ fn dispatch_event(
             let changed = result.outcome == Outcome::Changed;
             *chat_outcome = result
                 .action
-                .unwrap_or(mj_chat::hel_chat::ChatEventOutcome::None);
+                .unwrap_or(mj_chat::chat::ChatEventOutcome::None);
             context.dirty |= changed;
-            matches!(*chat_outcome, mj_chat::hel_chat::ChatEventOutcome::None)
+            matches!(*chat_outcome, mj_chat::chat::ChatEventOutcome::None)
                 && !(changed && (geometry_event || chat_modal))
         }
         None => {
@@ -2910,14 +2807,14 @@ fn draw_selection(
     let id = selection.active_surface()?;
     let range = selection.range()?;
     let surface = *surfaces.surface(id)?;
-    mj_chat::hel_selection::highlight(frame.buffer_mut(), &surface, &range);
+    mj_chat::selection::highlight(frame.buffer_mut(), &surface, &range);
     if matches!(
         id,
         SurfaceId::Transcript | SurfaceId::ElicitationMessage | SurfaceId::ReviewerTranscript
     ) {
         return None;
     }
-    Some(mj_chat::hel_selection::extract_rows(
+    Some(mj_chat::selection::extract_rows(
         frame.buffer_mut(),
         &surface,
         &range,
@@ -3020,7 +2917,7 @@ fn global_chord_event(dashboard: &DashboardState, event: &Event) -> Option<Comma
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return None;
     }
-    let id = hel_tui::global_chord(key)?;
+    let id = mj_tui::global_chord(key)?;
     dashboard.global_chord_allowed(id).then_some(id)
 }
 
@@ -3055,7 +2952,7 @@ pub(crate) fn resume_progress_notice(
     )
 }
 
-fn configuration_needs_setup(config: &HelConfig) -> bool {
+fn configuration_needs_setup(config: &Config) -> bool {
     config.is_unconfigured()
 }
 
@@ -3069,9 +2966,9 @@ mod tests {
     }
 
     use super::*;
-    use hel::hel_state::HelState;
-    use mj_chat::hel_chat::{ActiveChat, Notices, SessionHeaderIdentity};
-    use mj_chat::hel_selection::SurfaceFrame;
+    use mj_chat::chat::{ActiveChat, Notices, SessionHeaderIdentity};
+    use mj_chat::selection::SurfaceFrame;
+    use mj_core::state::State;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Position, Rect};
@@ -3126,14 +3023,14 @@ mod tests {
     /// A dashboard with profiles and a target, so the adaptive layout draws
     /// its three panes with text in them.
     fn populated_dashboard() -> DashboardState {
-        let mut config = HelConfig::default();
+        let mut config = Config::default();
         for (id, kind) in [
-            ("claude-1", hel::hel_config::HarnessKind::Claude),
-            ("codex-1", hel::hel_config::HarnessKind::Codex),
+            ("claude-1", mj_core::config::HarnessKind::Claude),
+            ("codex-1", mj_core::config::HarnessKind::Codex),
         ] {
             config.profiles.insert(
                 id.into(),
-                hel::hel_config::HarnessProfile {
+                mj_core::config::HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
                     kind,
@@ -3144,8 +3041,8 @@ mod tests {
         }
         config.targets.insert(
             "podman".into(),
-            hel::hel_config::TargetTemplate::LocalPodman {
-                container: hel::hel_config::ContainerTemplate {
+            mj_core::config::TargetTemplate::LocalPodman {
+                container: mj_core::config::ContainerTemplate {
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -3158,9 +3055,9 @@ mod tests {
         );
         config.bundles.insert(
             "hel".into(),
-            hel::hel_config::ProjectBundle {
+            mj_core::config::ProjectBundle {
                 primary_repo: "project".into(),
-                repositories: vec![hel::hel_config::ProjectRepository {
+                repositories: vec![mj_core::config::ProjectRepository {
                     id: "project".into(),
                     github: Some("owner/project".into()),
                     local: None,
@@ -3169,18 +3066,18 @@ mod tests {
                 }],
             },
         );
-        let mut state = HelState::default();
+        let mut state = State::default();
         for (id, title) in [("session-1", "First"), ("session-2", "Second")] {
             state.sessions.insert(
                 id.into(),
-                hel::hel_state::SessionRecord {
-                    workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                mj_core::state::SessionRecord {
+                    workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                     archived: false,
                     container_cpus: None,
                     container_memory: None,
                     id: id.into(),
                     title: title.into(),
-                    harness_kind: hel::hel_config::HarnessKind::Codex,
+                    harness_kind: mj_core::config::HarnessKind::Codex,
                     last_profile: "codex-1".into(),
                     bundle_id: "hel".into(),
                     project_directory: None,
@@ -3188,7 +3085,7 @@ mod tests {
                     target_template_id: "podman".into(),
                     resource_allocation: None,
                     additional_mounts: Vec::new(),
-                    state: hel::hel_state::SessionState::Running,
+                    state: mj_core::state::SessionState::Running,
                     target: None,
                     native_session_id: None,
                     acp_session_title: None,
@@ -3326,8 +3223,8 @@ mod tests {
             SelectionRouting::Copy {
                 surface: SurfaceId::DashboardPane(2),
                 range: SelectionRange {
-                    start: mj_chat::hel_selection::ContentPos::new(1, 0),
-                    end: mj_chat::hel_selection::ContentPos::new(2, quotas.rect.width - 1),
+                    start: mj_chat::selection::ContentPos::new(1, 0),
+                    end: mj_chat::selection::ContentPos::new(2, quotas.rect.width - 1),
                 },
             }
         );
@@ -3352,7 +3249,7 @@ mod tests {
     #[test]
     fn short_bordered_minimized_list_can_be_selected_and_copied() {
         let mut dashboard = populated_dashboard();
-        dashboard.set_pane_size(hel_tui::SupportPane::Sessions, hel_tui::PaneSize::Minimized);
+        dashboard.set_pane_size(mj_tui::SupportPane::Sessions, mj_tui::PaneSize::Minimized);
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("terminal");
         let mut selection = SelectionState::new();
         draw_with_selection(&mut terminal, &mut dashboard, &selection);
@@ -3485,7 +3382,7 @@ mod tests {
             .draw(|frame| {
                 chat.draw_in(
                     frame,
-                    mj_chat::hel_chat::ChatRegions {
+                    mj_chat::chat::ChatRegions {
                         transcript: Rect::new(0, 0, 60, 15),
                         prompt: Rect::new(0, 15, 60, 5),
                         footer: None,
@@ -3712,8 +3609,8 @@ mod tests {
     #[test]
     fn only_events_that_ask_for_work_end_an_input_batch() {
         let mut dashboard = DashboardState::new(
-            HelConfig::default(),
-            HelState::default(),
+            Config::default(),
+            State::default(),
             std::collections::BTreeMap::new(),
         );
 
@@ -3758,7 +3655,7 @@ mod tests {
 
     /// Walks the focus ring to `wanted`, which is the only way in from
     /// outside the crate that owns the panes.
-    fn focus_on(dashboard: &mut DashboardState, wanted: hel_tui::Focus) {
+    fn focus_on(dashboard: &mut DashboardState, wanted: mj_tui::Focus) {
         dashboard.focus_sessions();
         for _ in 0..8 {
             if dashboard.focus() == wanted {
@@ -3814,7 +3711,7 @@ mod tests {
         let command = global_chord_event(&dashboard, &forward).expect("F6 is global");
         assert_eq!(command, CommandId::CycleFocus);
         assert!(apply_global_focus_cycle(&mut dashboard, &forward, command));
-        assert_eq!(dashboard.focus(), hel_tui::Focus::Prompt);
+        assert_eq!(dashboard.focus(), mj_tui::Focus::Prompt);
 
         let reverse = Event::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::F(6),
@@ -3823,7 +3720,7 @@ mod tests {
         let command = global_chord_event(&dashboard, &reverse).expect("Shift-F6 is global");
         assert_eq!(command, CommandId::CycleFocus);
         assert!(apply_global_focus_cycle(&mut dashboard, &reverse, command));
-        assert_eq!(dashboard.focus(), hel_tui::Focus::Sessions);
+        assert_eq!(dashboard.focus(), mj_tui::Focus::Sessions);
     }
 
     /// Resume is a chord like new session: the pane letter it used to answer
@@ -3839,7 +3736,7 @@ mod tests {
             dashboard.dispatch_command(command),
             DashboardAction::OpenResumeDialog
         ));
-        assert_eq!(dashboard.focus(), hel_tui::Focus::Prompt);
+        assert_eq!(dashboard.focus(), mj_tui::Focus::Prompt);
 
         // Like Alt-N, it waits for an open dialog to close.
         dashboard.show_resume_dialog(1, Vec::new());
@@ -3863,11 +3760,11 @@ mod tests {
     #[tokio::test]
     async fn advertised_web_and_setup_shortcuts_open_their_dialogs_from_every_pane() {
         for focus in [
-            hel_tui::Focus::Workspaces,
-            hel_tui::Focus::Prompt,
-            hel_tui::Focus::Sessions,
-            hel_tui::Focus::Targets,
-            hel_tui::Focus::Quota,
+            mj_tui::Focus::Workspaces,
+            mj_tui::Focus::Prompt,
+            mj_tui::Focus::Sessions,
+            mj_tui::Focus::Targets,
+            mj_tui::Focus::Quota,
         ] {
             let mut dashboard = populated_dashboard();
             focus_on(&mut dashboard, focus);
@@ -3953,10 +3850,10 @@ mod tests {
     #[test]
     fn f3_is_no_longer_a_workspace_shortcut() {
         for focus in [
-            hel_tui::Focus::Sessions,
-            hel_tui::Focus::Prompt,
-            hel_tui::Focus::Targets,
-            hel_tui::Focus::Quota,
+            mj_tui::Focus::Sessions,
+            mj_tui::Focus::Prompt,
+            mj_tui::Focus::Targets,
+            mj_tui::Focus::Quota,
         ] {
             let mut dashboard = populated_dashboard();
             focus_on(&mut dashboard, focus);
@@ -3967,7 +3864,7 @@ mod tests {
     #[test]
     fn alt_a_marks_all_read_from_the_targets_pane() {
         let mut dashboard = populated_dashboard();
-        focus_on(&mut dashboard, hel_tui::Focus::Targets);
+        focus_on(&mut dashboard, mj_tui::Focus::Targets);
 
         let command = chord(&dashboard, alt('a')).expect("Alt-A is a global chord");
         assert_eq!(command, CommandId::MarkAllRead);
@@ -4008,7 +3905,7 @@ mod tests {
     #[test]
     fn alt_x_inside_the_target_dialog_cancels_the_running_test() {
         let mut dashboard = populated_dashboard();
-        focus_on(&mut dashboard, hel_tui::Focus::Targets);
+        focus_on(&mut dashboard, mj_tui::Focus::Targets);
         assert!(matches!(
             dashboard.handle_key(plain_key(crossterm::event::KeyCode::Enter)),
             DashboardAction::None
@@ -4051,15 +3948,15 @@ mod tests {
         ));
     }
 
-    fn live_session(id: &str, created_at: &str) -> hel::hel_state::SessionRecord {
-        hel::hel_state::SessionRecord {
-            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+    fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
+        mj_core::state::SessionRecord {
+            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,
             container_memory: None,
             id: id.into(),
             title: id.into(),
-            harness_kind: hel::hel_config::HarnessKind::Codex,
+            harness_kind: mj_core::config::HarnessKind::Codex,
             last_profile: "codex-1".into(),
             bundle_id: "hel".into(),
             project_directory: None,
@@ -4067,7 +3964,7 @@ mod tests {
             target_template_id: "podman".into(),
             resource_allocation: None,
             additional_mounts: Vec::new(),
-            state: hel::hel_state::SessionState::Running,
+            state: mj_core::state::SessionState::Running,
             target: None,
             native_session_id: None,
             acp_session_title: None,
@@ -4100,7 +3997,7 @@ mod tests {
 
         assert_eq!(
             startup_session_choice(
-                Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                Some(mj_core::workspace::DEFAULT_WORKSPACE_ID),
                 sessions.iter(),
                 activity
             ),
@@ -4113,7 +4010,7 @@ mod tests {
         let local = live_session("local", "2026-08-01T00:00:00Z");
         let mut foreign = live_session("foreign", "2026-08-03T00:00:00Z");
         foreign.workspace_id = "another-workspace".into();
-        let mut state = hel::hel_state::HelState::default();
+        let mut state = mj_core::state::State::default();
         state.sessions.insert(local.id.clone(), local.clone());
         state.sessions.insert(foreign.id.clone(), foreign);
         let mut dashboard = DashboardState::new(Default::default(), state, Default::default());
@@ -4139,7 +4036,7 @@ mod tests {
         ];
         assert_eq!(
             startup_session_choice(
-                Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                Some(mj_core::workspace::DEFAULT_WORKSPACE_ID),
                 sessions.iter(),
                 |_| None
             ),
@@ -4154,7 +4051,7 @@ mod tests {
         ];
         assert_eq!(
             startup_session_choice(
-                Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                Some(mj_core::workspace::DEFAULT_WORKSPACE_ID),
                 tied.iter(),
                 |_| None
             ),
@@ -4162,7 +4059,7 @@ mod tests {
         );
         assert_eq!(
             startup_session_choice(
-                Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                Some(mj_core::workspace::DEFAULT_WORKSPACE_ID),
                 tied.iter().rev(),
                 |_| None
             ),
@@ -4174,7 +4071,7 @@ mod tests {
     fn a_workspace_with_no_live_session_has_nothing_to_open() {
         assert_eq!(
             startup_session_choice(
-                Some(hel::hel_workspace::DEFAULT_WORKSPACE_ID),
+                Some(mj_core::workspace::DEFAULT_WORKSPACE_ID),
                 std::iter::empty(),
                 |_| Some(1)
             ),
@@ -4193,7 +4090,7 @@ mod tests {
         let mut stopped = archived.clone();
         stopped.id = "stopped".into();
         stopped.archived = false;
-        stopped.state = hel::hel_state::SessionState::Stopped;
+        stopped.state = mj_core::state::SessionState::Stopped;
         let records = [active, archived, stopped];
         assert_eq!(
             startup_session_choice(Some("b"), records.iter(), |_| Some(99)),
@@ -4265,12 +4162,12 @@ mod tests {
 
     #[test]
     fn only_a_fully_empty_config_triggers_automatic_setup() {
-        let mut config = hel::hel_config::HelConfig::default();
+        let mut config = mj_core::config::Config::default();
         assert!(configuration_needs_setup(&config));
         config.targets.insert(
             "podman".into(),
-            hel::hel_config::TargetTemplate::LocalPodman {
-                container: hel::hel_config::ContainerTemplate {
+            mj_core::config::TargetTemplate::LocalPodman {
+                container: mj_core::config::ContainerTemplate {
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),
                     platform: None,

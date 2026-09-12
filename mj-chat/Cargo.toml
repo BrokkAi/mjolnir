@@ -13,13 +13,13 @@ name = "mj_chat"
 
 [features]
 default = []
-test-hooks = ["hel/test-hooks"]
+test-hooks = ["mj-core/test-hooks"]
 
 [lints]
 workspace = true
 
 [dependencies]
-hel = { workspace = true, features = ["controller"] }
+mj-core.workspace = true
 mj-client.workspace = true
 agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"
@@ -44,5 +44,7 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 
 [dev-dependencies]
+# Cross-runtime fixtures stay local; versionless dev dependencies are not published.
+mj-worker = { path = "../mj-worker", package = "brokk-mj-worker" }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }

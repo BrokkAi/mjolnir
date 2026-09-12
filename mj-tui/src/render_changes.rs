@@ -6,11 +6,11 @@
 //! snapshot is refreshed after a frame is drawn; checking a clock or animation
 //! never mutates the dashboard or requests a redraw by itself.
 
-pub(crate) use hel::clock::epoch_seconds;
+pub(crate) use mj_core::clock::epoch_seconds;
 
-use hel::hel_state::SessionState;
-use hel::hel_targets::{DeploymentCapacityKind, DeploymentCapacityUsage};
 use mj_client::review::RuntimeReviewView;
+use mj_core::state::SessionState;
+use mj_core::targets::{DeploymentCapacityKind, DeploymentCapacityUsage};
 
 use crate::ingest::{CapacityDetail, SessionDetail};
 use crate::render::{
@@ -104,7 +104,7 @@ pub(crate) struct VisibleStateSignature {
     configuration_issue: Option<String>,
     last_checkpoint_error: Option<String>,
     checkpoint_created_at: Option<String>,
-    project_source: hel::hel_state::ProjectSourceIdentity,
+    project_source: mj_core::state::ProjectSourceIdentity,
     materialized: Option<MaterializedDisplaySignature>,
 }
 
@@ -396,7 +396,7 @@ impl DashboardState {
             .list_offset(crate::resume::ResumeFocus::Sessions);
         let height = self
             .frame_surfaces
-            .surface(mj_chat::hel_selection::SurfaceId::ResumeList)
+            .surface(mj_chat::selection::SurfaceId::ResumeList)
             .map_or(usize::MAX, |surface| {
                 usize::from(surface.rect.height.saturating_sub(1))
             });
@@ -448,7 +448,7 @@ impl DashboardState {
 }
 
 fn recovery_age_clock(
-    session: &hel::hel_state::SessionRecord,
+    session: &mj_core::state::SessionRecord,
     dashboard: &DashboardState,
     now: u64,
 ) -> Option<String> {

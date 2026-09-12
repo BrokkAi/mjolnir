@@ -7,15 +7,16 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use hel::hel_config::{
-    CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, HelConfig, ProjectBundle,
+use mj_core::config::{
+    CONFIG_VERSION, Config, ContainerTemplate, HarnessKind, HarnessProfile, ProjectBundle,
     ProjectRepository, TargetTemplate,
 };
-use hel::hel_state::{
-    CheckpointMetadata, HelState, MaterializedExecutionState, MaterializedSession, STATE_VERSION,
-    SessionRecord, SessionState, TranscriptBody, TranscriptItem,
+use mj_core::state::{
+    CheckpointMetadata, MaterializedExecutionState, MaterializedSession, STATE_VERSION,
+    SessionRecord, SessionState, State, TranscriptBody, TranscriptItem,
 };
-use hel::hel_targets::{DeploymentCapacityKind, DeploymentCapacityTarget, ProvisionStage};
+
+use mj_core::targets::{DeploymentCapacityKind, DeploymentCapacityTarget, ProvisionStage};
 
 use crate::ingest::SessionOperationDisplay;
 use crate::{DashboardState, SessionOperationKind};
@@ -87,8 +88,8 @@ pub(crate) fn mouse_at_row(kind: MouseEventKind, area: Rect, row_offset: u16) ->
     }
 }
 
-pub(crate) fn config() -> HelConfig {
-    HelConfig {
+pub(crate) fn config() -> Config {
+    Config {
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
         advanced: Default::default(),
@@ -163,7 +164,7 @@ pub(crate) fn config() -> HelConfig {
 
 pub(crate) fn stopped_session() -> SessionRecord {
     SessionRecord {
-        workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+        workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
         container_cpus: None,
         container_memory: None,
@@ -219,7 +220,7 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
     session.updated_at = "2026-08-09T01:00:00Z".into();
     DashboardState::new(
         config(),
-        HelState {
+        State {
             version: STATE_VERSION,
             sessions: BTreeMap::from([(session.id.clone(), session)]),
             mount_history: BTreeMap::new(),
@@ -283,12 +284,12 @@ pub(crate) fn session_restart(position: u64) -> Arc<TranscriptItem> {
     let mut item = transcript_item(
         position,
         TranscriptBody::System {
-            text: hel::hel_transcript::SESSION_RESTART_TEXT.into(),
+            text: mj_core::transcript::SESSION_RESTART_TEXT.into(),
         },
     );
     Arc::make_mut(&mut item).stable_id = format!(
         "{}{}",
-        hel::hel_transcript::SESSION_RESTART_ITEM_PREFIX,
+        mj_core::transcript::SESSION_RESTART_ITEM_PREFIX,
         position
     );
     item

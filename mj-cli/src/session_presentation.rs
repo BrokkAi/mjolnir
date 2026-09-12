@@ -4,8 +4,8 @@
 //! snapshots.  Keeping these setters here prevents either surface from
 //! turning a display update into persistence or chat-side behavior.
 
-use hel_tui::{DashboardState, SessionOperationKind};
-use mj_controller::hel_session_manager::ManagedSessionView;
+use mj_controller::session_manager::ManagedSessionView;
+use mj_tui::{DashboardState, SessionOperationKind};
 
 use crate::daemon::{RuntimeLifecycleKind, RuntimeLifecycleView};
 
@@ -27,8 +27,8 @@ pub(crate) fn apply_session_activity(
     dashboard.set_session_activity(
         session_id,
         view.snapshot.as_ref().map_or_else(
-            mj_chat::usage_format::SessionActivity::default,
-            |snapshot| mj_chat::usage_format::SessionActivity::of(&snapshot.operational),
+            mj_client::usage_format::SessionActivity::default,
+            |snapshot| mj_client::usage_format::SessionActivity::of(&snapshot.operational),
         ),
     );
     dashboard.set_session_connectivity(session_id, view.connected);
@@ -93,15 +93,16 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    use hel::hel_config::{HarnessKind, HarnessProfile, HelConfig, TargetTemplate};
-    use hel::hel_state::{
-        HelState, ManagedSessionSnapshot, MaterializedExecutionState, MaterializedSession,
-        ProjectionWindow, SessionRecord, SessionState,
+    use mj_core::config::{Config, HarnessKind, HarnessProfile, TargetTemplate};
+    use mj_core::state::{
+        ManagedSessionSnapshot, MaterializedExecutionState, MaterializedSession, ProjectionWindow,
+        SessionRecord, SessionState, State,
     };
-    use hel::hel_targets::ProvisionStage;
-    use hel::hel_worker::{RELAY_EVENT_GENESIS_DIGEST, RelayExecutionState, RelayOperationalState};
-    use hel_tui::{DashboardState, PaneSize, SessionOperationKind, SupportPane, render_combined};
-    use mj_controller::hel_session_manager::ManagedSessionView;
+
+    use mj_controller::session_manager::ManagedSessionView;
+    use mj_controller::targets::ProvisionStage;
+    use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayExecutionState, RelayOperationalState};
+    use mj_tui::{DashboardState, PaneSize, SessionOperationKind, SupportPane, render_combined};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -110,7 +111,7 @@ mod tests {
     use crate::daemon::{RuntimeLifecycleKind, RuntimeLifecycleView};
 
     fn dashboard() -> DashboardState {
-        let mut config = HelConfig::default();
+        let mut config = Config::default();
         config.profiles.insert(
             "profile-1".into(),
             HarnessProfile {
@@ -126,9 +127,9 @@ mod tests {
             .insert("target-1".into(), TargetTemplate::LocalBare);
         config.bundles.insert(
             "bundle-1".into(),
-            hel::hel_config::ProjectBundle {
+            mj_core::config::ProjectBundle {
                 primary_repo: "project".into(),
-                repositories: vec![hel::hel_config::ProjectRepository {
+                repositories: vec![mj_core::config::ProjectRepository {
                     id: "project".into(),
                     github: Some("owner/project".into()),
                     local: None,
@@ -137,12 +138,12 @@ mod tests {
                 }],
             },
         );
-        let mut state = HelState::default();
+        let mut state = State::default();
         state.sessions.insert(
             "session-1".into(),
             SessionRecord {
                 id: "session-1".into(),
-                workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 title: "Presentation test".into(),
                 harness_kind: HarnessKind::Codex,
                 last_profile: "profile-1".into(),

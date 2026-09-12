@@ -68,7 +68,7 @@ RUN apt-get update \
         zip \
     && rm -rf /var/lib/apt/lists/*
 
-# Keep these in lockstep with bridge_launch() in src/hel_controller/worker_binary.rs. Kimi is
+# Keep these in lockstep with bridge_launch() in mj-controller/src/controller/worker_binary.rs. Kimi is
 # intentionally left to Hel's official on-demand installer because that path is
 # not version-pinned yet.
 RUN npm install --global --no-audit --no-fund \

@@ -1,7 +1,7 @@
 //! Real worker entrypoints must clean inherited state before invoking Git.
 #![cfg(unix)]
 
-use hel::hel_targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
+use mj_core::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
 use std::time::Duration;
 
 #[test]
@@ -86,7 +86,7 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
     let root = tempfile::tempdir().unwrap();
     let worker_root = root.path().join("worker");
     drop(
-        hel::hel_worker::DurableRelay::open(
+        mj_worker::relay::DurableRelay::open(
             &worker_root,
             "018f9dd2-a3b4-7c8d-9000-123456789abc",
             "test",
@@ -131,7 +131,8 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
             ensure!(Instant::now() < deadline, "checkpoint worker did not start");
             std::thread::sleep(Duration::from_millis(25));
         }
-        let script = hel::hel_targets::worker_daemon_liveness_script(worker_root.to_str().unwrap());
+        let script =
+            mj_controller::targets::worker_daemon_liveness_script(worker_root.to_str().unwrap());
         let output = executor.execute(&CommandSpec::new("sh", ["-c", &script]))?;
         ensure!(
             output.status == 0 && output.stdout == b"alive\n",
@@ -141,7 +142,7 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
     })();
     // Always stop/join before dropping the worker's files, even if observation
     // failed. The bounded owner also cleans up if the identity check regresses.
-    let script = hel::hel_targets::stop_worker_daemon_script(worker_root.to_str().unwrap());
+    let script = mj_controller::targets::stop_worker_daemon_script(worker_root.to_str().unwrap());
     let stopped = executor.execute(&CommandSpec::new("sh", ["-c", &script]));
     let output = worker.join().expect("worker owner panicked");
     observation.unwrap();

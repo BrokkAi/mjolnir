@@ -6,9 +6,10 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Position;
 
-use hel::hel_config::{HarnessKind, HarnessProfile, SshConnection, TargetTemplate};
-use hel::hel_state::{HelState, HostContainerSize, STATE_VERSION, SessionResourceAllocation};
-use hel::hel_targets::AdditionalMount;
+use mj_core::config::{HarnessKind, HarnessProfile, SshConnection, TargetTemplate};
+use mj_core::state::{HostContainerSize, STATE_VERSION, SessionResourceAllocation, State};
+
+use mj_core::targets::AdditionalMount;
 
 use super::*;
 use crate::test_support::*;
@@ -22,7 +23,7 @@ fn startup_creation_uses_defaults_before_focusing_the_new_session_prompt() {
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     let directory = std::env::current_dir().unwrap().join("project with spaces");
     assert_eq!(
         dashboard.quick_session_action(directory.clone()).unwrap(),
@@ -37,7 +38,7 @@ fn startup_creation_uses_defaults_before_focusing_the_new_session_prompt() {
 
     let mut session = running_session();
     session.state = SessionState::Provisioning;
-    let mut state = HelState::default();
+    let mut state = State::default();
     state.sessions.insert(session.id.clone(), session.clone());
     dashboard.set_state(state.clone());
     dashboard.begin_session_operation(
@@ -106,7 +107,7 @@ fn startup_prepares_codex_for_an_empty_workspace() {
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     let directory = std::env::current_dir().unwrap().join("project with spaces");
     assert_eq!(
         dashboard.begin_startup_session(directory.clone()).unwrap(),
@@ -128,7 +129,7 @@ fn startup_respects_configured_agent_and_existing_live_sessions() {
         .insert("localhost".into(), TargetTemplate::LocalBare);
     config.startup.profile = Some("claude-1".into());
     config.startup.target = Some("localhost".into());
-    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     assert!(matches!(
         dashboard
             .begin_startup_session(std::env::current_dir().unwrap())
@@ -168,7 +169,7 @@ fn startup_reports_missing_profiles_and_ignores_stopped_history() {
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut state = HelState::default();
+    let mut state = State::default();
     let stopped = stopped_session();
     state.sessions.insert(stopped.id.clone(), stopped);
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
@@ -181,7 +182,7 @@ fn startup_reports_missing_profiles_and_ignores_stopped_history() {
 
     let mut missing = DashboardState::new(
         crate::test_support::config(),
-        HelState::default(),
+        State::default(),
         BTreeMap::new(),
     );
     let directory = std::env::current_dir().unwrap();
@@ -225,8 +226,7 @@ fn startup_creation_respects_the_configured_agent_and_fallback() {
                 .profiles
                 .retain(|_, profile| profile.kind != HarnessKind::Codex);
         }
-        let mut dashboard =
-            DashboardState::new(config.clone(), HelState::default(), BTreeMap::new());
+        let mut dashboard = DashboardState::new(config.clone(), State::default(), BTreeMap::new());
         assert!(
             matches!(dashboard.quick_session_action(std::env::current_dir().unwrap()).unwrap(),
             DashboardAction::CreateStartupSession { profile_id, target_template_id, .. } if profile_id == "claude-1" && target_template_id.as_deref() == Some("localhost"))
@@ -238,7 +238,7 @@ fn startup_creation_respects_the_configured_agent_and_fallback() {
 fn explicit_quick_creation_ignores_deprecated_startup_enabled() {
     let mut config = config();
     config.startup.enabled = false;
-    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     assert_eq!(
         dashboard
             .quick_session_action(std::env::current_dir().unwrap())
@@ -257,7 +257,7 @@ fn stopped_history_does_not_block_explicit_quick_creation() {
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut state = HelState::default();
+    let mut state = State::default();
     let session = stopped_session();
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
@@ -272,7 +272,7 @@ fn stopped_history_does_not_block_explicit_quick_creation() {
 
 #[test]
 fn explicit_quick_creation_reports_missing_agent_profiles() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     let directory = std::env::current_dir().unwrap();
     dashboard.config.startup.profile = Some("missing".into());
     assert!(
@@ -293,7 +293,7 @@ fn explicit_quick_creation_reports_missing_agent_profiles() {
 
 #[test]
 fn new_session_wizard_returns_all_three_choices() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     assert_eq!(dashboard.handle_key(alt_key('w')), DashboardAction::None);
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Down)),
@@ -315,7 +315,7 @@ fn new_session_wizard_returns_all_three_choices() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
-                workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
                 bundle_id: "hel".into(),
                 project_directory: None,
@@ -334,7 +334,7 @@ fn new_session_wizard_returns_all_three_choices() {
 
 #[test]
 fn isolated_creation_review_checks_prerequisites_before_enabling_create() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -381,7 +381,7 @@ fn isolated_creation_review_checks_prerequisites_before_enabling_create() {
 
 #[test]
 fn isolated_creation_runs_one_check_at_a_time_and_retries_after_failure() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -432,9 +432,9 @@ fn isolated_creation_runs_one_check_at_a_time_and_retries_after_failure() {
 
 #[test]
 fn switching_workspaces_preserves_remote_preflight_in_its_original_workspace() {
-    let workspace_a = hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned();
+    let workspace_a = mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned();
     let workspace_b = "workspace-b".to_owned();
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
 
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -494,7 +494,7 @@ fn switching_workspaces_preserves_remote_preflight_in_its_original_workspace() {
 
 #[test]
 fn new_session_wizard_renders_and_focuses_explicit_navigation_buttons() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
     terminal
@@ -530,14 +530,14 @@ fn opening_session_wizards_prefetches_all_aws_sizes() {
         launch_template: "hel".into(),
         launch_template_version: None,
         ssh_user: "ubuntu".into(),
-        address_source: hel::hel_config::AwsAddressSource::PublicIp,
+        address_source: mj_core::config::AwsAddressSource::PublicIp,
         identity_file: None,
         ssh_args: Vec::new(),
     };
     let mut config = config();
     config.targets.insert("aws-a".into(), aws_target());
     config.targets.insert("aws-b".into(), aws_target());
-    let mut dashboard = DashboardState::new(config.clone(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config.clone(), State::default(), BTreeMap::new());
 
     assert_eq!(
         dashboard.handle_key(alt_key('w')),
@@ -558,7 +558,7 @@ fn opening_session_wizards_prefetches_all_aws_sizes() {
 
     let mut dashboard = DashboardState::new(
         config,
-        HelState {
+        State {
             version: STATE_VERSION,
             sessions: BTreeMap::from([("session-1".into(), stopped_session())]),
             mount_history: BTreeMap::new(),
@@ -586,8 +586,8 @@ fn persisted_import_opens_resume_wizard_for_its_id_and_keeps_defaults() {
     imported.last_profile = "codex-2".into();
     imported.target_template_id = "z-target".into();
 
-    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
-    let state = HelState {
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    let state = State {
         version: STATE_VERSION,
         sessions: BTreeMap::from([(imported.id.clone(), imported)]),
         mount_history: BTreeMap::new(),
@@ -619,7 +619,7 @@ fn persisted_import_opens_resume_wizard_for_its_id_and_keeps_defaults() {
 fn new_session_can_request_a_repository_when_no_bundle_exists() {
     let mut config = config();
     config.bundles.clear();
-    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -641,7 +641,7 @@ fn new_session_can_request_a_repository_when_no_bundle_exists() {
 fn dashboard_at_new_bundle_editor() -> DashboardState {
     let mut config = config();
     config.bundles.clear();
-    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -852,11 +852,11 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
                 identity_file: None,
                 extra_args: Vec::new(),
             },
-            permissions: hel::hel_config::PermissionMode::Guardian,
+            permissions: mj_core::config::PermissionMode::Guardian,
             workspace_prefix: ".local/share/hel/workspaces".into(),
         },
     )]);
-    let mut state = HelState::default();
+    let mut state = State::default();
     state.remember_project_directory("builder.example.com", std::path::Path::new("/srv/recent"));
     state.remember_project_directory("builder.example.com", std::path::Path::new("/srv/older"));
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
@@ -939,7 +939,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
-            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "claude-1".into(),
             bundle_id: raw_project_context_id("/srv/repaired"),
             project_directory: Some("/srv/repaired".into()),
@@ -968,7 +968,7 @@ fn raw_localhost_warns_for_harnesses_without_guardian_approvals() {
             },
         )]);
         config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
-        let mut state = HelState::default();
+        let mut state = State::default();
         state.remember_project_directory("local", std::path::Path::new("/home/me/project"));
         let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
         dashboard.handle_key(alt_key('w'));
@@ -1014,7 +1014,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         },
     )]);
     config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
-    let mut state = HelState::default();
+    let mut state = State::default();
     state.remember_project_directory("local", std::path::Path::new("/home/me/project"));
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
 
@@ -1049,7 +1049,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
-            workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "kimi".into(),
             bundle_id: raw_project_context_id("/home/me/project"),
             project_directory: Some("/home/me/project".into()),
@@ -1075,7 +1075,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
     recent.id = "recent".into();
     recent.bundle_id = "zebra-recent".into();
     recent.created_at = "2026-08-11T12:00:00Z".into();
-    let state = HelState {
+    let state = State {
         version: STATE_VERSION,
         sessions: BTreeMap::from([(older.id.clone(), older), (recent.id.clone(), recent)]),
         mount_history: BTreeMap::new(),
@@ -1095,7 +1095,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
-                workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
                 bundle_id: "zebra-recent".into(),
                 project_directory: None,
@@ -1125,7 +1125,7 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
     recent.bundle_id = "recent-project".into();
     recent.target_template_id = "recent-target".into();
     recent.created_at = "2026-08-12T12:00:00Z".into();
-    let state = HelState {
+    let state = State {
         version: STATE_VERSION,
         sessions: BTreeMap::from([(recent.id.clone(), recent)]),
         mount_history: BTreeMap::new(),
@@ -1154,7 +1154,7 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
 /// Walk the new-session wizard as far as an open mount editor with the
 /// source already typed and the destination filled in.
 fn dashboard_at_mount_editor(source: &str) -> DashboardState {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Down));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -1286,7 +1286,7 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
 
 #[test]
 fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Down));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -1344,7 +1344,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                 read_only: false,
             }],
             launch: Box::new(DashboardAction::CreateSession {
-                workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
                 bundle_id: "hel".into(),
                 project_directory: None,
@@ -1406,7 +1406,7 @@ fn failed_submit_preflight_reopens_the_invalid_mount() {
 
 #[test]
 fn directory_completion_is_bounded_and_keyboard_selectable() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -1449,7 +1449,7 @@ fn directory_completion_is_bounded_and_keyboard_selectable() {
 
 #[test]
 fn failed_source_validation_does_not_add_new_or_resume_mounts() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -1546,7 +1546,7 @@ fn resume_can_convert_to_another_harness() {
 
 #[test]
 fn resume_keeps_the_workspace_where_its_dialog_was_opened() {
-    let workspace_a = hel::hel_workspace::DEFAULT_WORKSPACE_ID.to_owned();
+    let workspace_a = mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned();
     let workspace_b = "workspace-b".to_owned();
     let mut dashboard = dashboard_with_session(stopped_session());
     open_resume_wizard(&mut dashboard);
@@ -1568,7 +1568,7 @@ fn resume_keeps_the_workspace_where_its_dialog_was_opened() {
 
 #[test]
 fn wizard_back_activation_preserves_the_draft_and_cancel_closes_it() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
 
@@ -1717,10 +1717,10 @@ fn open_move_review(dashboard: &mut DashboardState) -> u64 {
     request_id
 }
 
-fn move_preparation() -> hel::hel_state::MovePreparation {
-    hel::hel_state::MovePreparation {
+fn move_preparation() -> mj_core::state::MovePreparation {
+    mj_core::state::MovePreparation {
         source_unavailable: false,
-        selection: hel::hel_state::MoveSelection {
+        selection: mj_core::state::MoveSelection {
             session_id: "session-1".into(),
             profile_id: Some("codex-1".into()),
             target_template_id: Some("podman".into()),
@@ -1771,7 +1771,7 @@ fn resume_dialog_attaches_an_additional_resource() {
             }],
             launch: Box::new(DashboardAction::PreflightResumeRepositories {
                 launch: Box::new(DashboardAction::ResumeSession {
-                    workspace_id: hel::hel_workspace::DEFAULT_WORKSPACE_ID.into(),
+                    workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                     session_id: "session-1".into(),
                     profile_id: "codex-1".into(),
                     target_template_id: "podman".into(),
@@ -1858,7 +1858,7 @@ fn aws_resource_destinations_default_under_the_ssh_users_home() {
         launch_template: "hel".into(),
         launch_template_version: None,
         ssh_user: "ubuntu".into(),
-        address_source: hel::hel_config::AwsAddressSource::PublicIp,
+        address_source: mj_core::config::AwsAddressSource::PublicIp,
         identity_file: None,
         ssh_args: Vec::new(),
     };
@@ -2121,10 +2121,10 @@ fn queue_choice_keeps_a_ready_move_confirmation_when_only_prepared_queue_exists(
     let mut dashboard = dashboard_with_session(running_session());
     let request_id = open_move_review(&mut dashboard);
     let mut preparation = move_preparation();
-    preparation.queued_commands = vec![hel::hel_state::MaterializedQueuedPrompt {
+    preparation.queued_commands = vec![mj_core::state::MaterializedQueuedPrompt {
         accepted_ordinal: None,
         command_id: "queued-1".into(),
-        kind: hel::hel_state::QueuedCommandKind::Prompt,
+        kind: mj_core::state::QueuedCommandKind::Prompt,
         content: Vec::new(),
         queued_at_ms: 1,
     }];
@@ -2146,7 +2146,7 @@ fn queue_choice_keeps_a_ready_move_confirmation_when_only_prepared_queue_exists(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::MoveSession {
             preparation_request_id: None,
-            queue: Some(hel::hel_state::ResumeQueueDisposition::Start),
+            queue: Some(mj_core::state::ResumeQueueDisposition::Start),
             ..
         }
     ));
@@ -2193,7 +2193,7 @@ fn raw_resume_review_names_the_exact_reused_project_directory() {
         .insert("localhost".into(), TargetTemplate::LocalBare);
     let mut dashboard = DashboardState::new(
         config,
-        HelState {
+        State {
             version: STATE_VERSION,
             sessions: BTreeMap::from([(session.id.clone(), session)]),
             mount_history: BTreeMap::new(),
@@ -2243,7 +2243,7 @@ fn resume_target_step_minus_halves_container_size_through_the_key_path() {
     );
     let mut dashboard = DashboardState::new(
         config,
-        HelState {
+        State {
             version: STATE_VERSION,
             sessions: BTreeMap::from([("session-1".into(), stopped_session())]),
             mount_history: BTreeMap::new(),
@@ -2292,7 +2292,7 @@ fn resume_target_step_minus_halves_container_size_through_the_key_path() {
 
 #[test]
 fn new_target_step_minus_halves_container_size_when_focus_is_off_content() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new wizard, got {:?}", dashboard.mode);
@@ -2338,7 +2338,7 @@ fn new_target_step_minus_halves_container_size_when_focus_is_off_content() {
 #[test]
 fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() {
     let gib = 1024 * 1024 * 1024;
-    let mut state = HelState::default();
+    let mut state = State::default();
     state.container_sizes.insert(
         "local".into(),
         HostContainerSize {
@@ -2347,18 +2347,18 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
         },
     );
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
-    dashboard.set_deployment_capacity_targets(vec![hel::hel_targets::DeploymentCapacityTarget {
+    dashboard.set_deployment_capacity_targets(vec![mj_core::targets::DeploymentCapacityTarget {
         id: "local".into(),
         host: "local".into(),
         target_ids: vec!["podman".into()],
-        kind: hel::hel_targets::DeploymentCapacityKind::Host,
+        kind: mj_core::targets::DeploymentCapacityKind::Host,
         local: true,
         probes: Vec::new(),
         probe_error: None,
     }]);
     dashboard.apply_deployment_capacity(
         "local",
-        Ok(Some(hel::hel_targets::DeploymentCapacityUsage {
+        Ok(Some(mj_core::targets::DeploymentCapacityUsage {
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 48 * gib,
@@ -2390,7 +2390,7 @@ fn resume_keeps_the_sessions_size_instead_of_the_hosts_latest_size() {
         cpus: 4,
         memory_bytes: 16 * gib,
     });
-    let mut state = HelState::default();
+    let mut state = State::default();
     state.sessions.insert(session.id.clone(), session);
     state.container_sizes.insert(
         "local".into(),
@@ -2618,7 +2618,7 @@ fn ec2_size_controls_use_exact_doubling_steps() {
 
 #[test]
 fn cancelling_a_wizard_invalidates_checks_before_reopening_the_same_form() {
-    let mut dashboard = DashboardState::new(config(), HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     let pending = dashboard.session_preflight_generation();
     dashboard.handle_key(key(KeyCode::Esc));
@@ -2634,7 +2634,7 @@ fn target_next_focuses_the_project_field_and_footer_keys_do_not_edit_it() {
     config
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
-    let mut dashboard = DashboardState::new(config, HelState::default(), BTreeMap::new());
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     dashboard.handle_key(alt_key('w'));
     dashboard.handle_key(key(KeyCode::Enter));
     for _ in 0..3 {
@@ -2672,7 +2672,7 @@ fn resume_target_next_mouse_release_advances_to_review() {
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut state = HelState::default();
+    let mut state = State::default();
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
     open_resume_wizard(&mut dashboard);

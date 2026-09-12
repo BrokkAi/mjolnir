@@ -5,12 +5,11 @@ pub mod components;
 pub mod speech;
 pub mod spinner;
 pub mod theme;
-pub mod usage_format;
 
-pub mod hel_chat;
-pub mod hel_clipboard;
-pub mod hel_modal;
-pub mod hel_selection;
-pub mod hel_text_input;
+pub mod chat;
+pub mod clipboard;
+pub mod modal;
+pub mod selection;
+pub mod text_input;
 
-pub mod hel_path_input;
+pub mod path_input;

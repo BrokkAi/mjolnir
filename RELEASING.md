@@ -145,3 +145,5 @@ Confirm that:
    for each trusted-publisher configuration. Package existence, ownership of
    sibling crates, green CI, and successful dry-runs do not establish this
    authorization. Stop before tagging if any package's access is unverified.
+
+After regenerating notices or changing package documentation, run `node scripts/sync-package-assets.mjs sync` and commit the synchronized package copies. CI verifies that each published package contains the canonical assets.

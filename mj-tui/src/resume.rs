@@ -24,10 +24,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use hel::hel_config::{HarnessKind, HelConfig};
-use hel::hel_state::{HelState, MoveOperation, SessionRecord, SessionState};
-use mj_chat::hel_selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
-use mj_chat::hel_text_input::TextInput;
+use mj_core::config::{Config, HarnessKind};
+use mj_core::state::{MoveOperation, SessionRecord, SessionState, State};
+
+use mj_chat::selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
+use mj_chat::text_input::TextInput;
 
 use crate::dialogs::{ConfirmDialog, Confirmation, ImportProfileOption};
 use crate::render::render_session_scrollbar;
@@ -313,8 +314,8 @@ fn relative_time(value: i64, unit: &str) -> String {
 /// Dedupe rule: a Hel record whose `native_session_id` matches a scanned native
 /// session of the same harness replaces that native row entirely.
 pub(crate) fn merged_resume_rows(
-    config: &HelConfig,
-    state: &HelState,
+    config: &Config,
+    state: &State,
     profiles: &[ImportProfileOption],
 ) -> Vec<ResumeRow> {
     let mut adopted = BTreeSet::new();
@@ -389,8 +390,8 @@ pub(crate) fn merged_resume_rows(
 /// The rows one dialog tab shows: the merged sources split by ownership, with
 /// checkpoint sizes appended and search applied.
 fn build_resume_rows(
-    config: &HelConfig,
-    state: &HelState,
+    config: &Config,
+    state: &State,
     dialog: &ResumeDialog,
     checkpoint_archive_sizes: &BTreeMap<String, Option<u64>>,
     now: &chrono::DateTime<chrono::Local>,
@@ -459,7 +460,7 @@ impl DashboardState {
                 .filter(|operation| {
                     matches!(
                         operation.phase,
-                        hel::hel_state::MovePhase::Failed | hel::hel_state::MovePhase::Cancelled
+                        mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
                     ) && (operation.checkpoint.is_some()
                         || (operation.queue_admission_started
                             && !operation.queue_admission_finished))
@@ -1147,7 +1148,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crossterm::event::KeyCode;
-    use hel::hel_state::STATE_VERSION;
+    use mj_core::state::STATE_VERSION;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1181,8 +1182,8 @@ mod tests {
         }
     }
 
-    fn state_with(sessions: Vec<SessionRecord>) -> HelState {
-        HelState {
+    fn state_with(sessions: Vec<SessionRecord>) -> State {
+        State {
             version: STATE_VERSION,
             sessions: sessions
                 .into_iter()
@@ -1197,7 +1198,7 @@ mod tests {
         MoveOperation {
             source_checkpoint_only: false,
             operation_id: "move-1".into(),
-            selection: hel::hel_state::MoveSelection {
+            selection: mj_core::state::MoveSelection {
                 clear_resource_allocation: false,
                 session_id: "session-1".into(),
                 profile_id: Some("codex-1".into()),
@@ -1217,8 +1218,8 @@ mod tests {
             configuration_fingerprint: "fingerprint".into(),
             checkpoint: None,
             recovery_session: None,
-            queue: hel::hel_state::ResumeQueueDisposition::Start,
-            phase: hel::hel_state::MovePhase::Cancelled,
+            queue: mj_core::state::ResumeQueueDisposition::Start,
+            phase: mj_core::state::MovePhase::Cancelled,
             queue_admission_started: true,
             queue_admission_finished: false,
             cancellation_requested: true,
@@ -1394,18 +1395,18 @@ mod tests {
         let mut config = config();
         config.targets.insert(
             "localhost".into(),
-            hel::hel_config::TargetTemplate::LocalBare,
+            mj_core::config::TargetTemplate::LocalBare,
         );
         config.targets.insert(
             "precision-3260".into(),
-            hel::hel_config::TargetTemplate::SshBare {
-                ssh: hel::hel_config::SshConnection {
+            mj_core::config::TargetTemplate::SshBare {
+                ssh: mj_core::config::SshConnection {
                     host: "precision-3260".into(),
                     user: None,
                     identity_file: None,
                     extra_args: Vec::new(),
                 },
-                permissions: hel::hel_config::PermissionMode::Yolo,
+                permissions: mj_core::config::PermissionMode::Yolo,
                 workspace_prefix: ".local/share/hel/workspaces".into(),
             },
         );
@@ -1420,12 +1421,12 @@ mod tests {
             )])],
         );
 
-        let hel_targets = rows(&dashboard)
+        let targets = rows(&dashboard)
             .into_iter()
             .map(|row| row.origin)
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            hel_targets,
+            targets,
             BTreeSet::from([
                 "localhost/bifrost-fird".to_owned(),
                 "precision-3260/bifrost".to_owned(),

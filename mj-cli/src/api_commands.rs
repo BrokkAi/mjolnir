@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
-use mj_controller::hel_server::api::{
+use mj_controller::server::api::{
     ExportKind, ExportRequest, RelayState, StartSessionRequest, WaitOutcome, WaitRequest,
     WaitResponse,
 };
@@ -38,7 +38,7 @@ pub(crate) async fn events(args: EventsArgs, requested_workspace: Option<String>
         (None, None) => None,
     };
     let client = ApiClient::connect().await?;
-    let filter = hel::hel_database::ApiEventFilter {
+    let filter = mj_controller::database::ApiEventFilter {
         session_id: args.session,
         workspace_id,
     };
@@ -161,12 +161,12 @@ pub(crate) struct TranscriptArgs {
     #[arg(long)]
     limit: Option<usize>,
     #[arg(long, value_parser = parse_transcript_role)]
-    role: Option<hel::hel_transcript::TranscriptRole>,
+    role: Option<mj_core::transcript::TranscriptRole>,
     #[arg(long)]
     json: bool,
 }
 
-fn parse_transcript_role(value: &str) -> Result<hel::hel_transcript::TranscriptRole, String> {
+fn parse_transcript_role(value: &str) -> Result<mj_core::transcript::TranscriptRole, String> {
     serde_json::from_value(serde_json::Value::String(value.into())).map_err(|e| e.to_string())
 }
 
@@ -229,9 +229,9 @@ pub(crate) struct RespondArgs {
 
 pub(crate) async fn put_file(args: PutFileArgs) -> Result<()> {
     let bytes = if args.source == std::path::Path::new("-") {
-        hel::hel_archive::read_session_file_input(std::io::stdin().lock())?
+        mj_core::archive::read_session_file_input(std::io::stdin().lock())?
     } else {
-        hel::hel_archive::read_session_file_input(
+        mj_core::archive::read_session_file_input(
             std::fs::File::open(&args.source)
                 .with_context(|| format!("open {}", args.source.display()))?,
         )?
@@ -744,7 +744,7 @@ pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
         .await?
         .set_config(
             &args.session,
-            &mj_controller::hel_server::api::SetConfigRequest {
+            &mj_controller::server::api::SetConfigRequest {
                 key: args.key,
                 value: args.value,
             },

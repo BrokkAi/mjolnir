@@ -14,7 +14,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
-use hel::hel_credentials::MAX_CREDENTIAL_BYTES;
+use mj_core::credentials::MAX_CREDENTIAL_BYTES;
 
 const MINT_BASE_URL_ENV: &str = "TBH_MINT_BASE_URL";
 const DEFAULT_MINT_BASE_URL: &str = "https://api.meta.ai";

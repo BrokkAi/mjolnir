@@ -8,12 +8,15 @@ license = "GPL-3.0-only"
 repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
+[lib]
+name = "mj_tui"
+
 [lints]
 workspace = true
 
 [dependencies]
 anyhow = "1"
-hel = { workspace = true, features = ["controller"] }
+mj-core.workspace = true
 mj-client.workspace = true
 mj-chat.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
