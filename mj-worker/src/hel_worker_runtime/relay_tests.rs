@@ -5225,3 +5225,83 @@ async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting
     assert!(!root.join("control.sock").exists());
     assert!(!root.join("acp-supervisor.json").exists());
 }
+
+#[tokio::test]
+async fn acp_supervisor_terminates_descendants_when_parent_input_ends() {
+    use std::time::Duration;
+    for broken_output in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("descendant-writes");
+        struct GroupGuard(std::path::PathBuf);
+        impl Drop for GroupGuard {
+            fn drop(&mut self) {
+                if let Ok(text) = std::fs::read_to_string(&self.0)
+                    && let Ok(pid) = text.parse::<i32>()
+                {
+                    hel::hel_subprocess::terminate_process_group(pid, libc::SIGKILL);
+                }
+            }
+        }
+        let _group = GroupGuard(root.path().join("descendant-writes.pid"));
+        let spec = AcpSupervisorSpec {
+            command: "python3".into(),
+            args: vec![
+                "-c".into(),
+                r#"
+import os, signal, sys, time
+with open(sys.argv[1] + '.pid', 'w') as f: f.write(str(os.getpid()))
+if os.fork() == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        with open(sys.argv[1], 'a') as f: f.write('x')
+        time.sleep(.01)
+while not os.path.exists(sys.argv[1]): time.sleep(.01)
+print('x' * 100000, flush=True)
+while True: time.sleep(1)
+"#
+                .into(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            environment: BTreeMap::new(),
+            cwd: root.path().to_owned(),
+            harness_lease: None,
+        };
+        let (input, held) = tokio::io::duplex(64);
+        let output: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = if broken_output {
+            let (writer, reader) = tokio::io::duplex(64);
+            drop(reader);
+            Box::new(writer)
+        } else {
+            Box::new(tokio::io::sink())
+        };
+        let task = tokio::spawn(unix::run_acp_supervisor_with_streams(spec, input, output));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut held = Some(held);
+        if !broken_output {
+            drop(held.take());
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        if broken_output {
+            assert!(format!("{:#}", result.unwrap_err()).contains("forward ACP supervisor output"));
+        } else {
+            result.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let size = std::fs::metadata(&marker).unwrap().len();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            std::fs::metadata(&marker).unwrap().len(),
+            size,
+            "descendant must stop before working files are removed"
+        );
+    }
+}

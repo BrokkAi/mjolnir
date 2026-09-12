@@ -222,6 +222,9 @@ fn probe_profile(
     )
     .purpose("discover profile configuration");
     let output = executor.execute(&command)?;
+    if !output.stderr.is_empty() {
+        tracing::info!(harness = ?profile.kind, diagnostics = %String::from_utf8_lossy(&output.stderr).trim(), "profile discovery worker diagnostics");
+    }
     ensure!(
         output.status == 0,
         "profile discovery failed: {}",

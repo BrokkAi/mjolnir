@@ -3068,19 +3068,20 @@ where
         tokio::pin!(input, output, exited);
         tokio::select! {
             result = &mut input => {
-                result.context("forward ACP supervisor input")?;
-                SupervisorCompletion::InputEnded
+                result.context("forward ACP supervisor input").map(|_| SupervisorCompletion::InputEnded)
             }
             result = &mut output => {
-                result.context("forward ACP supervisor output")?;
-                SupervisorCompletion::OutputEnded
+                result.context("forward ACP supervisor output").map(|_| SupervisorCompletion::OutputEnded)
             }
             result = &mut exited => {
-                SupervisorCompletion::ChildExited(
-                    result.context("wait for supervised ACP bridge")?
-                )
+                result.context("wait for supervised ACP bridge").map(SupervisorCompletion::ChildExited)
             }
         }
+    };
+    // A broken parent pipe must still terminate the owned harness group.
+    let (completion, forwarding_error) = match completion {
+        Ok(completion) => (completion, None),
+        Err(error) => (SupervisorCompletion::InputEnded, Some(error)),
     };
     if !matches!(&completion, SupervisorCompletion::ChildExited(_)) {
         match tokio::time::timeout(std::time::Duration::from_secs(1), child_stdin.shutdown()).await
@@ -3132,6 +3133,11 @@ where
             }
         }
     };
+    // The leader can exit on TERM while a descendant ignores it.
+    terminate_process_group(pid, libc::SIGKILL);
+    if let Some(error) = forwarding_error {
+        return Err(error);
+    }
     if bridge_ended
         && let Some(status) = status
         && !status.success()

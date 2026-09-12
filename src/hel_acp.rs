@@ -833,7 +833,23 @@ pub async fn run(
     requests: mpsc::Receiver<CommandRequest>,
     events: mpsc::Sender<RuntimeEvent>,
 ) -> Result<()> {
-    let result = run_inner(spec, requests, events.clone()).await;
+    run_with_shutdown(
+        spec,
+        requests,
+        events,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
+/// Stop protocol work cooperatively while retaining bridge process cleanup.
+pub async fn run_with_shutdown(
+    spec: LaunchSpec,
+    requests: mpsc::Receiver<CommandRequest>,
+    events: mpsc::Sender<RuntimeEvent>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let result = run_inner(spec, requests, events.clone(), shutdown).await;
     if let Err(error) = &result {
         emit_runtime_event(
             &events,
@@ -866,11 +882,15 @@ async fn run_inner(
     mut spec: LaunchSpec,
     mut requests: mpsc::Receiver<CommandRequest>,
     events: mpsc::Sender<RuntimeEvent>,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     spec.environment = crate::hel_login_environment::with_overrides(&spec.environment).await?;
     let mut rapid_deaths = 0_u32;
     let mut replacing_previous_bridge = false;
     loop {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
         let opened = Arc::new(Mutex::new(None));
         match run_bridge(
             &spec,
@@ -878,6 +898,7 @@ async fn run_inner(
             &events,
             opened.clone(),
             replacing_previous_bridge,
+            &shutdown,
         )
         .await?
         {
@@ -916,6 +937,7 @@ async fn run_bridge(
     events: &mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     replacing_previous_bridge: bool,
+    shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<BridgeRestart>> {
     let mut child = Command::new(&spec.command)
         .args(&spec.args)
@@ -958,6 +980,7 @@ async fn run_bridge(
         tokio::pin!(drive);
         tokio::select! {
             biased;
+            () = shutdown.cancelled() => (Ok(None), false),
             result = &mut drive => (result, false),
             waited = child.wait() => {
                 let result = match waited {
@@ -995,7 +1018,7 @@ async fn run_bridge(
             }
         } else {
             let cleanup =
-                match tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
                     Ok(Ok(status)) if status.success() => Ok(()),
                     Ok(Ok(status)) => Err(anyhow!(
                         "ACP bridge exited with {status} after the protocol runtime completed"

@@ -62,10 +62,24 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
 }
 
 async fn probe(launch: LaunchSpec, model: Option<String>) -> Result<ProfileConfig> {
+    probe_with_close_timeout(launch, model, Duration::from_secs(15)).await
+}
+
+async fn probe_with_close_timeout(
+    launch: LaunchSpec,
+    model: Option<String>,
+    close_timeout: Duration,
+) -> Result<ProfileConfig> {
     let harness = launch.harness;
     let (commands, requests) = mpsc::channel(8);
     let (events, mut updates) = mpsc::channel(128);
-    let mut task = tokio::spawn(hel_acp::run(launch, requests, events));
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut task = tokio::spawn(hel_acp::run_with_shutdown(
+        launch,
+        requests,
+        events,
+        shutdown.clone(),
+    ));
     let discovery = tokio::time::timeout(Duration::from_secs(240), async {
         let mut warning = String::new();
         let mut initial_models = None;
@@ -119,31 +133,68 @@ async fn probe(launch: LaunchSpec, model: Option<String>) -> Result<ProfileConfi
     // Keep draining while the runtime shuts down; it can emit more than one
     // channel's worth of final events. The supervisor owns process cleanup.
     let cleanup = async {
-        if commands
-            .send(CommandRequest::Close {
-                request_id: "discovery-close".into(),
-            })
-            .await
-            .is_err()
-        {
-            return (&mut task).await.context("discovery task panicked")?;
-        }
+        let close = commands.send(CommandRequest::Close {
+            request_id: "discovery-close".into(),
+        });
+        tokio::pin!(close);
+        let mut sent = false;
         loop {
             tokio::select! {
+                _ = &mut close, if !sent => sent = true,
                 result = &mut task => return result.context("discovery task panicked")?,
                 event = updates.recv() => if event.is_none() { return (&mut task).await.context("discovery task panicked")?; },
             }
         }
     };
-    match tokio::time::timeout(Duration::from_secs(15), cleanup).await {
-        Ok(Ok(())) => discovery,
-        Ok(Err(error)) => Err(error.context("stop profile discovery")),
+    let cleanup = match tokio::time::timeout(close_timeout, cleanup).await {
+        Ok(result) => result,
         Err(_) => {
-            task.abort();
-            let _ = task.await;
-            bail!("profile discovery cleanup timed out");
+            shutdown.cancel();
+            // Closing the transport lets the supervisor terminate its process group.
+            let stopped = async {
+                loop {
+                    tokio::select! {
+                        result = &mut task => return result.context("discovery shutdown task panicked")?,
+                        event = updates.recv() => if event.is_none() { return (&mut task).await.context("discovery shutdown task panicked")?; },
+                    }
+                }
+            };
+            match tokio::time::timeout(Duration::from_secs(10), stopped).await {
+                Ok(Ok(())) => Err(anyhow::anyhow!(
+                    "profile discovery close timed out; harness terminated"
+                )),
+                Ok(Err(error)) => {
+                    Err(error.context("terminate profile discovery after close timeout"))
+                }
+                Err(_) => {
+                    task.abort();
+                    match task.await {
+                        Ok(Err(error)) => {
+                            tracing::error!(error = %format!("{error:#}"), "profile discovery failed during forced shutdown")
+                        }
+                        Err(error) if !error.is_cancelled() => {
+                            tracing::error!(%error, "profile discovery task failed during forced shutdown")
+                        }
+                        _ => {}
+                    }
+                    Err(anyhow::anyhow!(
+                        "profile discovery forced shutdown timed out"
+                    ))
+                }
+            }
         }
+    };
+    preserve_discovery(discovery, cleanup)
+}
+
+fn preserve_discovery(
+    discovery: Result<ProfileConfig>,
+    cleanup: Result<()>,
+) -> Result<ProfileConfig> {
+    if let Err(error) = cleanup {
+        tracing::warn!(discovery_succeeded = discovery.is_ok(), error = %format!("{error:#}"), "profile discovery cleanup failed");
     }
+    discovery
 }
 
 fn discovered(
@@ -167,12 +218,24 @@ fn discovered(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_cleanup_errors_do_not_replace_results() {
+        let config = discovered(hel::hel_config::HarnessKind::Kimi, vec![], vec![]);
+        assert!(preserve_discovery(Ok(config), Err(anyhow::anyhow!("cleanup failure"))).is_ok());
+        let error = preserve_discovery(
+            Err(anyhow::anyhow!("original discovery failure")),
+            Err(anyhow::anyhow!("cleanup failure")),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "original discovery failure");
+    }
+
     #[tokio::test]
     async fn discovery_reads_model_specific_efforts_without_sending_a_prompt() {
         let root = tempfile::tempdir().unwrap();
         let script = root.path().join("harness.py");
         std::fs::write(&script, r#"
-import json, sys
+import json, sys, os, time
 model = 'default'
 def options():
     return [
@@ -188,7 +251,15 @@ for line in sys.stdin:
     if ident is None: continue
     if method == 'initialize': result = {'protocolVersion':1}
     elif method == 'session/new': result = {'sessionId':'probe','configOptions':options()}
+    elif method == 'session/close' and os.environ.get('HANG_CLOSE'):
+        for i in range(300):
+            print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'probe','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'x'*1024}}}}), flush=True)
+        time.sleep(60)
+        continue
     elif method == 'session/set_config_option':
+        if os.environ.get('FAIL_CONFIG'):
+            print(json.dumps({'jsonrpc':'2.0','id':ident,'error':{'code':-32603,'message':'original model failure'}}), flush=True)
+            continue
         assert request['params']['configId'] == 'model_id'
         model = request['params']['value']
         result = {'configOptions':options()}
@@ -213,7 +284,7 @@ for line in sys.stdin:
         let defaults = probe(launch.clone(), None).await.unwrap();
         assert_eq!(defaults.model.as_deref(), Some("default"));
         assert_eq!(defaults.efforts[0].value, "low");
-        let chosen = probe(launch, Some("chosen".into())).await.unwrap();
+        let chosen = probe(launch.clone(), Some("chosen".into())).await.unwrap();
         assert_eq!(chosen.model.as_deref(), Some("chosen"));
         assert_eq!(
             chosen
@@ -222,6 +293,29 @@ for line in sys.stdin:
                 .map(|choice| choice.value.as_str())
                 .collect::<Vec<_>>(),
             ["high", "max"]
+        );
+        let mut hanging = launch;
+        hanging.accepted_config = Arc::new(Mutex::new(AcceptedSessionConfig::default()));
+        hanging.environment.insert("HANG_CLOSE".into(), "1".into());
+        let result = tokio::time::timeout(
+            Duration::from_secs(12),
+            probe_with_close_timeout(hanging.clone(), None, Duration::from_millis(200)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.model.as_deref(), Some("default"));
+        hanging.environment.insert("FAIL_CONFIG".into(), "1".into());
+        let error = tokio::time::timeout(
+            Duration::from_secs(12),
+            probe_with_close_timeout(hanging, Some("chosen".into()), Duration::from_millis(200)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("original model failure"),
+            "{error:#}"
         );
     }
 }
