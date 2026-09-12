@@ -1,17 +1,10 @@
 #!/usr/bin/env bash
 #
-# Rebuild the static musl worker, then build and run the host `mj` with the
-# daemon from that same host build. macOS builds the native worker too, and
-# uses its local container engine to build the Linux worker for containers.
-#
-# Plain `cargo build` targets the host and never rebuilds the musl worker
-# under target/worker/<triple>/. A long-lived daemon then hands container and
-# remote (SSH) sessions whatever musl worker was last built with an explicit
-# `--target`, with no warning that it is stale. This wrapper rebuilds the musl
-# worker at the same profile the run will use, so it is the "just works"
-# replacement for `cargo build && cargo run` when you exercise container or
-# remote sessions. Local-bare sessions run a native worker and do not need it,
-# but building both here is cheap once warm.
+# Rebuild native and portable workers, then build and run the host `mj`.
+# Local sessions prefer the native worker, so rebuilding only the portable
+# worker can leave localhost running old code even with a fresh controller.
+# Both workers use the run's profile and isolated target/worker directory.
+# macOS uses its local container engine to build the portable Linux worker.
 #
 # Any arguments are passed through to `cargo run`, e.g.
 #   scripts/run.sh -- login
@@ -52,6 +45,7 @@ case "$(uname -s)" in
       echo "The $triple target is not installed. Run: rustup target add $triple" >&2
       exit 1
     fi
+    cargo build --target-dir target/worker -p brokk-mj-worker --bin mj-worker ${profile_flag:+"$profile_flag"}
     cargo build --target-dir target/worker --target "$triple" -p brokk-mj-worker --bin mj-worker ${profile_flag:+"$profile_flag"}
     ;;
   Darwin)

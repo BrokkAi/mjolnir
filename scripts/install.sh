@@ -8,9 +8,8 @@
 # musl worker named `mj-worker-<target-triple>` beside its own binary, the
 # layout the release archives use. This wrapper builds that worker first, so a
 # failed worker build leaves the existing installation alone, then installs
-# `mj` and places the worker beside it. macOS also gets the native worker for
-# local sessions and, when Docker or Podman is running, the Linux worker built
-# through that engine.
+# `mj` and places both workers beside it. Both hosts get a native worker for
+# local sessions. On macOS, Docker or Podman builds the portable Linux worker.
 #
 # Cargo's install root receives the binaries: CARGO_INSTALL_ROOT, else
 # CARGO_HOME, else ~/.cargo, with executables in its bin directory. Choose a
@@ -50,6 +49,9 @@ case "$(uname -s)" in
       echo "The $triple target is not installed. Run: rustup target add $triple" >&2
       exit 1
     fi
+    cargo build --release --locked --target-dir target/worker -p brokk-mj-worker --bin mj-worker
+    worker_sources+=("target/worker/release/mj-worker")
+    worker_names+=("mj-worker")
     cargo build --release --locked --target-dir target/worker --target "$triple" -p brokk-mj-worker --bin mj-worker
     worker_sources+=("target/worker/$triple/release/mj-worker")
     worker_names+=("mj-worker-$triple")
