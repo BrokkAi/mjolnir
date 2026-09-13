@@ -330,6 +330,12 @@ async fn recovery_question(events: &mut mpsc::Receiver<RuntimeEvent>) -> Elicita
         match next(events).await {
             RuntimeEvent::Warning { message } => {
                 assert!(message.contains("withdrawn-model"), "{message}");
+                assert!(message.contains("Could not restore"), "{message}");
+                assert!(
+                    message.contains("currently reports model \"default\""),
+                    "{message}"
+                );
+                assert!(!message.contains("harness default"), "{message}");
                 warned = true;
             }
             RuntimeEvent::SessionConfigured { .. } => configured = true,
@@ -594,4 +600,134 @@ fn a_completed_model_change_keeps_its_new_effort_and_clears_an_absent_selector()
             effort: None
         }
     );
+}
+
+/// Model menus under Claude setup-token auth retain the 1M alias only when
+/// the native process receives the accepted model before resuming history.
+#[tokio::test]
+async fn claude_resume_pins_the_saved_model_before_catalogue_and_queued_prompt() {
+    let root = tempfile::tempdir().unwrap();
+    let script = reset_on_load_harness(root.path());
+    let source = std::fs::read_to_string(&script).unwrap()
+        .replace("'chosen'", "'opus[1m]'")
+        .replace("model, effort = 'default', 'low'", "model, effort = 'default', 'low'\npinned = False")
+        .replace("['default','opus[1m]']", "(['default','opus[1m]'] if pinned else ['default','opus'])")
+        .replace("('session/new','session/load'):", "('session/new','session/load'):\n        pinned = params.get('_meta',{}).get('claudeCode',{}).get('options',{}).get('model') == 'opus[1m]'");
+    std::fs::write(&script, source).unwrap();
+    let mut spec = launch(
+        root.path(),
+        script,
+        AcceptedSessionConfig {
+            model: Some("opus[1m]".into()),
+            effort: Some("medium".into()),
+        },
+    );
+    spec.harness = HarnessKind::Claude;
+    let (commands, requests) = mpsc::channel(8);
+    let (events_tx, mut events) = mpsc::channel(64);
+    prompt(&commands, "queued-before-startup").await;
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    for turn in 0..3 {
+        let mut ready = false;
+        loop {
+            let event = next(&mut events).await;
+            match event {
+                RuntimeEvent::SessionConfigured { config_options } => {
+                    let option = find_session_config_option(&config_options, "model").unwrap();
+                    let SessionConfigKind::Select(select) = &option.kind else {
+                        panic!("select")
+                    };
+                    assert_eq!(select.current_value.to_string(), "opus[1m]");
+                    ready = true;
+                    if turn > 0 {
+                        prompt(&commands, "after-restart").await;
+                    }
+                }
+                RuntimeEvent::PromptFinished { stop_reason, .. } if stop_reason == "EndTurn" => {
+                    assert!(ready, "prompts wait for restored model and effort");
+                    break;
+                }
+                RuntimeEvent::ElicitationRequested { request } => {
+                    panic!("unexpected recovery: {request:?}")
+                }
+                RuntimeEvent::Stopped => panic!("Claude startup failed"),
+                _ => {}
+            }
+        }
+        if turn < 2 {
+            prompt(&commands, "restart").await;
+        }
+    }
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[test]
+fn claude_session_requests_read_the_latest_accepted_model() {
+    let mut spec = launch(
+        std::path::Path::new("/workspace"),
+        PathBuf::from("adapter"),
+        AcceptedSessionConfig::default(),
+    );
+    spec.harness = HarnessKind::Claude;
+    for model in [None, Some("opus[1m]"), Some("opus")] {
+        spec.accepted_config.lock().unwrap().model = model.map(str::to_owned);
+        for request in [
+            serde_json::to_value(new_session_request(&spec, true)).unwrap(),
+            serde_json::to_value(load_session_request(&spec, "native".into())).unwrap(),
+            serde_json::to_value(resume_session_request(&spec, "native".into())).unwrap(),
+        ] {
+            assert_eq!(
+                request
+                    .pointer("/_meta/claudeCode/options/model")
+                    .and_then(serde_json::Value::as_str),
+                model
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn claude_startup_errors_are_not_reported_as_model_replacement() {
+    for cause in [
+        "authentication expired",
+        "requested startup model is unavailable",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let script = dropped_model_harness(root.path());
+        let source = std::fs::read_to_string(&script).unwrap().replace(
+            "result = {'sessionId':'native','configOptions':options()}",
+            &format!("error = {{'code':-32603,'message':{cause:?}}}"),
+        );
+        std::fs::write(&script, source).unwrap();
+        let mut spec = launch(
+            root.path(),
+            script,
+            AcceptedSessionConfig {
+                model: Some("opus[1m]".into()),
+                effort: None,
+            },
+        );
+        spec.harness = HarnessKind::Claude;
+        let (commands, requests) = mpsc::channel(8);
+        let (events_tx, mut events) = mpsc::channel(64);
+        prompt(&commands, "must-not-run").await;
+        let error = tokio::time::timeout(Duration::from_secs(10), run(spec, requests, events_tx))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(cause), "{error:#}");
+        while let Some(event) = events.recv().await {
+            assert!(!matches!(
+                event,
+                RuntimeEvent::SessionConfigured { .. }
+                    | RuntimeEvent::ElicitationRequested { .. }
+                    | RuntimeEvent::PromptFinished { .. }
+            ));
+        }
+    }
 }

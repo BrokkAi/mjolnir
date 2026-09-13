@@ -176,6 +176,16 @@ fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, ser
         "perTaskStopAffordance".to_owned(),
         serde_json::Value::Bool(true),
     )]);
+    // Claude builds its resume catalogue before ACP selector restoration. With
+    // setup-token auth, only an explicit startup pin retains the 1M model row.
+    if let Some(model) = &spec
+        .accepted_config
+        .lock()
+        .expect("accepted session configuration lock poisoned")
+        .model
+    {
+        options.insert("model".to_owned(), serde_json::Value::String(model.clone()));
+    }
     if spec.execution_policy.is_unconstrained() {
         options.insert(
             "sandbox".to_owned(),
@@ -2302,8 +2312,8 @@ async fn serve_session(
             // consequence of a model being renamed or withdrawn, and it is
             // unrepairable from outside: the worker dispatches queued
             // commands only once the session is configured, so failing here
-            // strands the session forever. Start on the harness default
-            // instead and ask the operator below. Asking the catalogue after
+            // strands the session forever. Keep the reported configuration
+            // and ask the operator below. Asking the catalogue after
             // the attempt rather than before keeps every dialect's own
             // availability rule, including Grok's legacy model list.
             if selector_value_is_offered(&config_options, key, &value) {
@@ -2368,7 +2378,7 @@ async fn serve_session(
         emit_runtime_event(
             events,
             RuntimeEvent::Warning {
-                message: dropped_selector_warning(&dropped_selectors),
+                message: dropped_selector_warning(&dropped_selectors, &config_options),
             },
         )
         .await?;
@@ -3077,15 +3087,31 @@ fn selector_value_is_offered(options: &[SessionConfigOption], key: &str, value: 
         .is_some_and(|option| select_contains(&option.kind, value))
 }
 
-fn dropped_selector_warning(dropped: &[(&'static str, String)]) -> String {
+fn dropped_selector_warning(
+    dropped: &[(&'static str, String)],
+    options: &[SessionConfigOption],
+) -> String {
     let listed = dropped
         .iter()
         .map(|(key, value)| format!("{key} {value:?}"))
         .collect::<Vec<_>>()
         .join(" and ");
-    format!(
-        "The harness no longer offers this session's saved {listed}, so the session started on the harness default."
-    )
+    let current = dropped
+        .iter()
+        .filter_map(|(key, _)| {
+            let option = find_session_config_option(options, key)?;
+            let SessionConfigKind::Select(select) = &option.kind else {
+                return None;
+            };
+            Some(format!("{key} {:?}", select.current_value.to_string()))
+        })
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let mut message = format!("Could not restore this session's saved {listed}.");
+    if !current.is_empty() {
+        message.push_str(&format!(" The harness currently reports {current}."));
+    }
+    message
 }
 
 /// The one form that asks the operator to replace every selector this startup
@@ -3120,11 +3146,13 @@ fn session_config_recovery_request(
                             preview: None,
                         })
                         .collect(),
-                    // The harness default is what the session is running on,
-                    // so accepting the form unchanged records that choice and
-                    // retires the question for good.
+                    // Offer the currently reported value when it is selectable.
                     default: option.and_then(|option| match &option.kind {
-                        SessionConfigKind::Select(select) => Some(select.current_value.to_string()),
+                        SessionConfigKind::Select(select)
+                            if select_contains(&option.kind, &select.current_value.to_string()) =>
+                        {
+                            Some(select.current_value.to_string())
+                        }
                         _ => None,
                     }),
                 },
@@ -3137,9 +3165,9 @@ fn session_config_recovery_request(
     Some(ElicitationRequest {
         id: SESSION_CONFIG_RECOVERY_ID.to_owned(),
         title: Some("Choose a replacement".into()),
-        message: dropped_selector_warning(dropped),
+        message: dropped_selector_warning(dropped, options),
         description: Some(
-            "Pick what this session should use from now on. Declining keeps the harness default."
+            "Pick what this session should use from now on. Declining keeps the current configuration."
                 .into(),
         ),
         fields,
@@ -3242,7 +3270,7 @@ async fn resolve_session_config_recovery(
         }
     }
     let mut message = if applied.is_empty() {
-        "This session keeps the harness default configuration.".to_owned()
+        "This session keeps its current configuration.".to_owned()
     } else {
         format!("This session now uses {}.", applied.join(" and "))
     };

@@ -89,14 +89,6 @@ pub async fn observe(
         let profile = config
             .enabled_profile(&profile_id)
             .context("observed profile was removed")?;
-        let executor =
-            CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-        let worker = super::worker_binary::worker_binary_for(
-            &TargetLocator::LocalBare {
-                worker_root: String::new(),
-            },
-            &executor,
-        )?;
         let facts = mj_core::acp::AcpSessionFacts::from_operational(
             profile.kind,
             &state.config,
@@ -109,10 +101,23 @@ pub async fn observe(
             efforts: mj_core::acp::session_config_choices(&state.config_options, "effort"),
             observed_at: chrono::Utc::now().timestamp(),
         };
+        // Worker observations do not carry authentication provenance. Claude's
+        // setup-token and login catalogues differ, so only probes may cache it.
+        if profile.kind == mj_core::config::HarnessKind::Claude {
+            return Ok(choices);
+        }
+        let executor =
+            CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
+        let worker = super::worker_binary::worker_binary_for(
+            &TargetLocator::LocalBare {
+                worker_root: String::new(),
+            },
+            &executor,
+        )?;
         if mj_core::worker_launch::worker_executable_digest(&worker)? == worker_build {
             store(
                 &profile_id,
-                &fingerprint(profile)?,
+                &fingerprint(profile, &profile.environment)?,
                 &choices.model,
                 &choices,
             )?;
@@ -123,9 +128,11 @@ pub async fn observe(
     .map(|_| ())
 }
 
-fn fingerprint(profile: &HarnessProfile) -> Result<String> {
+fn fingerprint(profile: &HarnessProfile, environment: &BTreeMap<String, String>) -> Result<String> {
     let mut hash = Sha256::new();
+    hash.update(b"profile-config-v2\0");
     hash.update(serde_json::to_vec(profile)?);
+    hash.update(serde_json::to_vec(environment)?);
     hash.update(
         mj_core::harness_runtime::pin(profile.kind)
             .install_id
@@ -148,7 +155,13 @@ fn discover_blocking(
     let profile = config
         .enabled_profile(profile_id)
         .with_context(|| format!("unknown or disabled profile {profile_id:?}"))?;
-    let fingerprint = fingerprint(profile)?;
+    let mut environment = profile.environment.clone();
+    super::worker_binary::apply_claude_setup_token(
+        &mut environment,
+        profile.kind,
+        &mj_core::credentials::claude_oauth_token_path(profile_id),
+    );
+    let fingerprint = fingerprint(profile, &environment)?;
     resolve_cached(
         refresh,
         || {
@@ -160,7 +173,7 @@ fn discover_blocking(
             .map(|body| serde_json::from_str(&body).context("read cached profile configuration"))
             .transpose()
         },
-        || probe_profile(profile, model.clone(), cancelled),
+        || probe_profile(profile, environment.clone(), model.clone(), cancelled),
         |choices| {
             if model.is_none() || choices.model == model {
                 store(profile_id, &fingerprint, &model, choices)?;
@@ -186,6 +199,7 @@ fn resolve_cached(
 
 fn probe_profile(
     profile: &HarnessProfile,
+    environment: BTreeMap<String, String>,
     model: Option<String>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ProfileConfig> {
@@ -205,7 +219,7 @@ fn probe_profile(
     let spec = ProfileProbeSpec {
         harness: profile.kind,
         profile_home: home,
-        environment: profile.environment.clone(),
+        environment,
         cwd,
         model,
     };
@@ -253,6 +267,47 @@ fn store(
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn setup_token_changes_invalidate_the_discovery_cache() {
+        use mj_core::credentials::{CLAUDE_OAUTH_TOKEN_ENV, write_claude_oauth_token};
+        let root = tempfile::tempdir().unwrap();
+        let token = root.path().join("token");
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Claude,
+            home: root.path().into(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        };
+        let resolve = |environment: BTreeMap<String, String>| {
+            let mut environment = environment;
+            super::super::worker_binary::apply_claude_setup_token(
+                &mut environment,
+                profile.kind,
+                &token,
+            );
+            environment
+        };
+        let login = fingerprint(&profile, &resolve(BTreeMap::new())).unwrap();
+        write_claude_oauth_token(&token, b"setup-first").unwrap();
+        let first = resolve(BTreeMap::new());
+        assert_eq!(first[CLAUDE_OAUTH_TOKEN_ENV], "setup-first");
+        let first_key = fingerprint(&profile, &first).unwrap();
+        assert_ne!(login, first_key);
+        write_claude_oauth_token(&token, b"setup-second").unwrap();
+        assert_eq!(
+            first[CLAUDE_OAUTH_TOKEN_ENV], "setup-first",
+            "an in-flight probe retains its authentication snapshot"
+        );
+        assert_ne!(
+            first_key,
+            fingerprint(&profile, &resolve(BTreeMap::new())).unwrap()
+        );
+        let explicit = BTreeMap::from([(CLAUDE_OAUTH_TOKEN_ENV.into(), "explicit".into())]);
+        assert_eq!(resolve(explicit.clone()), explicit);
+        assert!(!first_key.contains("setup-first"));
+    }
 
     #[tokio::test]
     async fn concurrent_cold_lookups_share_the_first_probe() {

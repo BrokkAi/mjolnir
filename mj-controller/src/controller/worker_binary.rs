@@ -438,7 +438,7 @@ fn harness_runtime_policy(backend: &targets::TargetLocator) -> HarnessRuntimePol
 /// credentials file, and a setup token does not rotate, so a container copy
 /// cannot lose the single-use refresh race with the host. A profile that sets
 /// the variable itself stays authoritative.
-fn apply_claude_setup_token(
+pub(super) fn apply_claude_setup_token(
     environment: &mut std::collections::BTreeMap<String, String>,
     kind: mj_core::config::HarnessKind,
     token_path: &Path,
