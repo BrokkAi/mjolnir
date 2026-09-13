@@ -782,12 +782,12 @@ impl Controller {
             }
             _ => PathBuf::from(path),
         };
-        let remote_spec = format!("{worker_root}/checkpoint-spec.json");
-        let remote_archive = format!("{worker_root}/checkpoint.hel.zip");
-        let remote_stage = format!(
-            "{worker_root}/checkpoint-stage-{}",
-            new_command_id("capture")?
-        );
+        // Packing can outlive the relay capture barrier. Another export must
+        // never replace the archive whose digest this operation transfers.
+        let operation_id = new_command_id("checkpoint")?;
+        let remote_spec = format!("{worker_root}/{operation_id}-spec.json");
+        let remote_archive = format!("{worker_root}/{operation_id}.hel.zip");
+        let remote_stage = format!("{worker_root}/{operation_id}-stage");
         let checkpointed_at = now();
         let target_manifest = TargetManifest {
             template_id: session.target_template_id.clone(),
@@ -1223,6 +1223,7 @@ impl Controller {
             let transfer = CheckpointTransfer {
                 locator: &backend,
                 session_id,
+                operation_id: &operation_id,
                 remote_archive: &remote_archive,
                 destination: &destination,
                 expected_sha256: &target_checkpoint.sha256,
@@ -2197,7 +2198,20 @@ fn export_uploaded_spec(
     let local_spec = staging.path().join("checkpoint-spec.json");
     spec.write(&local_spec)?;
     upload_checkpoint_spec(executor, locator, session_id, &local_spec, remote_spec)?;
-    executor.execute(&export_command(locator, session_id, remote_spec)?)
+    let output = executor.execute(&export_command(locator, session_id, remote_spec)?)?;
+    if output.status == 0 {
+        execute_checked(
+            executor,
+            targets::command_on_locator(
+                locator,
+                session_id,
+                ["rm", "-f", "--", remote_spec].map(str::to_owned).to_vec(),
+                "remove uploaded checkpoint specification",
+            )?,
+        )
+        .context("clean successful checkpoint export specification")?;
+    }
+    Ok(output)
 }
 
 /// When the installed worker cannot execute this export protocol, replace its
@@ -3072,6 +3086,7 @@ mod tests {
                 "export target checkpoint".to_owned(),
                 "upload checkpoint specification".to_owned(),
                 "export target checkpoint".to_owned(),
+                "remove uploaded checkpoint specification".to_owned(),
             ]
         );
     }
