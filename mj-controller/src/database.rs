@@ -31,7 +31,7 @@ use mj_core::workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 29;
+const SCHEMA_VERSION: i64 = 30;
 
 mod session_move;
 pub use session_move::*;
@@ -52,8 +52,7 @@ const DATABASE_WRITE_QUEUE_CAPACITY: usize = 256;
 /// A queued write, handed either the writer's connection or the reason it
 /// must not be used. The job -- not the lane -- decides what a refusal means
 /// to its caller.
-type DatabaseWriteJob =
-    Box<dyn FnOnce(std::result::Result<&mut Connection, StoreSchemaMismatch>) + Send + 'static>;
+type DatabaseWriteJob = Box<dyn FnOnce(Result<&mut Connection>) + Send + 'static>;
 
 enum DatabaseWriterMessage {
     Run {
@@ -99,7 +98,7 @@ impl DatabaseWriter {
                         // The mismatch travels as the operation's own failure,
                         // so a refused write reports why rather than the
                         // writer-stopped message a dropped reply would give.
-                        Err(mismatch) => Err(anyhow::Error::new(mismatch)),
+                        Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(reply);
                 }),
@@ -215,6 +214,7 @@ fn start_database_writer_at(path: &Path, install_globally: bool) -> Result<Datab
     static NEXT_WRITER_ID: AtomicU64 = AtomicU64::new(1);
 
     let connection = schema::open_writer(path)?;
+    let mut observed_revision = schema::read_schema_state(&connection)?.revision;
     let path = path.to_owned();
     let (sender, receiver) = sync_channel(DATABASE_WRITE_QUEUE_CAPACITY);
     let (stopped_tx, stopped) = sync_channel(1);
@@ -236,15 +236,16 @@ fn start_database_writer_at(path: &Path, install_globally: bool) -> Result<Datab
                     match receiver.recv() {
                         Ok(DatabaseWriterMessage::Run { label, job }) => {
                             tracing::trace!(operation = label, "running database writer operation");
-                            // This connection verified the schema once, when it
-                            // opened. Another process can migrate the store
-                            // afterwards, and this lane would keep writing rows
-                            // a foreign ladder no longer expects. Re-read the
-                            // recorded version per job: it is one pragma
-                            // against an open connection.
-                            match writer_schema_state(&path, &connection, label) {
+                            // Recheck compatibility even after startup, and
+                            // remember forward progress to detect rollback.
+                            match writer_schema_state(
+                                &path,
+                                &connection,
+                                label,
+                                &mut observed_revision,
+                            ) {
                                 Ok(()) => job(Ok(&mut connection)),
-                                Err(mismatch) => job(Err(mismatch)),
+                                Err(error) => job(Err(error)),
                             }
                         }
                         Ok(DatabaseWriterMessage::Shutdown) => break Ok(()),
@@ -280,44 +281,41 @@ fn start_database_writer_at(path: &Path, install_globally: bool) -> Result<Datab
     })
 }
 
-/// Whether the writer's own connection still sees the schema it opened.
-///
-/// A version that reads successfully and differs is divergence in either
-/// direction: a store rolled back under this connection is as foreign to it as
-/// one migrated forward. A pragma that fails to read is not divergence at all
-/// -- the connection is broken, and the job it is about to run reports its own
-/// I/O error, which is a truer message than a schema claim this code cannot
-/// support.
+/// Refuse incompatible stores, rollback, and unreadable metadata before a job.
 fn writer_schema_state(
     path: &Path,
     connection: &Connection,
     label: &'static str,
-) -> std::result::Result<(), StoreSchemaMismatch> {
-    let version: i64 = match connection.query_row("PRAGMA user_version", [], |row| row.get(0)) {
-        Ok(version) => version,
-        Err(error) => {
-            tracing::warn!(
-                operation = label,
-                path = %path.display(),
-                error = %error,
-                "could not read the store's schema version before a write; running the operation"
-            );
-            return Ok(());
+    observed_revision: &mut i64,
+) -> Result<()> {
+    let result: Result<()> = (|| {
+        let state = schema::read_schema_state(connection)?;
+        if state.revision < *observed_revision {
+            return Err(StoreSchemaMismatch {
+                found: state.revision,
+                supported: SCHEMA_VERSION,
+                reason: StoreSchemaMismatchReason::Rollback {
+                    previous: *observed_revision,
+                },
+            }
+            .into());
         }
-    };
-    if version == SCHEMA_VERSION {
-        return Ok(());
+        *observed_revision = state.revision;
+        state.ensure_supported()
+    })();
+    if let Err(error) = &result {
+        tracing::error!(
+            operation = label,
+            path = %path.display(),
+            error = %error,
+            "could not establish store compatibility; refusing the operation"
+        );
     }
-    tracing::error!(
-        operation = label,
-        path = %path.display(),
-        found = version,
-        supported = SCHEMA_VERSION,
-        "the store's schema moved underneath this writer; refusing the operation"
-    );
-    Err(StoreSchemaMismatch {
-        found: version,
-        supported: SCHEMA_VERSION,
+    result.with_context(|| {
+        format!(
+            "check database compatibility before {label} at {}",
+            path.display()
+        )
     })
 }
 

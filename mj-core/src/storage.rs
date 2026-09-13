@@ -18,7 +18,7 @@ impl std::fmt::Display for ProjectionIntegrityError {
 
 impl std::error::Error for ProjectionIntegrityError {}
 
-/// A store whose schema is not the one this build supports.
+/// A store this build cannot safely read and write.
 ///
 /// Carried as a typed cause rather than a message so the daemon can tell a
 /// store that moved underneath it from a transport failure. It survives every
@@ -27,24 +27,41 @@ impl std::error::Error for ProjectionIntegrityError {}
 pub struct StoreSchemaMismatch {
     pub found: i64,
     pub supported: i64,
+    pub reason: StoreSchemaMismatchReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreSchemaMismatchReason {
+    NeedsMigration,
+    Incompatible { minimum_compatible: i64 },
+    InvalidCompatibilityMetadata,
+    Rollback { previous: i64 },
 }
 
 impl std::fmt::Display for StoreSchemaMismatch {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { found, supported } = self;
-        // Direction decides the advice. A store ahead of this build cannot be
-        // migrated by starting a daemon of this build -- that is what the old
-        // single message told the user to do, for an hour.
-        if found > supported {
-            write!(
+        let Self {
+            found,
+            supported,
+            reason,
+        } = self;
+        match reason {
+            StoreSchemaMismatchReason::Incompatible { minimum_compatible } => write!(
                 formatter,
-                "Mjolnir database schema {found} is newer than this Mjolnir build supports ({supported}); upgrade Mjolnir"
-            )
-        } else {
-            write!(
+                "Mjolnir database schema {found} requires at least build schema {minimum_compatible} for reads and writes; this build supports {supported}; upgrade Mjolnir"
+            ),
+            StoreSchemaMismatchReason::NeedsMigration => write!(
                 formatter,
                 "Mjolnir database schema {found} is not the supported schema {supported}; start the Mjolnir daemon to migrate it"
-            )
+            ),
+            StoreSchemaMismatchReason::InvalidCompatibilityMetadata => write!(
+                formatter,
+                "Mjolnir database schema {found} has missing or invalid compatibility metadata; refusing access from build schema {supported}"
+            ),
+            StoreSchemaMismatchReason::Rollback { previous } => write!(
+                formatter,
+                "Mjolnir database schema rolled back from {previous} to {found} underneath this writer; refusing writes from build schema {supported}"
+            ),
         }
     }
 }

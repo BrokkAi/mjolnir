@@ -62,12 +62,7 @@ fn store_schema_mismatch_survives_the_controller_load_error_chain() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     drop(schema::open_writer(&database).unwrap());
-    let connection = Connection::open(&database).unwrap();
-    connection
-        .execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1))
-        .unwrap();
-    drop(connection);
-    forget_verified_schema(&database);
+    migrate_store_underneath(&database);
 
     let error = load_state_from(&database).unwrap_err();
 
@@ -154,12 +149,7 @@ fn writer_refuses_a_read_receipt_after_the_store_moves() {
 /// Moves the store's recorded schema forward the way another build's ladder
 /// would, under a writer that has already opened it.
 fn migrate_store_underneath(path: &Path) {
-    let connection = Connection::open(path).unwrap();
-    connection
-        .execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1))
-        .unwrap();
-    drop(connection);
-    forget_verified_schema(path);
+    schema::advance_test_schema(path, SCHEMA_VERSION + 1, SCHEMA_VERSION + 1);
 }
 
 fn assert_mismatch(failure: &anyhow::Error) {
@@ -169,6 +159,163 @@ fn assert_mismatch(failure: &anyhow::Error) {
         .unwrap_or_else(|| panic!("the refusal names the divergence, got {failure:#}"));
     assert_eq!(mismatch.found, SCHEMA_VERSION + 1);
     assert_eq!(mismatch.supported, SCHEMA_VERSION);
+    assert_eq!(
+        mismatch.reason,
+        StoreSchemaMismatchReason::Incompatible {
+            minimum_compatible: SCHEMA_VERSION + 1,
+        }
+    );
+}
+
+#[test]
+fn compatible_migration_preserves_new_data_through_existing_session_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("mj.sqlite3");
+    let mut record = session("session-1", "project-1");
+    save_session_to(&database, &record).unwrap();
+    let owner = start_database_writer_at(&database, false).unwrap();
+    let raw = Connection::open(&database).unwrap();
+    raw.execute_batch(
+        "ALTER TABLE sessions ADD COLUMN future_note TEXT;
+         UPDATE sessions SET future_note = 'new feature data';
+         CREATE TABLE future_feature(value TEXT NOT NULL);
+         INSERT INTO future_feature VALUES ('keep');",
+    )
+    .unwrap();
+    schema::advance_test_schema(&database, SCHEMA_VERSION + 1, SCHEMA_VERSION);
+
+    record.title = "updated by older build".into();
+    let updated = record.clone();
+    owner
+        .writer
+        .execute("save session", move |connection| {
+            let tx = connection.transaction()?;
+            insert_session(&tx, &updated)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .unwrap();
+    owner.shutdown().unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].title,
+        record.title
+    );
+    // The ordinary path-taking writer reopens the future store too.
+    record.title = "updated after reopening".into();
+    save_session_to(&database, &record).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].title,
+        record.title
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT future_note FROM sessions WHERE session_id = 'session-1'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "new feature data"
+    );
+    assert_eq!(
+        raw.query_row("SELECT value FROM future_feature", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION + 1
+    );
+    assert_eq!(
+        raw.query_row("SELECT max(version) FROM schema_migrations", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        SCHEMA_VERSION + 1
+    );
+}
+
+#[test]
+fn writer_refuses_rollback_after_observing_a_compatible_migration() {
+    for reopen in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("mj.sqlite3");
+        let mut owner = start_database_writer_at(&database, false).unwrap();
+        schema::advance_test_schema(&database, SCHEMA_VERSION + 1, SCHEMA_VERSION);
+        if reopen {
+            owner.shutdown().unwrap();
+            owner = start_database_writer_at(&database, false).unwrap();
+        }
+        owner
+            .writer
+            .execute("observe compatible revision", |connection| {
+                connection.execute(
+                    "INSERT INTO mount_history(host, source, ordinal) VALUES ('test', ?1, 0)",
+                    [b"/first".as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let raw = Connection::open(&database).unwrap();
+        raw.execute(
+            "DELETE FROM schema_migrations WHERE version > ?1",
+            [SCHEMA_VERSION],
+        )
+        .unwrap();
+        raw.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
+        let error = owner
+            .writer
+            .execute("write after rollback", |connection| {
+                connection.execute("DELETE FROM mount_history", [])?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
+            StoreSchemaMismatchReason::Rollback {
+                previous: SCHEMA_VERSION + 1
+            }
+        );
+        assert_eq!(
+            raw.query_row("SELECT count(*) FROM mount_history", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        owner.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn writer_refuses_missing_compatibility_metadata_instead_of_running_the_job() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("mj.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let owner = start_database_writer_at(&database, false).unwrap();
+    let raw = Connection::open(&database).unwrap();
+    raw.execute_batch("DROP TABLE schema_compatibility")
+        .unwrap();
+    let error = owner
+        .writer
+        .execute("delete sessions", |connection| {
+            connection.execute("DELETE FROM sessions", [])?;
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
+        StoreSchemaMismatchReason::InvalidCompatibilityMetadata
+    );
+    assert_eq!(
+        raw.query_row("SELECT count(*) FROM sessions", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    owner.shutdown().unwrap();
 }
 
 #[test]
@@ -581,6 +728,7 @@ fn migration_twenty_two_preserves_existing_podman_targets_as_container_layers() 
              DROP TABLE workspace_pane_sizes;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+             DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > 21;
              PRAGMA user_version = 21;",
         )
@@ -1029,6 +1177,7 @@ fn rewind_schema_to(connection: &Connection, version: i64) {
     connection
         .execute_batch(&format!(
             "ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+             DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > {version};
              PRAGMA user_version = {version};"
         ))
@@ -2112,6 +2261,7 @@ fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
         PRAGMA writable_schema=OFF;
         PRAGMA schema_version=1000;
         ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+             DROP TABLE schema_compatibility;
         DELETE FROM schema_migrations WHERE version>=27;
         PRAGMA user_version=26;").unwrap();
     drop(connection);
@@ -3829,6 +3979,7 @@ fn migration_twenty_five_adds_pane_sizes_without_losing_workspaces() {
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+             DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > 24;
              PRAGMA user_version = 24;",
         )
@@ -4375,6 +4526,7 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+             DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > 20;
              PRAGMA user_version = 20;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
@@ -4496,6 +4648,7 @@ fn migration_twenty_four_preserves_targets_and_accepts_ssh_docker() {
         DROP TABLE session_moves;
         DROP TABLE workspace_pane_sizes;
         ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+             DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > 23;
         PRAGMA user_version = 23;").unwrap();
     drop(connection);
@@ -4733,6 +4886,7 @@ fn a_version_twenty_seven_database_migrates_and_reports_no_turn_history() {
              PRAGMA writable_schema = OFF;
              DROP TABLE api_idempotency;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+             DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > 27;
              PRAGMA user_version = 27;",
         )
@@ -4970,7 +5124,8 @@ fn worktree_choice_migrates_as_automatic_and_survives_both_session_writers() {
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN create_managed_worktree;
-         DELETE FROM schema_migrations WHERE version = 29;
+             DROP TABLE schema_compatibility;
+         DELETE FROM schema_migrations WHERE version >= 29;
          PRAGMA user_version = 28;",
         )
         .unwrap();

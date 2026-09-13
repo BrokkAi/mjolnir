@@ -138,6 +138,18 @@ Use idiomatic Rust formatted by rustfmt. Prefer clear module boundaries that mat
 
 ## Testing Guidelines
 
+Classify every new database migration as compatible or breaking, with a short
+reason beside it. Advance the migration revision for every change; raise the
+minimum compatible read/write revision only for breaking changes, in the same
+transaction. Compatibility includes older reads and writes, stored JSON and enum
+values, constraints, and preservation of new data by older updates. Additive SQL
+alone does not prove compatibility; treat uncertainty as breaking.
+
+Test breaking migrations with isolated `MJ_CONFIG_DIR` and `MJ_DATA_DIR`. A
+feature request does not authorize an incompatible upgrade of the live store.
+Keep existing isolated tests isolated even for compatible changes. Never rewrite
+an already-applied migration; give subsequent schema changes a new revision.
+
 Plain Cargo commands build for the current host. Build a portable container
 worker explicitly with `--target x86_64-unknown-linux-musl` or
 `--target aarch64-unknown-linux-musl`.

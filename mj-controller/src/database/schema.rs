@@ -1,6 +1,96 @@
 use super::*;
 use rusqlite::OpenFlags;
 
+const COMPATIBILITY_METADATA_VERSION: i64 = 30;
+
+pub(super) struct SchemaState {
+    pub(super) revision: i64,
+    minimum_compatible: Option<i64>,
+}
+
+impl SchemaState {
+    pub(super) fn ensure_supported(&self) -> Result<()> {
+        let reason = if self.revision < SCHEMA_VERSION {
+            StoreSchemaMismatchReason::NeedsMigration
+        } else if let Some(minimum_compatible) = self.minimum_compatible {
+            if minimum_compatible <= SCHEMA_VERSION {
+                return Ok(());
+            }
+            StoreSchemaMismatchReason::Incompatible { minimum_compatible }
+        } else {
+            StoreSchemaMismatchReason::InvalidCompatibilityMetadata
+        };
+        Err(StoreSchemaMismatch {
+            found: self.revision,
+            supported: SCHEMA_VERSION,
+            reason,
+        }
+        .into())
+    }
+}
+
+/// The revision, ledger, and compatibility floor must describe one snapshot.
+/// A missing floor is only legitimate before compatibility was introduced.
+pub(super) fn read_schema_state(connection: &Connection) -> Result<SchemaState> {
+    let snapshot = connection
+        .unchecked_transaction()
+        .context("start database compatibility snapshot")?;
+    let revision: i64 = snapshot
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("read database migration revision")?;
+    let minimum_compatible = if revision >= COMPATIBILITY_METADATA_VERSION {
+        let invalid = || StoreSchemaMismatch {
+            found: revision,
+            supported: SCHEMA_VERSION,
+            reason: StoreSchemaMismatchReason::InvalidCompatibilityMetadata,
+        };
+        let (count, singleton, floor, recorded): (i64, Option<i64>, Option<i64>, Option<i64>) =
+            snapshot
+                .query_row(
+                    "SELECT count(*), min(singleton), min(minimum_compatible_version),
+                    (SELECT max(version) FROM schema_migrations)
+             FROM schema_compatibility",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(|error| {
+                    // Missing tables/columns and invalid field types are
+                    // structural. Busy, I/O, and interruption errors are not
+                    // evidence of an incompatible migration.
+                    let structural = match &error {
+                        rusqlite::Error::SqliteFailure(code, _) => {
+                            code.code == rusqlite::ErrorCode::Unknown
+                        }
+                        _ => true,
+                    };
+                    let error = anyhow::Error::new(error);
+                    if structural {
+                        error.context(invalid())
+                    } else {
+                        error.context("read database compatibility metadata")
+                    }
+                })?;
+        if count != 1
+            || singleton != Some(1)
+            || recorded != Some(revision)
+            || !floor
+                .is_some_and(|floor| (COMPATIBILITY_METADATA_VERSION..=revision).contains(&floor))
+        {
+            return Err(invalid().into());
+        }
+        floor
+    } else {
+        None
+    };
+    snapshot
+        .commit()
+        .context("finish database compatibility snapshot")?;
+    Ok(SchemaState {
+        revision,
+        minimum_compatible,
+    })
+}
+
 pub fn database_path() -> PathBuf {
     data_dir().join("mj.sqlite3")
 }
@@ -54,14 +144,7 @@ fn open_reader_strict(path: &Path) -> Result<Connection> {
         "PRAGMA foreign_keys = ON;
          PRAGMA query_only = ON;",
     )?;
-    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version != SCHEMA_VERSION {
-        return Err(StoreSchemaMismatch {
-            found: version,
-            supported: SCHEMA_VERSION,
-        }
-        .into());
-    }
+    read_schema_state(&connection)?.ensure_supported()?;
     Ok(connection)
 }
 
@@ -89,24 +172,25 @@ fn schema_cache_key(path: &Path) -> PathBuf {
 }
 
 /// Run the migration ladder the first time this process opens a database.
-/// Later opens confirm only the recorded schema version, which keeps relay
-/// catch-up from paying for the full probe sequence on every connection. A
-/// database whose version no longer matches is migrated again, so a recreated
-/// file under a reused path still converges.
+/// Later opens confirm compatibility without repeating schema repairs. A
+/// database behind this build is migrated again, so a recreated file under a
+/// reused path still converges. Compatible future stores are never repaired.
 fn verify_schema_once(path: &Path, connection: &Connection) -> Result<()> {
     let key = schema_cache_key(path);
     let mut verified = verified_schemas()
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if verified.contains(&key) {
-        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version == SCHEMA_VERSION {
-            return Ok(());
-        }
+    let state = read_schema_state(connection)?;
+    if state.revision > SCHEMA_VERSION
+        || (state.revision == SCHEMA_VERSION && verified.contains(&key))
+    {
+        // An older build must never run its repairs against a newer schema.
+        return state.ensure_supported();
     }
     // Holding the lock across the ladder keeps two first opens of the same
     // database from running the additive migration steps against each other.
     migrate_schema(connection)?;
+    read_schema_state(connection)?.ensure_supported()?;
     verified.insert(key);
     Ok(())
 }
@@ -123,13 +207,10 @@ pub(super) fn forget_verified_schema(path: &Path) {
 }
 
 fn migrate_schema(connection: &Connection) -> Result<()> {
-    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let state = read_schema_state(connection)?;
+    let version = state.revision;
     if version > SCHEMA_VERSION {
-        return Err(StoreSchemaMismatch {
-            found: version,
-            supported: SCHEMA_VERSION,
-        }
-        .into());
+        return state.ensure_supported();
     }
     if version == 0 {
         connection.execute_batch(
@@ -710,6 +791,9 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 30 {
+        migrate_compatibility_metadata(connection)?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -728,6 +812,25 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     // already-migrated database converges too.
     ensure_client_session_state_schema(connection)?;
     ensure_api_events_schema(connection)?;
+    Ok(())
+}
+
+/// Breaking baseline: earlier executables reject every newer revision.
+/// Later compatible migrations retain the floor; breaking ones raise it to
+/// their revision in the same transaction as their schema and ledger changes.
+fn migrate_compatibility_metadata(connection: &Connection) -> Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE schema_compatibility (
+             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+             minimum_compatible_version INTEGER NOT NULL CHECK(minimum_compatible_version >= 30)
+         ) STRICT;
+         INSERT INTO schema_compatibility(singleton, minimum_compatible_version) VALUES (1, 30);
+         INSERT INTO schema_migrations(version, applied_at)
+             VALUES (30, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+         PRAGMA user_version = 30;",
+    )?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -1388,18 +1491,189 @@ fn ensure_api_events_schema(connection: &Connection) -> Result<()> {
 }
 
 #[cfg(test)]
+pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible: i64) {
+    let connection = Connection::open(path).unwrap();
+    let transaction = connection.unchecked_transaction().unwrap();
+    transaction
+        .execute(
+            "UPDATE schema_compatibility SET minimum_compatible_version = ?1",
+            [minimum_compatible],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 'test')",
+            [revision],
+        )
+        .unwrap();
+    transaction
+        .pragma_update(None, "user_version", revision)
+        .unwrap();
+    transaction.commit().unwrap();
+    forget_verified_schema(path);
+}
+
+#[cfg(test)]
 mod reader_tests {
     use super::*;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
     fn stamp_schema_version(path: &Path, version: i64) {
+        if version > SCHEMA_VERSION {
+            advance_test_schema(path, version, version);
+            return;
+        }
         let connection = Connection::open(path).unwrap();
         connection
             .execute_batch(&format!("PRAGMA user_version = {version};"))
             .unwrap();
         drop(connection);
         forget_verified_schema(path);
+    }
+
+    #[test]
+    fn older_readers_and_reopened_writers_preserve_a_compatible_future_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open_writer(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE future_feature(value TEXT NOT NULL);
+                 INSERT INTO future_feature VALUES ('preserve me');",
+            )
+            .unwrap();
+        drop(connection);
+        advance_test_schema(&path, SCHEMA_VERSION + 1, SCHEMA_VERSION);
+
+        let reader = open_reader_strict(&path).unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT value FROM future_feature", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "preserve me"
+        );
+        assert!(reader.execute("DELETE FROM future_feature", []).is_err());
+        drop(reader);
+
+        // A repair would recreate this deliberately removed trigger. A future
+        // schema is authoritative even when it differs from our own repairs.
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch("DROP TRIGGER api_session_error_updated;")
+            .unwrap();
+        drop(raw);
+        let writer = open_writer(&path).unwrap();
+        assert!(!writer.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'api_session_error_updated')", [], |row| row.get::<_, bool>(0)).unwrap());
+        assert_eq!(
+            writer
+                .query_row("SELECT value FROM future_feature", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "preserve me"
+        );
+        let state = read_schema_state(&writer).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION + 1);
+        assert_eq!(state.minimum_compatible, Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn invalid_compatibility_metadata_refuses_readers_and_writers() {
+        for alteration in [
+            "DROP TABLE schema_compatibility",
+            "DELETE FROM schema_compatibility",
+            "PRAGMA ignore_check_constraints = ON; UPDATE schema_compatibility SET minimum_compatible_version = 0",
+            "UPDATE schema_compatibility SET minimum_compatible_version = 99999",
+            "PRAGMA ignore_check_constraints = ON; UPDATE schema_compatibility SET singleton = 2",
+            "PRAGMA ignore_check_constraints = ON; INSERT INTO schema_compatibility VALUES (2, 30)",
+            "DROP TABLE schema_compatibility; CREATE TABLE schema_compatibility(singleton, minimum_compatible_version); INSERT INTO schema_compatibility VALUES (1, 'invalid')",
+            "DELETE FROM schema_migrations WHERE version = (SELECT max(version) FROM schema_migrations)",
+        ] {
+            for future in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("mj.sqlite3");
+                drop(open_writer(&path).unwrap());
+                if future {
+                    advance_test_schema(&path, SCHEMA_VERSION + 1, SCHEMA_VERSION);
+                }
+                let raw = Connection::open(&path).unwrap();
+                raw.execute_batch(alteration).unwrap();
+                let before: i64 = raw
+                    .query_row("PRAGMA schema_version", [], |row| row.get(0))
+                    .unwrap();
+                // Exercise the cached path as well as a fresh writer open.
+                for error in [
+                    open_reader_strict(&path).unwrap_err(),
+                    open_writer(&path).unwrap_err(),
+                ] {
+                    let mismatch = error.downcast_ref::<StoreSchemaMismatch>().unwrap();
+                    assert_eq!(
+                        mismatch.reason,
+                        StoreSchemaMismatchReason::InvalidCompatibilityMetadata,
+                        "{alteration}"
+                    );
+                }
+                forget_verified_schema(&path);
+                assert!(open_writer(&path).is_err(), "{alteration}");
+                let after: i64 = raw
+                    .query_row("PRAGMA schema_version", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(
+                    before, after,
+                    "a rejected open repaired schema: {alteration}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compatibility_baseline_migration_is_atomic_and_retryable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(
+            state.minimum_compatible,
+            Some(COMPATIBILITY_METADATA_VERSION)
+        );
+        connection
+            .execute_batch(
+                "DROP TABLE schema_compatibility;
+             DELETE FROM schema_migrations WHERE version >= 30;
+             PRAGMA user_version = 29;
+             CREATE TRIGGER reject_baseline BEFORE INSERT ON schema_migrations
+             WHEN NEW.version = 30 BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END;",
+            )
+            .unwrap();
+        forget_verified_schema(&path);
+        let error = migrate_schema(&connection).unwrap_err();
+        assert!(error.to_string().contains("injected migration failure"));
+        assert!(
+            connection.is_autocommit(),
+            "the failed migration left a transaction open"
+        );
+        assert_eq!(read_schema_state(&connection).unwrap().revision, 29);
+        assert_eq!(
+            connection
+                .query_row("SELECT max(version) FROM schema_migrations", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            29
+        );
+        assert!(!connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'schema_compatibility')", [], |row| row.get::<_, bool>(0)).unwrap());
+        connection
+            .execute_batch("DROP TRIGGER reject_baseline")
+            .unwrap();
+        drop(connection);
+        let writer = open_writer(&path).unwrap();
+        let state = read_schema_state(&writer).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(
+            state.minimum_compatible,
+            Some(COMPATIBILITY_METADATA_VERSION)
+        );
     }
 
     /// A store ahead of this build cannot be fixed by starting a daemon of

@@ -2661,9 +2661,9 @@ fn spawn_manager_target_refresher(
                         }
                         Ok(Err(error)) => {
                             // The one place divergence is classified. Every
-                            // read this daemon makes re-checks the recorded
-                            // schema, so a store migrated by another process
-                            // arrives here within one tick. A daemon that
+                            // read re-checks store compatibility, so an
+                            // incompatible migration reaches this branch
+                            // within one tick. A daemon that
                             // cannot read its own store cannot serve anyone,
                             // and its writer is already refusing work, so the
                             // answer is the shutdown it already knows how to
@@ -2675,6 +2675,7 @@ fn spawn_manager_target_refresher(
                                 tracing::error!(
                                     found = mismatch.found,
                                     supported = mismatch.supported,
+                                    error = %mismatch,
                                     "daemon store schema diverged underneath the daemon; shutting down"
                                 );
                                 cancellation.cancel();

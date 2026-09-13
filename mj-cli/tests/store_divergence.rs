@@ -1,9 +1,8 @@
 //! The incident from issue #24, end to end: another process migrates the
 //! daemon's store while the daemon is live.
 //!
-//! Before the fix the daemon stayed up indefinitely -- refusing every read,
-//! writing through a connection whose schema check had passed once, and
-//! warning twice a second. It must now notice and leave.
+//! Compatible migrations keep it usable; incompatible migrations must stop
+//! writes and shut it down instead of warning indefinitely.
 
 mod common;
 
@@ -64,7 +63,7 @@ image = "ubuntu:24.04"
 }
 
 #[test]
-fn daemon_exits_when_its_store_is_migrated_underneath_it() {
+fn daemon_survives_compatible_migration_then_exits_on_an_incompatible_one() {
     let (_storage, config_directory, data_directory) = configured_storage();
 
     // No MJ_DAEMON_EXIT_WHEN_IDLE: an idle exit would end this process for a
@@ -145,9 +144,63 @@ fn daemon_exits_when_its_store_is_migrated_underneath_it() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read the store's schema version");
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
     connection
-        .execute_batch(&format!("PRAGMA user_version = {};", version + 1))
-        .expect("migrate the store underneath the daemon");
+        .execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+         CREATE TABLE future_feature(value TEXT NOT NULL);
+         INSERT INTO future_feature VALUES ('preserve me');
+         INSERT INTO schema_migrations(version, applied_at) VALUES ({}, 'test');
+         PRAGMA user_version = {};
+         COMMIT;",
+            version + 1,
+            version + 1,
+        ))
+        .expect("apply a compatible migration underneath the daemon");
+
+    // Exercise both the queued production writer and strict reader, without
+    // starting a replacement daemon if this process incorrectly shuts down.
+    let endpoint = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(METADATA_WAIT, async {
+            let mut client = mj_client::daemon::DaemonClient::connect(endpoint)
+                .await
+                .unwrap();
+            let workspace = client
+                .create_workspace("compatible migration".into())
+                .await
+                .unwrap();
+            let snapshot = client.snapshot(workspace.id).await.unwrap();
+            assert_eq!(snapshot.workspace.name, "compatible migration");
+        })
+        .await
+        .expect("daemon stopped serving after compatible migration");
+    });
+    assert!(daemon.child_mut().try_wait().unwrap().is_none());
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM future_feature", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "preserve me"
+    );
+
+    connection
+        .execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+         UPDATE schema_compatibility SET minimum_compatible_version = {};
+         INSERT INTO schema_migrations(version, applied_at) VALUES ({}, 'test');
+         PRAGMA user_version = {};
+         COMMIT;",
+            version + 2,
+            version + 2,
+            version + 2,
+        ))
+        .expect("apply an incompatible migration underneath the daemon");
     drop(connection);
 
     let deadline = Instant::now() + EXIT_WAIT;
