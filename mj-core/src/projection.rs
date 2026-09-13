@@ -921,6 +921,10 @@ fn project_observation(
                 mutation.execution = Some(MaterializedExecutionState::Idle);
             }
         }
+        RelayObservation::HarnessTurnStarted { .. } if current.active_turn.is_some() => {
+            // Codex reports native execution starts for ordinary replies too.
+            // The user turn already supplies the transcript boundary and clock.
+        }
         RelayObservation::HarnessTurnStarted { started_at_ms } => {
             upsert(
                 mutation,

@@ -676,9 +676,10 @@ pub enum RelayObservation {
     Notice {
         message: String,
     },
-    /// The harness began working with no prompt in flight. Recorded just
-    /// before the agent output that revealed it, so the turn covers that
-    /// output.
+    /// The harness began working. Claude records this when output arrives
+    /// without a prompt in flight; Codex records native execution starts,
+    /// including ordinary replies. Only starts outside a user turn add an
+    /// autonomous-turn transcript marker.
     HarnessTurnStarted {
         started_at_ms: i64,
     },
