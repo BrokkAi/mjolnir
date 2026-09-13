@@ -4666,6 +4666,112 @@ mod tests {
     }
 
     #[test]
+    fn codex_replies_preserve_the_user_turn_and_only_autonomous_work_adds_a_notice() {
+        use mj_core::state::{MaterializedExecutionState, MaterializedSession};
+        use mj_core::transcript::HARNESS_TURN_ITEM_PREFIX;
+
+        for goal in [
+            serde_json::Value::Null,
+            serde_json::json!({"objective":"finish","status":"active","createdAt":1}),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+            relay.set_harness_turn_policy(HarnessTurnPolicy::CodexAdapter);
+            let metadata = |status, turn_id| {
+                serde_json::from_value::<SessionUpdate>(serde_json::json!({
+                    "sessionUpdate":"session_info_update",
+                    "_meta": {
+                        "goal":goal,
+                        "execution":{"version":1,"status":status,"turnId":turn_id}
+                    }
+                }))
+                .unwrap()
+            };
+            let project = |relay: &DurableRelay| {
+                let mut session = MaterializedSession::empty(SESSION);
+                for event in relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
+                    let projected =
+                        mj_core::projection::project_relay_event(&session, &event).unwrap();
+                    mj_core::projection::apply_committed_projection_event(
+                        &mut session,
+                        &event,
+                        projected.mutation,
+                    )
+                    .unwrap();
+                }
+                session
+            };
+            let marker_count = |session: &MaterializedSession| {
+                session
+                    .transcript
+                    .iter()
+                    .filter(|item| item.stable_id.starts_with(HARNESS_TURN_ITEM_PREFIX))
+                    .count()
+            };
+            let command_id = "00000000000000000000000000000001";
+            submit_relay(
+                &mut relay,
+                command_id,
+                prompt("Are those problems captured in a ticket?"),
+            );
+            relay.claim_pending_commands(true).unwrap();
+            let before = project(&relay);
+            assert!(before.active_turn.is_some());
+            for _ in 0..2 {
+                relay
+                    .record_session_update(metadata("running", "reply"))
+                    .unwrap();
+            }
+            let replying = project(&relay);
+            assert_eq!(marker_count(&replying), 0);
+            assert_eq!(replying.active_turn, before.active_turn);
+            assert_eq!(replying.execution, before.execution);
+            assert_eq!(replying.transcript, before.transcript);
+
+            // Native execution can outlast the ACP prompt result. Suppressing
+            // the notice must not settle that work or permit replacement.
+            relay
+                .record_command_completed(
+                    command_id,
+                    RelayCommandOutcome::Prompt {
+                        diagnostic: None,
+                        stop_reason: "end_turn".into(),
+                        usage: None,
+                    },
+                )
+                .unwrap();
+            let running = project(&relay);
+            assert!(running.active_turn.is_none());
+            assert!(matches!(
+                running.execution,
+                MaterializedExecutionState::Running { .. }
+            ));
+            assert_eq!(marker_count(&running), 0);
+            let operational = relay.operational_state();
+            assert!(!operational.safe_to_replace(mj_core::config::HarnessKind::Codex));
+            assert!(!operational.safe_for_checkpoint(mj_core::config::HarnessKind::Codex));
+            relay
+                .record_session_update(metadata("idle", "reply"))
+                .unwrap();
+            assert_eq!(project(&relay).execution, MaterializedExecutionState::Idle);
+
+            for _ in 0..2 {
+                relay
+                    .record_session_update(metadata("running", "autonomous"))
+                    .unwrap();
+            }
+            assert_eq!(marker_count(&project(&relay)), 1);
+            relay
+                .record_session_update(metadata("idle", "autonomous"))
+                .unwrap();
+            let settled = project(&relay);
+            assert_eq!(marker_count(&settled), 1);
+            assert_eq!(settled.execution, MaterializedExecutionState::Idle);
+            assert_eq!(settled.transcript, project(&relay).transcript);
+        }
+    }
+
+    #[test]
     fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
         use mj_core::config::HarnessKind;
         let root = tempfile::tempdir().unwrap();
