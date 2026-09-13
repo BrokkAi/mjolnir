@@ -4,6 +4,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch};
+/// Serialize target recovery with the durable transition into destruction.
+/// Callers hold the lock only on background execution paths; a recovery that
+/// has already started must finish before cleanup can stop its target.
+pub(crate) fn worker_target_mutex(session_id: &str) -> Arc<Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<Mutex<BTreeMap<String, std::sync::Weak<Mutex<()>>>>> =
+        std::sync::OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let slot = locks.entry(session_id.to_owned()).or_default();
+    if let Some(lock) = slot.upgrade() {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    *slot = Arc::downgrade(&lock);
+    lock
+}
+
 /// Reports session activity to the recovery coordinator.
 ///
 /// Reporting is a queued hand-off, never a round trip: the caller is often a
