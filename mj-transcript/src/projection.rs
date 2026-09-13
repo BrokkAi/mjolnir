@@ -657,7 +657,8 @@ fn project_observation(
                 mj_core::relay::RelayCommandOutcome::Configured => {
                     mutation.config_results.push((command_id.clone(), None));
                 }
-                mj_core::relay::RelayCommandOutcome::SessionModeSet
+                mj_core::relay::RelayCommandOutcome::GoalControlled
+                | mj_core::relay::RelayCommandOutcome::SessionModeSet
                 | mj_core::relay::RelayCommandOutcome::Cancelled
                 | mj_core::relay::RelayCommandOutcome::CheckpointCompleted
                 | mj_core::relay::RelayCommandOutcome::CheckpointReleased

@@ -408,6 +408,11 @@ pub enum CommandRequest {
         key: String,
         value: String,
     },
+    /// Apply native goal control independently of the current prompt.
+    GoalControl {
+        request_id: String,
+        action: mj_core::goal::GoalControlAction,
+    },
     /// Select an ACP session mode through `session/set_mode`.
     SetSessionMode {
         request_id: String,
@@ -2074,6 +2079,7 @@ fn drain_requests_from_the_previous_bridge(requests: &mut mpsc::Receiver<Command
             CommandRequest::Prompt { request_id, .. }
             | CommandRequest::PromptAttachments { request_id, .. } => ("Prompt", Some(request_id)),
             CommandRequest::SetConfig { request_id, .. } => ("SetConfig", Some(request_id)),
+            CommandRequest::GoalControl { request_id, .. } => ("GoalControl", Some(request_id)),
             CommandRequest::SetSessionMode { request_id, .. } => {
                 ("SetSessionMode", Some(request_id))
             }
@@ -2190,6 +2196,26 @@ async fn serve_session(
             agent_info: initialized.agent_info.clone(),
             steering_supported: Some(steering_supported),
         },
+    )
+    .await?;
+
+    let capability = initialized
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("goal"))
+        .and_then(|value| {
+            match serde_json::from_value::<mj_core::goal::GoalCapability>(value.clone()) {
+                Ok(capability) => Some(capability),
+                Err(error) => {
+                    tracing::warn!(%error, "adapter advertised malformed goal controls");
+                    None
+                }
+            }
+        });
+    goal::publish(
+        spec,
+        events,
+        serde_json::json!({"mjGoalCapability": capability}),
     )
     .await?;
 
@@ -2406,7 +2432,15 @@ async fn serve_session(
         config_recovery.is_some(),
     )
     .await?;
-    while let Some(request) = requests.recv().await {
+    let mut goal_controls = goal::PendingControls::default();
+    loop {
+        let request = tokio::select! {
+            event = goal_controls.next(), if !goal_controls.is_empty() => {
+                emit_runtime_event(events, event).await?;
+                continue;
+            }
+            request = requests.recv() => match request { Some(request) => request, None => break },
+        };
         let request = match request {
             CommandRequest::PromptAttachments {
                 request_id,
@@ -2490,6 +2524,9 @@ async fn serve_session(
                 loop {
                     tokio::select! {
                         biased;
+                        event = goal_controls.next(), if !goal_controls.is_empty() => {
+                            emit_runtime_event(events, event).await?;
+                        }
                         Some(plan) = implementation_rx.recv(), if cancel_deadline.is_none() && approved_plan.is_none() && mode_restoration.is_none() => {
                             approved_plan = Some(plan);
                             implementation_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
@@ -2777,6 +2814,11 @@ async fn serve_session(
                                 )
                                 .await?;
                             }
+                            Some(CommandRequest::GoalControl { request_id, action }) => {
+                                if goal::prepare_control(spec, events, &mut goal_question, config_recovery.is_some(), &request_id, action).await? {
+                                    goal_controls.start(connection, &session_id, request_id, action);
+                                }
+                            }
                             Some(CommandRequest::SetConfig { request_id, .. }) => {
                                 emit_runtime_event(
                                     events,
@@ -2872,6 +2914,20 @@ async fn serve_session(
                             }
                         }
                     }
+                }
+            }
+            CommandRequest::GoalControl { request_id, action } => {
+                if goal::prepare_control(
+                    spec,
+                    events,
+                    &mut goal_question,
+                    config_recovery.is_some(),
+                    &request_id,
+                    action,
+                )
+                .await?
+                {
+                    goal_controls.start(connection, &session_id, request_id, action);
                 }
             }
             CommandRequest::SetConfig {

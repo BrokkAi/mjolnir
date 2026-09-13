@@ -416,6 +416,9 @@ pub enum RuntimeEvent {
         #[serde(default)]
         config_options: Vec<SessionConfigOption>,
     },
+    GoalControlApplied {
+        request_id: String,
+    },
     SessionModeApplied {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         request_id: String,

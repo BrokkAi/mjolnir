@@ -198,4 +198,45 @@ mod tests {
             }
         ));
     }
+    #[test]
+    fn goal_control_requires_protocol_eleven_and_old_readers_cannot_attach() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        let response = relay.handle(RelayRequestEnvelope {
+            request_id: "old-goal-control".into(),
+            protocol_version: 10,
+            request: RelayRequest::Submit {
+                command_id: "clear".into(),
+                command: RelayCommand::GoalControl {
+                    action: mj_core::goal::GoalControlAction::Clear,
+                },
+            },
+        });
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Error {
+                error: RelayProtocolError {
+                    code: RelayErrorCode::IncompatibleProtocol,
+                    ..
+                }
+            }
+        ));
+        let response = relay.handle(RelayRequestEnvelope {
+            request_id: "old-reader".into(),
+            protocol_version: 10,
+            request: RelayRequest::Hello {
+                controller_version: "old".into(),
+                supported: RelayVersionRange { min: 1, max: 10 },
+            },
+        });
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Error {
+                error: RelayProtocolError {
+                    code: RelayErrorCode::IncompatibleProtocol,
+                    ..
+                }
+            }
+        ));
+    }
 }

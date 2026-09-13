@@ -7,6 +7,46 @@ use serde_json::Value;
 pub const NATIVE_ARTIFACT_ROOT: &str = "mjolnir-goals";
 
 pub const PROJECTION_KEY: &str = "mj_goal_state";
+/// Explicit user controls; creating an objective remains an agent command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalControlAction {
+    Pause,
+    Resume,
+    Clear,
+}
+
+impl GoalControlAction {
+    pub const ALL: [Self; 3] = [Self::Pause, Self::Resume, Self::Clear];
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Clear => "clear",
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|action| text.eq_ignore_ascii_case(action.as_str()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalCapability {
+    pub version: u32,
+    pub control_method: String,
+    pub actions: Vec<String>,
+}
+impl GoalCapability {
+    pub fn supports(&self, action: GoalControlAction) -> bool {
+        self.version == 1
+            && self.control_method == "_session/goal"
+            && self.actions.iter().any(|value| value == action.as_str())
+    }
+}
+
 pub const RECOVERY_ID: &str = "session-goal-recovery";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +90,8 @@ pub struct GoalDecision {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<GoalCapability>,
     #[serde(default)]
     pub known: bool,
     #[serde(default)]
@@ -96,7 +138,13 @@ impl GoalState {
                 )
             })
     }
+    pub fn supports(&self, action: GoalControlAction) -> bool {
+        self.capability
+            .as_ref()
+            .is_some_and(|capability| capability.supports(action))
+    }
     pub fn restart(&mut self) {
+        self.capability = None;
         self.known = false;
         self.execution = None;
     }
@@ -110,6 +158,11 @@ impl GoalState {
             return Ok(false);
         };
         let mut changed = false;
+        if let Some(value) = meta.get("mjGoalCapability") {
+            self.capability =
+                serde_json::from_value(value.clone()).context("decode goal capability")?;
+            changed = true;
+        }
         if let Some(goal) = meta.get("goal") {
             let was_active = self.active();
             self.snapshot =
@@ -306,5 +359,39 @@ mod tests {
             .unwrap();
         context.state.restart();
         assert!(!context.asking());
+    }
+    #[test]
+    fn goal_controls_follow_advertised_actions_and_expire_on_restart() {
+        let mut state = GoalState::default();
+        for (actions, pause) in [
+            (serde_json::json!(["set", "clear"]), false),
+            (serde_json::json!(["set", "pause", "resume", "clear"]), true),
+        ] {
+            state
+                .apply(&update(serde_json::json!({"mjGoalCapability": {
+                    "version":1, "controlMethod":"_session/goal", "actions":actions
+                }})))
+                .unwrap();
+            assert!(state.supports(GoalControlAction::Clear));
+            assert_eq!(state.supports(GoalControlAction::Pause), pause);
+            assert_eq!(state.supports(GoalControlAction::Resume), pause);
+            state
+                .apply(&update(serde_json::json!({"goal":null})))
+                .unwrap();
+            assert!(
+                state.supports(GoalControlAction::Clear),
+                "clearing a goal retains controls"
+            );
+            state.restart();
+            assert!(!state.supports(GoalControlAction::Clear));
+        }
+        for (version, method) in [(2, "_session/goal"), (1, "unknown")] {
+            state
+                .apply(&update(serde_json::json!({"mjGoalCapability": {
+                    "version":version, "controlMethod":method, "actions":["clear"]
+                }})))
+                .unwrap();
+            assert!(!state.supports(GoalControlAction::Clear));
+        }
     }
 }

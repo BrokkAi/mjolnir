@@ -1144,7 +1144,7 @@ impl DurableRelay {
         }
         if let RelayRequest::Hello { supported, .. } = &envelope.request {
             let writer_range = RelayVersionRange {
-                min: mj_core::relay::RELAY_PROVIDER_DETAILS_PROTOCOL,
+                min: mj_core::relay::RELAY_WRITER_MIN_PROTOCOL_VERSION,
                 max: RELAY_PROTOCOL_VERSION,
             };
             let Some(negotiated) = writer_range.negotiate(*supported) else {
@@ -1168,11 +1168,11 @@ impl DurableRelay {
             });
         }
         if matches!(envelope.request, RelayRequest::Attach { .. })
-            && envelope.protocol_version < mj_core::relay::RELAY_PROVIDER_DETAILS_PROTOCOL
+            && envelope.protocol_version < mj_core::relay::RELAY_WRITER_MIN_PROTOCOL_VERSION
         {
             return Some(relay_error(
                 RelayErrorCode::IncompatibleProtocol,
-                "upgrade the controller to read provider turn details without losing event integrity",
+                "upgrade the controller to read goal controls and provider details without losing event integrity",
                 false,
                 None,
             ));
@@ -1499,7 +1499,10 @@ impl DurableRelay {
         }
         // A late cancellation must not advance the checkpoint cursor or leave
         // a cancellation queued for a future turn after the barrier releases.
-        if matches!(command, RelayCommand::CancelTurn) && self.snapshot.checkpoint_barrier.is_some()
+        if matches!(
+            command,
+            RelayCommand::CancelTurn | RelayCommand::GoalControl { .. }
+        ) && self.snapshot.checkpoint_barrier.is_some()
         {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidState,
@@ -2090,7 +2093,9 @@ impl DurableRelay {
                 if active_prompt_ordinal.is_some_and(|prompt| accepted > prompt)
                     && !matches!(
                         dispatch.command,
-                        RelayCommand::Cancel | RelayCommand::CancelTurn
+                        RelayCommand::Cancel
+                            | RelayCommand::CancelTurn
+                            | RelayCommand::GoalControl { .. }
                     )
                 {
                     return None;
@@ -2099,6 +2104,7 @@ impl DurableRelay {
                     self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some();
                 if accepted < before_ordinal
                     || (running_turn && matches!(dispatch.command, RelayCommand::CancelTurn))
+                    || matches!(dispatch.command, RelayCommand::GoalControl { .. })
                 {
                     Some((accepted, command_id.clone()))
                 } else {
@@ -6615,6 +6621,78 @@ mod tests {
         let persisted = fs::read_to_string(temp.path().join(RELAY_STATE_FILE)).unwrap();
         assert!(!persisted.contains("e30="));
         assert!(relay.snapshot.handled_commands.is_empty());
+    }
+    #[test]
+    fn goal_controls_bypass_work_and_checkpoints_without_consuming_prompts() {
+        use mj_core::goal::GoalControlAction;
+        for autonomous in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = if autonomous {
+                claude_relay(temp.path())
+            } else {
+                DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap()
+            };
+            if autonomous {
+                relay.record_session_update(tool_call_update()).unwrap();
+            } else {
+                submit_relay(&mut relay, "active-work", prompt("keep running"));
+                relay.claim_pending_commands(true).unwrap();
+            }
+            submit_relay(
+                &mut relay,
+                "checkpoint",
+                RelayCommand::BeginCheckpoint { reason: None },
+            );
+            submit_relay(&mut relay, "queued-work", prompt("leave queued"));
+            for action in GoalControlAction::ALL {
+                submit_relay(
+                    &mut relay,
+                    &format!("goal-{}", action.as_str()),
+                    RelayCommand::GoalControl { action },
+                );
+                let claimed = relay.claim_pending_commands(true).unwrap();
+                assert_eq!(claimed.len(), 1);
+                assert_eq!(claimed[0].command_id, format!("goal-{}", action.as_str()));
+                assert!(claimed[0].steering_prompt.is_none());
+                // Leave resume outstanding while sending subsequent clear.
+                if action != GoalControlAction::Resume {
+                    relay
+                        .record_command_completed(
+                            &format!("goal-{}", action.as_str()),
+                            RelayCommandOutcome::GoalControlled,
+                        )
+                        .unwrap();
+                }
+            }
+            assert_eq!(queued_command_ids(&relay), vec!["queued-work"]);
+            assert!(relay.operational_state().checkpoint_barrier.is_none());
+            assert_eq!(relay.operational_state().harness_turn.is_some(), autonomous);
+            assert_eq!(
+                relay.operational_state().active_prompt.is_some(),
+                !autonomous
+            );
+            let events = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
+            let mut projection = mj_core::state::MaterializedSession::empty(SESSION);
+            for event in &events {
+                let projected =
+                    mj_transcript::projection::project_relay_event(&projection, event).unwrap();
+                mj_transcript::projection::apply_committed_projection_event(
+                    &mut projection,
+                    event,
+                    projected.mutation,
+                )
+                .unwrap();
+            }
+            drop(relay);
+            let relay = DurableRelay::open_for_checkpoint(temp.path(), SESSION, "1.0.0").unwrap();
+            assert_eq!(queued_command_ids(&relay), vec!["queued-work"]);
+            let replay = relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap();
+            assert!(replay.starts_with(&events));
+            assert!(matches!(
+                relay.snapshot.dispatches["goal-resume"].state,
+                RelayDispatchState::Interrupted
+            ));
+        }
     }
 }
 

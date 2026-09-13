@@ -1664,6 +1664,19 @@ impl ActiveChat {
                     &mut self.state,
                 );
             }
+            ChatAction::GoalControl { action } => {
+                let Some(command_id) = self.command_id("goal-control") else {
+                    restore_unsent_input(&mut self.state, &format!("/goal {}", action.as_str()));
+                    return ChatEventOutcome::Handled;
+                };
+                self.state
+                    .set_notice(format!("Sending /goal {}…", action.as_str()));
+                queue_chat_remote_operation(
+                    self.remote.operations(),
+                    ChatRemoteOperation::GoalControl { command_id, action },
+                    &mut self.state,
+                );
+            }
             ChatAction::SetConfig { key, value } => {
                 let Some(command_id) = self.command_id("set-config") else {
                     restore_unsent_input(&mut self.state, &config_command_text(&key, &value));

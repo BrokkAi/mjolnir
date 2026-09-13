@@ -237,6 +237,9 @@ pub enum ChatAction {
     StopBackgroundTask {
         id: String,
     },
+    GoalControl {
+        action: mj_core::goal::GoalControlAction,
+    },
     SetConfig {
         key: String,
         value: String,
@@ -557,6 +560,7 @@ pub struct ChatState {
     elicitation_is_reviewers: bool,
     /// Which reviewing role asked the form on screen, when one did.
     elicitation_role: Option<String>,
+    goal_state: mj_core::goal::GoalState,
     goal_prompt_active: bool,
     acp_surface: AcpSessionSurface,
     plan_command_pending: bool,
@@ -706,6 +710,11 @@ impl ChatState {
             review_config: mj_core::config::ReviewConfig::default(),
             elicitation_is_reviewers: false,
             elicitation_role: None,
+            goal_state: mj_core::goal::GoalState::from_configuration(&snapshot.config)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "invalid projected goal state");
+                    Default::default()
+                }),
             goal_prompt_active: snapshot
                 .active_prompt
                 .as_ref()
@@ -936,6 +945,18 @@ impl ChatState {
         if self.queued_prompts != queued_prompts {
             self.queued_prompts = queued_prompts;
             self.mark_visible_changed();
+        }
+        match mj_core::goal::GoalState::from_configuration(&session.configuration) {
+            Ok(goal) => {
+                if self.goal_state != goal {
+                    self.goal_state = goal;
+                    self.mark_visible_changed();
+                }
+            }
+            Err(error) => {
+                self.goal_state = Default::default();
+                self.set_notice(format!("Could not read goal state: {error:#}"));
+            }
         }
         self.set_config_options(config_options);
         self.acp_surface
@@ -1690,6 +1711,9 @@ impl ChatState {
     }
 
     fn pursuing_goal(&self) -> bool {
+        if self.goal_state.known {
+            return self.goal_state.active();
+        }
         self.session_activity.pursuing_goal
             || (self.goal_prompt_active && self.acp_surface.advertises_command("goal"))
     }
@@ -2155,7 +2179,9 @@ impl ChatState {
         if prompt.is_empty() && self.input_images.is_empty() {
             return ChatAction::None;
         }
-        if self.plan_command_pending {
+        if self.plan_command_pending
+            && !matches!(parsed_command, Some((LocalCommand::GoalControl(_), _)))
+        {
             self.set_notice("A plan-mode transition is still in progress");
             return ChatAction::None;
         }
@@ -2183,6 +2209,29 @@ impl ChatState {
         }
         if let Some((command, args)) = parsed_command {
             return match command {
+                LocalCommand::GoalControl(action) => {
+                    if !self.goal_state.supports(action) {
+                        let mut message = format!(
+                            "/goal {} is not supported by this adapter.",
+                            action.as_str()
+                        );
+                        if self
+                            .goal_state
+                            .supports(mj_core::goal::GoalControlAction::Clear)
+                        {
+                            message.push_str(" Use /goal clear to remove the goal.");
+                        }
+                        self.set_notice(message);
+                        return ChatAction::None;
+                    }
+                    if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
+                        self.set_notice("The worker is closing; the goal command was not sent");
+                        return ChatAction::None;
+                    }
+                    self.record_prompt_history(&prompt);
+                    self.clear_input();
+                    ChatAction::GoalControl { action }
+                }
                 LocalCommand::Help => {
                     self.clear_input();
                     self.show_help();
@@ -3499,6 +3548,11 @@ impl ChatState {
                 return;
             }
         };
+        match self.goal_state.apply(&parsed) {
+            Ok(true) => self.rebuild_command_choices(),
+            Ok(false) => {}
+            Err(error) => self.set_notice(format!("Could not read goal update: {error:#}")),
+        }
         let Some(parsed) =
             apply_session_update_to_entries(&mut self.entries, seq, recorded_at_ms, parsed)
         else {

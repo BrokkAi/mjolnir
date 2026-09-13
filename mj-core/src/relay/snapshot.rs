@@ -52,6 +52,10 @@ pub enum RelayCommand {
         key: String,
         value: String,
     },
+    /// Native goal control delivered independently of the prompt queue.
+    GoalControl {
+        action: crate::goal::GoalControlAction,
+    },
     /// Opaque ACP `session/set_mode` id. Hel uses it for harnesses whose plan
     /// mode is a session mode rather than an advertised slash command.
     SetSessionMode {
@@ -96,6 +100,7 @@ impl RelayCommand {
     pub fn minimum_protocol(&self) -> u32 {
         match self {
             Self::RunUserShell { .. } | Self::CancelUserShell { .. } => 5,
+            Self::GoalControl { .. } => 11,
             Self::CancelTurn => 7,
             Self::Prompt { prompt } if crate::attachment::has_references(prompt) => 8,
             _ => super::RELAY_MIN_PROTOCOL_VERSION,
@@ -124,6 +129,7 @@ impl RelayCommand {
             self,
             Self::Prompt { .. }
                 | Self::SetConfig { .. }
+                | Self::GoalControl { .. }
                 | Self::SetSessionMode { .. }
                 | Self::CancelTurn
                 | Self::Cancel
@@ -146,6 +152,7 @@ impl RelayCommand {
             Self::RemoveQueuedPrompt { .. } => RelayCommandKind::RemoveQueuedPrompt,
             Self::ClearQueuedPrompts => RelayCommandKind::ClearQueuedPrompts,
             Self::SetConfig { .. } => RelayCommandKind::SetConfig,
+            Self::GoalControl { .. } => RelayCommandKind::GoalControl,
             Self::SetSessionMode { .. } => RelayCommandKind::SetSessionMode,
             Self::CancelTurn => RelayCommandKind::CancelTurn,
             Self::Cancel => RelayCommandKind::Cancel,
@@ -168,6 +175,7 @@ pub enum RelayCommandKind {
     RemoveQueuedPrompt,
     ClearQueuedPrompts,
     SetConfig,
+    GoalControl,
     SetSessionMode,
     CancelTurn,
     Cancel,
@@ -713,6 +721,7 @@ pub enum RelayCommandOutcome {
     },
     UserShellCancelled,
     Configured,
+    GoalControlled,
     SessionModeSet,
     Cancelled,
     Steered {
@@ -1599,6 +1608,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 (RelayCommand::SetSessionMode { mode_id }, RelayCommandOutcome::SessionModeSet) => {
                     snapshot.config.insert("mode".to_owned(), mode_id);
                 }
+                (RelayCommand::GoalControl { .. }, RelayCommandOutcome::GoalControlled) => {}
                 (RelayCommand::Cancel, RelayCommandOutcome::Cancelled)
                 | (RelayCommand::CancelTurn, RelayCommandOutcome::Cancelled) => {}
                 (RelayCommand::Cancel, RelayCommandOutcome::Steered { queued_command_id }) => {
@@ -2012,6 +2022,7 @@ fn cancels_capacity_retry(command: &RelayCommand) -> bool {
             | RelayCommand::Cancel
             | RelayCommand::CancelTurn
             | RelayCommand::SetConfig { .. }
+            | RelayCommand::GoalControl { .. }
             | RelayCommand::SetSessionMode { .. }
             | RelayCommand::Close { .. }
     )

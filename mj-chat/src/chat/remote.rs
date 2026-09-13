@@ -44,6 +44,10 @@ pub(super) enum ChatRemoteOperation {
     StopBackgroundTask {
         id: String,
     },
+    GoalControl {
+        command_id: String,
+        action: mj_core::goal::GoalControlAction,
+    },
     SetConfig {
         command_id: String,
         key: String,
@@ -91,6 +95,10 @@ pub(super) enum ChatRemoteResult {
         id: String,
         result: std::result::Result<(), String>,
     },
+    GoalControl {
+        action: mj_core::goal::GoalControlAction,
+        result: std::result::Result<(), String>,
+    },
     SetConfig {
         key: String,
         value: String,
@@ -129,6 +137,9 @@ impl ChatRemoteResult {
                 result: Err(error), ..
             }
             | Self::StopBackgroundTask {
+                result: Err(error), ..
+            }
+            | Self::GoalControl {
                 result: Err(error), ..
             }
             | Self::SetConfig {
@@ -553,6 +564,37 @@ async fn enqueue_chat_remote_operation(
                 );
             });
         }
+        ChatRemoteOperation::GoalControl { command_id, action } => {
+            let response = session
+                .enqueue_submit(command_id, RelayCommand::GoalControl { action })
+                .await;
+            match response {
+                Ok(response) => {
+                    let results = results.clone();
+                    let attached = attached.clone();
+                    pending.spawn(async move {
+                        let result = response
+                            .wait()
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| format!("{error:#}"));
+                        publish_chat_remote_result(
+                            &results,
+                            &attached,
+                            ChatRemoteResult::GoalControl { action, result },
+                        );
+                    });
+                }
+                Err(error) => publish_chat_remote_result(
+                    results,
+                    attached,
+                    ChatRemoteResult::GoalControl {
+                        action,
+                        result: Err(format!("{error:#}")),
+                    },
+                ),
+            }
+        }
         ChatRemoteOperation::SetConfig {
             command_id,
             key,
@@ -889,6 +931,13 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
             id,
             result: Err(error),
         } => chat.fail_background_stop(&id, &error),
+        ChatRemoteResult::GoalControl { action, result } => match result {
+            Ok(()) => chat.set_notice(format!("Goal command finished: /goal {}", action.as_str())),
+            Err(error) => {
+                restore_unsent_input(chat, &format!("/goal {}", action.as_str()));
+                chat.set_notice(format!("/goal {} failed: {error}", action.as_str()));
+            }
+        },
         ChatRemoteResult::SetConfig { result: Ok(()), .. } => {
             chat.set_notice("Configuration update accepted")
         }
@@ -984,6 +1033,9 @@ pub(super) fn queue_chat_remote_operation(
             }
             ChatRemoteOperation::StopBackgroundTask { id } => {
                 chat.fail_background_stop(&id, "session command queue is full");
+            }
+            ChatRemoteOperation::GoalControl { action, .. } => {
+                restore_unsent_input(chat, &format!("/goal {}", action.as_str()));
             }
             ChatRemoteOperation::SetConfig { key, value, .. } => {
                 restore_unsent_input(chat, &config_command_text(&key, &value));

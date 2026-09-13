@@ -1,6 +1,75 @@
-//! Goal recovery uses the same question surface as saved model recovery.
+//! Native goal controls and recovery through the saved-session question surface.
 use super::*;
 use mj_core::goal::{GoalSnapshot, RECOVERY_ID};
+
+type PendingControl = Pin<Box<dyn Future<Output = RuntimeEvent> + Send>>;
+
+/// Polled by both command loops. Dropping the session drops all request waits;
+/// the relay reports their commands interrupted rather than replaying them.
+#[derive(Default)]
+pub(super) struct PendingControls(Vec<PendingControl>);
+
+impl PendingControls {
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(super) fn start(
+        &mut self,
+        connection: &ConnectionTo<Agent>,
+        session: &SessionId,
+        request_id: String,
+        action: mj_core::goal::GoalControlAction,
+    ) {
+        let connection = connection.clone();
+        let session = session.clone();
+        self.0.push(Box::pin(async move {
+            // Explicit native resume may answer only when its turn finishes.
+            // Do not impose recovery's short acknowledgement timeout here.
+            let response = connection
+                .send_request(control_request(&session, action, None))
+                .block_task()
+                .await;
+            match response {
+                Ok(_) => RuntimeEvent::GoalControlApplied { request_id },
+                Err(error) => RuntimeEvent::CommandRejected {
+                    request_id,
+                    message: format!("/goal {} failed: {error}", action.as_str()),
+                },
+            }
+        }));
+    }
+
+    pub(super) async fn next(&mut self) -> RuntimeEvent {
+        std::future::poll_fn(|cx| {
+            for index in 0..self.0.len() {
+                if let std::task::Poll::Ready(event) = self.0[index].as_mut().poll(cx) {
+                    // Keep requests ordered until their first poll sends them.
+                    drop(self.0.remove(index));
+                    return std::task::Poll::Ready(event);
+                }
+            }
+            std::task::Poll::Pending
+        })
+        .await
+    }
+}
+
+fn control_request(
+    session: &SessionId,
+    action: mj_core::goal::GoalControlAction,
+    expected: Option<&GoalSnapshot>,
+) -> UntypedMessage {
+    let mut params = serde_json::json!({"sessionId":session, "action":action.as_str()});
+    if let Some(goal) = expected {
+        params["expectedGoal"] =
+            serde_json::json!({"objective":goal.objective, "createdAt":goal.created_at});
+    }
+    UntypedMessage {
+        method: "_session/goal".into(),
+        params,
+    }
+}
 
 pub(super) async fn publish(
     spec: &LaunchSpec,
@@ -54,6 +123,71 @@ async fn decision_update(
     }
 }
 
+/// Explicit controls supersede any saved restart answer before native dispatch.
+pub(super) async fn prepare_control(
+    spec: &LaunchSpec,
+    events: &mpsc::Sender<RuntimeEvent>,
+    pending: &mut Option<Question>,
+    model_pending: bool,
+    request_id: &str,
+    action: mj_core::goal::GoalControlAction,
+) -> Result<bool> {
+    let context = spec
+        .goal_recovery
+        .lock()
+        .expect("goal lock poisoned")
+        .clone();
+    let error = if !context.state.supports(action) {
+        Some(format!(
+            "/goal {} is not supported by this adapter",
+            action.as_str()
+        ))
+    } else if model_pending && action == mj_core::goal::GoalControlAction::Resume {
+        Some("Choose the replacement model before resuming the goal".into())
+    } else {
+        None
+    };
+    if let Some(message) = error {
+        emit_runtime_event(
+            events,
+            RuntimeEvent::CommandRejected {
+                request_id: request_id.into(),
+                message,
+            },
+        )
+        .await?;
+        return Ok(false);
+    }
+    if pending.is_some() || context.state.decision.is_some() || context.asking() {
+        let mut meta = serde_json::json!({"mjGoalDecision":null});
+        if let Some(intent) = context.request_id() {
+            meta["mjGoalResumeAnswered"] = intent.into();
+        }
+        if let Err(error) = decision_update(spec, events, meta).await {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::CommandRejected {
+                    request_id: request_id.into(),
+                    message: format!("Could not save goal control intent: {error:#}"),
+                },
+            )
+            .await?;
+            return Ok(false);
+        }
+        if pending.take().is_some() {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::ElicitationResolved {
+                    elicitation_id: RECOVERY_ID.into(),
+                    action: "cancel".into(),
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(true)
+}
+
 pub(super) struct Question {
     request: ElicitationRequest,
     goal: GoalSnapshot,
@@ -70,11 +204,14 @@ async fn control(
         goal.control_method.as_deref() == Some("_session/goal"),
         "goal resume is not supported by this harness"
     );
-    let created_at = goal.created_at.context("goal identity is unavailable")?;
-    tokio::time::timeout(Duration::from_secs(30), connection.send_request(UntypedMessage {
-        method: "_session/goal".into(),
-        params: serde_json::json!({"sessionId":session,"action":if resume { "resume" } else { "pause" }, "expectedGoal":{"objective":goal.objective,"createdAt":created_at}}),
-    }).block_task()).await.context("goal resume acknowledgement timed out; current execution must be reconciled before retrying")??;
+    goal.created_at.context("goal identity is unavailable")?;
+    let action = if resume {
+        mj_core::goal::GoalControlAction::Resume
+    } else {
+        mj_core::goal::GoalControlAction::Pause
+    };
+    tokio::time::timeout(Duration::from_secs(30), connection.send_request(control_request(session, action, Some(goal))).block_task())
+        .await.context("goal resume acknowledgement timed out; current execution must be reconciled before retrying")??;
     Ok(())
 }
 
@@ -429,6 +566,266 @@ for line in sys.stdin:
             assert_eq!(count, expected_resumes);
             if running {
                 assert_eq!(bytes, 80000);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn goal_controls_work_during_prompts_and_pending_resume_with_large_output() {
+        use mj_core::goal::GoalControlAction;
+        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+            for foreground in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let script = root.path().join("controls.py");
+                std::fs::write(&script, r#"
+import json, os, sys
+def emit(x): print(json.dumps(x), flush=True)
+def result(i): emit({'jsonrpc':'2.0','id':i,'result':{}})
+def update(x): emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':x}})
+def goal(status): update({'sessionUpdate':'session_info_update','_meta':{'goal':None if status is None else {'objective':'finish','status':status,'createdAt':123,'tokensUsed':42,'tokenBudget':900}}})
+def text(s): update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':s}})
+codex = os.environ['CODEX'] == 'true'
+held = None
+clears = 0
+for line in sys.stdin:
+    r=json.loads(line); m=r.get('method'); i=r.get('id'); p=r.get('params',{})
+    if i is None: continue
+    if m=='initialize':
+        emit({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{},'_meta':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear'] if codex else ['set','clear']}}}})
+    elif m=='session/new':
+        emit({'jsonrpc':'2.0','id':i,'result':{'sessionId':'native','modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'}]}}})
+    elif m=='session/prompt':
+        assert p['prompt'][0]['text']=='work'
+        text('prompt-started')
+        # Leave the foreground prompt open until close.
+    elif m=='_session/goal':
+        assert 'expectedGoal' not in p
+        action=p['action']
+        if action=='resume':
+            assert codex
+            held=i
+            goal('active')
+            text('resume-pending')
+        elif action=='pause':
+            assert codex
+            goal('paused')
+            text('x'*100000)
+            result(i)
+        elif action=='clear':
+            clears += 1
+            if clears > 1:
+                emit({'jsonrpc':'2.0','id':i,'error':{'code':-32603,'message':'control denied by test adapter'}})
+                continue
+            goal(None)
+            text('x'*100000)
+            result(i)
+            if held is not None: result(held); held=None
+        else: raise AssertionError(action)
+    else: result(i)
+"#).unwrap();
+                let context = Arc::new(Mutex::new(mj_core::goal::GoalRecoveryContext::default()));
+                let spec = LaunchSpec {
+                    goal_recovery: context.clone(),
+                    command: "python3".into(),
+                    args: vec![script.to_string_lossy().into_owned()],
+                    environment: BTreeMap::from([(
+                        "CODEX".into(),
+                        (harness == HarnessKind::Codex).to_string(),
+                    )]),
+                    cwd: root.path().into(),
+                    additional_directories: vec![],
+                    project_memory: None,
+                    extra_mcp_servers: vec![],
+                    resume_session: None,
+                    accepted_config: Default::default(),
+                    harness,
+                    execution_policy: ExecutionPolicy::ConfiguredApprovals,
+                    acp_activity: Default::default(),
+                    step_clock: Default::default(),
+                };
+                let (tx, rx) = mpsc::channel(8);
+                let (events, mut receive) = mpsc::channel(2);
+                let task = tokio::spawn(run(spec, rx, events));
+                async fn next(rx: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
+                    tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                }
+                while !matches!(
+                    next(&mut receive).await,
+                    RuntimeEvent::SessionStarted { .. }
+                ) {}
+                assert!(
+                    context
+                        .lock()
+                        .unwrap()
+                        .state
+                        .supports(GoalControlAction::Clear)
+                );
+                if foreground {
+                    tx.send(CommandRequest::Prompt {
+                        request_id: "work".into(),
+                        prompt: vec![ContentBlock::from("work")],
+                    })
+                    .await
+                    .unwrap();
+                    loop {
+                        if let RuntimeEvent::SessionUpdate { update } = next(&mut receive).await
+                            && update
+                                .pointer("/content/text")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("prompt-started")
+                        {
+                            break;
+                        }
+                    }
+                }
+                if harness == HarnessKind::Codex {
+                    tx.send(CommandRequest::GoalControl {
+                        request_id: "resume".into(),
+                        action: GoalControlAction::Resume,
+                    })
+                    .await
+                    .unwrap();
+                    loop {
+                        if let RuntimeEvent::SessionUpdate { update } = next(&mut receive).await
+                            && update
+                                .pointer("/content/text")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("resume-pending")
+                        {
+                            break;
+                        }
+                    }
+                    tx.send(CommandRequest::GoalControl {
+                        request_id: "pause".into(),
+                        action: GoalControlAction::Pause,
+                    })
+                    .await
+                    .unwrap();
+                } else {
+                    tx.send(CommandRequest::GoalControl {
+                        request_id: "unsupported".into(),
+                        action: GoalControlAction::Pause,
+                    })
+                    .await
+                    .unwrap();
+                }
+                let mut bytes = 0;
+                loop {
+                    match next(&mut receive).await {
+                        RuntimeEvent::GoalControlApplied { request_id } => {
+                            assert_eq!(request_id, "pause");
+                            break;
+                        }
+                        RuntimeEvent::CommandRejected {
+                            request_id,
+                            message,
+                        } => {
+                            assert_eq!(harness, HarnessKind::Claude);
+                            assert_eq!(request_id, "unsupported");
+                            assert!(message.contains("not supported"));
+                            break;
+                        }
+                        RuntimeEvent::SessionUpdate { update } => {
+                            bytes += update
+                                .pointer("/content/text")
+                                .and_then(serde_json::Value::as_str)
+                                .map_or(0, str::len);
+                        }
+                        _ => {}
+                    }
+                }
+                tx.send(CommandRequest::GoalControl {
+                    request_id: "clear".into(),
+                    action: GoalControlAction::Clear,
+                })
+                .await
+                .unwrap();
+                let mut completed = 0;
+                while completed < if harness == HarnessKind::Codex { 2 } else { 1 } {
+                    match next(&mut receive).await {
+                        RuntimeEvent::GoalControlApplied { request_id } => {
+                            assert!(matches!(request_id.as_str(), "clear" | "resume"));
+                            completed += 1;
+                        }
+                        RuntimeEvent::SessionUpdate { update } => {
+                            bytes += update
+                                .pointer("/content/text")
+                                .and_then(serde_json::Value::as_str)
+                                .map_or(0, str::len);
+                        }
+                        RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+                        _ => {}
+                    }
+                }
+                assert_eq!(
+                    bytes,
+                    if harness == HarnessKind::Codex {
+                        200000
+                    } else {
+                        100000
+                    }
+                );
+                assert!(
+                    context.lock().unwrap().state.snapshot.is_none(),
+                    "late resume acknowledgement must not reactivate a cleared goal"
+                );
+                tx.send(CommandRequest::GoalControl {
+                    request_id: "denied".into(),
+                    action: GoalControlAction::Clear,
+                })
+                .await
+                .unwrap();
+                loop {
+                    if let RuntimeEvent::CommandRejected {
+                        request_id,
+                        message,
+                    } = next(&mut receive).await
+                    {
+                        assert_eq!(request_id, "denied");
+                        assert!(message.contains("control denied by test adapter"));
+                        break;
+                    }
+                }
+                if harness == HarnessKind::Codex {
+                    tx.send(CommandRequest::GoalControl {
+                        request_id: "unfinished-resume".into(),
+                        action: GoalControlAction::Resume,
+                    })
+                    .await
+                    .unwrap();
+                    loop {
+                        if let RuntimeEvent::SessionUpdate { update } = next(&mut receive).await
+                            && update
+                                .pointer("/content/text")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("resume-pending")
+                        {
+                            break;
+                        }
+                    }
+                    tx.send(CommandRequest::Cancel {
+                        request_id: "cancel".into(),
+                        steering_prompt: None,
+                    })
+                    .await
+                    .unwrap();
+                    while !matches!(next(&mut receive).await, RuntimeEvent::CancelApplied { .. }) {}
+                }
+                tx.send(CommandRequest::Close {
+                    request_id: "close".into(),
+                })
+                .await
+                .unwrap();
+                while !matches!(next(&mut receive).await, RuntimeEvent::CloseApplied { .. }) {}
+                drop(tx);
+                while receive.recv().await.is_some() {}
+                tokio::time::timeout(Duration::from_secs(10), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
             }
         }
     }

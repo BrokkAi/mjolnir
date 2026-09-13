@@ -1083,6 +1083,10 @@ pub(super) fn record_runtime_event(
                 in_flight.remove(&request_id);
             }
         }
+        RuntimeEvent::GoalControlApplied { request_id } => {
+            relay.record_command_completed(&request_id, RelayCommandOutcome::GoalControlled)?;
+            in_flight.remove(&request_id);
+        }
         RuntimeEvent::SessionModeApplied {
             request_id,
             mode_id,
@@ -1413,6 +1417,10 @@ fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandRequest> {
             request_id,
             key: key.clone(),
             value: value.clone(),
+        }),
+        RelayCommand::GoalControl { action } => Some(CommandRequest::GoalControl {
+            request_id,
+            action: *action,
         }),
         RelayCommand::SetSessionMode { mode_id } => Some(CommandRequest::SetSessionMode {
             request_id,

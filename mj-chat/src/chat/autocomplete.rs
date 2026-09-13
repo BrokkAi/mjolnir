@@ -17,6 +17,7 @@ use crate::components::{AutocompletePopup, PopupSide};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LocalCommand {
+    GoalControl(mj_core::goal::GoalControlAction),
     Help,
     Detach,
     Model,
@@ -135,7 +136,7 @@ impl ChatState {
             self.set_autocomplete(None);
             return;
         };
-        if query.contains(char::is_whitespace) {
+        if query.contains(char::is_whitespace) && !query.starts_with("goal ") {
             self.set_autocomplete(None);
             return;
         }
@@ -190,6 +191,25 @@ impl ChatState {
                 input_hint: Some("instruction".to_owned()),
                 source: CommandSource::Hel,
             });
+        }
+        for action in mj_core::goal::GoalControlAction::ALL {
+            if self.goal_state.supports(action) {
+                commands.push(CommandChoice {
+                    name: format!("goal {}", action.as_str()),
+                    description: match action {
+                        mj_core::goal::GoalControlAction::Pause => {
+                            "pause goal continuation, preserving the goal"
+                        }
+                        mj_core::goal::GoalControlAction::Resume => "resume the existing goal",
+                        mj_core::goal::GoalControlAction::Clear => {
+                            "remove the goal without interrupting the current turn"
+                        }
+                    }
+                    .into(),
+                    input_hint: None,
+                    source: CommandSource::Hel,
+                });
+            }
         }
         for command in self.acp_surface.agent_commands() {
             let name = command.name.trim();
@@ -356,6 +376,7 @@ pub(super) fn builtin_command_choices() -> Vec<CommandChoice> {
 pub(super) fn parse_local_command(prompt: &str) -> Option<(LocalCommand, &str)> {
     let (name, args) = parse_slash_command(prompt)?;
     let command = match name {
+        "goal" => LocalCommand::GoalControl(mj_core::goal::GoalControlAction::parse(args)?),
         "help" => LocalCommand::Help,
         "detach" => LocalCommand::Detach,
         "model" => LocalCommand::Model,
@@ -788,6 +809,92 @@ mod tests {
                 .command_choices
                 .iter()
                 .any(|command| { matches!(command.name.as_str(), "plan" | "implement") })
+        );
+    }
+    fn goal_chat(actions: &[&str]) -> ChatState {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        advertise(&mut chat, 1, &["goal"]);
+        chat.apply_session_update(2, &serde_json::json!({
+            "sessionUpdate":"session_info_update", "_meta": {
+                "mjGoalCapability":{"version":1,"controlMethod":"_session/goal","actions":actions},
+                "goal":{"objective":"finish","status":"active"}
+            }
+        }));
+        chat
+    }
+
+    #[test]
+    fn goal_controls_are_local_while_objectives_remain_prompts() {
+        use mj_core::goal::GoalControlAction;
+        for actions in [
+            vec!["set", "clear"],
+            vec!["set", "pause", "resume", "clear"],
+        ] {
+            let mut chat = goal_chat(&actions);
+            for action in GoalControlAction::ALL {
+                let command = format!("/goal {}", action.as_str().to_uppercase());
+                chat.input = command.clone();
+                let result = chat.submit_input();
+                if actions.contains(&action.as_str()) {
+                    assert_eq!(result, ChatAction::GoalControl { action });
+                    assert!(chat.input.is_empty());
+                } else {
+                    assert_eq!(result, ChatAction::None);
+                    assert_eq!(chat.input, command);
+                    assert!(chat.notices.current().unwrap().contains("not supported"));
+                }
+            }
+            chat.input = "/goal pause the migration after testing".into();
+            assert_eq!(
+                chat.submit_input(),
+                ChatAction::Prompt("/goal pause the migration after testing".into())
+            );
+            assert_eq!(parse_local_command("/goal"), None);
+            assert_eq!(parse_local_command("/goalkeeper pause"), None);
+        }
+    }
+
+    #[test]
+    fn goal_completion_uses_capabilities_and_pause_clears_pursuing_label() {
+        let mut chat = goal_chat(&["clear"]);
+        chat.set_input("/goal ".into());
+        assert!(chat.accept_autocomplete());
+        assert_eq!(chat.input, "/goal clear ");
+        assert!(!chat.lists_command("goal pause"));
+        let mut chat = goal_chat(&["pause", "resume", "clear"]);
+        chat.set_input("/goal p".into());
+        assert!(chat.accept_autocomplete());
+        assert_eq!(chat.input, "/goal pause ");
+        chat.mark_prompt_submitted("/goal finish");
+        assert!(chat.pursuing_goal());
+        chat.apply_session_update(3, &serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"finish","status":"paused"}}}));
+        assert!(!chat.pursuing_goal());
+        chat.apply_session_update(4, &serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"mjGoalCapability":null}}));
+        assert!(!chat.lists_command("goal pause"));
+    }
+    #[test]
+    fn goal_control_keeps_attached_drafts_and_bypasses_pending_plan_transition() {
+        let mut chat = goal_chat(&["clear"]);
+        chat.set_input("/goal clear ".into());
+        assert!(chat.reserve_attachment(1));
+        let draft = chat.input.clone();
+        assert_eq!(chat.submit_input(), ChatAction::None);
+        assert_eq!(chat.input, draft);
+        assert_eq!(chat.input_images.len(), 1);
+        assert!(
+            chat.notices
+                .current()
+                .unwrap()
+                .contains("delete its marker")
+        );
+        let mut chat = goal_chat(&["clear"]);
+        chat.plan_command_pending = true;
+        chat.input = "/goal clear".into();
+        assert_eq!(
+            chat.submit_input(),
+            ChatAction::GoalControl {
+                action: mj_core::goal::GoalControlAction::Clear
+            }
         );
     }
 }

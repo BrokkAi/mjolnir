@@ -3604,6 +3604,7 @@ while True:
 
     let mut started = Vec::new();
     let mut saw_reload = false;
+    let mut capability_updates = 0;
     loop {
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv())
             .await
@@ -3629,12 +3630,21 @@ while True:
                 saw_reload = true;
             }
             RuntimeEvent::SessionUpdate { update } => {
-                panic!("resume replay leaked into the relay: {update}")
+                assert_eq!(
+                    update,
+                    serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"mjGoalCapability":null}}),
+                    "resume replay leaked into the relay: {update}"
+                );
+                capability_updates += 1;
             }
             RuntimeEvent::Stopped => panic!("worker stopped before reloading the session"),
             _ => {}
         }
     }
+    assert_eq!(
+        capability_updates, 2,
+        "each bridge refreshes its goal controls"
+    );
     assert!(saw_reload, "a dead bridge after session start must reload");
     assert_eq!(started, vec![false, true], "the second open is a resume");
 
