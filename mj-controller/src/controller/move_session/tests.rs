@@ -14,7 +14,7 @@ use crate::controller::test_support::{
     raw_session_on, resume_compatibility_config, ssh_worktree_target,
 };
 #[cfg(unix)]
-use mj_core::archive::{
+use mj_checkpoint::archive::{
     ArchiveInput, BundleManifest, CanonicalExecutionState, CanonicalQueuedCommandKind,
     CanonicalQueuedPrompt, CanonicalSessionSnapshot, CanonicalSessionState, SessionManifest,
     TargetManifest, write_archive_atomic,
@@ -497,7 +497,7 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
     let image = ContentBlock::Image(ImageContent::new("x".repeat(70 * 1024), "image/png"));
     let canonical = CanonicalSessionSnapshot {
         event_frontier: 0,
-        event_frontier_digest: mj_core::archive::EVENT_FRONTIER_GENESIS_DIGEST.into(),
+        event_frontier_digest: mj_checkpoint::archive::EVENT_FRONTIER_GENESIS_DIGEST.into(),
         session: CanonicalSessionState {
             execution: CanonicalExecutionState::Idle,
             last_activity_at_ms: None,

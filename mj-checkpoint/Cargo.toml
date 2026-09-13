@@ -1,0 +1,37 @@
+[package]
+name = "brokk-mj-checkpoint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Checkpoint archives and native session relocation for Mjolnir"
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[lib]
+name = "mj_checkpoint"
+
+[lints]
+workspace = true
+
+[dependencies]
+mj-core.workspace = true
+agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
+anyhow = "1"
+base64 = "0.22"
+blake3 = { version = "1", default-features = false, features = ["std"] }
+dirs = "6"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+libc = "0.2"
+rayon = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+zstd = "0.13"
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3"
+url = "2"
+zip = { version = "2", default-features = false, features = ["deflate", "zstd"] }
+
+[dev-dependencies]
+tempfile = "3"

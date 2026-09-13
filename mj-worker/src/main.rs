@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use mj_core::archive::{EXPORT_REFUSED_EXIT_CODE, PushBranchError, SessionExportError};
+use mj_checkpoint::archive::{EXPORT_REFUSED_EXIT_CODE, PushBranchError, SessionExportError};
 use mj_core::worker_launch::WorkerLaunchConfig;
 use mj_worker::worker_runtime::{
     AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor,
@@ -341,7 +341,7 @@ async fn run_command(command: Command) -> Result<()> {
             mj_worker::checkpoint::restore_from_spec_file(&spec)
         }
         WorkerCommand::InstallResource { destination } => {
-            mj_core::resources::install_resource_stream(std::io::stdin(), &destination)
+            mj_checkpoint::resources::install_resource_stream(std::io::stdin(), &destination)
         }
         WorkerCommand::MemoryMcp { root } => mj_worker::memory_mcp::run_mcp_stdio(&root),
         WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
@@ -350,8 +350,8 @@ async fn run_command(command: Command) -> Result<()> {
             base,
             branch,
         } => {
-            let diff = mj_core::archive::session_diff(
-                &mj_core::archive::SystemGit,
+            let diff = mj_checkpoint::archive::session_diff(
+                &mj_checkpoint::archive::SystemGit,
                 &repository,
                 base.as_deref(),
                 branch.as_deref(),
@@ -359,16 +359,16 @@ async fn run_command(command: Command) -> Result<()> {
             .map_err(export_error)?;
             write_stdout(diff.as_bytes())
         }
-        WorkerCommand::ReadFile { root, path } => {
-            write_stdout(&mj_core::archive::read_session_file(&root, &path).map_err(export_error)?)
-        }
+        WorkerCommand::ReadFile { root, path } => write_stdout(
+            &mj_checkpoint::archive::read_session_file(&root, &path).map_err(export_error)?,
+        ),
         WorkerCommand::WriteFile {
             root,
             path,
             overwrite,
             length,
         } => {
-            let bytes = mj_core::archive::read_session_file_input(std::io::stdin().lock())
+            let bytes = mj_checkpoint::archive::read_session_file_input(std::io::stdin().lock())
                 .map_err(export_error)?;
             if bytes.len() != length {
                 return Err(export_error(SessionExportError::Refused(format!(
@@ -376,15 +376,18 @@ async fn run_command(command: Command) -> Result<()> {
                     bytes.len()
                 ))));
             }
-            mj_core::archive::write_session_file(&root, &path, &bytes, overwrite)
+            mj_checkpoint::archive::write_session_file(&root, &path, &bytes, overwrite)
                 .map_err(export_error)
         }
         WorkerCommand::PushBranch {
             repository, branch, ..
         } => {
-            let pushed =
-                mj_core::archive::push_branch(&mj_core::archive::SystemGit, &repository, &branch)
-                    .map_err(push_error)?;
+            let pushed = mj_checkpoint::archive::push_branch(
+                &mj_checkpoint::archive::SystemGit,
+                &repository,
+                &branch,
+            )
+            .map_err(push_error)?;
             println!("{}", serde_json::to_string(&pushed)?);
             Ok(())
         }
@@ -552,7 +555,7 @@ mod tests {
     fn an_export_precondition_failure_carries_the_refusal_exit_code() {
         let root = tempfile::tempdir().unwrap();
         let error = export_error(
-            mj_core::archive::read_session_file(root.path(), Path::new("../secret.txt"))
+            mj_checkpoint::archive::read_session_file(root.path(), Path::new("../secret.txt"))
                 .unwrap_err(),
         );
         let refusal = error

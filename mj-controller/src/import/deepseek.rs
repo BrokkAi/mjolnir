@@ -90,11 +90,11 @@ pub(super) fn scan(
 /// Read a native DSH log into Hel's lossy chat projection.
 pub(super) fn read_transcript(path: &Path) -> Result<ClaudeTranscript> {
     ensure!(
-        mj_core::native::deepseek::is_session_log(path),
+        mj_checkpoint::native::deepseek::is_session_log(path),
         "unsupported DeepSeek session artifact path {}",
         path.display()
     );
-    if let Some(generation) = mj_core::native::deepseek::session_generation(path)
+    if let Some(generation) = mj_checkpoint::native::deepseek::session_generation(path)
         && generation != "0"
     {
         bail!(
@@ -119,7 +119,7 @@ pub(super) fn read_transcript(path: &Path) -> Result<ClaudeTranscript> {
     }
     let data =
         fs::read(path).with_context(|| format!("read DeepSeek session {}", path.display()))?;
-    let log = mj_core::native::deepseek::read(path, &data)?;
+    let log = mj_checkpoint::native::deepseek::read(path, &data)?;
     validate_path_identity(path, &log.header)?;
     ensure_top_level(&log.header)?;
     ensure!(
@@ -270,7 +270,7 @@ fn candidates(home: &Path) -> Result<Vec<Candidate>> {
             }
             let data = fs::read(&path)
                 .with_context(|| format!("read DeepSeek session {}", path.display()))?;
-            let log = mj_core::native::deepseek::read(&path, &data)?;
+            let log = mj_checkpoint::native::deepseek::read(&path, &data)?;
             validate_path_identity(&path, &log.header)?;
             if is_child(&log.header) {
                 continue;
@@ -345,10 +345,10 @@ fn find_log(directory: &Path) -> Result<Option<PathBuf>> {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             continue;
         }
-        if !mj_core::native::deepseek::is_session_log(&path) {
+        if !mj_checkpoint::native::deepseek::is_session_log(&path) {
             continue;
         }
-        let generation = mj_core::native::deepseek::session_generation(&path)
+        let generation = mj_checkpoint::native::deepseek::session_generation(&path)
             .context("DeepSeek session log generation is invalid")?;
         if generation != "0" {
             bail!(
@@ -379,7 +379,7 @@ fn validate_path_identity(path: &Path, header: &Value) -> Result<()> {
         .and_then(|name| name.to_str())
         .context("DeepSeek session directory name is not UTF-8")?;
     ensure!(
-        mj_core::native::deepseek::decode_segment(encoded_id).as_deref() == Some(id.as_str()),
+        mj_checkpoint::native::deepseek::decode_segment(encoded_id).as_deref() == Some(id.as_str()),
         "corrupt DeepSeek session log {}: header id {:?} does not match its directory",
         path.display(),
         id
@@ -387,7 +387,7 @@ fn validate_path_identity(path: &Path, header: &Value) -> Result<()> {
     let project_dir = session_dir
         .parent()
         .context("DeepSeek session directory has no project directory")?;
-    let expected_project = mj_core::native::deepseek::project_key(&cwd)?;
+    let expected_project = mj_checkpoint::native::deepseek::project_key(&cwd)?;
     ensure!(
         project_dir.file_name().and_then(|name| name.to_str()) == Some(expected_project.as_str()),
         "corrupt DeepSeek session log {}: header cwd {} does not match its project directory",

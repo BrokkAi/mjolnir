@@ -478,10 +478,9 @@ fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, Export
         // base, no push remote, a path outside the workspace — and printed the
         // reason. That is the caller's to fix, so it is a refusal, not a
         // failed export.
-        mj_core::archive::EXPORT_REFUSED_EXIT_CODE => Err(ExportError::Refused(refusal_reason(
-            &output.stderr,
-            purpose,
-        ))),
+        mj_checkpoint::archive::EXPORT_REFUSED_EXIT_CODE => Err(ExportError::Refused(
+            refusal_reason(&output.stderr, purpose),
+        )),
         status => Err(ExportError::Failed(anyhow!(
             "{purpose} failed with status {status}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -843,8 +842,8 @@ impl SubagentBackend for ApiBackend {
             ];
             let stdout =
                 worker_command(layout, session_id, arguments, "session branch push").await?;
-            let pushed: mj_core::archive::PushedBranch =
-                serde_json::from_slice(&stdout).map_err(|error| {
+            let pushed: mj_checkpoint::archive::PushedBranch = serde_json::from_slice(&stdout)
+                .map_err(|error| {
                     ExportError::Failed(anyhow!("the worker's push result was unreadable: {error}"))
                 })?;
             Ok(PushedBranch {
@@ -886,7 +885,7 @@ impl SubagentBackend for ApiBackend {
                 }
             };
             let bundles = export_blocking("verify the checkpoint bundles", move || {
-                mj_core::archive::verify_repository_bundles_streaming(&archive_path)
+                mj_checkpoint::archive::verify_repository_bundles_streaming(&archive_path)
             })
             .await?;
             let repository = bundles

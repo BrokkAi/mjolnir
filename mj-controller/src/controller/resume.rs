@@ -11,11 +11,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::checkpoint_transfer::restore_command;
 use crate::session_manager::new_command_id;
-use mj_core::archive::{
+use mj_checkpoint::archive::{
     CanonicalQueuedCommandKind, CanonicalSessionSnapshot, CheckpointRepositoryBundle, SystemGit,
     checkpoint_bundle_prerequisites, read_checkpoint_repository_bundles, verify_archive_streaming,
 };
-use mj_core::checkpoint::CheckpointRestoreSpec;
+use mj_checkpoint::checkpoint::CheckpointRestoreSpec;
 use mj_core::config::{Config, HarnessKind, ProjectRepository, mount_history_host};
 use mj_core::projection::materialized_session_from_canonical;
 use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocation, SessionState};
@@ -732,7 +732,7 @@ impl Controller {
         // Take the snapshot out of the verified metadata and share it behind an
         // `Arc`: on a long session it is tens of megabytes, and resume reads it
         // from three places that used to hold private copies.
-        let mj_core::archive::VerifiedArchiveMetadata {
+        let mj_checkpoint::archive::VerifiedArchiveMetadata {
             manifest: archive_manifest,
             canonical_session,
             archive_sha256,
@@ -1007,7 +1007,7 @@ impl Controller {
             if let Some(worktree) = previous.managed_worktree.as_ref() {
                 recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
                 if recreated_managed_worktree && plan == ResumePlan::RawToWorkspace {
-                    mj_core::checkpoint::restore_single_repository_onto_branch(
+                    mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
                         &archive_path,
                         &worktree.worktree_root,
                         &worktree.branch,
@@ -1037,7 +1037,7 @@ impl Controller {
                         PrimaryCheckoutRequirement::Any,
                     )?;
                 }
-                mj_core::checkpoint::restore_single_repository_onto_branch(
+                mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
                     &archive_path,
                     &conversion.worktree.worktree_root,
                     &conversion.worktree.branch,
@@ -1779,7 +1779,7 @@ mod tests {
         resume_compatibility_config, write_checkpoint_gate_archive,
     };
     use crate::controller::{Controller, SessionResumeOptions};
-    use mj_core::archive::{GitCommandRunner, verify_archive_streaming};
+    use mj_checkpoint::archive::{GitCommandRunner, verify_archive_streaming};
     use mj_core::config::{
         Config, ContainerTemplate as ConfigContainer, HarnessProfile, ProjectBundle,
         ProjectRepository, TargetTemplate,
@@ -2022,7 +2022,7 @@ mod tests {
             let output = SystemGit
                 .run(
                     repository,
-                    &mj_core::archive::GitCommand {
+                    &mj_checkpoint::archive::GitCommand {
                         arguments: arguments.iter().map(std::ffi::OsString::from).collect(),
                         stdin: Vec::new(),
                         env: Vec::new(),
@@ -2052,13 +2052,13 @@ mod tests {
         git(&source, &["config", "user.name", "Hel Test"]);
         git(&source, &["config", "user.email", "hel@example.test"]);
         git(&source, &["commit", "--allow-empty", "-qm", "session"]);
-        let snapshot = mj_core::archive::collect_git_snapshot(
+        let snapshot = mj_checkpoint::archive::collect_git_snapshot(
             &SystemGit,
             &source,
-            &mj_core::archive::GitCollectionSpec {
+            &mj_checkpoint::archive::GitCollectionSpec {
                 id: "project".into(),
                 relative_destination: "project".into(),
-                history: mj_core::archive::GitHistoryMode::SessionDelta,
+                history: mj_checkpoint::archive::GitHistoryMode::SessionDelta,
                 origin_override: None,
             },
         )
@@ -2166,7 +2166,7 @@ mod tests {
             repositories: repositories
                 .iter()
                 .map(|repository| CheckpointRepositoryBundle {
-                    metadata: mj_core::archive::RepositoryMetadata {
+                    metadata: mj_checkpoint::archive::RepositoryMetadata {
                         push_urls: Vec::new(),
                         remote_workspace: false,
                         id: repository.id.clone(),
@@ -2234,7 +2234,7 @@ mod tests {
         let prerequisite = "a".repeat(40);
         let head = "b".repeat(40);
         let archived = CheckpointRepositoryBundle {
-            metadata: mj_core::archive::RepositoryMetadata {
+            metadata: mj_checkpoint::archive::RepositoryMetadata {
                 push_urls: Vec::new(),
                 remote_workspace: false,
                 id: "project".into(),

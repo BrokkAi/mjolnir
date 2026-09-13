@@ -1,5 +1,5 @@
-use mj_core::archive::*;
-use mj_core::checkpoint::*;
+use mj_checkpoint::archive::*;
+use mj_checkpoint::checkpoint::*;
 use mj_core::config::HarnessKind;
 use serde_json::json;
 use std::fs;

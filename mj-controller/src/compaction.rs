@@ -7,7 +7,7 @@ use anyhow::{Context, Result, ensure};
 use futures::{TryStreamExt, stream};
 use serde_json::Value;
 
-use mj_core::archive::{CanonicalSessionSnapshot, CanonicalTranscriptBody};
+use mj_checkpoint::archive::{CanonicalSessionSnapshot, CanonicalTranscriptBody};
 
 pub const DEFAULT_CONTEXT_BYTES: usize = 256 * 1024;
 /// Opening sentence of every handoff this module writes. Generation and
@@ -714,7 +714,7 @@ fn handoff(summary: &str, exact_tail: Option<&str>, handoff_bytes: usize) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mj_core::archive::{
+    use mj_checkpoint::archive::{
         CanonicalExecutionState, CanonicalSessionState, CanonicalTranscriptItem,
     };
     use std::collections::BTreeMap;

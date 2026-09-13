@@ -218,7 +218,7 @@ fn branch_export_uses_session_auth_after_clean_reexec() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let pushed: mj_core::archive::PushedBranch =
+        let pushed: mj_checkpoint::archive::PushedBranch =
             serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(pushed.branch, branch);
         assert_eq!(

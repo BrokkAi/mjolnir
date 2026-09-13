@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mj_core::native::muse::{MuseRecord, read_records};
+use mj_checkpoint::native::muse::{MuseRecord, read_records};
 
 use super::*;
 

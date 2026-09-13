@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use mj_core::archive::{PayloadRole, verify_archive_streaming};
-use mj_core::checkpoint::{CheckpointRestoreSpec, restore_checkpoint};
+use mj_checkpoint::archive::{PayloadRole, verify_archive_streaming};
+use mj_checkpoint::checkpoint::{CheckpointRestoreSpec, restore_checkpoint};
 
 use mj_core::config::{Config, HarnessKind, ProjectBundle, ProjectRepository, TargetTemplate};
 use mj_core::state::{SessionState, State};
@@ -80,8 +80,8 @@ fn fixture(root: &Path, kind: HarnessKind) -> NativeFixture {
         HarnessKind::Deepseek => {
             let id = DSH_ID.to_owned();
             let home = root.join("dsh");
-            let project = mj_core::native::deepseek::project_key(&cwd).unwrap();
-            let encoded_id = mj_core::native::deepseek::encode_segment(&id).unwrap();
+            let project = mj_checkpoint::native::deepseek::project_key(&cwd).unwrap();
+            let encoded_id = mj_checkpoint::native::deepseek::encode_segment(&id).unwrap();
             let path = home
                 .join("sessions")
                 .join(project)
@@ -354,7 +354,7 @@ fn native_checkpoint_restore_relocates_muse_and_dsh_without_changing_identity() 
                 discard_queued_prompts: false,
                 primary_repository_root: None,
             },
-            &mj_core::archive::SystemGit,
+            &mj_checkpoint::archive::SystemGit,
         )
         .unwrap();
         let located = locate_native_session(

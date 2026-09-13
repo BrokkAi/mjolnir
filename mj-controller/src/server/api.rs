@@ -981,7 +981,7 @@ pub(super) fn router(state: ServerState) -> Router<ServerState> {
             get(read_file)
                 .put(write_file)
                 .layer(axum::extract::DefaultBodyLimit::max(
-                    mj_core::archive::MAX_SESSION_FILE_BYTES as usize,
+                    mj_checkpoint::archive::MAX_SESSION_FILE_BYTES as usize,
                 )),
         )
         .route("/sessions/{session_id}/elicitations", get(elicitations))
@@ -3596,7 +3596,7 @@ mod tests {
                 bearer(Request::put("/api/v1/sessions/session-1/files?path=large"))
                     .body(Body::from(vec![
                         0;
-                        mj_core::archive::MAX_SESSION_FILE_BYTES
+                        mj_checkpoint::archive::MAX_SESSION_FILE_BYTES
                             as usize
                             + 1
                     ]))

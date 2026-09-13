@@ -750,7 +750,7 @@ pub(super) fn raw_checkout_position(
 /// This reports; it never reconciles. The working tree is the truth.
 pub(super) fn raw_checkout_divergence_notice(
     directory: &Path,
-    recorded: Option<&mj_core::archive::RepositoryMetadata>,
+    recorded: Option<&mj_checkpoint::archive::RepositoryMetadata>,
     live: &CheckoutPosition,
 ) -> Option<String> {
     let recorded = recorded?;
@@ -1388,7 +1388,7 @@ mod tests {
         managed_worktree_session, raw_session_on, resume_compatibility_config, ssh_worktree_target,
         test_git,
     };
-    use mj_core::archive::RepositoryMetadata;
+    use mj_checkpoint::archive::RepositoryMetadata;
     use mj_core::config::{
         Config, HarnessProfile, ProjectBundle, ProjectRepository, TargetTemplate,
     };

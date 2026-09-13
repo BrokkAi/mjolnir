@@ -1,6 +1,6 @@
 //! Session-scoped native goal checkpoints. Codex stores accounting outside rollouts.
 use anyhow::{Context, Result, ensure};
-use mj_core::archive::{NativeArtifact, validate_component};
+use mj_checkpoint::archive::{NativeArtifact, validate_component};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha384};
@@ -430,7 +430,7 @@ mod tests {
         let encoded = serde_json::to_vec(&spec).unwrap();
         crate::checkpoint::export_from_spec_reader(&mut encoded.as_slice()).unwrap();
         let target_home = temp.path().join("restored-home");
-        let restore_spec = mj_core::checkpoint::CheckpointRestoreSpec {
+        let restore_spec = mj_checkpoint::checkpoint::CheckpointRestoreSpec {
             archive_path,
             workspace_root: spec.workspace_root,
             relay_root: temp.path().join("restored-relay"),

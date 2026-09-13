@@ -169,7 +169,7 @@ jobs:
           # the root binary needs everything.
           # Publishing out of this order fails on a missing registry
           # dependency.
-          for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-client brokk-mj-worker brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mj-desktop brokk-mjolnir; do
+          for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-checkpoint brokk-mj-client brokk-mj-worker brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mj-desktop brokk-mjolnir; do
             if already_published "$crate"; then
               echo "$crate $version is already on crates.io, skipping"
               continue

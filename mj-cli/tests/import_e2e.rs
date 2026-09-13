@@ -11,7 +11,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
-use mj_core::archive::read_archive_verified;
+use mj_checkpoint::archive::read_archive_verified;
 use mj_core::config::{
     CONFIG_VERSION, Config, ContainerTemplate, HarnessKind, HarnessProfile, ProjectBundle,
     ProjectRepository, TargetTemplate,

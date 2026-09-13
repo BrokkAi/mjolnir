@@ -695,7 +695,7 @@ pub(super) fn install_attached_resources(
             ],
             "stream attached resource",
         )?;
-        mj_core::resources::stream_resource(&resource.source, |stream| {
+        mj_checkpoint::resources::stream_resource(&resource.source, |stream| {
             execute_checked_with_stdin(executor, &install, stream).map(|_| ())
         })
         .with_context(|| format!("stream attached resource {}", resource.source.display()))?;

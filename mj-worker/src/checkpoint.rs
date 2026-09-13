@@ -1,9 +1,9 @@
 //! Target checkpoint command entrypoints.
 mod codex_goal;
 use anyhow::{Context, Result, ensure};
-use mj_core::archive::SystemGit;
-use mj_core::archive::{NativeArtifact, SessionManifest};
-use mj_core::checkpoint::*;
+use mj_checkpoint::archive::SystemGit;
+use mj_checkpoint::archive::{NativeArtifact, SessionManifest};
+use mj_checkpoint::checkpoint::*;
 use mj_core::config::HarnessKind;
 use std::fs;
 use std::path::Path;

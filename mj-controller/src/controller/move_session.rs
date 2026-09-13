@@ -92,7 +92,7 @@ pub(crate) fn move_refuses_command(session_id: &str, command: &RelayCommand) -> 
         )
 }
 use crate::session_manager::{SessionManagerControl, StandaloneSession, new_command_id};
-use mj_core::archive::{CanonicalQueuedCommandKind, verify_archive_streaming};
+use mj_checkpoint::archive::{CanonicalQueuedCommandKind, verify_archive_streaming};
 use mj_core::state::{MoveOperation, MovePhase, ResumeQueueDisposition, SessionState};
 
 pub use mj_core::state::{MoveOutcome, MovePreparation, MoveSelection, MoveSessionRequest};

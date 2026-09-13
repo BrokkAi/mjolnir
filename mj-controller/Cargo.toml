@@ -22,6 +22,7 @@ workspace = true
 sysinfo = "0.32"
 signal-hook = "0.3"
 mj-core.workspace = true
+mj-checkpoint.workspace = true
 mj-client.workspace = true
 agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"

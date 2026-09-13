@@ -118,10 +118,10 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         let mut workspace_roots = vec![config.cwd.clone()];
         workspace_roots.extend(config.additional_directories.iter().cloned());
         tokio::task::spawn_blocking(move || {
-            let git = mj_core::archive::SystemGit;
+            let git = mj_checkpoint::archive::SystemGit;
             let repositories =
-                mj_core::review::delta::discover_repositories(&git, &workspace_roots);
-            mj_core::review::delta::initialize_review_baselines(&git, &repositories)
+                crate::review::capture::discover_repositories(&git, &workspace_roots);
+            crate::review::capture::initialize_review_baselines(&git, &repositories)
         })
         .await
         .map_err(|error| anyhow::anyhow!("review baseline initialization stopped: {error}"))??;

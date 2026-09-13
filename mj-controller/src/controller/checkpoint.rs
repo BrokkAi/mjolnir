@@ -16,11 +16,11 @@ use crate::session_manager::{
     new_command_id, worker_connect_needs_restart,
 };
 use crate::worker_client::RelayRejected;
-use mj_core::archive::{
+use mj_checkpoint::archive::{
     BundleManifest, CanonicalSessionSnapshot, SessionManifest, TargetManifest,
     verify_archive_streaming,
 };
-use mj_core::checkpoint::{
+use mj_checkpoint::checkpoint::{
     CHECKPOINT_EXPORT_PROTOCOL_VERSION, CHECKPOINT_STAGING_PROTOCOL_VERSION, CapturedCheckpoint,
     CheckpointCaptureSpec, CheckpointExportSpec, CheckpointPackSpec, CheckpointRepositoryCapture,
     CheckpointRepositorySpec, canonical_session_contains_prompt, checkpoint_sha256,
@@ -1183,7 +1183,7 @@ impl Controller {
                 export_ms = Some(export_started.elapsed().as_millis() as u64);
                 output
             };
-            let target_checkpoint: mj_core::checkpoint::TargetCheckpoint =
+            let target_checkpoint: mj_checkpoint::checkpoint::TargetCheckpoint =
                 serde_json::from_slice(&exported.stdout)
                     .context("decode target checkpoint result")?;
             if let Some(export_ms) = export_ms {
@@ -2536,10 +2536,10 @@ mod tests {
     #[cfg(unix)]
     use crate::session_manager::{ManagedSessionHandle, new_command_id};
     use crate::worker_client::RelayTransportDead;
-    use mj_core::archive::{
+    use mj_checkpoint::archive::{
         BundleManifest, CanonicalTranscriptBody, CanonicalTranscriptItem, TargetManifest,
     };
-    use mj_core::checkpoint::CheckpointExportSpec;
+    use mj_checkpoint::checkpoint::CheckpointExportSpec;
     #[cfg(unix)]
     use mj_core::config::{
         Config, HarnessProfile, ProjectBundle, ProjectRepository, TargetTemplate,
@@ -2860,7 +2860,7 @@ mod tests {
     }
     /// Target-side answer of a successful export.
     fn exported_checkpoint_json() -> Vec<u8> {
-        serde_json::to_vec(&mj_core::checkpoint::TargetCheckpoint {
+        serde_json::to_vec(&mj_checkpoint::checkpoint::TargetCheckpoint {
             path: PathBuf::from("/var/lib/hel/workers/session/checkpoint.hel.zip"),
             sha256: "c".repeat(64),
             event_frontier: 7,
@@ -2872,7 +2872,7 @@ mod tests {
     fn export_spec_fixture() -> CheckpointExportSpec {
         CheckpointExportSpec {
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
-            session: mj_core::archive::SessionManifest {
+            session: mj_checkpoint::archive::SessionManifest {
                 id: LATCH_RELAY_SESSION.into(),
                 title: "streamed spec".into(),
                 harness_kind: mj_core::config::HarnessKind::Codex,

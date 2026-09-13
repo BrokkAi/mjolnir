@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use mj_core::archive::{
+use mj_checkpoint::archive::{
     ArchiveInput, BundleManifest, SessionManifest, TargetManifest, write_archive_atomic,
 };
 use mj_core::config::{
@@ -65,7 +65,7 @@ pub(super) fn write_network_checkpoint_archive(
     session_id: &str,
     event_frontier: u64,
 ) -> CheckpointMetadata {
-    use mj_core::archive::{RepositoryMetadata, RepositorySnapshot};
+    use mj_checkpoint::archive::{RepositoryMetadata, RepositorySnapshot};
     write_checkpoint_archive(
         directory,
         session_id,
@@ -93,7 +93,7 @@ fn write_checkpoint_archive(
     directory: &Path,
     session_id: &str,
     event_frontier: u64,
-    repositories: Vec<mj_core::archive::RepositorySnapshot>,
+    repositories: Vec<mj_checkpoint::archive::RepositorySnapshot>,
 ) -> CheckpointMetadata {
     let archive_path = directory.join(format!("{session_id}.hel.zip"));
     let verified = write_archive_atomic(
@@ -120,15 +120,15 @@ fn write_checkpoint_archive(
                 id: "project".into(),
                 primary_repository: "project".into(),
             },
-            canonical_session: mj_core::archive::CanonicalSessionSnapshot {
+            canonical_session: mj_checkpoint::archive::CanonicalSessionSnapshot {
                 event_frontier,
                 event_frontier_digest: if event_frontier == 0 {
-                    mj_core::archive::EVENT_FRONTIER_GENESIS_DIGEST.into()
+                    mj_checkpoint::archive::EVENT_FRONTIER_GENESIS_DIGEST.into()
                 } else {
                     "a".repeat(64)
                 },
-                session: mj_core::archive::CanonicalSessionState {
-                    execution: mj_core::archive::CanonicalExecutionState::Idle,
+                session: mj_checkpoint::archive::CanonicalSessionState {
+                    execution: mj_checkpoint::archive::CanonicalExecutionState::Idle,
                     last_activity_at_ms: (event_frontier > 0).then_some(1_234),
                     session_title: None,
                     configuration: BTreeMap::new(),

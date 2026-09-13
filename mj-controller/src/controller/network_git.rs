@@ -133,7 +133,7 @@ pub(super) fn checkpoint_bundle(
         .checkpoint
         .as_ref()
         .context("session has no checkpoint")?;
-    let archive = mj_core::archive::verify_archive_streaming(&checkpoint.archive_path)?;
+    let archive = mj_checkpoint::archive::verify_archive_streaming(&checkpoint.archive_path)?;
     ensure!(
         archive.archive_sha256 == checkpoint.sha256 && archive.manifest.session.id == session.id,
         "persisted checkpoint verification failed"
@@ -142,7 +142,7 @@ pub(super) fn checkpoint_bundle(
 }
 
 pub(super) fn bundle_from_manifest(
-    manifest: &mj_core::archive::ArchiveManifest,
+    manifest: &mj_checkpoint::archive::ArchiveManifest,
 ) -> Result<targets::ProjectBundleSpec> {
     ensure!(
         !manifest.repositories.is_empty(),
@@ -252,7 +252,7 @@ mod tests {
             bundle.repositories[0].push_urls,
             ["https://push.example.test/project.git"]
         );
-        let mut archive = mj_core::archive::verify_archive_streaming(
+        let mut archive = mj_checkpoint::archive::verify_archive_streaming(
             &session.checkpoint.as_ref().unwrap().archive_path,
         )
         .unwrap();

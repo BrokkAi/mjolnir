@@ -626,6 +626,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-checkpoint"
+version = "2.6.4"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "base64",
+ "blake3",
+ "brokk-mj-core",
+ "dirs",
+ "flate2",
+ "libc",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "url",
+ "zip",
+ "zstd",
+]
+
+[[package]]
 name = "brokk-mj-client"
 version = "2.6.4"
 dependencies = [
@@ -656,6 +679,7 @@ dependencies = [
  "axum-server",
  "base64",
  "brokk-anvil-client",
+ "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-core",
  "brokk-mj-worker",
@@ -699,30 +723,23 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "base64",
- "blake3",
  "chrono",
  "dirs",
- "flate2",
  "getrandom 0.3.4",
  "libc",
- "rayon",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
  "similar",
- "tar",
  "tempfile",
  "tokio",
- "tokio-util",
  "toml",
  "tracing",
  "tree-sitter",
  "tree-sitter-bash",
  "url",
- "zip",
- "zstd",
 ]
 
 [[package]]
@@ -795,6 +812,7 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "base64",
+ "brokk-mj-checkpoint",
  "brokk-mj-controller",
  "brokk-mj-core",
  "chrono",
@@ -826,6 +844,7 @@ dependencies = [
  "axum",
  "axum-server",
  "brokk-mj-chat",
+ "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-controller",
  "brokk-mj-core",

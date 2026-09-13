@@ -938,7 +938,8 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
         },
     )
     .unwrap();
-    let verified = mj_core::archive::verify_archive_streaming(&imported.archive_path).unwrap();
+    let verified =
+        mj_checkpoint::archive::verify_archive_streaming(&imported.archive_path).unwrap();
     assert_eq!(verified.canonical_session.event_frontier, 3);
     assert_eq!(
         verified.canonical_session.session.last_activity_at_ms,
@@ -1248,10 +1249,11 @@ fn stop_sequence_claude_import_produces_idle_raw_project_session() {
     .unwrap();
 
     let record = &state.sessions[&imported.session_id];
-    let verified = mj_core::archive::verify_archive_streaming(&imported.archive_path).unwrap();
+    let verified =
+        mj_checkpoint::archive::verify_archive_streaming(&imported.archive_path).unwrap();
     assert_eq!(
         verified.canonical_session.session.execution,
-        mj_core::archive::CanonicalExecutionState::Idle
+        mj_checkpoint::archive::CanonicalExecutionState::Idle
     );
     assert_eq!(
         record.project_directory,

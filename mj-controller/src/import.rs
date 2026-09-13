@@ -20,11 +20,11 @@ use rayon::prelude::*;
 use serde_json::{Value, json};
 
 use crate::setup::{GithubRepository, github_repository_from_origin};
-use mj_core::archive::{
+use mj_checkpoint::archive::{
     ArchiveInput, BundleManifest, GitCollectionSpec, GitHistoryMode, GitSnapshotProgress,
     SystemGit, TargetManifest, collect_git_snapshot_with_progress, write_archive_atomic,
 };
-use mj_core::checkpoint::{collect_import_native_artifacts, collect_native_artifacts};
+use mj_checkpoint::checkpoint::{collect_import_native_artifacts, collect_native_artifacts};
 
 use mj_core::config::{
     Config, HarnessKind, ProjectBundle, ProjectRepository, TargetTemplate, validate_id,
@@ -389,7 +389,7 @@ pub fn locate_native_session(
 ) -> Result<LocatedNativeSession> {
     let (native_session_id, source_path) = match harness {
         HarnessKind::Muse => {
-            return muse::locate(&mj_core::native::muse_sessions_root(home)?, selection);
+            return muse::locate(&mj_checkpoint::native::muse_sessions_root(home)?, selection);
         }
         HarnessKind::Codex => {
             let located = locate_codex_session(home, selection)?;
@@ -444,9 +444,12 @@ pub fn scan_native_sessions(
         });
     };
     match harness {
-        HarnessKind::Muse => muse::scan(&mj_core::native::muse_sessions_root(home)?, |progress| {
-            forward(progress.scanned, progress.total, progress.session);
-        }),
+        HarnessKind::Muse => muse::scan(
+            &mj_checkpoint::native::muse_sessions_root(home)?,
+            |progress| {
+                forward(progress.scanned, progress.total, progress.session);
+            },
+        ),
         HarnessKind::Codex => scan_codex_sessions(home, |progress| {
             let session = progress.session.map(|session| NativeSessionListing {
                 unavailable_reason: session.history_mode.import_issue(),
@@ -2473,7 +2476,7 @@ fn import_claude_session_inner(
     let verified = write_archive_atomic(
         &archive_path,
         &ArchiveInput {
-            session: mj_core::archive::SessionManifest {
+            session: mj_checkpoint::archive::SessionManifest {
                 id: session_id.clone(),
                 title: title.clone(),
                 harness_kind: HarnessKind::Claude,
@@ -2801,7 +2804,7 @@ pub fn import_native_session(
     let verified = write_archive_atomic(
         &archive_path,
         &ArchiveInput {
-            session: mj_core::archive::SessionManifest {
+            session: mj_checkpoint::archive::SessionManifest {
                 id: session_id.clone(),
                 title: title.clone(),
                 harness_kind: harness,
@@ -2934,7 +2937,7 @@ fn collect_local_repositories(
     detected_roots: &[PathBuf],
     isolated: bool,
     control: Option<&ImportControl<'_>>,
-) -> Result<Vec<mj_core::archive::RepositorySnapshot>> {
+) -> Result<Vec<mj_checkpoint::archive::RepositorySnapshot>> {
     let detected = detected_roots
         .iter()
         .map(|root| Ok((root_identity(root)?, root.clone())))
@@ -3053,7 +3056,7 @@ fn collect_local_repositories(
                 snapshot.metadata.push_urls = source
                     .push_urls
                     .iter()
-                    .map(|url| mj_core::archive::redact_origin_credentials(url))
+                    .map(|url| mj_checkpoint::archive::redact_origin_credentials(url))
                     .collect::<Result<Vec<_>>>()?;
                 snapshot.metadata.remote_workspace = true;
             } else {
@@ -3068,7 +3071,7 @@ fn canonical_import_session(
     session_id: &str,
     events: &[SequencedEvent],
     source_path: &Path,
-) -> Result<mj_core::archive::CanonicalSessionSnapshot> {
+) -> Result<mj_checkpoint::archive::CanonicalSessionSnapshot> {
     let mut events = events.to_vec();
     finalize_import_event_times(&mut events, source_path)?;
     let mut materialized = mj_core::projection::imported_materialized_session(session_id, &events);
@@ -3195,8 +3198,8 @@ pub fn persist_imported_session_locally(session: &SessionRecord) -> Result<()> {
         .checkpoint
         .as_ref()
         .context("imported session has no checkpoint")?;
-    let canonical =
-        mj_core::archive::verify_archive_streaming(&checkpoint.archive_path)?.canonical_session;
+    let canonical = mj_checkpoint::archive::verify_archive_streaming(&checkpoint.archive_path)?
+        .canonical_session;
     let materialized =
         mj_core::projection::materialized_session_from_canonical(session.id.clone(), &canonical)?;
     crate::database::save_materialized_session(&materialized)

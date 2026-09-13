@@ -4,8 +4,8 @@ use crate::targets::{
     worker_root,
 };
 use anyhow::{Context, Result, bail, ensure};
-use mj_core::archive::validate_component;
-use mj_core::checkpoint::*;
+use mj_checkpoint::archive::validate_component;
+use mj_checkpoint::checkpoint::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 /// Export by streaming the spec to the worker's standard input.
@@ -394,12 +394,12 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use mj_core::archive::*;
+    use mj_checkpoint::archive::*;
     use mj_worker::checkpoint::*;
     use std::cell::RefCell;
     use std::process::Command;
 
-    use mj_core::archive::{
+    use mj_checkpoint::archive::{
         CanonicalExecutionState, CanonicalQueuedCommandKind, CanonicalQueuedPrompt,
         CanonicalSessionState, CanonicalTranscriptItem,
     };

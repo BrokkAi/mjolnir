@@ -543,7 +543,7 @@ impl ReviewerRole {
     fn review_repositories(&self) -> Vec<PathBuf> {
         let mut roots = vec![self.placement.cwd.clone()];
         roots.extend(self.placement.additional_directories.iter().cloned());
-        mj_core::review::delta::discover_repositories(&mj_core::archive::SystemGit, &roots)
+        crate::review::capture::discover_repositories(&mj_checkpoint::archive::SystemGit, &roots)
     }
 
     /// Reports what every workspace repository changed since `baselines`.
@@ -557,8 +557,8 @@ impl ReviewerRole {
     ) -> Result<RelayResponseBody> {
         let repositories = self.review_repositories();
         let repositories = tokio::task::spawn_blocking(move || {
-            mj_core::review::delta::capture_repository_deltas(
-                &mj_core::archive::SystemGit,
+            crate::review::capture::capture_repository_deltas(
+                &mj_checkpoint::archive::SystemGit,
                 &repositories,
                 &baselines,
             )
@@ -576,7 +576,7 @@ impl ReviewerRole {
         trees: std::collections::BTreeMap<PathBuf, String>,
     ) -> Result<RelayResponseBody> {
         tokio::task::spawn_blocking(move || {
-            mj_core::review::delta::advance_baselines(&mj_core::archive::SystemGit, &trees)
+            crate::review::capture::advance_baselines(&mj_checkpoint::archive::SystemGit, &trees)
         })
         .await
         .map_err(|error| anyhow::anyhow!("the review baseline update stopped: {error}"))??;
@@ -600,7 +600,10 @@ impl ReviewerRole {
                 None => {
                     let root = repository.root.clone();
                     tokio::task::spawn_blocking(move || {
-                        mj_core::archive::empty_tree_id(&mj_core::archive::SystemGit, &root)
+                        mj_checkpoint::archive::empty_tree_id(
+                            &mj_checkpoint::archive::SystemGit,
+                            &root,
+                        )
                     })
                     .await
                     .map_err(|error| anyhow::anyhow!("reading the empty tree stopped: {error}"))??

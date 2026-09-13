@@ -229,9 +229,9 @@ pub(crate) struct RespondArgs {
 
 pub(crate) async fn put_file(args: PutFileArgs) -> Result<()> {
     let bytes = if args.source == std::path::Path::new("-") {
-        mj_core::archive::read_session_file_input(std::io::stdin().lock())?
+        mj_checkpoint::archive::read_session_file_input(std::io::stdin().lock())?
     } else {
-        mj_core::archive::read_session_file_input(
+        mj_checkpoint::archive::read_session_file_input(
             std::fs::File::open(&args.source)
                 .with_context(|| format!("open {}", args.source.display()))?,
         )?

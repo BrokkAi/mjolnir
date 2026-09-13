@@ -53,7 +53,7 @@ impl GitCommandRunner for SystemGit {
         if std::env::var_os("GIT_SSH_COMMAND").is_none() {
             process.env("GIT_SSH_COMMAND", NON_INTERACTIVE_GIT_SSH_COMMAND);
         }
-        let output = crate::subprocess::run_with_input(&mut process, &command.stdin)
+        let output = mj_core::subprocess::run_with_input(&mut process, &command.stdin)
             .with_context(|| format!("run git in {}", repository.display()))?;
         Ok(GitOutput {
             status: output.status.code().unwrap_or(-1),
@@ -639,9 +639,9 @@ pub fn restore_git_snapshot(
     snapshot: &RepositorySnapshot,
 ) -> Result<()> {
     if snapshot.metadata.remote_workspace {
-        crate::remote_git::validate_network_url(&snapshot.metadata.origin)?;
+        mj_core::remote_git::validate_network_url(&snapshot.metadata.origin)?;
         for url in &snapshot.metadata.push_urls {
-            crate::remote_git::validate_network_url(url)?;
+            mj_core::remote_git::validate_network_url(url)?;
         }
     }
     if let Some(branch) = &snapshot.metadata.branch {

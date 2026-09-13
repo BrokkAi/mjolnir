@@ -21,6 +21,7 @@ test-hooks = ["mj-core/test-hooks", "mj-controller/test-hooks", "mj-chat/test-ho
 
 [dependencies]
 mj-core.workspace = true
+mj-checkpoint.workspace = true
 mj-client.workspace = true
 mj-controller.workspace = true
 mj-chat.workspace = true

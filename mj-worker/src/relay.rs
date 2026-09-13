@@ -31,7 +31,7 @@ use journal::{
     JournalReadMode, RelayJournalSpan, open_relay_journal, read_restored_relay_seed,
     visit_relay_journal_file,
 };
-use mj_core::archive::CanonicalQueuedCommandKind;
+use mj_checkpoint::archive::CanonicalQueuedCommandKind;
 use mj_core::clock::epoch_millis;
 /// Whether this relay models turns the harness starts on its own.
 ///

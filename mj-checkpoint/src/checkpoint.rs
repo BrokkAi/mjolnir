@@ -25,7 +25,7 @@ use crate::archive::{
     read_archive_verified, remote_workspace_base, restore_git_snapshot, validate_component,
     verify_archive_streaming, write_archive_hashed, write_archive_hashed_borrowed,
 };
-use crate::config::HarnessKind;
+use mj_core::config::HarnessKind;
 /// Native state whose storage format is owned by the target runtime.
 /// Shared archive algorithms never open a provider's database themselves.
 pub trait NativeCheckpointState: Sync {
@@ -294,7 +294,7 @@ pub fn restore_checkpoint_with_native_state(
     // means either a leaked worker still writing here or an unfinished
     // teardown, and the seed would be ignored in favour of the stale
     // snapshot, leaving a frontier no journal can support.
-    let existing_relay_state = spec.relay_root.join(crate::relay::RELAY_STATE_FILE);
+    let existing_relay_state = spec.relay_root.join(mj_core::relay::RELAY_STATE_FILE);
     ensure!(
         !existing_relay_state.exists(),
         "relay state already present in {}; a previous worker may still be running, \
@@ -308,7 +308,7 @@ pub fn restore_checkpoint_with_native_state(
     // The relay that opens next needs the frontier it continues from and the
     // commands still queued, and nothing else. The transcript stays in the
     // archive; the controller already holds it as the durable projection.
-    let mut seed = crate::relay::RestoredRelaySeed {
+    let mut seed = mj_core::relay::RestoredRelaySeed {
         event_frontier: canonical_session.event_frontier,
         event_frontier_digest: canonical_session.event_frontier_digest,
         queued_prompts: canonical_session.queued_prompts,
@@ -323,10 +323,10 @@ pub fn restore_checkpoint_with_native_state(
 
     // Attachment data belongs to the relay, even when native harness history
     // is deliberately not restored. Install before publishing the queue seed.
-    let image_store = crate::attachment::AttachmentStore::worker(&spec.relay_root);
+    let image_store = mj_core::attachment::AttachmentStore::worker(&spec.relay_root);
     for descriptor in &archive.manifest.payloads {
         if let PayloadRole::NativeArtifact { relative_path } = &descriptor.role
-            && relative_path.starts_with(crate::attachment::ARCHIVE_ATTACHMENT_DIR)
+            && relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR)
         {
             image_store.restore_artifact(relative_path, archive.payload(descriptor)?)?;
         }
@@ -338,15 +338,15 @@ pub fn restore_checkpoint_with_native_state(
             .cloned()
             .map(serde_json::from_value)
             .collect::<std::result::Result<_, _>>()?;
-        for reference in crate::attachment::references(&blocks)? {
+        for reference in mj_core::attachment::references(&blocks)? {
             image_store.read(&reference)?;
         }
     }
     fs::create_dir_all(&spec.relay_root)?;
-    crate::relay::clear_native_session_identity(&spec.relay_root)?;
+    mj_core::relay::clear_native_session_identity(&spec.relay_root)?;
     write_private_file(
         &spec.relay_root,
-        Path::new(crate::relay::RESTORED_RELAY_SEED_FILE),
+        Path::new(mj_core::relay::RESTORED_RELAY_SEED_FILE),
         &serde_json::to_vec(&seed)?,
         0o600,
     )?;
@@ -363,7 +363,7 @@ pub fn restore_checkpoint_with_native_state(
             let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
                 continue;
             };
-            if relative_path.starts_with(crate::attachment::ARCHIVE_ATTACHMENT_DIR) {
+            if relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR) {
                 continue;
             }
             let native_data = archive.payload(descriptor)?;
@@ -376,7 +376,7 @@ pub fn restore_checkpoint_with_native_state(
                 continue;
             }
             ensure!(
-                !relative_path.starts_with(crate::goal::NATIVE_ARTIFACT_ROOT),
+                !relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT),
                 "this checkpoint requires native goal restoration by the target worker"
             );
             let relative_path = restored_native_relative_path(
@@ -1513,9 +1513,9 @@ fn collect_checkpoint_repositories(
                     "repository '{}' managed workspace has no Git origin",
                     repository.id
                 );
-                crate::remote_git::validate_network_url(&snapshot.metadata.origin)?;
+                mj_core::remote_git::validate_network_url(&snapshot.metadata.origin)?;
                 for url in &snapshot.metadata.push_urls {
-                    crate::remote_git::validate_network_url(url)?;
+                    mj_core::remote_git::validate_network_url(url)?;
                 }
                 snapshot.metadata.base_commit = base_commit;
                 snapshot.metadata.remote_workspace = true;
@@ -1553,7 +1553,7 @@ fn collect_checkpoint_native_artifacts(
         artifacts
     };
     artifacts.extend(native_state.collect(session, harness_home)?);
-    artifacts.extend(crate::attachment::AttachmentStore::worker(relay_root).archive_artifacts()?);
+    artifacts.extend(mj_core::attachment::AttachmentStore::worker(relay_root).archive_artifacts()?);
     let launch_path = relay_root.join("launch.json");
     match read_project_memory_checkpoint_endpoint(&launch_path) {
         Ok(launch) => {
@@ -2334,7 +2334,7 @@ pub fn resolve_target_path(path: &Path) -> Result<PathBuf> {
         .is_some_and(|part| part.as_os_str() == "~")
     {
         let home = std::env::var_os("HOME").context("HOME is required to expand target path")?;
-        return crate::path_input::expand_home(path, Some(Path::new(&home)));
+        return mj_core::path_input::expand_home(path, Some(Path::new(&home)));
     }
     ensure!(false, "target path must be absolute or start with '~'");
     unreachable!()
@@ -3776,7 +3776,7 @@ mod tests {
         let memory_root = spec.harness_home.join("projects/replica/memory");
         fs::create_dir_all(&memory_root).unwrap();
         fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
-        crate::worker_launch::WorkerLaunchConfig {
+        mj_core::worker_launch::WorkerLaunchConfig {
             goal_resume_request: Default::default(),
             target_environment: Default::default(),
             run_mode: Default::default(),
@@ -3784,21 +3784,21 @@ mod tests {
             harness: HarnessKind::Codex,
             bridge_command: "codex-acp".into(),
             bridge_args: Vec::new(),
-            harness_runtime: crate::worker_launch::HarnessRuntimePolicy::Ambient,
+            harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
             environment: Default::default(),
             cwd: spec.workspace_root.join("app"),
             additional_directories: Vec::new(),
             native_session_id: Some(NATIVE.into()),
-            project_memory: Some(crate::worker_launch::ProjectMemoryLaunchConfig {
+            project_memory: Some(mj_core::worker_launch::ProjectMemoryLaunchConfig {
                 project_key: "project".into(),
                 root: memory_root,
                 baseline_root: spec
                     .harness_home
                     .join("projects/replica/.hel-memory-baseline"),
                 repository_roots: Default::default(),
-                mcp_delivery: crate::worker_launch::ProjectMemoryMcpDelivery::Acp,
+                mcp_delivery: mj_core::worker_launch::ProjectMemoryMcpDelivery::Acp,
             }),
-            execution_policy: crate::config::ExecutionPolicy::Unconstrained,
+            execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
         }
         .write(&spec.relay_root.join("launch.json"))
         .unwrap();
@@ -4634,9 +4634,9 @@ mod tests {
         relay_root
     }
 
-    fn restored_seed(relay_root: &Path) -> crate::relay::RestoredRelaySeed {
+    fn restored_seed(relay_root: &Path) -> mj_core::relay::RestoredRelaySeed {
         serde_json::from_slice(
-            &fs::read(crate::relay::restored_relay_seed_path(relay_root)).unwrap(),
+            &fs::read(mj_core::relay::restored_relay_seed_path(relay_root)).unwrap(),
         )
         .unwrap()
     }
@@ -4669,7 +4669,7 @@ mod tests {
         temp: &Path,
     ) -> (
         CheckpointExportSpec,
-        crate::attachment::AttachmentRef,
+        mj_core::attachment::AttachmentRef,
         Vec<u8>,
         PathBuf,
     ) {
@@ -4678,8 +4678,8 @@ mod tests {
             .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFgAI/yZmaPdoAAAAASUVORK5CYII=")
             .unwrap();
         let reference =
-            crate::attachment::AttachmentRef::new(&bytes, "image/png".into(), 1, 1).unwrap();
-        let store = crate::attachment::AttachmentStore::worker(&spec.relay_root);
+            mj_core::attachment::AttachmentRef::new(&bytes, "image/png".into(), 1, 1).unwrap();
+        let store = mj_core::attachment::AttachmentStore::worker(&spec.relay_root);
         store.install(&reference, &bytes).unwrap();
         let image_block = serde_json::to_value(reference.content_block()).unwrap();
         spec.canonical_session.queued_prompts[0].content = vec![image_block; 10];
@@ -4730,11 +4730,11 @@ mod tests {
         .collect::<std::result::Result<_, _>>()
         .unwrap();
         assert_eq!(
-            crate::attachment::references(&blocks).unwrap(),
+            mj_core::attachment::references(&blocks).unwrap(),
             vec![reference.clone(); 10]
         );
 
-        crate::attachment::AttachmentStore::worker(&restored_relay)
+        mj_core::attachment::AttachmentStore::worker(&restored_relay)
             .resolve(&mut blocks)
             .unwrap();
         for block in blocks {
@@ -4755,7 +4755,7 @@ mod tests {
     fn restored_image_resolution_rejects_missing_and_corrupt_blobs() {
         let temp = tempfile::tempdir().unwrap();
         let (_, reference, bytes, restored_relay) = image_checkpoint_fixture(temp.path());
-        let store = crate::attachment::AttachmentStore::worker(&restored_relay);
+        let store = mj_core::attachment::AttachmentStore::worker(&restored_relay);
         let attachment_path = store.root().join(&reference.sha256);
         let queued = restored_seed(&restored_relay).queued_prompts[0]
             .content
@@ -4798,7 +4798,7 @@ mod tests {
         export_checkpoint(&spec).unwrap();
 
         let relay_root = restore_into(temp.path(), &spec, false);
-        let seed = fs::metadata(crate::relay::restored_relay_seed_path(&relay_root))
+        let seed = fs::metadata(mj_core::relay::restored_relay_seed_path(&relay_root))
             .unwrap()
             .len();
 
@@ -4823,7 +4823,7 @@ mod tests {
         let relay_root = temp.path().join("occupied-relay");
         fs::create_dir_all(&relay_root).unwrap();
         fs::write(
-            relay_root.join(crate::relay::RELAY_STATE_FILE),
+            relay_root.join(mj_core::relay::RELAY_STATE_FILE),
             b"{\"format_version\":1}",
         )
         .unwrap();
@@ -4847,7 +4847,7 @@ mod tests {
             format!("{error:#}").contains("relay state already present"),
             "{error:#}"
         );
-        assert!(!crate::relay::restored_relay_seed_path(&relay_root).exists());
+        assert!(!mj_core::relay::restored_relay_seed_path(&relay_root).exists());
     }
 
     /// `Path::exists` follows links, so a *dangling* symlink at the seed path
@@ -4864,7 +4864,7 @@ mod tests {
         fs::create_dir_all(outside.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(
             &outside,
-            relay_root.join(crate::relay::RESTORED_RELAY_SEED_FILE),
+            relay_root.join(mj_core::relay::RESTORED_RELAY_SEED_FILE),
         )
         .unwrap();
 

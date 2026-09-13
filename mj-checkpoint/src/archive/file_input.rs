@@ -28,7 +28,7 @@ pub fn write_session_file(
     overwrite: bool,
 ) -> Result<(), SessionExportError> {
     let refuse = |error: anyhow::Error| SessionExportError::Refused(format!("{error:#}"));
-    crate::config::validate_relative_destination(relative).map_err(refuse)?;
+    mj_core::config::validate_relative_destination(relative).map_err(refuse)?;
     if bytes.len() as u64 > MAX_SESSION_FILE_BYTES {
         return Err(SessionExportError::Refused(format!(
             "file exceeds {MAX_SESSION_FILE_BYTES} bytes"

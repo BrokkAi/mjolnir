@@ -3,8 +3,8 @@ resolver = "3"
 # mj-desktop stays out of the default set: plain builds produce the headless
 # controller/worker, while its own GNU/Linux CI job and the macOS/Windows
 # matrix build the separate native application explicitly.
-members = ["mj-core", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli", "mj-desktop", "voice-worker"]
-default-members = ["mj-core", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli"]
+members = ["mj-core", "mj-checkpoint", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli", "mj-desktop", "voice-worker"]
+default-members = ["mj-core", "mj-checkpoint", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli"]
 
 # Single source of truth for the release version. Every published crate
 # inherits it with `version.workspace = true`, so the nine package versions
@@ -30,6 +30,7 @@ rust-version = "1.96"
 # `node scripts/release-version.mjs check` (run in CI) fails when these fall
 # behind the workspace version.
 [workspace.dependencies]
+mj-checkpoint = { path = "mj-checkpoint", package = "brokk-mj-checkpoint", version = "2.6.4" }
 anvil-client = { package = "brokk-anvil-client", version = "0.28.2" }
 mj-core = { path = "mj-core", package = "brokk-mj-core", version = "2.6.4", default-features = false }
 mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.6.4" }
