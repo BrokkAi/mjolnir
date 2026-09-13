@@ -17,6 +17,8 @@ Shorten the compilation barrier imposed by mj-core and stop archive/review imple
 
 ## Surprises & Discoveries
 
+The full parallel test run hit ETXTBSY while the unchanged npm update fixture executed a freshly copied test binary. The fixture passed in isolation; the serial full-suite rerun has passed all controller tests.
+
 The first benchmark hit the mbx compiler cache and was discarded. The driver now invokes rustup-selected Cargo directly with compiler wrappers disabled. Direct Cargo exposes normal metadata/codegen pipelining, so metadata readiness is measured separately from full compilation.
 
 Projection has production consumers in both controller and chat's second-opinion flow. It cannot move directly into controller. Worker uses projection in integration-style unit tests. Worker and controller already have versionless cross-runtime dev dependencies.
@@ -29,7 +31,7 @@ Projection has production consumers in both controller and chat's second-opinion
 
 ## Outcomes & Retrospective
 
-Implementation and controlled performance measurements are in progress.
+All three extraction milestones are committed. Core is approximately 18,843 non-test lines, versus 32,148 before extraction. All twelve packages assemble, extracted core/new-library checks and desktop all-target compilation pass. Full final validation and controlled timing acceptance remain in progress.
 
 ## Context and Orientation
 
@@ -76,3 +78,5 @@ Revision note: checkpoint extraction validated; benchmark corrected to exclude c
 Revision note: transcript extraction validated and worker production dependency kept limited to core/checkpoint.
 
 Revision note: turn-review extraction validated; all 3,218 statically inventoried test functions retained. Controlled final timing will run without other compilation jobs competing for resources.
+
+Revision note: parser cache-version ownership moved into mj-transcript so a rule-version bump does not dirty core. The benchmark now probes archive compression, summary rules plus cache version, and review prompt edits in its private source snapshot and checks Cargo library freshness.

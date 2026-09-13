@@ -9,6 +9,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use tree_sitter::{Node, Parser};
 const TOOL_SUMMARY_SOURCE_BYTES: usize = 64 * 1024;
+/// Parser-rule version stored with cached tool summaries.
+pub const TOOL_SUMMARY_VERSION: u8 = 1;
 
 /// Reduce a tool call to what a reader still needs, once a verified checkpoint
 /// holds the whole of it.

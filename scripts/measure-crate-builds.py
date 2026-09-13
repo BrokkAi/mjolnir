@@ -10,12 +10,66 @@ import subprocess
 import tarfile
 
 
+def probe_rebuilds(cargo, source, env, metadata):
+    """Change actual implementation in the private snapshot and inspect Cargo freshness."""
+    names = {p["id"]: p["name"] for p in metadata["packages"]}
+    probes = [
+        ("archive", "mj-checkpoint/src/archive.rs", "const ZSTD_LEVEL: i64 = 1;",
+         "const ZSTD_LEVEL: i64 = 2;", "brokk-mj-checkpoint"),
+        ("summary", "mj-transcript/src/transcript.rs",
+         "const TOOL_SUMMARY_SOURCE_BYTES: usize = 64 * 1024;",
+         "const TOOL_SUMMARY_SOURCE_BYTES: usize = 63 * 1024;", "brokk-mj-transcript"),
+        ("review", "mj-review/src/lanes.rs", "You are a read-only specialist reviewer",
+         "You are a careful read-only specialist reviewer", "brokk-mj-review"),
+    ]
+    for label, filename, old, new, changed in probes:
+        path = source / filename
+        original = path.read_text()
+        assert original.count(old) == 1, f"probe anchor changed: {filename}"
+        log = source.parent / f"edit-{label}.log"
+        try:
+            edited = original.replace(old, new, 1)
+            if label == "summary":
+                version = "pub const TOOL_SUMMARY_VERSION: u8 = 1;"
+                assert edited.count(version) == 1, "parser version anchor changed"
+                edited = edited.replace(version, "pub const TOOL_SUMMARY_VERSION: u8 = 2;", 1)
+            path.write_text(edited)
+            with log.open("w") as output:
+                subprocess.run([cargo, "build", "--locked", "--message-format=json"],
+                               cwd=source, env=env, stdout=output, stderr=output, check=True)
+            freshness = {}
+            for line in log.read_text().splitlines():
+                if not line.startswith("{"):
+                    continue
+                event = json.loads(line)
+                if event.get("reason") != "compiler-artifact":
+                    continue
+                name = names.get(event["package_id"])
+                if name and "lib" in event["target"]["kind"]:
+                    freshness[name] = event["fresh"]
+            assert freshness[changed] is False, f"{label} did not rebuild its implementation"
+            required_fresh = ["brokk-mj-core"]
+            if label != "summary":
+                required_fresh += ["brokk-mj-client", "brokk-mj-chat", "brokk-mj-tui"]
+            for name in required_fresh:
+                assert freshness[name], f"{label} unnecessarily rebuilt {name}"
+            (source.parent / f"edit-{label}.json").write_text(
+                json.dumps(freshness, indent=2) + "\n")
+            print(f"{label} edit freshness: {json.dumps(freshness)}", flush=True)
+        finally:
+            path.write_text(original)
+            with (source.parent / f"restore-{label}.log").open("w") as output:
+                subprocess.run([cargo, "build", "--locked"], cwd=source, env=env,
+                               stdout=output, stderr=output, check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--revision", default="HEAD")
     parser.add_argument("--label", required=True)
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--probe-edits", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     work = args.directory.resolve()
@@ -63,6 +117,8 @@ def main():
                    for u in units if u["name"] in packages]
         (source.parent / f"run-{run}.json").write_text(json.dumps(summary, indent=2) + "\n")
         print(json.dumps(summary), flush=True)
+    if args.probe_edits:
+        probe_rebuilds(cargo, source, env, metadata)
 
 
 if __name__ == "__main__":

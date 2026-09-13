@@ -24,9 +24,6 @@ pub const SESSION_RESTART_ITEM_PREFIX: &str = "system:session-restarted:";
 pub const HARNESS_TURN_TEXT: &str = "Agent continued on its own";
 pub const HARNESS_TURN_ITEM_PREFIX: &str = "harness-turn:";
 
-/// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 1;
-
 /// Where a tool's compact presentation source came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

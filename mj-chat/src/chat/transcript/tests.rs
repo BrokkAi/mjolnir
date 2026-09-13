@@ -3119,7 +3119,7 @@ fn current_stored_tool_presentation_is_preserved() {
                 source: "git add src/lib.rs".into(),
                 source_kind: mj_core::transcript::ToolSummarySourceKind::RawInput,
                 tool_kind: ToolKind::Execute,
-                summary_version: mj_core::transcript::TOOL_SUMMARY_VERSION,
+                summary_version: mj_transcript::transcript::TOOL_SUMMARY_VERSION,
             })),
         },
     })];
