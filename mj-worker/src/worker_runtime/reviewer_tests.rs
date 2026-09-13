@@ -651,8 +651,7 @@ async fn disconnecting_during_analysis_kills_bifrost_before_pausing_the_reviewer
     write_options(&directory, "options.json", &[]);
     fixture.start(config(0)).await;
     let bifrost = blocking_bifrost_script(&directory);
-    let _bifrost_override =
-        EnvironmentGuard::set(mj_core::review::bifrost::BIFROST_BIN_ENV, &bifrost);
+    let _bifrost_override = EnvironmentGuard::set(mj_review::bifrost::BIFROST_BIN_ENV, &bifrost);
 
     let (mut client, server) = reviewer_socket(&fixture).await;
     send_reviewer_request(

@@ -6,10 +6,10 @@ use mj_checkpoint::archive::{
     pin_review_tree,
 };
 use mj_core::relay::RepoDelta;
-use mj_core::review::delta::RawDiffSummary;
+use mj_review::delta::RawDiffSummary;
 #[cfg(test)]
-use mj_core::review::delta::{captured_trees, has_changes};
-use mj_core::review::{LANE_DIFF_LIMIT, bound_review_section};
+use mj_review::delta::{captured_trees, has_changes};
+use mj_review::{LANE_DIFF_LIMIT, bound_review_section};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

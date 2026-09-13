@@ -30,6 +30,7 @@ sha2 = "0.10"
 zstd = "0.13"
 regex = "1"
 mj-core.workspace = true
+mj-review.workspace = true
 mj-checkpoint.workspace = true
 agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
 anyhow = "1"

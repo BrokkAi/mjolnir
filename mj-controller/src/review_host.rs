@@ -36,12 +36,12 @@ use mj_core::state::{MaterializedExecutionState, MaterializedSession};
 
 use mj_core::relay::{RelayCommand, RelayEvent, RelayObservation};
 
-use mj_core::review::driver::{
+use mj_core::review::lanes::{ReviewTier, UserMessage};
+use mj_core::review::verdict::ReviewVerdict;
+use mj_review::driver::{
     INTENT_ROLE, PendingForward, Resolution, ReviewRequest, SUPERVISOR_ROLE, TurnReviewDriver,
     TurnReviewPhase, TurnReviewSeed,
 };
-use mj_core::review::lanes::{ReviewTier, UserMessage};
-use mj_core::review::verdict::ReviewVerdict;
 
 pub use mj_client::review::{RuntimeReviewView, VerdictKind, VerdictView, role_session_id};
 
@@ -907,7 +907,7 @@ impl HostState {
                         // A lane that cannot start is a coverage gap the
                         // supervisor is told about; any other role failing to
                         // start fails the review.
-                        Err(error) if mj_core::review::lanes::lane_by_id(&role).is_some() => {
+                        Err(error) if mj_review::lanes::lane_by_id(&role).is_some() => {
                             slot.driver.lane_failed(&role, error)
                         }
                         Err(error)
@@ -2167,16 +2167,16 @@ async fn launch_role(
     // set as well as navigation; every other role navigates and reads rather
     // than running analyzers. The intent analyst gets no tools at all: it
     // reads the user's messages, not the code.
-    let lane = mj_core::review::lanes::lane_by_id(role).is_some();
+    let lane = mj_review::lanes::lane_by_id(role).is_some();
     let mcp_servers = if role == INTENT_ROLE {
         Vec::new()
     } else {
-        mj_core::review::bifrost::review_mcp_servers(
+        mj_review::bifrost::review_mcp_servers(
             repositories,
             if lane {
-                mj_core::review::lanes::LANE_BIFROST_TOOLSET
+                mj_review::lanes::LANE_BIFROST_TOOLSET
             } else {
-                mj_core::review::lanes::SUPERVISOR_BIFROST_TOOLSET
+                mj_review::lanes::SUPERVISOR_BIFROST_TOOLSET
             },
         )
     };

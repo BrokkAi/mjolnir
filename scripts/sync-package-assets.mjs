@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const mode = process.argv[2] ?? 'check';
 if (!['check', 'sync'].includes(mode)) throw new Error('usage: node scripts/sync-package-assets.mjs [check|sync]');
-const copies = ['mj-transcript', 'mj-checkpoint', 'mj-core', 'mj-worker', 'mj-client', 'mj-controller', 'mj-chat', 'mj-tui', 'mj-cli', 'mj-desktop', 'voice-worker'].map(dir => ['LICENSE', `${dir}/LICENSE`]);
+const copies = ['mj-review', 'mj-transcript', 'mj-checkpoint', 'mj-core', 'mj-worker', 'mj-client', 'mj-controller', 'mj-chat', 'mj-tui', 'mj-cli', 'mj-desktop', 'voice-worker'].map(dir => ['LICENSE', `${dir}/LICENSE`]);
 for (const file of ['README.md', 'licenses/THIRD_PARTY_LICENSES.html', 'licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt']) copies.push([file, `mj-core/${file}`]);
 for (const file of ['docs/DOCKER.md', 'docs/PODMAN.md']) copies.push([file, `mj-controller/${file}`]);
 for (const [source, destination] of copies) {

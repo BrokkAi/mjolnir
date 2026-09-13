@@ -12,7 +12,7 @@ Shorten the compilation barrier imposed by mj-core and stop archive/review imple
 - [x] 2026-09-13: Added isolated benchmark driver; baseline at c52742b1 started with warmup plus three measured runs.
 - [x] 2026-09-13: Extracted checkpoint implementation; 134 checkpoint tests and 8 worker capture tests passed, all-target compilation and boundary/version checks passed.
 - [x] 2026-09-13: Extracted shared transcript implementation; 80 replay/formatting tests, all-target consumer check, boundary and version checks passed. Worker depends on transcript only in unpublished test fixtures.
-- [ ] Extract and validate turn-review engine; commit checkpoint.
+- [x] 2026-09-13: Extracted turn-review engine; 49 behavior tests and all-target consumer checks passed. Publication order, licenses and boundary rules include all three independent libraries.
 - [ ] Complete package integration, full tests, strict Clippy, performance comparison, rebuild isolation, and final commit.
 
 ## Surprises & Discoveries
@@ -74,3 +74,5 @@ Revision note: created from the approved plan before implementation, with reprod
 Revision note: checkpoint extraction validated; benchmark corrected to exclude compiler cache hits.
 
 Revision note: transcript extraction validated and worker production dependency kept limited to core/checkpoint.
+
+Revision note: turn-review extraction validated; all 3,218 statically inventoried test functions retained. Controlled final timing will run without other compilation jobs competing for resources.

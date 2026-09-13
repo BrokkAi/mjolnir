@@ -241,7 +241,7 @@ impl ReviewerSidecar {
         &self,
         dispatch: mj_core::review::lanes::LaneDispatch,
     ) -> mj_core::review::lanes::LaneDispatchReply {
-        if let Err(message) = mj_core::review::lanes::validate_dispatch(&dispatch.reviewers) {
+        if let Err(message) = mj_review::lanes::validate_dispatch(&dispatch.reviewers) {
             return mj_core::review::lanes::LaneDispatchReply {
                 started: Vec::new(),
                 error: Some(message),
@@ -609,7 +609,7 @@ impl ReviewerRole {
                     .map_err(|error| anyhow::anyhow!("reading the empty tree stopped: {error}"))??
                 }
             };
-            requests.push(mj_core::review::bifrost::AnalyzeRequest {
+            requests.push(mj_review::bifrost::AnalyzeRequest {
                 repository: repository.root,
                 base_tree: base,
                 target_tree: repository.current_tree,
@@ -1283,7 +1283,7 @@ impl ReviewerRole {
 /// The default reviewer, the validator, the supervisor and the intent analyst
 /// are single-instance roles and are not what the cap protects against.
 fn is_lane(role: &str) -> bool {
-    mj_core::review::lanes::lane_by_id(role).is_some()
+    mj_review::lanes::lane_by_id(role).is_some()
 }
 
 /// Moves a role's old relay files out of the live root. A relay journal is

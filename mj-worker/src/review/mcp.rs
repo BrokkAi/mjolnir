@@ -26,7 +26,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use mj_core::review::lanes::{LaneDispatch, LaneDispatchReply, REVIEW_LANES, validate_dispatch};
+use mj_review::lanes::{LaneDispatch, LaneDispatchReply, REVIEW_LANES, validate_dispatch};
 
 /// Serve the review dispatch tool over MCP's JSON-lines stdio transport.
 pub fn run_mcp_stdio(socket: &Path) -> Result<()> {

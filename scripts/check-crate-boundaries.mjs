@@ -8,14 +8,15 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1', '--no-deps', '--locked'], { cwd: root, encoding: 'utf8' }));
 const allowed = {
   'brokk-mj-core': [],
+  'brokk-mj-review': ['brokk-mj-core'],
   'brokk-mj-transcript': ['brokk-mj-core'],
   'brokk-mj-checkpoint': ['brokk-mj-core'],
   'brokk-mj-client': ['brokk-mj-transcript', 'brokk-mj-core'],
-  'brokk-mj-worker': ['brokk-mj-checkpoint', 'brokk-mj-core'],
-  'brokk-mj-controller': ['brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client'],
+  'brokk-mj-worker': ['brokk-mj-review', 'brokk-mj-checkpoint', 'brokk-mj-core'],
+  'brokk-mj-controller': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client'],
   'brokk-mj-chat': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client'],
   'brokk-mj-tui': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-chat'],
-  'brokk-mjolnir': ['brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-chat', 'brokk-mj-tui'],
+  'brokk-mjolnir': ['brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-controller', 'brokk-mj-chat', 'brokk-mj-tui'],
   'brokk-mj-desktop': ['brokk-mj-core', 'brokk-mj-controller'],
   'brokk-mj-voice-worker': [],
 };

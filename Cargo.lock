@@ -684,6 +684,7 @@ dependencies = [
  "brokk-mj-checkpoint",
  "brokk-mj-client",
  "brokk-mj-core",
+ "brokk-mj-review",
  "brokk-mj-transcript",
  "brokk-mj-worker",
  "chrono",
@@ -776,6 +777,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokk-mj-review"
+version = "2.6.4"
+dependencies = [
+ "brokk-mj-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "brokk-mj-transcript"
 version = "2.6.4"
 dependencies = [
@@ -832,6 +842,7 @@ dependencies = [
  "brokk-mj-checkpoint",
  "brokk-mj-controller",
  "brokk-mj-core",
+ "brokk-mj-review",
  "brokk-mj-transcript",
  "chrono",
  "clap",

@@ -31,7 +31,7 @@ const DEFAULT_BIFROST_BIN: &str = "bifrost";
 /// What a review runs Bifrost as.
 #[must_use]
 pub fn bifrost_binary() -> PathBuf {
-    crate::config::env_override_os("BIFROST_BIN")
+    mj_core::config::env_override_os("BIFROST_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BIFROST_BIN))
 }
@@ -56,13 +56,13 @@ pub fn mcp_server_args(repository: &Path, toolset: &str) -> Vec<String> {
 pub fn review_mcp_servers(
     repositories: &[PathBuf],
     toolset: &str,
-) -> Vec<crate::worker_launch::ReviewMcpServer> {
+) -> Vec<mj_core::worker_launch::ReviewMcpServer> {
     let binary = bifrost_binary();
     repositories
         .iter()
         .enumerate()
         .map(
-            |(index, repository)| crate::worker_launch::ReviewMcpServer {
+            |(index, repository)| mj_core::worker_launch::ReviewMcpServer {
                 name: if index == 0 {
                     "bifrost".to_string()
                 } else {

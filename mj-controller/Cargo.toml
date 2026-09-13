@@ -22,6 +22,7 @@ workspace = true
 sysinfo = "0.32"
 signal-hook = "0.3"
 mj-core.workspace = true
+mj-review.workspace = true
 mj-transcript.workspace = true
 mj-checkpoint.workspace = true
 mj-client.workspace = true

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::relay::RepoDelta;
+use mj_core::relay::RepoDelta;
 
 /// Line and file totals parsed straight from a unified diff.
 ///

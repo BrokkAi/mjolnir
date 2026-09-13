@@ -1,6 +1,6 @@
 //! Target-side semantic review execution.
-use mj_core::review::bifrost::*;
-use mj_core::review::{CHANGED_FUNCTIONS_LIMIT, bound_review_section};
+use mj_review::bifrost::*;
+use mj_review::{CHANGED_FUNCTIONS_LIMIT, bound_review_section};
 use std::process::Stdio;
 /// Runs `analyze_diff` over each repository and renders one packet.
 ///
