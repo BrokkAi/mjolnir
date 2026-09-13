@@ -4903,6 +4903,7 @@ mod tests {
     #[cfg(unix)]
     fn register_leased_relay_session() {
         crate::database::save_session(&mj_core::state::SessionRecord {
+            create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,

@@ -1209,6 +1209,8 @@ pub struct ViewerConfigOption {
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ControllerAction {
     New {
+        #[serde(default)]
+        create_managed_worktree: Option<bool>,
         /// Which workspace the session belongs to. Optional on the wire so a
         /// viewer cached from before workspaces reached the phone still parses,
         /// but a controller holding more than one workspace refuses an empty
@@ -1506,6 +1508,8 @@ pub struct PreflightRepository {
 pub struct PreflightNew {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub managed_worktree: mj_core::state::ManagedWorktreeOptions,
     #[serde(default)]
     pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
     #[serde(default)]
@@ -2214,6 +2218,7 @@ async fn preflight_new(
 ) -> Result<Json<PreflightNew>, ApiError> {
     let project_validation = request.project_directory.is_some();
     let action = ControllerAction::New {
+        create_managed_worktree: None,
         workspace_id: request.workspace_id,
         profile_id: request.profile_id,
         bundle_id: request.bundle_id.clone(),
@@ -2928,6 +2933,7 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
             title,
             project_directory,
             dirty_ack,
+            create_managed_worktree,
         } => {
             if !workspace_id.is_empty() {
                 validate_public_id(workspace_id)?;
@@ -2953,6 +2959,11 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
             require_profile(snapshot, profile_id)?;
             require_bundle(snapshot, bundle_id)?;
             let target = require_target(snapshot, target_id)?;
+            if *create_managed_worktree == Some(true) && !target.requires_project_directory {
+                return Err(ApiError::bad_request(
+                    "managed worktree creation requires a bare Git project",
+                ));
+            }
             if target.requires_project_directory != project_directory.is_some() {
                 return Err(ApiError::bad_request(
                     "project_directory is required exactly for bare targets",
@@ -3790,7 +3801,7 @@ mod tests {
             theme: Default::default(),
             phone: Default::default(),
             review: Default::default(),
-            startup: Default::default(),
+            legacy_startup: (),
             profiles: BTreeMap::from([(
                 "codex-1".into(),
                 HarnessProfile {
@@ -3837,6 +3848,7 @@ mod tests {
             sessions: BTreeMap::from([(
                 "session-1".into(),
                 SessionRecord {
+                    create_managed_worktree: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                     archived: false,
                     container_cpus: None,
@@ -5636,6 +5648,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         request
             .reply
             .send(Ok(PreflightNew {
+                managed_worktree: Default::default(),
                 project_directory: Some("/remote/project".into()),
                 remote_repairs: Vec::new(),
                 dirty_repositories: Vec::new(),
@@ -5734,6 +5747,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         request
             .reply
             .send(Ok(PreflightNew {
+                managed_worktree: Default::default(),
                 project_directory: None,
                 remote_repairs: Vec::new(),
                 dirty_repositories: Vec::new(),
@@ -6619,6 +6633,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         assert_eq!(
             action.action,
             ControllerAction::New {
+                create_managed_worktree: None,
                 workspace_id: String::new(),
                 profile_id: "codex-1".into(),
                 bundle_id: "hel".into(),
@@ -6640,6 +6655,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         let (config, state) = sample_config_state();
         let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
         let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+            create_managed_worktree: None,
             workspace_id: String::new(),
             profile_id: "codex-1".into(),
             bundle_id: "hel".into(),

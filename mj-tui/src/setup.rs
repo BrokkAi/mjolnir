@@ -153,10 +153,7 @@ fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
     match value {
         Value::Object(entries) => entries
             .keys()
-            .filter(|key| {
-                key.as_str() != "version"
-                    && !(path.len() == 1 && path[0] == "startup" && key.as_str() == "enabled")
-            })
+            .filter(|key| key.as_str() != "version")
             .cloned()
             .collect(),
         Value::Array(entries) => (0..entries.len()).map(|i| i.to_string()).collect(),
@@ -517,10 +514,6 @@ impl SetupDialog {
 
     fn clear_disabled_profile_references(&mut self, profile_id: &str) {
         let mut cleared = Vec::new();
-        if self.draft["startup"]["profile"].as_str() == Some(profile_id) {
-            self.draft["startup"]["profile"] = Value::Null;
-            cleared.push("New Session Defaults");
-        }
         if self.draft["review"]["profile"].as_str() == Some(profile_id) {
             self.draft["review"]["profile"] = Value::Null;
             self.draft["review"]["enabled"] = Value::Bool(false);
@@ -1693,7 +1686,6 @@ mod tests {
         assert!(text.contains("Interface"), "{text}");
         assert!(text.contains("Advanced"), "{text}");
         for section in [
-            "New Session Defaults",
             "Agent Profiles",
             "Machines and Runtimes",
             "Projects",
@@ -1955,18 +1947,17 @@ mod tests {
         let root = buffer_lines(terminal.backend().buffer()).join("\n");
         assert_eq!(root.matches("Setup").count(), 1, "{root}");
 
-        choose(&mut dashboard, "startup");
+        choose(&mut dashboard, "phone");
         terminal
             .draw(|frame| crate::render::render(frame, &mut dashboard))
             .unwrap();
         let nested = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(nested.contains("Setup › New Session Defaults"), "{nested}");
+        assert!(nested.contains("Setup › Web Access"), "{nested}");
     }
 
     #[test]
     fn disabling_a_profile_clears_references_and_reports_the_cleanup() {
         let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.config.startup.profile = Some("codex-1".into());
         dashboard.config.review.enabled = true;
         dashboard.config.review.profile = Some("codex-1".into());
         dashboard.config.review.model = Some("review-model".into());
@@ -1987,13 +1978,11 @@ mod tests {
             panic!("setup");
         };
         assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], false);
-        assert!(dialog.draft["startup"]["profile"].is_null());
         assert!(dialog.draft["review"]["profile"].is_null());
         assert_eq!(dialog.draft["review"]["enabled"], false);
         assert_eq!(dialog.draft["review"]["model"], "review-model");
         assert_eq!(dialog.draft["review"]["effort"], "high");
         let notice = dialog.notice.as_deref().unwrap();
-        assert!(notice.contains("New Session Defaults"), "{notice}");
         assert!(notice.contains("Code Review"), "{notice}");
 
         terminal
@@ -2060,54 +2049,12 @@ mod tests {
     }
 
     #[test]
-    fn setup_is_available_with_existing_config_and_edits_quick_creation_defaults() {
+    fn setup_does_not_offer_automatic_session_settings() {
         let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.handle_key(key(KeyCode::F(7)));
-        choose(&mut dashboard, "startup");
-        choose(&mut dashboard, "prompt");
-        choose(&mut dashboard, "profile");
-        let Mode::Setup(dialog) = &mut dashboard.mode else {
-            panic!("setup");
-        };
-        let editor = dialog.editor.as_mut().unwrap();
-        let selected = editor
-            .choices
-            .iter()
-            .position(|value| value == "claude-1")
-            .unwrap();
-        assert!(editor.combo.preview(SetupControl::Choices, selected));
-        dialog.prepare();
-        dashboard.handle_key(key(KeyCode::Enter));
-        let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
-            KeyCode::Char('s'),
-            KeyModifiers::CONTROL,
-        ));
-        let DashboardAction::SaveSetup { updated, .. } = action else {
-            panic!("{action:?}");
-        };
-        let saved: Config = serde_json::from_str(&updated).unwrap();
-        assert!(!saved.startup.prompt);
-        assert_eq!(saved.startup.profile.as_deref(), Some("claude-1"));
-        let generation = setup_dialog_mut(&mut dashboard.mode).unwrap().generation;
-        dashboard.setup_saved(generation, Ok(saved));
-        assert!(!dashboard.modal_open());
-        let action = dashboard
-            .quick_session_action(std::path::PathBuf::from("/project"))
-            .unwrap();
-        assert!(
-            matches!(action, DashboardAction::CreateStartupSession { profile_id, .. } if profile_id == "claude-1")
-        );
-        assert!(!dashboard.prompt_has_focus());
-    }
-
-    #[test]
-    fn deprecated_startup_enabled_is_preserved_but_hidden_from_setup() {
-        let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.config.startup.enabled = false;
         dashboard.begin_setup();
         let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-        assert!(!dialog.keys().iter().any(|key| key == "enabled"));
-        assert_eq!(dialog.draft["startup"]["enabled"], false);
+        assert!(!dialog.keys().iter().any(|key| key == "startup"));
+        assert!(dialog.draft.get("startup").is_none());
     }
 
     #[test]
@@ -2207,14 +2154,14 @@ mod tests {
         let original = dashboard.config.clone();
         for (width, height) in [(80, 18), (100, 30), (140, 42)] {
             dashboard.begin_setup();
-            choose(&mut dashboard, "startup");
-            choose(&mut dashboard, "prompt");
+            choose(&mut dashboard, "phone");
+            choose(&mut dashboard, "enabled");
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| crate::render::render(frame, &mut dashboard))
                 .unwrap();
             let text = buffer_lines(terminal.backend().buffer()).join("\n");
-            for label in ["Focus prompt", "Save (Ctrl-S)", "Cancel"] {
+            for label in ["Enabled", "Save (Ctrl-S)", "Cancel"] {
                 assert!(text.contains(label), "{text}");
             }
             dashboard.handle_key(key(KeyCode::Backspace));
@@ -2432,7 +2379,6 @@ mod tests {
     #[test]
     fn expanded_form_preserves_existing_optional_settings() {
         let mut original = config();
-        original.startup.prompt = false;
         original.phone.tls_cert = Some("/keys/cert.pem".into());
         original.phone.tls_key = Some("/keys/key.pem".into());
         original

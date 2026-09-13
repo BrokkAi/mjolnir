@@ -2154,9 +2154,12 @@ fn run_new_preflight_with_executor(
     if target_is_bare {
         let directory =
             project_directory.context("project directory is required for a bare target")?;
-        let directory = config_only_controller(config)
-            .resolve_project_directory(&target_id, &directory, executor)?;
+        let controller = config_only_controller(config);
+        let directory = controller.resolve_project_directory(&target_id, &directory, executor)?;
+        let managed_worktree =
+            controller.managed_worktree_options(&target_id, &directory, executor)?;
         return Ok(crate::server::PreflightNew {
+            managed_worktree,
             project_directory: Some(directory),
             remote_repairs: Vec::new(),
             dirty_repositories: Vec::new(),
@@ -2172,6 +2175,7 @@ fn run_new_preflight_with_executor(
     let repairs = mj_core::local_git::repository_remote_repairs(bundle, executor)?;
     if !repairs.is_empty() {
         return Ok(crate::server::PreflightNew {
+            managed_worktree: Default::default(),
             project_directory: None,
             remote_repairs: repairs,
             dirty_repositories: Vec::new(),
@@ -2200,6 +2204,7 @@ fn run_new_preflight_with_executor(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(crate::server::PreflightNew {
+        managed_worktree: Default::default(),
         project_directory: None,
         remote_repairs: Vec::new(),
         dirty_repositories: Vec::new(),
@@ -2338,6 +2343,7 @@ async fn apply_phone_action(
             target_id,
             title,
             project_directory,
+            create_managed_worktree,
             dirty_ack: _dirty_ack,
         } => {
             let workspace_id = if workspace_id.is_empty() {
@@ -2371,6 +2377,7 @@ async fn apply_phone_action(
                 .daemon_runtime
                 .start_create_session_controlled(
                     CreateSessionRequest {
+                        create_managed_worktree,
                         initial_prompt: None,
                         workspace_id,
                         profile_id,
@@ -3981,7 +3988,7 @@ mod tests {
                 theme: Default::default(),
                 phone: Default::default(),
                 review: Default::default(),
-                startup: Default::default(),
+                legacy_startup: (),
                 profiles: ids
                     .iter()
                     .map(|id| {
@@ -4203,6 +4210,7 @@ mod tests {
 
     fn new_action() -> ControllerAction {
         ControllerAction::New {
+            create_managed_worktree: None,
             workspace_id: String::new(),
             profile_id: "codex".into(),
             bundle_id: "project".into(),
@@ -4215,6 +4223,7 @@ mod tests {
 
     fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         SessionRecord {
+            create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,

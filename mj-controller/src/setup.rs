@@ -1487,7 +1487,12 @@ mod tests {
         fs::write(&path, disabled).unwrap();
         initialize_local_startup_config(&path).unwrap();
         let bootstrapped = Config::load_from(&path).unwrap();
-        assert!(!bootstrapped.startup.enabled);
+        assert!(
+            serde_json::to_value(&bootstrapped)
+                .unwrap()
+                .get("startup")
+                .is_none()
+        );
         assert_eq!(bootstrapped.profiles["codex"].kind, HarnessKind::Codex);
         assert!(matches!(
             bootstrapped.targets["localhost"],
@@ -2363,7 +2368,6 @@ Host builder
             .environment
             .insert("KEEP".into(), "custom".into());
         original.phone.enabled = false;
-        original.startup.enabled = false;
         original.save_to(&path).unwrap();
         let discovery = SetupDiscovery {
             homes: vec![
@@ -2400,7 +2404,6 @@ Host builder
             );
             assert_eq!(saved.targets, original.targets);
             assert_eq!(saved.phone, original.phone);
-            assert_eq!(saved.startup, original.startup);
             assert_eq!(saved.profiles.len(), 2);
             assert_eq!(saved.profiles["muse"].kind, HarnessKind::Muse);
             assert_eq!(saved.bundles.len(), 2);

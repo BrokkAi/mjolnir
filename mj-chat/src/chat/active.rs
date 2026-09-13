@@ -4486,6 +4486,7 @@ mod tests {
 
     fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
         SessionRecord {
+            create_managed_worktree: None,
             id: id.to_owned(),
             workspace_id: workspace_id.to_owned(),
             title: "work".into(),

@@ -409,11 +409,13 @@ pub(crate) struct PendingDashboardImport {
 
 #[derive(Clone, Copy)]
 pub(crate) struct DashboardImportSafety {
+    pub(crate) create_managed_worktree: Option<bool>,
     pub(crate) accepted: bool,
     pub(crate) include_untracked: bool,
 }
 
 pub(crate) struct ImportBundlePrompt {
+    pub(crate) managed_worktree: mj_core::state::ManagedWorktreeOptions,
     pub(crate) dirty_git_roots: Vec<String>,
     pub(crate) omitted_non_git_dirs: Vec<String>,
     pub(crate) scratch_git_roots: Vec<String>,
@@ -680,14 +682,30 @@ fn resolve_background_import_bundle(
             id
         }
     };
+    let managed_worktree = match mj_controller::import::raw_project_import(config, &targets) {
+        Some((directory, target)) => Controller {
+            config: config.clone(),
+            state: State::default(),
+        }
+        .managed_worktree_options(
+            &target,
+            &directory,
+            &mj_controller::targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(
+                30,
+            )),
+        )?,
+        None => mj_core::state::ManagedWorktreeOptions::default(),
+    };
     let issues = import_safety_issues(&targets)?;
     if !safety_accepted
-        && (!issues.dirty_git_roots.is_empty()
+        && (managed_worktree.available
+            || !issues.dirty_git_roots.is_empty()
             || !issues.omitted_non_git_dirs.is_empty()
             || !issues.scratch_git_roots.is_empty())
     {
         return Ok(BackgroundBundleResolution::NeedsConfirmation(
             ImportBundlePrompt {
+                managed_worktree,
                 dirty_git_roots: issues
                     .dirty_git_roots
                     .into_iter()
@@ -767,6 +785,12 @@ fn import_session_from_profile(
         },
         &control,
     )?;
+    controller
+        .state
+        .sessions
+        .get_mut(&imported.session_id)
+        .context("import did not add its session to controller state")?
+        .create_managed_worktree = safety.create_managed_worktree;
     report(4, Some(4), "Finalizing imported session…", true);
     Ok(DashboardImportTaskResult::Imported(Box::new(
         DashboardImportSuccess {
@@ -881,6 +905,135 @@ mod tests {
         for message in messages {
             assert!(message.contains("Mjolnir"), "{message}");
             assert!(!message.contains("Hel"), "{message}");
+        }
+    }
+    #[test]
+    fn clean_raw_imports_require_a_worktree_choice_and_keep_it_when_imported() {
+        const CHILD: &str = "MJ_TEST_IMPORT_WORKTREE_CHOICE";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "import::tests::clean_raw_imports_require_a_worktree_choice_and_keep_it_when_imported", "--nocapture"])
+                .env(CHILD, "1").env("MJ_DATA_DIR", directory.path()).env("MJ_CONFIG_DIR", directory.path());
+            let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.name", "Import Test"],
+            vec!["config", "user.email", "test@example.invalid"],
+            vec!["commit", "--allow-empty", "-m", "base"],
+        ] {
+            let mut command = std::process::Command::new("git");
+            command.arg("-C").arg(&root).args(args);
+            let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let home = directory.path().join("codex");
+        let native_id = "11111111-2222-4333-8444-555555555555";
+        let rollout = home
+            .join("sessions/2026/09/13")
+            .join(format!("rollout-{native_id}.jsonl"));
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        let records = [
+            serde_json::json!({"timestamp":"2026-09-13T12:00:00Z", "type":"session_meta", "payload":{"id":native_id,"cwd":root,"history_mode":"paginated"}}),
+            serde_json::json!({"timestamp":"2026-09-13T12:00:01Z", "type":"event_msg", "payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"import this"}]}}}),
+        ];
+        std::fs::write(
+            rollout,
+            records
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let mut config = Config::default();
+        config
+            .targets
+            .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                kind: HarnessKind::Codex,
+                home,
+                enabled: true,
+                environment: Default::default(),
+                context_window_bytes: None,
+            },
+        );
+        let controller = Controller {
+            config: config.clone(),
+            state: State::default(),
+        };
+        let result = import_session_from_profile(
+            controller,
+            "codex",
+            native_id,
+            "Imported",
+            DashboardImportSafety {
+                accepted: false,
+                include_untracked: true,
+                create_managed_worktree: None,
+            },
+            &AtomicBool::new(false),
+            |_, _, _, _| {},
+        )
+        .unwrap();
+        let DashboardImportTaskResult::NeedsBundle(prompt) = result else {
+            panic!("clean import must offer worktree choice")
+        };
+        assert!(prompt.dirty_git_roots.is_empty());
+        assert!(prompt.managed_worktree.available);
+        assert!(prompt.managed_worktree.default_create);
+        for choice in [false, true] {
+            let controller = Controller {
+                config: config.clone(),
+                state: State::default(),
+            };
+            let result = import_session_from_profile(
+                controller,
+                "codex",
+                native_id,
+                "Imported",
+                DashboardImportSafety {
+                    accepted: true,
+                    include_untracked: true,
+                    create_managed_worktree: Some(choice),
+                },
+                &AtomicBool::new(false),
+                |_, _, _, _| {},
+            )
+            .unwrap();
+            let DashboardImportTaskResult::Imported(imported) = result else {
+                panic!("accepted import must complete")
+            };
+            let record = &imported.controller.state.sessions[&imported.session_id];
+            assert_eq!(record.create_managed_worktree, Some(choice));
+            assert_eq!(record.project_directory, Some(root.canonicalize().unwrap()));
+            assert!(record.managed_worktree.is_none());
+            let database = directory.path().join(format!("import-{choice}.sqlite3"));
+            mj_controller::database::save_state_to(&database, &imported.controller.state).unwrap();
+            assert_eq!(
+                mj_controller::database::load_state_from(&database)
+                    .unwrap()
+                    .sessions[&record.id]
+                    .create_managed_worktree,
+                Some(choice)
+            );
         }
     }
 }

@@ -289,6 +289,7 @@ fn event_digest(value: u64) -> String {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        create_managed_worktree: None,
         workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
         container_cpus: None,
@@ -579,6 +580,7 @@ fn migration_twenty_two_preserves_existing_podman_targets_as_container_layers() 
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
+             ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DELETE FROM schema_migrations WHERE version > 21;
              PRAGMA user_version = 21;",
         )
@@ -1026,7 +1028,8 @@ fn rewind_schema_to(connection: &Connection, version: i64) {
     }
     connection
         .execute_batch(&format!(
-            "DELETE FROM schema_migrations WHERE version > {version};
+            "ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+             DELETE FROM schema_migrations WHERE version > {version};
              PRAGMA user_version = {version};"
         ))
         .unwrap();
@@ -2108,6 +2111,7 @@ fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
         UPDATE sqlite_schema SET sql=replace(sql, ',''muse''', '') WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
         PRAGMA writable_schema=OFF;
         PRAGMA schema_version=1000;
+        ALTER TABLE sessions DROP COLUMN create_managed_worktree;
         DELETE FROM schema_migrations WHERE version>=27;
         PRAGMA user_version=26;").unwrap();
     drop(connection);
@@ -3824,6 +3828,7 @@ fn migration_twenty_five_adds_pane_sizes_without_losing_workspaces() {
         .execute_batch(
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
+             ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DELETE FROM schema_migrations WHERE version > 24;
              PRAGMA user_version = 24;",
         )
@@ -4369,6 +4374,7 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
         .execute_batch(
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
+             ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DELETE FROM schema_migrations WHERE version > 20;
              PRAGMA user_version = 20;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
@@ -4489,7 +4495,8 @@ fn migration_twenty_four_preserves_targets_and_accepts_ssh_docker() {
         PRAGMA writable_schema = OFF;
         DROP TABLE session_moves;
         DROP TABLE workspace_pane_sizes;
-        DELETE FROM schema_migrations WHERE version > 23;
+        ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+             DELETE FROM schema_migrations WHERE version > 23;
         PRAGMA user_version = 23;").unwrap();
     drop(connection);
     forget_verified_schema(&database);
@@ -4725,6 +4732,7 @@ fn a_version_twenty_seven_database_migrates_and_reports_no_turn_history() {
                  WHERE name = 'materialized_sessions';
              PRAGMA writable_schema = OFF;
              DROP TABLE api_idempotency;
+             ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DELETE FROM schema_migrations WHERE version > 27;
              PRAGMA user_version = 27;",
         )
@@ -4950,4 +4958,36 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
     .unwrap();
     assert!(empty.items.is_empty());
     assert_eq!(empty.next_after_seq, 6);
+}
+
+#[test]
+fn worktree_choice_migrates_as_automatic_and_survives_both_session_writers() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("mj.sqlite3");
+    let mut record = session("session-1", "project-1");
+    save_session_to(&database, &record).unwrap();
+    let connection = open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+         DELETE FROM schema_migrations WHERE version = 29;
+         PRAGMA user_version = 28;",
+        )
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&database);
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].create_managed_worktree,
+        None
+    );
+    for choice in [Some(false), Some(true), None] {
+        record.create_managed_worktree = choice;
+        save_session_to(&database, &record).unwrap();
+        record.state = SessionState::Stopped;
+        save_lifecycle_session_to(&database, &record).unwrap();
+        assert_eq!(
+            load_state_from(&database).unwrap().sessions[&record.id].create_managed_worktree,
+            choice
+        );
+    }
 }

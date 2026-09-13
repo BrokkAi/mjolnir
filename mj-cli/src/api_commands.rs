@@ -346,6 +346,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         (None, None) => None,
     };
     let request = StartSessionRequest {
+        create_managed_worktree: None,
         workspace_id,
         profile_id: args.profile.clone(),
         target_id: args.target.clone(),

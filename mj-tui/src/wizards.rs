@@ -66,6 +66,7 @@ pub(crate) enum WizardControl {
     MountDestination,
     MountReadOnly,
     ReviewAttachments,
+    CreateManagedWorktree,
     DiscardQueue,
     Cancel,
     Back,
@@ -76,6 +77,8 @@ pub(crate) enum WizardControl {
 
 #[derive(Debug, Clone)]
 pub(crate) struct NewWizard {
+    pub(crate) worktree_options: Option<(String, String, mj_core::state::ManagedWorktreeOptions)>,
+    pub(crate) create_managed_worktree: bool,
     /// Creation stays in this workspace even if the visible tab changes.
     pub(crate) workspace_id: String,
     pub(crate) step: WizardStep,
@@ -108,7 +111,9 @@ pub(crate) struct NewWizard {
 
 impl PartialEq for NewWizard {
     fn eq(&self, other: &Self) -> bool {
-        self.workspace_id == other.workspace_id
+        self.worktree_options == other.worktree_options
+            && self.create_managed_worktree == other.create_managed_worktree
+            && self.workspace_id == other.workspace_id
             && self.step == other.step
             && self.profile == other.profile
             && self.bundle == other.bundle
@@ -213,6 +218,19 @@ impl MountWizard {
 }
 
 impl NewWizard {
+    fn selected_worktree_options(
+        &self,
+        config: &Config,
+    ) -> Option<mj_core::state::ManagedWorktreeOptions> {
+        let target_id = nth_key(&config.targets, self.target);
+        self.worktree_options
+            .as_ref()
+            .and_then(|(target, directory, options)| {
+                (target == &target_id && directory == self.project_directory.trim())
+                    .then_some(*options)
+            })
+    }
+
     pub(crate) fn prepare_dialog_state(&mut self) {
         let form = self.form.get_mut();
         form.set_dismiss_actions(&[WizardControl::Cancel, WizardControl::Back]);
@@ -775,6 +793,13 @@ pub(crate) fn render_new_wizard(
             area,
             dashboard,
             ReviewWizardView {
+                worktree: Some((
+                    wizard.create_managed_worktree,
+                    raw_project
+                        && wizard
+                            .selected_worktree_options(&dashboard.config)
+                            .is_some_and(|options| options.available),
+                )),
                 profile_id: &nth_enabled_profile(&dashboard.config, wizard.profile),
                 project_label: if raw_project {
                     "Project directory"
@@ -799,7 +824,11 @@ pub(crate) fn render_new_wizard(
                 moving: false,
                 preparing: false,
                 preparation_error: None,
-                submit_enabled: true,
+                submit_enabled: !raw_project
+                    || wizard
+                        .selected_worktree_options(&dashboard.config)
+                        .is_some()
+                    || wizard.remote_preflight_error.is_some(),
                 active_interruption: false,
                 source_unavailable: false,
                 clear_resource_allocation: false,
@@ -1192,6 +1221,7 @@ pub(crate) fn render_new_wizard(
 }
 
 struct ReviewWizardView<'a> {
+    worktree: Option<(bool, bool)>,
     pub(crate) profile_id: &'a str,
     pub(crate) project_label: &'a str,
     pub(crate) project: &'a str,
@@ -1226,6 +1256,7 @@ fn render_review_wizard(
     surfaces: &mut FrameSurfaces,
 ) {
     let ReviewWizardView {
+        worktree,
         profile_id,
         project_label,
         project,
@@ -1348,6 +1379,21 @@ fn render_review_wizard(
             )));
         }
     }
+    let worktree_row = worktree.map(|(checked, available)| {
+        let row = lines.len() as u16;
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            if !is_bare_project_target(target) {
+                "The target provides its own isolated workspace."
+            } else if checked && available {
+                "Create a separate session-owned checkout from the selected checkout's HEAD."
+            } else {
+                "Use the selected directory directly."
+            },
+            theme::muted(),
+        ));
+        row
+    });
     let queue_label = queue.map(|(count, _)| format!("Queued prompts: {count}"));
     if let Some(label) = &queue_label {
         lines.push(Line::raw(label.clone()));
@@ -1422,6 +1468,7 @@ fn render_review_wizard(
         inner.height.saturating_sub(1),
     );
     let focused_row = match form.focused() {
+        Some(WizardControl::CreateManagedWorktree) => worktree_row,
         Some(WizardControl::ReviewAttachments) => Some(
             summary_height.saturating_add(
                 mounts
@@ -1437,6 +1484,17 @@ fn render_review_wizard(
         frame.render_widget(
             Paragraph::new(line.clone()),
             viewport.row(u16::try_from(index).unwrap_or(u16::MAX), 1),
+        );
+    }
+    if let Some(((checked, available), row)) = worktree.zip(worktree_row) {
+        Checkbox::render(
+            frame,
+            viewport.row(row, 1),
+            "Create managed worktree",
+            checked && available,
+            available,
+            form,
+            WizardControl::CreateManagedWorktree,
         );
     }
     if can_attach && !mounts.mounts.is_empty() {
@@ -1817,6 +1875,7 @@ pub(crate) fn render_resume_wizard(
             area,
             dashboard,
             ReviewWizardView {
+                worktree: None,
                 profile_id,
                 project_label,
                 project,

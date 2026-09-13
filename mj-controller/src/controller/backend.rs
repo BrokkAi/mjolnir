@@ -1171,6 +1171,7 @@ mod tests {
         std::fs::write(source.path().join("many/files/two"), b"two").unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
         let record = SessionRecord {
+            create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,
@@ -1630,7 +1631,7 @@ mod tests {
             theme: Default::default(),
             phone: Default::default(),
             review: Default::default(),
-            startup: Default::default(),
+            legacy_startup: (),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
             targets: BTreeMap::from([

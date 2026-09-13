@@ -57,6 +57,7 @@ pub(crate) enum DialogControl {
     TargetTest,
     ConfirmButton(usize),
     ImportIgnore,
+    ImportManagedWorktree,
     ImportCancel,
     ImportContinue,
     WebRetry,
@@ -338,6 +339,8 @@ pub(crate) struct ImportProgress {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportBundleConfirmation {
+    managed_worktree: mj_core::state::ManagedWorktreeOptions,
+    create_managed_worktree: bool,
     dirty_git_roots: Vec<String>,
     omitted_non_git_dirs: Vec<String>,
     scratch_git_roots: Vec<String>,
@@ -358,7 +361,9 @@ fn dialog_form(
                 len: 0,
                 selected: 0,
             },
-            DialogControl::ImportIgnore => ControlKind::Checkbox,
+            DialogControl::ImportIgnore | DialogControl::ImportManagedWorktree => {
+                ControlKind::Checkbox
+            }
             _ => ControlKind::Button,
         };
         form.declare(*id, kind);
@@ -630,7 +635,16 @@ pub(crate) fn render_import_bundle_confirmation(
     if confirmation.has_untracked_files {
         lines.push(Line::raw("Space toggles the checkbox."));
     }
-    let control_lines = usize::from(confirmation.has_untracked_files) + 2;
+    lines.push(Line::raw(if confirmation.managed_worktree.available {
+        if confirmation.create_managed_worktree {
+            "On resume, create a separate session-owned checkout."
+        } else {
+            "On resume, use the imported session's directory directly."
+        }
+    } else {
+        "This import uses an isolated workspace."
+    }));
+    let control_lines = usize::from(confirmation.has_untracked_files) + 3;
     let body_paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
     let height = popup_height(
         &body_paragraph,
@@ -658,15 +672,20 @@ pub(crate) fn render_import_bundle_confirmation(
     );
     let mut form = confirmation.form.borrow_mut();
     form.begin_frame();
-    let title = dismissible_modal_title(
-        &mut form,
-        popup,
-        "Import safety warning",
-        theme::title(true),
-        true,
-    );
+    let title =
+        dismissible_modal_title(&mut form, popup, "Confirm import", theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
     let y = inner.y.saturating_add(body_height);
+    Checkbox::render(
+        frame,
+        Rect::new(inner.x, y, inner.width, 1),
+        "Create managed worktree",
+        confirmation.create_managed_worktree,
+        confirmation.managed_worktree.available,
+        &mut form,
+        DialogControl::ImportManagedWorktree,
+    );
+    let y = y.saturating_add(1);
     if confirmation.has_untracked_files {
         Checkbox::render(
             frame,
@@ -2081,8 +2100,9 @@ impl DashboardState {
         omitted_non_git_dirs: Vec<String>,
         scratch_git_roots: Vec<String>,
         has_untracked_files: bool,
+        managed_worktree: mj_core::state::ManagedWorktreeOptions,
     ) {
-        let form = if has_untracked_files {
+        let mut form = if has_untracked_files {
             dialog_form(
                 &[
                     DialogControl::ImportIgnore,
@@ -2097,7 +2117,14 @@ impl DashboardState {
                 DialogControl::ImportContinue,
             )
         };
+        form.get_mut().declare_with_enabled(
+            DialogControl::ImportManagedWorktree,
+            ControlKind::Checkbox,
+            managed_worktree.available,
+        );
         self.mode = Mode::ConfirmImportBundle(ImportBundleConfirmation {
+            managed_worktree,
+            create_managed_worktree: managed_worktree.default_create,
             dirty_git_roots,
             omitted_non_git_dirs,
             scratch_git_roots,
@@ -2245,9 +2272,16 @@ impl DashboardState {
             Some(Interaction::Cancel)
             | Some(Interaction::Activate(DialogControl::ImportCancel)) => {
                 return DashboardAction::ConfirmImportBundle {
+                    create_managed_worktree: None,
                     accepted: false,
                     include_untracked: false,
                 };
+            }
+            Some(Interaction::Toggle(DialogControl::ImportManagedWorktree)) => {
+                if confirmation.managed_worktree.available {
+                    confirmation.create_managed_worktree = !confirmation.create_managed_worktree;
+                }
+                self.mode = Mode::ConfirmImportBundle(confirmation);
             }
             Some(Interaction::Toggle(DialogControl::ImportIgnore)) => {
                 confirmation.ignore_untracked = !confirmation.ignore_untracked;
@@ -2255,6 +2289,10 @@ impl DashboardState {
             }
             Some(Interaction::Activate(DialogControl::ImportContinue)) => {
                 return DashboardAction::ConfirmImportBundle {
+                    create_managed_worktree: Some(
+                        confirmation.managed_worktree.available
+                            && confirmation.create_managed_worktree,
+                    ),
                     accepted: true,
                     include_untracked: !confirmation.ignore_untracked,
                 };
@@ -2511,10 +2549,16 @@ mod tests {
             fetch_url: "https://example.com/repo.git".into(),
             push_urls: vec!["ssh://git@example.com/repo.git".into()],
         };
-        let retry = DashboardAction::CreateStartupSession {
+        let retry = DashboardAction::CreateSession {
+            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "codex".into(),
-            target_template_id: Some("docker".into()),
-            project_directory: "/project".into(),
+            target_template_id: "docker".into(),
+            bundle_id: "project".into(),
+            project_directory: None,
+            create_managed_worktree: Some(false),
+            additional_mounts: Vec::new(),
+            allow_dirty_local: false,
+            resource_allocation: None,
         };
         dashboard.show_remote_repair_confirmation(
             "repo".into(),
@@ -2586,6 +2630,7 @@ mod tests {
     fn launch_failure_survives_notices_and_retries_original_settings_once() {
         let mut dashboard = dashboard_with_session(stopped_session());
         let retry = DashboardAction::CreateSession {
+            create_managed_worktree: None,
             workspace_id: "original-workspace".into(),
             profile_id: "codex".into(),
             bundle_id: "project".into(),
@@ -2969,7 +3014,7 @@ mod tests {
                 theme: Default::default(),
                 phone: Default::default(),
                 review: Default::default(),
-                startup: Default::default(),
+                legacy_startup: (),
                 profiles: Default::default(),
                 bundles: Default::default(),
                 targets: Default::default(),
@@ -3436,6 +3481,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             true,
+            Default::default(),
         );
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
         terminal
@@ -3455,6 +3501,7 @@ mod tests {
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::ConfirmImportBundle {
+                create_managed_worktree: Some(false),
                 accepted: true,
                 include_untracked: false,
             }
@@ -3465,6 +3512,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             true,
+            Default::default(),
         );
         dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(
@@ -3475,6 +3523,7 @@ mod tests {
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::ConfirmImportBundle {
+                create_managed_worktree: Some(false),
                 accepted: true,
                 include_untracked: true,
             }
@@ -3489,6 +3538,7 @@ mod tests {
             Vec::new(),
             vec!["/tmp/claude-1000/scratch".into()],
             false,
+            Default::default(),
         );
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
         terminal
@@ -3514,6 +3564,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             true,
+            Default::default(),
         );
 
         // Focus starts on Continue; the checkbox is the next control in the
@@ -3548,12 +3599,19 @@ mod tests {
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::ConfirmImportBundle {
+                create_managed_worktree: None,
                 accepted: false,
                 include_untracked: false,
             }
         );
 
-        dashboard.show_import_bundle_confirmation(Vec::new(), Vec::new(), Vec::new(), false);
+        dashboard.show_import_bundle_confirmation(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            Default::default(),
+        );
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('y'))),
             DashboardAction::None
@@ -3562,6 +3620,7 @@ mod tests {
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Esc)),
             DashboardAction::ConfirmImportBundle {
+                create_managed_worktree: None,
                 accepted: false,
                 include_untracked: false,
             }
@@ -3768,6 +3827,7 @@ mod tests {
     #[test]
     fn dirty_local_confirmation_continues_or_cancels_from_its_buttons() {
         let create = |allow_dirty_local| DashboardAction::CreateSession {
+            create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "codex-1".into(),
             bundle_id: "hel".into(),
@@ -3929,5 +3989,66 @@ mod tests {
             dialog.error.as_deref(),
             Some("That origin does not contain checkpoint base b41dc78.")
         );
+    }
+    #[test]
+    fn import_confirmation_allows_worktree_opt_out_and_cancellation() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.show_import_bundle_confirmation(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: true,
+            },
+        );
+        let Mode::ConfirmImportBundle(dialog) = &mut dashboard.mode else {
+            panic!("import confirmation")
+        };
+        dialog
+            .form
+            .get_mut()
+            .focus(DialogControl::ImportManagedWorktree);
+        dashboard.handle_key(key(KeyCode::Char(' ')));
+        let Mode::ConfirmImportBundle(dialog) = &mut dashboard.mode else {
+            panic!("import confirmation")
+        };
+        assert!(!dialog.create_managed_worktree);
+        dialog.form.get_mut().focus(DialogControl::ImportContinue);
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::ConfirmImportBundle {
+                accepted: true,
+                create_managed_worktree: Some(false),
+                ..
+            }
+        ));
+        dashboard.show_import_bundle_confirmation(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: false,
+            },
+        );
+        let Mode::ConfirmImportBundle(dialog) = &mut dashboard.mode else {
+            panic!("import confirmation")
+        };
+        dialog
+            .form
+            .get_mut()
+            .focus(DialogControl::ImportManagedWorktree);
+        dashboard.handle_key(key(KeyCode::Char(' ')));
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::ConfirmImportBundle {
+                accepted: false,
+                create_managed_worktree: None,
+                ..
+            }
+        ));
     }
 }

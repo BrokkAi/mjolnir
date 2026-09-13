@@ -699,6 +699,17 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 28 {
         migrate_turn_outcome_columns(connection)?;
     }
+    if version < 29 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE sessions ADD COLUMN create_managed_worktree INTEGER
+                 CHECK(create_managed_worktree IN (0, 1));
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (29, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 29;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

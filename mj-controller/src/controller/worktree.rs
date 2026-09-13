@@ -8,7 +8,8 @@ use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::{Config, ProjectBundle, TargetTemplate};
 use mj_core::local_git::canonical_repository;
 use mj_core::state::{
-    ManagedWorktree, ManagedWorktreeTarget, ProjectSourceIdentity, SessionRecord,
+    ManagedWorktree, ManagedWorktreeOptions, ManagedWorktreeTarget, ProjectSourceIdentity,
+    SessionRecord,
 };
 
 use crate::targets::{
@@ -20,6 +21,34 @@ pub use mj_client::target::{ResumePlan, resume_compatibility};
 use super::{Controller, backend_ssh, execute_checked, now, ssh_command_spec};
 
 impl Controller {
+    /// Inspect in a supervised worker, never on a UI event loop.
+    pub fn managed_worktree_options(
+        &self,
+        target_id: &str,
+        directory: &Path,
+        executor: &impl CommandExecutor,
+    ) -> Result<ManagedWorktreeOptions> {
+        let template = self
+            .config
+            .targets
+            .get(target_id)
+            .with_context(|| format!("unknown target template {target_id:?}"))?;
+        if !mj_core::config::is_bare_project_target(template) {
+            return Ok(ManagedWorktreeOptions::default());
+        }
+        let target = managed_worktree_target(template)?;
+        if matches!(target, ManagedWorktreeTarget::Local)
+            && local_project_repository(directory, executor)?.is_none()
+        {
+            return Ok(ManagedWorktreeOptions::default());
+        }
+        let inspection = inspect_raw_project(executor, &target, directory)?;
+        Ok(ManagedWorktreeOptions {
+            available: true,
+            default_create: inspection.primary_checkout,
+        })
+    }
+
     /// Resolve first so validation, review, and launch use the same path.
     pub fn resolve_project_directory(
         &self,
@@ -229,6 +258,9 @@ impl Controller {
         if session.managed_worktree.is_some() {
             return Ok(false);
         }
+        if session.create_managed_worktree == Some(false) {
+            return Ok(false);
+        }
         let template = self
             .config
             .targets
@@ -241,10 +273,14 @@ impl Controller {
         if matches!(target, ManagedWorktreeTarget::Local)
             && local_project_repository(selected, executor)?.is_none()
         {
+            ensure!(
+                session.create_managed_worktree != Some(true),
+                "managed worktree creation requires a Git project"
+            );
             return Ok(false);
         }
         let inspection = inspect_raw_project(executor, &target, selected)?;
-        if !inspection.primary_checkout {
+        if !inspection.primary_checkout && session.create_managed_worktree != Some(true) {
             return Ok(false);
         }
         let relative_directory = inspection
@@ -1399,6 +1435,191 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn worktree_choice_survives_reload_and_controls_creation() {
+        const CHILD: &str = "MJ_TEST_WORKTREE_CHOICE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "controller::worktree::tests::worktree_choice_survives_reload_and_controls_creation", "--nocapture"])
+                .env(CHILD, "1").env("MJ_DATA_DIR", directory.path()).env("MJ_CONFIG_DIR", directory.path());
+            let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let repository = committed_repository();
+        let root = repository.path().canonicalize().unwrap();
+        let linked_parent = tempfile::tempdir().unwrap();
+        let linked = linked_parent.path().join("linked");
+        test_git(
+            &root,
+            &["worktree", "add", "-b", "side", linked.to_str().unwrap()],
+        );
+        test_git(&linked, &["branch", "--set-upstream-to=master"]);
+        std::fs::write(linked.join("nested/file.txt"), "linked commit\n").unwrap();
+        test_git(&linked, &["commit", "-am", "side commit"]);
+        let linked = linked.canonicalize().unwrap();
+        let mut config = Config::default();
+        config
+            .targets
+            .insert("localhost".into(), TargetTemplate::LocalBare);
+        config.save().unwrap();
+        let mut controller = Controller {
+            config,
+            state: State::default(),
+        };
+        assert_eq!(
+            controller
+                .managed_worktree_options("localhost", &root, &ProcessExecutor)
+                .unwrap(),
+            ManagedWorktreeOptions {
+                available: true,
+                default_create: true
+            }
+        );
+        assert_eq!(
+            controller
+                .managed_worktree_options("localhost", &linked, &ProcessExecutor)
+                .unwrap(),
+            ManagedWorktreeOptions {
+                available: true,
+                default_create: false
+            }
+        );
+
+        // Both creation and first resume of an imported session enter this preparation.
+        // A dirty source is usable directly, and cleanup must leave its files and branch alone.
+        std::fs::write(root.join("dirty.txt"), "keep me\n").unwrap();
+        let selected = root.join("nested");
+        let mut record = raw_session_on("localhost", selected.to_str().unwrap());
+        record.create_managed_worktree = Some(false);
+        crate::database::save_session(&record).unwrap();
+        for _ in 0..2 {
+            controller.reload().unwrap();
+            assert!(
+                !controller
+                    .prepare_managed_raw_worktree(&record.id, &ProcessExecutor)
+                    .unwrap()
+            );
+            assert_eq!(
+                controller.state.sessions[&record.id]
+                    .project_directory
+                    .as_ref(),
+                Some(&selected)
+            );
+            assert!(
+                controller.state.sessions[&record.id]
+                    .managed_worktree
+                    .is_none()
+            );
+            controller
+                .cleanup_new_session_worktree(&record.id, &ProcessExecutor)
+                .unwrap();
+        }
+        assert!(root.join("dirty.txt").exists());
+        assert!(!root.join(".mj/worktrees").exists());
+        assert_eq!(test_git(&root, &["branch", "--show-current"]), "master");
+        std::fs::remove_file(root.join("dirty.txt")).unwrap();
+
+        // Explicit creation also works from a linked checkout and preserves its HEAD,
+        // upstream, and selected subdirectory rather than using the main checkout's HEAD.
+        record.project_directory = Some(linked.join("nested"));
+        record.create_managed_worktree = None;
+        crate::database::save_session(&record).unwrap();
+        controller.reload().unwrap();
+        assert!(
+            !controller
+                .prepare_managed_raw_worktree(&record.id, &ProcessExecutor)
+                .unwrap()
+        );
+        record.create_managed_worktree = Some(true);
+        crate::database::save_session(&record).unwrap();
+        controller.reload().unwrap();
+        assert!(
+            controller
+                .prepare_managed_raw_worktree(&record.id, &ProcessExecutor)
+                .unwrap()
+        );
+        controller.reload().unwrap();
+        let managed = controller.state.sessions[&record.id]
+            .managed_worktree
+            .clone()
+            .unwrap();
+        assert_eq!(
+            test_git(&managed.worktree_root, &["rev-parse", "HEAD"]),
+            test_git(&linked, &["rev-parse", "HEAD"])
+        );
+        assert_ne!(
+            test_git(&managed.worktree_root, &["rev-parse", "HEAD"]),
+            test_git(&root, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(
+            test_git(
+                &managed.worktree_root,
+                &["rev-parse", "--abbrev-ref", "@{upstream}"]
+            ),
+            "master"
+        );
+        assert_eq!(
+            controller.state.sessions[&record.id].project_directory,
+            Some(managed.worktree_root.join("nested"))
+        );
+        controller
+            .cleanup_new_session_worktree(&record.id, &ProcessExecutor)
+            .unwrap();
+        assert!(linked.join("nested/file.txt").exists());
+        assert!(!managed.worktree_root.exists());
+
+        record.project_directory = Some(root.clone());
+        record.create_managed_worktree = None;
+        crate::database::save_session(&record).unwrap();
+        controller.reload().unwrap();
+        assert!(
+            controller
+                .prepare_managed_raw_worktree(&record.id, &ProcessExecutor)
+                .unwrap()
+        );
+        controller
+            .cleanup_new_session_worktree(&record.id, &ProcessExecutor)
+            .unwrap();
+    }
+
+    #[test]
+    fn explicit_worktree_creation_rejects_plain_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut record = raw_session_on("localhost", directory.path().to_str().unwrap());
+        record.create_managed_worktree = Some(true);
+        let id = record.id.clone();
+        let mut config = Config::default();
+        config
+            .targets
+            .insert("localhost".into(), TargetTemplate::LocalBare);
+        let mut controller = Controller {
+            config,
+            state: State {
+                sessions: [(id.clone(), record)].into_iter().collect(),
+                ..State::default()
+            },
+        };
+        assert_eq!(
+            controller
+                .managed_worktree_options("localhost", directory.path(), &ProcessExecutor)
+                .unwrap(),
+            ManagedWorktreeOptions::default()
+        );
+        let error = controller
+            .prepare_managed_raw_worktree(&id, &ProcessExecutor)
+            .unwrap_err();
+        assert!(error.to_string().contains("requires a Git project"));
+        assert!(!directory.path().join(".git").exists());
+    }
 
     #[test]
     fn local_bare_validation_accepts_projects_and_plain_directories_but_rejects_missing_paths() {

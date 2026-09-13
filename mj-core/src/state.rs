@@ -647,6 +647,14 @@ pub enum ManagedWorktreeTarget {
     },
 }
 
+/// Whether a selected project can create a session-owned Git checkout.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedWorktreeOptions {
+    pub available: bool,
+    pub default_create: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedWorktree {
@@ -860,6 +868,9 @@ pub struct SessionRecord {
     /// Git worktree created and owned by Hel for this raw-project session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_worktree: Option<ManagedWorktree>,
+    /// None preserves automatic selection; false uses the selected directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_managed_worktree: Option<bool>,
     pub target_template_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_allocation: Option<SessionResourceAllocation>,
@@ -1665,6 +1676,7 @@ mod tests {
 
     fn sample_state() -> State {
         let session = SessionRecord {
+            create_managed_worktree: None,
             workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,
@@ -1726,7 +1738,7 @@ mod tests {
             theme: Default::default(),
             phone: Default::default(),
             review: Default::default(),
-            startup: Default::default(),
+            legacy_startup: (),
             profiles: BTreeMap::from([(
                 "codex-1".into(),
                 HarnessProfile {
@@ -2433,7 +2445,7 @@ mod tests {
             .get_mut(&session.last_profile)
             .unwrap()
             .enabled = false;
-        after.startup.prompt = !before.startup.prompt;
+        after.advanced.show_stopped_sessions = !before.advanced.show_stopped_sessions;
         after.targets.insert(
             "alternative".into(),
             crate::config::TargetTemplate::LocalBare,

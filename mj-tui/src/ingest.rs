@@ -1464,7 +1464,7 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut dashboard = dashboard_with_session(running_session());
         let mut saved_config = dashboard.config.clone();
-        saved_config.startup.enabled = !saved_config.startup.enabled;
+        saved_config.advanced.show_stopped_sessions = !saved_config.advanced.show_stopped_sessions;
         dashboard.handle_key(key(KeyCode::F(2)));
         dashboard.handle_paste("rename");
         dashboard.set_config(saved_config.clone());

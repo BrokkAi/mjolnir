@@ -23,6 +23,7 @@ use super::worktree::{
 
 pub(super) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
+        create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
         container_cpus: None,

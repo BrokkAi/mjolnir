@@ -22,6 +22,7 @@ impl Drop for DropFlag {
 
 fn session_record(id: &str) -> SessionRecord {
     SessionRecord {
+        create_managed_worktree: None,
         id: id.into(),
         workspace_id: "workspace-1".into(),
         title: format!("Session {id}"),

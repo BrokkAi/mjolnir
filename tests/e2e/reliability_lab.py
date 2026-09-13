@@ -611,9 +611,6 @@ bind = "127.0.0.1:{port}"
 tailscale_detect = false
 {tls_config}
 
-[startup]
-enabled = false
-
 [profiles.fake]
 kind = "codex"
 home = {json.dumps(str(self.profile))}

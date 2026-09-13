@@ -18,280 +18,6 @@ use crate::render::render;
 use crate::{DashboardAction, DashboardState, Mode, nth_key};
 
 #[test]
-fn startup_creation_uses_defaults_before_focusing_the_new_session_prompt() {
-    let mut config = config();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    let directory = std::env::current_dir().unwrap().join("project with spaces");
-    assert_eq!(
-        dashboard.quick_session_action(directory.clone()).unwrap(),
-        DashboardAction::CreateStartupSession {
-            profile_id: "codex-1".into(),
-            project_directory: directory,
-            target_template_id: None,
-        }
-    );
-    assert!(!dashboard.prompt_has_focus());
-    assert!(!dashboard.modal_open());
-
-    let mut session = running_session();
-    session.state = SessionState::Provisioning;
-    let mut state = State::default();
-    state.sessions.insert(session.id.clone(), session.clone());
-    dashboard.set_state(state.clone());
-    dashboard.begin_session_operation(
-        session.id.clone(),
-        crate::SessionOperationKind::Launching,
-        None,
-    );
-    assert!(!dashboard.prompt_has_focus());
-    state.sessions.get_mut(&session.id).unwrap().state = SessionState::Running;
-    dashboard.set_state(state);
-    dashboard.finish_session_operation(&session.id);
-    dashboard.select_active_session(&session.id);
-    assert_eq!(dashboard.selected_session_id(), Some(session.id.as_str()));
-    assert!(!dashboard.prompt_has_focus());
-}
-
-#[test]
-fn startup_scopes_active_sessions_to_the_selected_workspace() {
-    let mut foreign = running_session();
-    foreign.workspace_id = "other-workspace".into();
-    let mut dashboard = dashboard_with_session(foreign.clone());
-    let directory = std::env::current_dir().unwrap().join("opened project");
-    dashboard.set_active_workspace(None);
-    assert_eq!(
-        dashboard.begin_startup_session(directory.clone()).unwrap(),
-        DashboardAction::None
-    );
-    dashboard.set_active_workspace(Some("opened-workspace".into()));
-    assert!(dashboard.ordered_sessions().is_empty());
-    assert_eq!(dashboard.selected_session_id(), None);
-    assert_eq!(dashboard.startup_sessions().count(), 0);
-    assert!(matches!(
-        dashboard.begin_startup_session(directory.clone()).unwrap(),
-        DashboardAction::CreateStartupSession { project_directory, .. }
-            if project_directory == directory
-    ));
-
-    let mut local = running_session();
-    local.id = "opened-session".into();
-    local.workspace_id = "opened-workspace".into();
-    let mut state = dashboard.state.clone();
-    state.sessions.insert(local.id.clone(), local.clone());
-    dashboard.set_state(state.clone());
-    assert_eq!(dashboard.selected_session_id(), Some(local.id.as_str()));
-    assert_eq!(
-        dashboard
-            .startup_sessions()
-            .map(|session| &session.id)
-            .collect::<Vec<_>>(),
-        vec![&local.id]
-    );
-    assert_eq!(dashboard.ordered_sessions().len(), 1);
-    assert_eq!(
-        dashboard.begin_startup_session(directory).unwrap(),
-        DashboardAction::None
-    );
-
-    dashboard.select_active_session(&foreign.id);
-    dashboard.set_state(state);
-    assert_eq!(dashboard.selected_session_id(), Some(local.id.as_str()));
-}
-
-#[test]
-fn startup_prepares_codex_for_an_empty_workspace() {
-    let mut config = config();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    let directory = std::env::current_dir().unwrap().join("project with spaces");
-    assert_eq!(
-        dashboard.begin_startup_session(directory.clone()).unwrap(),
-        DashboardAction::CreateStartupSession {
-            profile_id: "codex-1".into(),
-            project_directory: directory,
-            target_template_id: None,
-        }
-    );
-    assert!(!dashboard.prompt_has_focus());
-    assert!(!dashboard.modal_open());
-}
-
-#[test]
-fn startup_respects_configured_agent_and_existing_live_sessions() {
-    let mut config = config();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    config.startup.profile = Some("claude-1".into());
-    config.startup.target = Some("localhost".into());
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    assert!(matches!(
-        dashboard
-            .begin_startup_session(std::env::current_dir().unwrap())
-            .unwrap(),
-        DashboardAction::CreateStartupSession {
-            profile_id,
-            target_template_id: Some(target),
-            ..
-        } if profile_id == "claude-1" && target == "localhost"
-    ));
-
-    for state in [
-        SessionState::Running,
-        SessionState::Provisioning,
-        SessionState::Disconnected,
-        SessionState::Error,
-    ] {
-        let mut session = running_session();
-        session.state = state;
-        let mut with_session = dashboard_with_session(session);
-        let selected = with_session.selected_session_id().map(str::to_owned);
-        let focus = with_session.focus();
-        assert_eq!(
-            with_session
-                .begin_startup_session(std::env::current_dir().unwrap())
-                .unwrap(),
-            DashboardAction::None
-        );
-        assert_eq!(with_session.selected_session_id(), selected.as_deref());
-        assert_eq!(with_session.focus(), focus);
-    }
-}
-
-#[test]
-fn startup_reports_missing_profiles_and_ignores_stopped_history() {
-    let mut config = config();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut state = State::default();
-    let stopped = stopped_session();
-    state.sessions.insert(stopped.id.clone(), stopped);
-    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-    assert!(matches!(
-        dashboard
-            .begin_startup_session(std::env::current_dir().unwrap())
-            .unwrap(),
-        DashboardAction::CreateStartupSession { .. }
-    ));
-
-    let mut missing = DashboardState::new(
-        crate::test_support::config(),
-        State::default(),
-        BTreeMap::new(),
-    );
-    let directory = std::env::current_dir().unwrap();
-    missing.config.startup.profile = Some("missing".into());
-    assert!(
-        missing
-            .begin_startup_session(directory.clone())
-            .unwrap_err()
-            .contains("not configured")
-    );
-    missing.config.startup.profile = None;
-    missing.config.profiles.clear();
-    assert!(
-        missing
-            .begin_startup_session(directory)
-            .unwrap_err()
-            .contains("F7")
-    );
-
-    missing.config.startup.enabled = false;
-    assert_eq!(
-        missing
-            .begin_startup_session(std::env::current_dir().unwrap())
-            .unwrap(),
-        DashboardAction::None
-    );
-}
-
-#[test]
-fn startup_creation_respects_the_configured_agent_and_fallback() {
-    let mut config = config();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    config.startup.profile = Some("claude-1".into());
-    config.startup.target = Some("localhost".into());
-    for explicit in [true, false] {
-        if !explicit {
-            config.startup.profile = None;
-            config
-                .profiles
-                .retain(|_, profile| profile.kind != HarnessKind::Codex);
-        }
-        let mut dashboard = DashboardState::new(config.clone(), State::default(), BTreeMap::new());
-        assert!(
-            matches!(dashboard.quick_session_action(std::env::current_dir().unwrap()).unwrap(),
-            DashboardAction::CreateStartupSession { profile_id, target_template_id, .. } if profile_id == "claude-1" && target_template_id.as_deref() == Some("localhost"))
-        );
-    }
-}
-
-#[test]
-fn explicit_quick_creation_ignores_deprecated_startup_enabled() {
-    let mut config = config();
-    config.startup.enabled = false;
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    assert_eq!(
-        dashboard
-            .quick_session_action(std::env::current_dir().unwrap())
-            .unwrap(),
-        DashboardAction::CreateStartupSession {
-            profile_id: "codex-1".into(),
-            target_template_id: None,
-            project_directory: std::env::current_dir().unwrap(),
-        }
-    );
-}
-
-#[test]
-fn stopped_history_does_not_block_explicit_quick_creation() {
-    let mut config = config();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut state = State::default();
-    let session = stopped_session();
-    state.sessions.insert(session.id.clone(), session);
-    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-    assert!(matches!(
-        dashboard
-            .quick_session_action(std::env::current_dir().unwrap())
-            .unwrap(),
-        DashboardAction::CreateStartupSession { .. }
-    ));
-    assert!(!dashboard.prompt_has_focus());
-}
-
-#[test]
-fn explicit_quick_creation_reports_missing_agent_profiles() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    let directory = std::env::current_dir().unwrap();
-    dashboard.config.startup.profile = Some("missing".into());
-    assert!(
-        dashboard
-            .quick_session_action(directory.clone())
-            .unwrap_err()
-            .contains("not configured")
-    );
-    dashboard.config.startup.profile = None;
-    dashboard.config.profiles.clear();
-    assert!(
-        dashboard
-            .quick_session_action(directory)
-            .unwrap_err()
-            .contains("F7")
-    );
-}
-
-#[test]
 fn new_session_wizard_returns_all_three_choices() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     assert_eq!(dashboard.handle_key(alt_key('w')), DashboardAction::None);
@@ -315,6 +41,7 @@ fn new_session_wizard_returns_all_three_choices() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
+                create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
                 bundle_id: "hel".into(),
@@ -921,7 +648,17 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         }
     );
 
-    dashboard.apply_project_directory_validation("/srv/repaired", Ok(()));
+    dashboard.apply_resolved_project_directory(
+        &dashboard.path_input_context(),
+        "/srv/repaired",
+        Ok((
+            PathBuf::from("/srv/repaired"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: true,
+            },
+        )),
+    );
 
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -939,6 +676,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "claude-1".into(),
             bundle_id: raw_project_context_id("/srv/repaired"),
@@ -1045,10 +783,21 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
             directory: "/home/me/project".into(),
         }
     );
-    dashboard.apply_project_directory_validation("/home/me/project", Ok(()));
+    dashboard.apply_resolved_project_directory(
+        &dashboard.path_input_context(),
+        "/home/me/project",
+        Ok((
+            PathBuf::from("/home/me/project"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: true,
+            },
+        )),
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "kimi".into(),
             bundle_id: raw_project_context_id("/home/me/project"),
@@ -1095,6 +844,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
+                create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
                 bundle_id: "zebra-recent".into(),
@@ -1344,6 +1094,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                 read_only: false,
             }],
             launch: Box::new(DashboardAction::CreateSession {
+                create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
                 bundle_id: "hel".into(),
@@ -2772,4 +2523,138 @@ fn revisiting_or_reselecting_a_target_preserves_edited_resources() {
     };
     assert_eq!(wizard.step, WizardStep::Target);
     assert_eq!(wizard.resource_allocation, edited);
+}
+
+#[test]
+fn raw_review_waits_for_worktree_inspection_and_preserves_explicit_selection() {
+    let mut configuration = config();
+    configuration.targets.clear();
+    configuration
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.step = WizardStep::Review;
+    wizard.project_directory = "/work/main".into();
+    assert!(matches!(
+        dashboard.take_prerequisite_check(),
+        Some(DashboardAction::ValidateProjectDirectory { .. })
+    ));
+    let context = dashboard.path_input_context();
+    dashboard.apply_resolved_project_directory(
+        &context,
+        "/work/main",
+        Ok((
+            PathBuf::from("/work/main"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: true,
+            },
+        )),
+    );
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    assert!(wizard.create_managed_worktree);
+    wizard
+        .form
+        .get_mut()
+        .focus(WizardControl::CreateManagedWorktree);
+    dashboard.handle_key(key(KeyCode::Char(' ')));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("new wizard")
+    };
+    assert!(!wizard.create_managed_worktree);
+    // Revalidating an unchanged directory keeps the explicit override.
+    dashboard.apply_resolved_project_directory(
+        &context,
+        "/work/main",
+        Ok((
+            PathBuf::from("/work/main"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: true,
+            },
+        )),
+    );
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    assert!(!wizard.create_managed_worktree);
+    wizard.form.get_mut().focus(WizardControl::Submit);
+    assert!(
+        matches!(dashboard.handle_key(key(KeyCode::Enter)), DashboardAction::CreateSession {
+        create_managed_worktree: Some(false), project_directory: Some(directory), ..
+    } if directory == std::path::Path::new("/work/main"))
+    );
+}
+
+#[test]
+fn worktree_inspection_ignores_old_directories_and_allows_linked_checkout_opt_in() {
+    let mut configuration = config();
+    configuration.targets.clear();
+    configuration
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.step = WizardStep::Review;
+    wizard.project_directory = "/work/main".into();
+    let old_context = dashboard.path_input_context();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.project_directory = "/work/linked".into();
+    dashboard.apply_resolved_project_directory(
+        &old_context,
+        "/work/main",
+        Ok((
+            PathBuf::from("/work/main"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: true,
+            },
+        )),
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("new wizard")
+    };
+    assert!(wizard.worktree_options.is_none());
+    dashboard.apply_resolved_project_directory(
+        &dashboard.path_input_context(),
+        "/work/linked",
+        Ok((
+            PathBuf::from("/work/linked"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: false,
+            },
+        )),
+    );
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    assert!(!wizard.create_managed_worktree);
+    wizard
+        .form
+        .get_mut()
+        .focus(WizardControl::CreateManagedWorktree);
+    dashboard.handle_key(key(KeyCode::Char(' ')));
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::Submit);
+    assert!(matches!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::CreateSession {
+            create_managed_worktree: Some(true),
+            ..
+        }
+    ));
 }

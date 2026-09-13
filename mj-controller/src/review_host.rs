@@ -2978,6 +2978,7 @@ mod tests {
     #[test]
     fn the_reviewer_profile_must_be_separate_from_the_primary_profile() {
         let session = mj_core::state::SessionRecord {
+            create_managed_worktree: None,
             id: "session-1".to_owned(),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             title: "task".to_owned(),

@@ -243,8 +243,6 @@ def main() -> int:
     print(f"mouse-commands: artifacts={lab.root}", flush=True)
     try:
         port = lab.prepare(fake_acp_delay_ms=100)
-        config = lab.config / "config.toml"
-        config.write_text(config.read_text().replace('[startup]\nenabled = false', '[startup]\nenabled = false\nprofile = "fake"\ntarget = "localhost"'))
         home = lab.runtime_root / "home"
         home.mkdir()
         environment = lab.environment()

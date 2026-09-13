@@ -17,6 +17,7 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
     snapshots: 0, preflights: [], preflightFailures: 0, actions: [], creates: [], rejectCreate: false,
     holdCreate: null, holdLaunch: null,
     holdPreflight: null,
+    worktreeOptions: { available: true, default_create: true },
   };
   const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
   await page.addInitScript(() => {
@@ -45,6 +46,7 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       return json({
         remote_repositories: bare ? [] : [{ id: request.bundle_id, fetch_url: 'https://github.com/example/repo.git', default_branch: 'main', push_urls: ['https://github.com/example/repo.git'] }],
         local_changes_excluded: !bare,
+        managed_worktree: bare ? state.worktreeOptions : { available: false, default_create: false },
       });
     }
     if (pathname === '/api/bundles') {
@@ -237,3 +239,65 @@ test('resume choices stay selected through revisions and are used by Resume', as
   await expect(page).toHaveURL(/#workspace\/test$/);
   expect(state.actions[0]).toEqual({ action: 'resume', session_id: 'stopped', workspace_id: 'test', profile_id: 'beta', target_id: 'remote', queue: 'discard' });
 });
+
+
+test('managed worktree defaults can be overridden and survive Back and live refresh', async ({ page }) => {
+  const state = await mount(page);
+  await projectStep(page, 'local');
+  await page.locator('#new-next').click();
+  const checkbox = page.getByRole('checkbox', { name: 'Create managed worktree' });
+  await expect(checkbox).toBeChecked();
+  await checkbox.uncheck();
+  await expect(page.locator("#new-step")).toContainText("Use the selected directory directly.");
+  await refresh(page, state);
+  await expect(checkbox).not.toBeChecked();
+  await page.locator('#new-back').click();
+  await page.locator('#new-next').click();
+  await expect(checkbox).not.toBeChecked();
+  await expect(page.locator('#new-step')).toContainText('Use the selected directory directly.');
+  await page.locator('#new-next').click();
+  expect(state.actions.at(-1)).toMatchObject({ create_managed_worktree: false, project_directory: '/work/recent' });
+});
+
+test('an existing linked checkout can explicitly create a managed worktree', async ({ page }) => {
+  const state = await mount(page);
+  state.worktreeOptions = { available: true, default_create: false };
+  await projectStep(page, 'local');
+  await page.locator('#new-project-directory').fill('/work/linked');
+  await page.locator('#new-next').click();
+  const checkbox = page.getByRole('checkbox', { name: 'Create managed worktree' });
+  await expect(checkbox).not.toBeChecked();
+  await expect(checkbox).toBeEnabled();
+  await checkbox.focus();
+  await page.keyboard.press('Space');
+  await expect(checkbox).toBeChecked();
+  await expect(checkbox).toBeFocused();
+  await page.locator('#new-next').click();
+  expect(state.actions.at(-1)).toMatchObject({ create_managed_worktree: true, project_directory: '/work/linked' });
+});
+
+test('changing the directory resets the worktree choice to its inspected default', async ({ page }) => {
+  const state = await mount(page);
+  await projectStep(page, 'local');
+  await page.locator('#new-next').click();
+  const checkbox = page.getByRole('checkbox', { name: 'Create managed worktree' });
+  await checkbox.uncheck();
+  await page.locator('#new-back').click();
+  await page.locator('#new-project-directory').fill('/work/another');
+  await page.locator('#new-next').click();
+  await expect(checkbox).toBeChecked();
+});
+
+for (const target of ['container', 'local', 'remote']) {
+  test(`unsupported worktree creation stays disabled for ${target}`, async ({ page }) => {
+    const state = await mount(page);
+    state.worktreeOptions = { available: false, default_create: false };
+    await projectStep(page, target);
+    await page.locator('#new-next').click();
+    const checkbox = page.getByRole('checkbox', { name: 'Create managed worktree' });
+    await expect(checkbox).not.toBeChecked();
+    await expect(checkbox).toBeDisabled();
+    await refresh(page, state);
+    await expect(checkbox).toBeDisabled();
+  });
+}

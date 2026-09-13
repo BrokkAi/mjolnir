@@ -539,6 +539,7 @@ mod tests {
                 (
                     (*session_id).to_owned(),
                     SessionRecord {
+                        create_managed_worktree: None,
                         id: (*session_id).to_owned(),
                         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                         title: "review settings test".to_owned(),

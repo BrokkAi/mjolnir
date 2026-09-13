@@ -998,62 +998,12 @@ fn validate_environment(owner: &str, environment: &BTreeMap<String, String>) -> 
     Ok(())
 }
 
-/// Defaults for new sessions and an empty terminal workspace's first session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StartupConfig {
-    /// Focus the normal composer when the new session is ready.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub prompt: bool,
-    /// Create a first session when opening an empty terminal workspace.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
-}
-
-impl Default for StartupConfig {
-    fn default() -> Self {
-        Self {
-            prompt: true,
-            enabled: true,
-            profile: None,
-            target: None,
-        }
-    }
-}
-
-impl StartupConfig {
-    fn is_default(&self) -> bool {
-        self == &Self::default()
-    }
-
-    fn validate(
-        &self,
-        profiles: &BTreeMap<String, HarnessProfile>,
-        targets: &BTreeMap<String, TargetTemplate>,
-    ) -> Result<()> {
-        if let Some(profile) = &self.profile
-            && !profiles.contains_key(profile)
-        {
-            bail!("startup profile {profile:?} is not configured");
-        }
-        if let Some(profile) = &self.profile
-            && profiles
-                .get(profile)
-                .is_some_and(|profile| !profile.enabled)
-        {
-            bail!("startup profile {profile:?} is disabled");
-        }
-        if let Some(target) = &self.target
-            && !targets.contains_key(target)
-        {
-            bail!("startup target {target:?} is not configured");
-        }
-        Ok(())
-    }
+// Old config files may still contain [startup]. Accept it without retaining
+// settings that could recreate automatic first-session behavior on save.
+fn discard_legacy_startup<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<(), D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer).map(|_| ())
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1232,8 +1182,13 @@ pub struct Config {
     pub phone: PhoneConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
     pub review: ReviewConfig,
-    #[serde(default, skip_serializing_if = "StartupConfig::is_default")]
-    pub startup: StartupConfig,
+    #[serde(
+        default,
+        rename = "startup",
+        skip_serializing,
+        deserialize_with = "discard_legacy_startup"
+    )]
+    pub legacy_startup: (),
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, HarnessProfile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1254,7 +1209,7 @@ impl Default for Config {
             theme: Default::default(),
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
-            startup: StartupConfig::default(),
+            legacy_startup: (),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
             targets: BTreeMap::new(),
@@ -1338,7 +1293,6 @@ impl Config {
         // Checked after the profiles, so a review pointing at a malformed
         // profile reports the profile's own error first.
         self.review.validate(&self.profiles)?;
-        self.startup.validate(&self.profiles, &self.targets)?;
         for (id, bundle) in &self.bundles {
             bundle.validate(id)?;
         }
@@ -1447,11 +1401,6 @@ impl Config {
         }
         config.bundles = salvage_map(document, "bundles", ProjectBundle::validate);
         config.targets = salvage_map(document, "targets", TargetTemplate::validate);
-        if let Some(startup) = salvage_section::<StartupConfig>(document, "startup")
-            && startup.validate(&config.profiles, &config.targets).is_ok()
-        {
-            config.startup = startup;
-        }
         config
     }
 
@@ -1568,9 +1517,6 @@ impl Config {
         }
         config.targets.remove("raw-localhost");
         config.targets.entry("localhost".into()).or_insert(legacy);
-        if config.startup.target.as_deref() == Some("raw-localhost") {
-            config.startup.target = Some("localhost".into());
-        }
         config.save_to_locked(path)?;
         Ok(true)
     }
@@ -1922,38 +1868,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_defaults_round_trip_and_validate_the_selected_profile() {
+    fn obsolete_startup_settings_are_ignored_and_removed_when_saving() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        let mut config = sample_config();
-        config.save_to(&path).unwrap();
-        assert!(!fs::read_to_string(&path).unwrap().contains("[startup]"));
-        assert_eq!(
-            Config::load_from(&path).unwrap().startup,
-            StartupConfig::default()
-        );
-        config.startup.profile = Some("codex-1".into());
-        config.startup.target = config.targets.keys().next().cloned();
-        config.startup.enabled = false;
-        config.save_to(&path).unwrap();
-        assert_eq!(Config::load_from(&path).unwrap(), config);
-        config.startup.profile = Some("missing".into());
-        assert!(
-            config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("startup profile")
-        );
-        config.startup.profile = None;
-        config.startup.target = Some("missing".into());
-        assert!(
-            config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("startup target")
-        );
+        let expected = sample_config();
+        let original = toml::to_string(&expected).unwrap();
+        for enabled in [true, false] {
+            fs::write(&path, format!("{original}\n[startup]\nenabled = {enabled}\nprompt = false\nprofile = \"missing\"\ntarget = \"missing\"\n")).unwrap();
+            let loaded = Config::load_from(&path).unwrap();
+            assert_eq!(loaded, expected);
+            assert!(
+                serde_json::to_value(&loaded)
+                    .unwrap()
+                    .get("startup")
+                    .is_none()
+            );
+            loaded.save_to(&path).unwrap();
+            assert!(!fs::read_to_string(&path).unwrap().contains("[startup]"));
+        }
     }
 
     #[test]
@@ -2055,7 +1987,7 @@ mod tests {
             theme: Default::default(),
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
-            startup: Default::default(),
+            legacy_startup: (),
             profiles: BTreeMap::from([(
                 "codex-1".into(),
                 HarnessProfile {
@@ -3002,22 +2934,17 @@ mod tests {
     }
 
     #[test]
-    fn startup_and_review_reject_disabled_profile_references() {
+    fn review_rejects_disabled_profile_references() {
         let profile =
             "[profiles.work]\nenabled = false\nkind = \"claude\"\nhome = \"/profiles/work\"\n";
-        for reference in [
-            "[startup]\nprofile = \"work\"\n",
-            "[review]\nprofile = \"work\"\n",
-        ] {
-            let error = toml::from_str::<Config>(&format!(
-                "version = {CONFIG_VERSION}\n{reference}{profile}"
-            ))
-            .unwrap()
-            .validate()
-            .unwrap_err()
-            .to_string();
-            assert!(error.contains("disabled"), "{error}");
-        }
+        let reference = "[review]\nprofile = \"work\"\n";
+        let error =
+            toml::from_str::<Config>(&format!("version = {CONFIG_VERSION}\n{reference}{profile}"))
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("disabled"), "{error}");
     }
 
     /// A profile that exists, so a `[review]` section has something to name.

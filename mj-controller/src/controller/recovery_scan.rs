@@ -261,6 +261,7 @@ fn adopted_session_record(
 ) -> SessionRecord {
     let now = now();
     SessionRecord {
+        create_managed_worktree: None,
         workspace_id,
         archived: false,
         container_cpus: None,

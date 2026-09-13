@@ -95,12 +95,6 @@ pub(crate) enum DashboardIoUpdate {
         launch: Box<DashboardAction>,
         result: std::result::Result<RemotePreflightOutcome, String>,
     },
-    /// A quick launch has no review modal; show the resolved destinations in
-    /// the dashboard notice while creation continues in the worker.
-    RemoteSourcesResolved {
-        repositories: Vec<RemoteRepositoryPreview>,
-    },
-    StartupConfig(Config),
     RenameSession {
         session_id: String,
         title: String,
@@ -221,7 +215,10 @@ pub(crate) enum DashboardIoUpdate {
     ProjectValidation {
         context: String,
         directory: String,
-        result: std::result::Result<std::path::PathBuf, String>,
+        result: std::result::Result<
+            (std::path::PathBuf, mj_core::state::ManagedWorktreeOptions),
+            String,
+        >,
     },
     /// Clipboard providers may use a blocking desktop IPC call. The result
     /// is delivered here after that work finishes on a blocking task.
@@ -1419,7 +1416,6 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
 /// so this stays separate from [`spawn_lifecycle_operation`].
 pub(crate) fn spawn_dashboard_create_session(
     action: DashboardAction,
-    workspace_id: String,
     updates: UnboundedSender<DashboardIoUpdate>,
     lifecycle_updates: UnboundedSender<LifecycleUpdate>,
     runtime: tokio::runtime::Handle,
@@ -1429,43 +1425,8 @@ pub(crate) fn spawn_dashboard_create_session(
     let guard = tracker.begin_cancellable("creating session", cancelled.clone());
     tokio::task::spawn_blocking(move || {
         let retry_launch = action.clone();
-        let prepared = match action {
-            DashboardAction::CreateStartupSession {
-                profile_id,
-                target_template_id,
-                project_directory,
-                ..
-            } => super::startup::prepare_session_launch(
-                profile_id,
-                target_template_id,
-                project_directory,
-                workspace_id.clone(),
-                &cancelled,
-            )
-            .and_then(|(config, action)| {
-                updates
-                    .send(DashboardIoUpdate::StartupConfig(config))
-                    .context("dashboard closed during startup preparation")?;
-                Ok(action)
-            }),
-            action => Ok(action),
-        };
-        let action = match prepared {
-            Ok(action) => action,
-            Err(error) => {
-                if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
-                    DashboardCreateSessionUpdate::Failed {
-                        retry_launch: Box::new(retry_launch),
-                        error: format!("{error:#}"),
-                    },
-                ))) {
-                    tracing::debug!(%error, "startup preparation result dropped after dashboard shutdown");
-                }
-                return;
-            }
-        };
-        let retry_launch = action.clone();
         let DashboardAction::CreateSession {
+            create_managed_worktree,
             workspace_id,
             profile_id,
             bundle_id,
@@ -1501,17 +1462,12 @@ pub(crate) fn spawn_dashboard_create_session(
                         .context("dashboard closed during remote repair preparation")?;
                     return Ok(None);
                 }
-                let repositories = resolve_remote_repositories(
+                resolve_remote_repositories(
                     &controller.config,
                     &bundle_id,
                     &target_template_id,
                     &executor,
                 )?;
-                if let Err(error) =
-                    updates.send(DashboardIoUpdate::RemoteSourcesResolved { repositories })
-                {
-                    tracing::debug!(%error, "remote source result dropped after dashboard shutdown");
-                }
             }
             if cancelled.load(Ordering::Acquire) {
                 bail!("operation cancelled");
@@ -1527,6 +1483,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
+                        create_managed_worktree,
                         initial_prompt: None,
                         workspace_id,
                         profile_id,
@@ -1661,10 +1618,6 @@ impl DashboardContext {
                         .finish_workspace_management(generation, Err(error));
                 }
             },
-            DashboardIoUpdate::StartupConfig(config) => {
-                self.controller.config = config.clone();
-                self.dashboard.set_config(config);
-            }
             DashboardIoUpdate::ReviewRefused {
                 session_id,
                 message,
@@ -1901,24 +1854,6 @@ impl DashboardContext {
                         self.dashboard.show_launch_failure(error, Some(*retry));
                     }
                 }
-            }
-            DashboardIoUpdate::RemoteSourcesResolved { repositories } => {
-                let destinations = repositories
-                    .iter()
-                    .map(|repository| {
-                        format!(
-                            "{}: fetch {} @ {}; push {}",
-                            repository.repository_id,
-                            repository.fetch_url,
-                            repository.default_branch,
-                            repository.push_urls.join(", ")
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.dashboard.set_notice(format!(
-                    "Using network repositories (local changes excluded): {destinations}"
-                ));
             }
             DashboardIoUpdate::RenameSession {
                 session_id,
@@ -2552,7 +2487,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
         // An unrelated preference remains editable even while a session needs repair.
         updated = original.clone();
-        updated.startup.prompt = false;
+        updated.advanced.show_stopped_sessions = true;
         save_setup_at(
             &path,
             &serde_json::to_string(&original).unwrap(),
@@ -2560,7 +2495,12 @@ mod tests {
             &state,
         )
         .unwrap();
-        assert!(!Config::load_from(&path).unwrap().startup.prompt);
+        assert!(
+            Config::load_from(&path)
+                .unwrap()
+                .advanced
+                .show_stopped_sessions
+        );
     }
 
     #[test]
@@ -2573,7 +2513,7 @@ mod tests {
         edited.sessions_side = mj_core::config::SessionsSide::Right;
         edited.theme = mj_core::config::UiTheme::Light;
         Config::update_to(&path, |current| {
-            current.startup.prompt = false;
+            current.advanced.show_stopped_sessions = true;
             Ok(())
         })
         .unwrap();
@@ -2587,7 +2527,7 @@ mod tests {
         .unwrap();
         assert_eq!(saved.sessions_side, mj_core::config::SessionsSide::Right);
         assert_eq!(saved.theme, mj_core::config::UiTheme::Light);
-        assert!(!saved.startup.prompt);
+        assert!(saved.advanced.show_stopped_sessions);
         assert_eq!(Config::load_from(&path).unwrap(), saved);
 
         let mut conflicting = original.clone();
@@ -2610,7 +2550,7 @@ mod tests {
             .contains("another client")
         );
         let mut invalid = original.clone();
-        invalid.startup.profile = Some("missing".into());
+        invalid.review.profile = Some("missing".into());
         assert!(
             save_setup_at(
                 &path,
@@ -2881,6 +2821,7 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            create_managed_worktree: None,
             workspace_id: workspace_id.to_owned(),
             archived: false,
             container_cpus: None,

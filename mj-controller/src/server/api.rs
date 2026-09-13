@@ -276,6 +276,8 @@ pub struct SessionListResponse {
 #[serde(deny_unknown_fields)]
 pub struct StartSessionRequest {
     #[serde(default)]
+    pub create_managed_worktree: Option<bool>,
+    #[serde(default)]
     pub workspace_id: Option<String>,
     pub profile_id: String,
     pub target_id: String,
@@ -1271,6 +1273,7 @@ async fn start_session(
         }
     };
     let action = ControllerAction::New {
+        create_managed_worktree: request.create_managed_worktree,
         workspace_id: request.workspace_id.clone().unwrap_or_default(),
         profile_id: request.profile_id.clone(),
         bundle_id,
@@ -2665,6 +2668,7 @@ mod tests {
         assert_eq!(
             request.action,
             ControllerAction::New {
+                create_managed_worktree: None,
                 workspace_id: String::new(),
                 profile_id: "codex-1".into(),
                 bundle_id: "hel".into(),
@@ -2762,6 +2766,7 @@ mod tests {
         assert_eq!(
             request.action,
             ControllerAction::New {
+                create_managed_worktree: None,
                 workspace_id: String::new(),
                 profile_id: "codex-1".into(),
                 bundle_id: "hel".into(),

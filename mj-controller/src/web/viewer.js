@@ -1130,6 +1130,9 @@ function freshDraft() {
     localChangesExcluded: false,
     preflightError: '',
     preflighted: false,
+    worktreeOptions: null,
+    createManagedWorktree: false,
+    worktreeSelection: null,
     bundleSource: '',
     creatingBundle: false,
     showBundleSource: false,
@@ -1174,7 +1177,7 @@ function renderNewForm() {
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? snapshot.targets.map(t => [t.id, t.kind]) : null,
     project: step.key === 'project' ? [newDraft.targetId, snapshot.bundles, snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories, newDraft.showBundleSource] : null,
-    remote: step.key === 'review' ? [newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError] : null,
+    remote: step.key === 'review' ? [newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
     creating: newDraft.creatingBundle,
@@ -1218,7 +1221,7 @@ function renderNewForm() {
     }
     case 'project': {
       if (targetIsBare(newDraft.targetId)) {
-        body.append(el('p', 'dim', 'Raw hosts open an existing checkout directly. Bundles are used for container targets.'));
+        body.append(el('p', 'dim', 'Choose an existing directory. Review whether to create a managed worktree before launching.'));
         const recents = snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories || [];
         if (!newDraft.projectDirectory && !Object.hasOwn(newDraft.projectDirectories, newDraft.targetId)) {
           newDraft.projectDirectory = recents[0] || '';
@@ -1309,6 +1312,23 @@ function renderNewForm() {
         review.append(el('dt', '', term), el('dd', '', value));
       }
       body.append(review);
+      const worktree = el('label', 'field-inline');
+      const checkbox = el('input');
+      checkbox.type = 'checkbox';
+      checkbox.id = 'new-managed-worktree';
+      const available = targetIsBare(newDraft.targetId) && newDraft.worktreeOptions?.available === true;
+      checkbox.checked = available && newDraft.createManagedWorktree;
+      checkbox.disabled = !available;
+      checkbox.onchange = () => {
+        newDraft.createManagedWorktree = checkbox.checked;
+        renderNewForm();
+      };
+      worktree.append(checkbox, document.createTextNode('Create managed worktree'));
+      body.append(worktree, el('p', 'dim', !targetIsBare(newDraft.targetId)
+        ? 'The target provides its own isolated workspace.'
+        : checkbox.checked ? 'Create a separate session-owned checkout from the selected checkout’s HEAD.'
+          : 'Use the selected directory directly.'));
+
     }
   }
   newStep.replaceChildren(body);
@@ -1319,7 +1339,8 @@ function renderNewForm() {
   const busy = newDraft.committing === true || newDraft.creatingBundle;
   newNextButton.disabled = busy;
   newBackButton.disabled ||= busy;
-  for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = busy || checking;
+  for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = input.disabled || busy || checking;
+  if (focused?.type === 'checkbox' && !busy) document.getElementById(focused.id)?.focus({ preventScroll: true });
   if (caret && !busy) {
     const input = document.getElementById(caret.id);
     input?.focus({ preventScroll: true });
@@ -1428,6 +1449,13 @@ async function preflightNew() {
       draft.projectDirectory = answer.project_directory;
       draft.projectDirectories[draft.targetId] = answer.project_directory;
     }
+    const selection = JSON.stringify([draft.targetId, draft.projectDirectory]);
+    draft.worktreeOptions = answer.managed_worktree || { available: false, default_create: false };
+    if (draft.worktreeSelection !== selection) {
+      draft.createManagedWorktree = draft.worktreeOptions.default_create;
+      draft.worktreeSelection = selection;
+    }
+    if (!bare || !draft.worktreeOptions.available) draft.createManagedWorktree = false;
     draft.remoteRepositories = answer.remote_repositories || [];
     draft.localChangesExcluded = answer.local_changes_excluded === true;
     draft.preflightError = '';
@@ -1493,6 +1521,7 @@ async function commitNew() {
     bundle_id: newDraft.bundleId,
     target_id: newDraft.targetId,
     project_directory: bare ? newDraft.projectDirectory : null,
+    create_managed_worktree: bare && draft.worktreeOptions?.available === true && draft.createManagedWorktree,
   };
   if (newDraft.title.trim()) body.title = newDraft.title.trim();
   draft.committing = true;

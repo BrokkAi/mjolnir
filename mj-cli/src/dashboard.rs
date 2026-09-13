@@ -15,7 +15,6 @@ mod attachment;
 mod composer_drafts;
 pub(crate) mod io;
 mod pane_sizes;
-mod startup;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -220,7 +219,6 @@ pub(crate) struct DashboardContext {
     terminal: TerminalGuard,
     pub(crate) controller: Controller,
     pub(crate) workspace_id: String,
-    pub(crate) launch_directory: std::path::PathBuf,
     pub(crate) client_id: String,
     pub(crate) dashboard: DashboardState,
     pane_size_persistence: pane_sizes::PaneSizePersistence,
@@ -850,7 +848,6 @@ impl DashboardContext {
     /// `Ok(None)` means first-run setup was cancelled and there is nothing to
     /// run.
     fn open(workspace_id: &str, client_id: &str) -> Result<Option<Self>> {
-        let launch_directory = std::env::current_dir().context("read the launch directory")?;
         let mut controller = Controller::load()?;
         retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
         let workspaces = mj_controller::database::list_workspaces()?;
@@ -949,7 +946,6 @@ impl DashboardContext {
             terminal,
             controller,
             workspace_id: workspace_id.to_owned(),
-            launch_directory,
             client_id: client_id.to_owned(),
             dashboard,
             pane_size_persistence,
@@ -1129,18 +1125,6 @@ impl DashboardContext {
                 .map(|(id, _)| id.clone()),
             std::time::Instant::now(),
         );
-        if !self.dashboard.modal_open() && self.dashboard.startup_sessions().next().is_none() {
-            match self
-                .dashboard
-                .begin_startup_session(self.launch_directory.clone())
-            {
-                Ok(DashboardAction::None) => {
-                    self.dashboard.focus_sessions();
-                }
-                Ok(action) => actions::start_session_launch(self, action),
-                Err(error) => self.dashboard.set_failure_notice(error),
-            }
-        }
         for (session_id, viewed_through_event_ordinal) in sessions {
             spawn_stored_session_summary(
                 session_id,
@@ -1244,9 +1228,7 @@ impl DashboardContext {
             self.dashboard.focus_sessions();
             return;
         };
-        if self.controller.config.startup.prompt {
-            self.dashboard.focus_prompt();
-        }
+        self.dashboard.focus_prompt();
         self.open_chat_session(&session_id);
     }
 
@@ -2364,6 +2346,7 @@ impl DashboardContext {
                                 prompt.omitted_non_git_dirs,
                                 prompt.scratch_git_roots,
                                 prompt.has_untracked_files,
+                                prompt.managed_worktree,
                             );
                         }
                         Ok(DashboardImportTaskResult::Imported(imported)) => {
@@ -3071,6 +3054,7 @@ mod tests {
             state.sessions.insert(
                 id.into(),
                 mj_core::state::SessionRecord {
+                    create_managed_worktree: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                     archived: false,
                     container_cpus: None,
@@ -3950,6 +3934,7 @@ mod tests {
 
     fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
         mj_core::state::SessionRecord {
+            create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,

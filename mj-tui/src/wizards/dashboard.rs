@@ -109,7 +109,28 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
                     true,
                 );
             }
-            declare_review_controls(&mut form, can_attach, true);
+            form.declare_with_enabled(
+                WizardControl::CreateManagedWorktree,
+                ControlKind::Checkbox,
+                wizard
+                    .selected_worktree_options(&dashboard.config)
+                    .is_some_and(|options| options.available)
+                    && is_bare_project_target(
+                        &dashboard.config.targets
+                            [&nth_key(&dashboard.config.targets, wizard.target)],
+                    ),
+            );
+            let ready = !is_bare_project_target(
+                &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target)],
+            ) || wizard
+                .selected_worktree_options(&dashboard.config)
+                .is_some()
+                || wizard.remote_preflight_error.is_some();
+            declare_review_controls(
+                &mut form,
+                can_attach,
+                ready && !wizard.remote_preflight_in_flight,
+            );
         }
     }
     form.end_frame(initial);
@@ -455,6 +476,17 @@ impl DashboardState {
                         }
                     }
                     _ => {}
+                }
+                self.mode = Mode::New(wizard);
+                DashboardAction::None
+            }
+            Interaction::Toggle(WizardControl::CreateManagedWorktree) => {
+                if wizard
+                    .selected_worktree_options(&self.config)
+                    .is_some_and(|options| options.available)
+                {
+                    wizard.create_managed_worktree = !wizard.create_managed_worktree;
+                    self.record_visible_event_change();
                 }
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
@@ -872,6 +904,7 @@ impl DashboardState {
             | WizardControl::MountDestination
             | WizardControl::MountReadOnly
             | WizardControl::ReviewAttachments
+            | WizardControl::CreateManagedWorktree
             | WizardControl::DiscardQueue
             | WizardControl::Submit => {
                 self.mode = Mode::New(wizard);
@@ -1265,6 +1298,11 @@ impl DashboardState {
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         }
+        if wizard.selected_worktree_options(&self.config).is_none() {
+            wizard.remote_preflight_error = None;
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
         if wizard.mounts.mounts.is_empty() {
             return self.create_session_action(&wizard);
         }
@@ -1295,7 +1333,18 @@ impl DashboardState {
         }
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         if is_bare_project_target(&self.config.targets[&target_template_id]) {
-            return None;
+            if wizard.selected_worktree_options(&self.config).is_some() {
+                return None;
+            }
+            let directory = wizard.project_directory.trim().to_owned();
+            if let Mode::New(wizard) = &mut self.mode {
+                wizard.remote_preflight_in_flight = true;
+            }
+            self.mark_render_changed();
+            return Some(DashboardAction::ValidateProjectDirectory {
+                target_template_id,
+                directory,
+            });
         }
         let launch = Box::new(self.create_session_action_without_closing(wizard));
         let check = if wizard.mounts.mounts.is_empty() {
@@ -1318,6 +1367,13 @@ impl DashboardState {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
+            create_managed_worktree: Some(
+                raw_project
+                    && wizard.create_managed_worktree
+                    && wizard
+                        .selected_worktree_options(&self.config)
+                        .is_some_and(|options| options.available),
+            ),
             workspace_id: wizard.workspace_id.clone(),
             profile_id: nth_enabled_profile(&self.config, wizard.profile),
             bundle_id: if raw_project {
@@ -1701,20 +1757,44 @@ impl DashboardState {
         &mut self,
         context: &str,
         directory: &str,
-        result: Result<std::path::PathBuf, String>,
+        result: Result<(std::path::PathBuf, mj_core::state::ManagedWorktreeOptions), String>,
     ) {
         if self.path_input_context() != context {
             return;
         }
         match result {
-            Ok(resolved) => {
+            Ok((resolved, options)) => {
                 let value = resolved.to_string_lossy().into_owned();
                 if let Mode::New(wizard) = &mut self.mode {
+                    let target = nth_key(&self.config.targets, wizard.target);
+                    if wizard.worktree_options.as_ref().is_none_or(
+                        |(old_target, old_directory, _)| {
+                            old_target != &target || old_directory != &value
+                        },
+                    ) {
+                        wizard.create_managed_worktree = options.default_create;
+                    }
+                    if !options.available {
+                        wizard.create_managed_worktree = false;
+                    }
+                    wizard.worktree_options = Some((target, value.clone(), options));
+                    wizard.remote_preflight_in_flight = false;
+                    wizard.remote_preflight_error = None;
                     wizard.project_directory.set_value(&value);
                 }
                 self.apply_project_directory_validation(&value, Ok(()));
+                self.mark_render_changed();
             }
-            Err(error) => self.apply_project_directory_validation(directory, Err(error)),
+            Err(error) => {
+                if let Mode::New(wizard) = &mut self.mode {
+                    wizard.remote_preflight_in_flight = false;
+                    if wizard.step == WizardStep::Review {
+                        wizard.remote_preflight_error = Some(error.clone());
+                    }
+                }
+                self.apply_project_directory_validation(directory, Err(error));
+                self.mark_render_changed();
+            }
         }
     }
 
@@ -1787,8 +1867,10 @@ impl DashboardState {
         let Mode::New(wizard) = &mut self.mode else {
             return;
         };
-        if wizard.step != WizardStep::ProjectDirectory
-            || wizard.project_directory.trim() != directory
+        if !matches!(
+            wizard.step,
+            WizardStep::ProjectDirectory | WizardStep::Review
+        ) || wizard.project_directory.trim() != directory
         {
             return;
         }
@@ -2402,55 +2484,6 @@ impl DashboardState {
         }
     }
 
-    /// Prepare the first prompt without opening the new-session wizard.
-    /// Called once when the surface opens, never on subsequent state refreshes.
-    pub fn begin_startup_session(
-        &mut self,
-        project_directory: std::path::PathBuf,
-    ) -> Result<DashboardAction, String> {
-        if self.active_workspace_id().is_none()
-            || !self.config.startup.enabled
-            || self.startup_sessions().next().is_some()
-        {
-            return Ok(DashboardAction::None);
-        }
-        self.quick_session_action(project_directory)
-    }
-
-    /// Use the saved creation defaults without opening any selector.
-    pub(crate) fn quick_session_action(
-        &mut self,
-        project_directory: std::path::PathBuf,
-    ) -> Result<DashboardAction, String> {
-        let profile_id = if let Some(profile_id) = self.config.startup.profile.as_deref() {
-            let profile = self
-                .config
-                .profiles
-                .get(profile_id)
-                .ok_or_else(|| format!("Startup profile {profile_id:?} is not configured."))?;
-            if !profile.enabled {
-                return Err(format!("Startup profile {profile_id:?} is disabled."));
-            }
-            profile_id.to_owned()
-        } else {
-            self.config
-                .enabled_profiles()
-                .find(|(_, profile)| profile.kind == mj_core::config::HarnessKind::Codex)
-                .or_else(|| self.config.enabled_profiles().next())
-                .map(|(id, _)| id.to_owned())
-                .ok_or(
-                    "No enabled agent profile is configured. Press F7 to enable or add one in Setup.",
-                )?
-        };
-        let action = DashboardAction::CreateStartupSession {
-            profile_id,
-            target_template_id: self.config.startup.target.clone(),
-            project_directory,
-        };
-        self.focus_sessions();
-        Ok(action)
-    }
-
     pub(crate) fn begin_new(&mut self) -> DashboardAction {
         if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
             self.notices
@@ -2481,6 +2514,8 @@ impl DashboardState {
             })
             .unwrap_or(0);
         self.mode = Mode::New(NewWizard {
+            worktree_options: None,
+            create_managed_worktree: false,
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             step: WizardStep::Profile,
 

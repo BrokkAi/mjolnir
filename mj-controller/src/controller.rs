@@ -439,6 +439,7 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 }
 
 pub struct SessionLaunchOptions {
+    pub create_managed_worktree: Option<bool>,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -713,6 +714,7 @@ impl Controller {
         options: SessionLaunchOptions,
     ) -> Result<String> {
         let SessionLaunchOptions {
+            create_managed_worktree,
             initial_prompt,
             workspace_id,
             additional_mounts,
@@ -738,6 +740,9 @@ impl Controller {
             .targets
             .get(target_id)
             .with_context(|| format!("unknown target template {target_id:?}"))?;
+        if create_managed_worktree == Some(true) && !is_bare_project_target(template) {
+            bail!("managed worktree creation requires a bare Git project");
+        }
         if project_directory.is_some() != is_bare_project_target(template) {
             bail!("raw project directories require a bare target, and bare targets require one");
         }
@@ -788,6 +793,7 @@ impl Controller {
         let id = new_session_id()?;
         let now = now();
         let record = SessionRecord {
+            create_managed_worktree,
             archived: false,
             container_cpus: None,
             container_memory: None,
@@ -890,9 +896,6 @@ impl Controller {
                 .remove(old_id)
                 .expect("profile was checked in the transaction");
             config.profiles.insert(new_id.to_owned(), profile);
-            if config.startup.profile.as_deref() == Some(old_id) {
-                config.startup.profile = Some(new_id.to_owned());
-            }
             Ok(())
         }) {
             Ok(result) => result,
@@ -915,9 +918,6 @@ impl Controller {
                     "cannot restore profile rename: both {old_id:?} and {new_id:?} exist"
                 );
                 config.profiles.insert(old_id.to_owned(), profile);
-                if config.startup.profile.as_deref() == Some(new_id) {
-                    config.startup.profile = Some(old_id.to_owned());
-                }
                 Ok(())
             });
             let restored = match restore {
@@ -974,9 +974,6 @@ impl Controller {
                 .remove(old_id)
                 .expect("target was checked in the transaction");
             config.targets.insert(new_id.to_owned(), target);
-            if config.startup.target.as_deref() == Some(old_id) {
-                config.startup.target = Some(new_id.to_owned());
-            }
             Ok(())
         }) {
             Ok(result) => result,
@@ -999,9 +996,6 @@ impl Controller {
                     "cannot restore target rename: both {old_id:?} and {new_id:?} exist"
                 );
                 config.targets.insert(old_id.to_owned(), target);
-                if config.startup.target.as_deref() == Some(new_id) {
-                    config.startup.target = Some(old_id.to_owned());
-                }
                 Ok(())
             });
             let restored = match restore {
@@ -1707,6 +1701,7 @@ mod tests {
 
     fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
         SessionLaunchOptions {
+            create_managed_worktree: None,
             initial_prompt: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             additional_mounts,
@@ -1932,8 +1927,6 @@ mod tests {
             config: registration_config(),
             state: State::default(),
         };
-        controller.config.startup.profile = Some("codex".into());
-        controller.config.startup.target = Some("podman".into());
         controller.config.save().unwrap();
         let session_id = controller
             .register_session_with_resources(
@@ -1958,14 +1951,6 @@ mod tests {
         assert_eq!(session.target_template_id, "podman-renamed");
         assert!(loaded.config.profiles.contains_key("codex-renamed"));
         assert!(loaded.config.targets.contains_key("podman-renamed"));
-        assert_eq!(
-            loaded.config.startup.profile.as_deref(),
-            Some("codex-renamed")
-        );
-        assert_eq!(
-            loaded.config.startup.target.as_deref(),
-            Some("podman-renamed")
-        );
         assert!(!config_rename_journal_path().exists());
     }
 

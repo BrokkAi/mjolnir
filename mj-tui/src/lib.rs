@@ -106,12 +106,8 @@ pub enum DashboardAction {
     RestartSession {
         session_id: String,
     },
-    CreateStartupSession {
-        profile_id: String,
-        target_template_id: Option<String>,
-        project_directory: std::path::PathBuf,
-    },
     CreateSession {
+        create_managed_worktree: Option<bool>,
         /// Workspace selected when the creation request was submitted. The
         /// dashboard may switch tabs while validation or dirty-repository
         /// confirmation is still in flight, so the request keeps its origin.
@@ -266,6 +262,7 @@ pub enum DashboardAction {
     },
     CancelImport,
     ConfirmImportBundle {
+        create_managed_worktree: Option<bool>,
         accepted: bool,
         include_untracked: bool,
     },
@@ -942,11 +939,7 @@ impl DashboardState {
     /// Select the newly created session and use the ordinary composer.
     pub fn finish_new_session(&mut self, session_id: &str) {
         self.select_active_session(session_id);
-        if self.config.startup.prompt {
-            self.focus_prompt();
-        } else {
-            self.focus_sessions();
-        }
+        self.focus_prompt();
     }
 
     /// Global visibility must not change which workspace opens automatically.
@@ -3275,7 +3268,13 @@ mod tests {
         importing.show_import_progress("Chosen session".into());
 
         let mut confirm_import = dashboard_with_session(stopped_session());
-        confirm_import.show_import_bundle_confirmation(Vec::new(), Vec::new(), Vec::new(), false);
+        confirm_import.show_import_bundle_confirmation(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            Default::default(),
+        );
 
         let mut confirm = dashboard_with_session(stopped_session());
         confirm.show_dirty_local_confirmation(DashboardAction::None, vec!["project".into()]);

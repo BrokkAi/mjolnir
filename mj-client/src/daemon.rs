@@ -171,6 +171,8 @@ pub struct ResumeSessionRequest {
 #[serde(deny_unknown_fields)]
 pub struct CreateSessionRequest {
     #[serde(default)]
+    pub create_managed_worktree: Option<bool>,
+    #[serde(default)]
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub profile_id: String,
@@ -1376,7 +1378,7 @@ pub fn ensure_supported_daemon_protocol(version: u32) -> Result<()> {
     );
     Ok(())
 }
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

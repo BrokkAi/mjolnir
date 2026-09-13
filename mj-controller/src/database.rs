@@ -31,7 +31,7 @@ use mj_core::workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 28;
+const SCHEMA_VERSION: i64 = 29;
 
 mod session_move;
 pub use session_move::*;
@@ -1314,12 +1314,13 @@ pub fn load_state_from(path: &Path) -> Result<State> {
                 s.viewed_through_event_ordinal, s.last_error, s.resource_allocation,
                 s.last_checkpoint_error, s.project_directory, s.managed_worktree,
                 s.draft_input, s.container_cpus, s.container_memory, s.archived
-                , c.workspace_id
+                , c.workspace_id, s.create_managed_worktree
          FROM sessions s JOIN session_contexts c USING(session_id)
          ORDER BY s.session_id",
     )?;
     let rows = statement.query_map([], |row| {
         Ok(SessionRecord {
+            create_managed_worktree: row.get(23)?,
             workspace_id: row.get(22)?,
             archived: row.get(21)?,
             container_cpus: row.get(19)?,
@@ -4310,8 +4311,8 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
              native_session_id, acp_session_title, session_title_override, updated_at,
              viewed_through_event_ordinal, last_error, resource_allocation,
              last_checkpoint_error, project_directory, managed_worktree,
-             container_cpus, container_memory, archived, draft_input
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+             container_cpus, container_memory, archived, draft_input, create_managed_worktree
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -4333,7 +4334,8 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
              managed_worktree = excluded.managed_worktree,
              container_cpus = excluded.container_cpus,
              container_memory = excluded.container_memory,
-             archived = excluded.archived",
+             archived = excluded.archived,
+             create_managed_worktree = excluded.create_managed_worktree",
         params![
             session.id,
             session.title,
@@ -4366,6 +4368,7 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
             session.container_memory,
             session.archived,
             session.draft_input,
+            session.create_managed_worktree,
         ],
     )?;
     tx.execute(

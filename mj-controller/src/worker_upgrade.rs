@@ -334,6 +334,7 @@ mod tests {
 
     fn session_record(state: SessionState) -> SessionRecord {
         SessionRecord {
+            create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,

@@ -2517,6 +2517,7 @@ fn import_claude_session_inner(
     state.sessions.insert(
         session_id.clone(),
         SessionRecord {
+            create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,
@@ -2845,6 +2846,7 @@ pub fn import_native_session(
     state.sessions.insert(
         session_id.clone(),
         SessionRecord {
+            create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,
@@ -2925,7 +2927,10 @@ fn raw_import_target_id(config: &Config) -> Option<String> {
 /// directory, so import it as a raw project session instead of a bundle
 /// session. `session_edit_targets` always records the cwd root, so a single
 /// durable root is that root.
-fn raw_project_import(config: &Config, targets: &SessionEditTargets) -> Option<(PathBuf, String)> {
+pub fn raw_project_import(
+    config: &Config,
+    targets: &SessionEditTargets,
+) -> Option<(PathBuf, String)> {
     let [cwd_root] = targets.git_roots.as_slice() else {
         return None;
     };

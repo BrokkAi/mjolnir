@@ -316,6 +316,7 @@ pub(crate) async fn apply_dashboard_action(
                         display_title,
                     },
                     DashboardImportSafety {
+                        create_managed_worktree: None,
                         accepted: false,
                         include_untracked: true,
                     },
@@ -332,6 +333,7 @@ pub(crate) async fn apply_dashboard_action(
             }
         }
         DashboardAction::ConfirmImportBundle {
+            create_managed_worktree,
             accepted,
             include_untracked,
         } => {
@@ -350,6 +352,7 @@ pub(crate) async fn apply_dashboard_action(
                     context.start_import(
                         pending,
                         DashboardImportSafety {
+                            create_managed_worktree,
                             accepted: true,
                             include_untracked,
                         },
@@ -540,11 +543,18 @@ pub(crate) async fn apply_dashboard_action(
                 move |cancelled| {
                     let executor = CancellableProcessExecutor::new(cancelled)
                         .with_deadline(std::time::Duration::from_secs(30));
-                    config_only_controller(config).resolve_project_directory(
+                    let controller = config_only_controller(config);
+                    let directory = controller.resolve_project_directory(
                         &target_template_id,
                         std::path::Path::new(&requested),
                         &executor,
-                    )
+                    )?;
+                    let options = controller.managed_worktree_options(
+                        &target_template_id,
+                        &directory,
+                        &executor,
+                    )?;
+                    Ok((directory, options))
                 },
                 move |result| DashboardIoUpdate::ProjectValidation {
                     context: input_context,
@@ -590,8 +600,7 @@ pub(crate) async fn apply_dashboard_action(
                 context.session_preflight_cancel = Some((generation, cancelled));
             }
         }
-        action @ (DashboardAction::CreateSession { .. }
-        | DashboardAction::CreateStartupSession { .. }) => start_session_launch(context, action),
+        action @ DashboardAction::CreateSession { .. } => start_session_launch(context, action),
         DashboardAction::RestartSession { session_id } => {
             let Some(session) = context.controller.state.sessions.get(&session_id).cloned() else {
                 return Ok(());
@@ -1130,13 +1139,11 @@ fn start_session_launch_with_repository_preflight(
         return;
     }
     match action {
-        action @ (DashboardAction::CreateSession { .. }
-        | DashboardAction::CreateStartupSession { .. }) => {
+        action @ DashboardAction::CreateSession { .. } => {
             debug_assert!(repository_preflight.is_none());
             context.dashboard.set_notice("Preparing session launch…");
             spawn_dashboard_create_session(
                 action,
-                context.workspace_id.clone(),
                 context.dashboard_io_tx.clone(),
                 context.lifecycle_updates_tx.clone(),
                 tokio::runtime::Handle::current(),

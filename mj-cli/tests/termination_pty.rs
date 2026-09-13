@@ -240,13 +240,13 @@ fn spawn_dashboard_pty_with_idle_exit(exit_when_idle: bool) -> DashboardPty {
 }
 
 fn spawn_dashboard_pty_fixture(exit_when_idle: bool, pending_session: bool) -> DashboardPty {
-    spawn_dashboard_pty_with_startup(exit_when_idle, pending_session, false)
+    spawn_dashboard_pty_with_local_target(exit_when_idle, pending_session, false)
 }
 
-fn spawn_dashboard_pty_with_startup(
+fn spawn_dashboard_pty_with_local_target(
     exit_when_idle: bool,
     pending_session: bool,
-    local_startup: bool,
+    local_target: bool,
 ) -> DashboardPty {
     let directory = tempfile::tempdir().expect("create Hel test storage");
     let config_directory = directory.path().join("config/hel");
@@ -281,7 +281,7 @@ image = "ubuntu:24.04"
 "#,
     )
     .expect("write Hel test config");
-    if local_startup {
+    if local_target {
         use std::os::unix::fs::PermissionsExt;
         let path = config_root.join("hel/config.toml");
         let mut config = mj_core::config::Config::load_from(&path).unwrap();
@@ -300,21 +300,12 @@ image = "ubuntu:24.04"
         profile
             .environment
             .insert("PATH".into(), tools.to_string_lossy().into_owned());
-        config.startup.enabled = false;
         config.targets.clear();
         config.targets.insert(
             "localhost".into(),
             mj_core::config::TargetTemplate::LocalBare,
         );
         config.save_to(&path).unwrap();
-    }
-    if !local_startup {
-        use std::io::Write as _;
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .open(config_root.join("hel/config.toml"))
-            .unwrap();
-        file.write_all(b"\n[startup]\nenabled = false\n").unwrap();
     }
     let seeded_workspace = pending_session.then(|| {
         let database = storage.path().join("data/hel/mj.sqlite3");
@@ -497,17 +488,17 @@ fn fixture_teardown_before_the_dashboard_is_ready_removes_its_storage() {
 }
 
 #[test]
-fn disabled_startup_waits_for_explicit_new_before_creating_a_session() {
+fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     let DashboardPty {
         _storage: storage,
         mut master,
         mut child,
         ..
-    } = spawn_dashboard_pty_with_startup(false, false, true);
+    } = spawn_dashboard_pty_with_local_target(false, false, true);
     let database = storage.path().join("data/hel/mj.sqlite3");
     let mut output = Vec::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
-    // With automatic startup disabled, ordinary background ticks must leave
+    // Ordinary background ticks must leave
     // the workspace empty until the user explicitly starts work.
     thread::sleep(Duration::from_millis(1100));
     drain(&mut master, &mut output);

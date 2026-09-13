@@ -63,9 +63,9 @@ the `version` value by hand.
 
 ## A bare session says the primary checkout is dirty
 
-When a new `local-bare` or `ssh-bare` session starts from a repository's primary
-checkout, Mjolnir creates a linked worktree from `HEAD`. It refuses to do that
-while any primary-checkout changes would be left behind, including staged,
+When **Create managed worktree** is checked for a new `local-bare` or `ssh-bare`
+session, Mjolnir creates a linked worktree from the selected checkout’s `HEAD`.
+It refuses to do that while source changes would be left behind, including staged,
 unstaged, and untracked files.
 
 Inspect the selected checkout on the local or remote target:
@@ -76,8 +76,9 @@ git -C <project-directory> status --short --untracked-files=all
 
 Commit the listed work, remove files you do not need, or stash everything with
 `git stash push --include-untracked`. Then retry the launch. This requirement
-applies when Mjolnir must create a managed worktree from a primary checkout; an
-existing linked worktree is used directly. See [Targets](/targets/#bare-targets)
+applies when creating a managed worktree. To work directly in the selected
+directory with its current changes, uncheck **Create managed worktree** on the
+final review. See [Targets](/targets/#bare-targets)
 and [Workspaces and bundles](/workspaces-bundles/).
 
 ## A harness profile is not authenticated

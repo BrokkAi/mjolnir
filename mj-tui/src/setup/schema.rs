@@ -5,9 +5,8 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "startup":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
         }
-        "startup" => json!({"enabled":true,"prompt":true,"profile":null,"target":null}),
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
@@ -96,7 +95,6 @@ pub(super) fn expand(value: &mut Value, path: &mut Vec<String>) {
 
 pub(super) fn label(key: &str) -> String {
     match key {
-        "startup" => "New Session Defaults",
         "interface" => "Interface",
         "sessions_side" => "Session sidebar position",
         "spinner" => "Activity animation",
@@ -110,9 +108,7 @@ pub(super) fn label(key: &str) -> String {
         "targets" => "Machines and Runtimes",
         "bundles" => "Projects",
         "enabled" => "Enabled",
-        "prompt" => "Focus prompt after creating",
         "profile" => "Agent profile",
-        "target" => "Machine / runtime",
         "kind" => "Type",
         "home" => "Account directory",
         "environment" => "Environment variables",
@@ -237,15 +233,9 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
             }
         }
     }
-    if matches!(key, "profile" | "target") {
+    if key == "profile" {
         let mut values = vec![Value::Null];
-        if let Some(entries) = draft[if key == "profile" {
-            "profiles"
-        } else {
-            "targets"
-        }]
-        .as_object()
-        {
+        if let Some(entries) = draft["profiles"].as_object() {
             values.extend(entries.keys().cloned().map(Value::String));
         }
         return values;
@@ -257,9 +247,6 @@ pub(super) fn help(path: &[String]) -> &'static str {
     match path.last().map(String::as_str).unwrap_or("") {
         "theme" => {
             "Colors for the terminal dashboard and conversation. Applies immediately after saving Setup."
-        }
-        "startup" => {
-            "Quick New uses these defaults. Automatic chooses Codex, then usable Podman, Docker, or a local worktree."
         }
         "profiles" => "Add an agent profile or use Detect machine to find your installed profiles.",
         "home" => {

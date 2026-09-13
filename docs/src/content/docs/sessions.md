@@ -38,6 +38,12 @@ dashboard. The full wizard resolves four things:
 3. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
 4. A final launch review, with optional attached directories and per-session container sizing where the target supports them.
 
+**Create managed worktree** on the final review controls whether a bare Git
+session gets a separate checkout or uses the selected directory directly. It
+defaults on for primary checkouts and off for linked worktrees. Containers, VMs,
+and plain directories leave it disabled. The terminal and web reviews both
+offer this choice. Opening an empty workspace does not create a session.
+
 Provisioning runs in the background. The new row appears immediately in Sessions, its status changes as each launch stage completes, and a failure remains visible with useful diagnostics. `Alt+X` cancels an in-flight launch without blocking the rest of the dashboard.
 
 Per-session CPU, memory, and attachment choices live in Mjolnir's state database, not `config.toml`. Container edits made later through **F2 → Container settings** take effect when that container is next created.
@@ -169,6 +175,10 @@ mj import claude --session <native-uuid> --bundle myapp
 mj import deepseek --latest --bundle myapp
 mj import muse --session <native-uuid> --bundle myapp
 ```
+
+Dashboard imports that will resume in a bare Git project also offer
+**Create managed worktree**, even when there are no import warnings. The saved
+choice takes effect on first resume.
 
 Close the source harness before importing. If it changes the session during import, select it again after it stops. Unsupported native storage versions report an error rather than importing partial history.
 

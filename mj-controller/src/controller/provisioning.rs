@@ -1414,6 +1414,7 @@ mod tests {
     fn failed_new_session_provisioning_discards_provisional_record() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let record = SessionRecord {
+            create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,
@@ -1495,6 +1496,7 @@ mod tests {
                 "docker",
                 "failed image",
                 SessionLaunchOptions {
+                    create_managed_worktree: None,
                     initial_prompt: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                     additional_mounts: Vec::new(),
@@ -1595,6 +1597,7 @@ mod tests {
                 "docker",
                 "missing Node",
                 SessionLaunchOptions {
+                    create_managed_worktree: None,
                     initial_prompt: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                     additional_mounts: Vec::new(),
@@ -1641,6 +1644,7 @@ mod tests {
     fn failed_new_worker_start_discards_session_only_after_target_cleanup() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let mut session = SessionRecord {
+            create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,

@@ -57,7 +57,6 @@ The only accepted top-level keys are:
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
-| `startup` | table | no | automatic first-session defaults | Controls the session Mjolnir creates when the opened workspace has no live sessions. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
 | `targets` | table of named tables | no | empty | Named places where sessions run. |
@@ -77,45 +76,9 @@ Profile, bundle, repository, and target IDs all use the same rule: 1–64 ASCII
 letters, digits, `.`, `-`, or `_`. The IDs `.` and `..` are not allowed. IDs are
 the TOML table names, for example `work` in `[profiles.work]`.
 
-## First-session defaults `[startup]`
-
-When the opened terminal workspace has no live sessions, Mjolnir automatically
-starts one using the launch directory as its project source and focuses the
-prompt when it is ready. This runs once while the dashboard opens; changing
-workspace tabs only filters the live list, and stopping the last session does
-not immediately create a replacement. Set `enabled = false` to require an
-explicit **Create** instead.
-
-```toml
-[startup]
-# profile = "my-codex"
-# target = "my-podman"
-enabled = true
-prompt = true
-```
-
-| Field | TOML type | Default | Behavior |
-| --- | --- | --- | --- |
-| `enabled` | boolean | `true` | Automatically create the first session in an empty opened workspace. |
-| `prompt` | boolean | `true` | Focus the normal composer after the automatic session opens. Set `false` to keep focus in Sessions. Explicit **Create** always uses the full wizard. |
-| `profile` | string | first configured Codex profile, otherwise first profile by ID | Must name a configured profile. |
-| `target` | string | usable Podman, then Docker, then local directory | Must name a configured target; an explicit selection never silently switches targets. |
-
-Automatic target selection checks local runtime readiness in the background. It
-reuses an existing target of the selected kind, preserving its image and
-resource settings, or adds a standard target if needed. It never selects SSH or
-AWS implicitly. Podman and Docker use a bundle sourced from the current Git
-repository's configured network remotes. Their isolated clone starts from the
-remote's default branch; local commits and uncommitted files are not copied.
-A plain directory uses a raw local session. Raw local sessions are the only
-sessions that can use a repository without a network remote. The local-directory
-fallback is supported on Linux and macOS; Windows retains its setup flow and
-requires a supported target.
-
-A completely unconfigured Linux or macOS installation gets a `codex` profile
-using `CODEX_HOME` or `~/.codex`, and a `localhost` target. Existing
-configuration is preserved. Authentication or provisioning failures appear on
-the dashboard; use `mj doctor`, `mj login`, or Setup (`F7`) to resolve them.
+Sessions are created explicitly through the New session wizard or the CLI/API.
+Opening an empty workspace does not create a session. Older `[startup]` settings
+are ignored and removed the next time configuration is saved.
 
 ## Advanced display options `[advanced]`
 
@@ -445,9 +408,9 @@ In addition to the common SSH fields:
 `workspace_prefix` cannot be empty, `/`, `.`, bare `~`/`~/`, or contain `..`.
 A leading `~/` on a longer path is interpreted relative to the remote login
 home. The wizard separately asks for an existing absolute remote Git directory;
-when that is a primary checkout, its managed worktree is created below the
-repository's own `.mj/worktrees/` tree. The legacy `hel` segment shown above is
-the current default. See [SSH and SSH Podman](/ssh/).
+when **Create managed worktree** is checked on the final review, the new
+checkout is created below the repository’s own `.mj/worktrees/` tree. The legacy
+`hel` segment shown above is the current default. See [SSH and SSH Podman](/ssh/).
 
 ### `ssh-podman`
 
