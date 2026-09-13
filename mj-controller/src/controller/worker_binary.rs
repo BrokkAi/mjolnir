@@ -200,6 +200,10 @@ impl Controller {
         let launch = self.current_worker_launch_config(session_id, &backend)?;
         let workspace = worker_workspace_for_recovery(&backend, &launch.cwd);
         Ok(WorkerRecoveryPlan {
+            source_target: self.state.sessions[session_id]
+                .target
+                .clone()
+                .context("session target is missing")?,
             target: targets::target_recovery_plan(&backend, session_id)?,
             workspace,
             liveness_probe: worker_liveness_command(&backend, &worker_root),

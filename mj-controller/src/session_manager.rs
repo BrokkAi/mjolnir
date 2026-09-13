@@ -101,6 +101,9 @@ pub struct WorkerWorkspace {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRecoveryPlan {
+    /// Durable target identity when this plan was built. A stale actor must
+    /// never recover a resource after the session moves or starts destruction.
+    pub source_target: mj_core::state::TargetLocator,
     pub target: Option<TargetRecoveryPlan>,
     pub workspace: Option<WorkerWorkspace>,
     pub liveness_probe: CommandSpec,
@@ -167,10 +170,11 @@ fn worker_connect_allows_live_restart(error: &anyhow::Error) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum WorkerRecoveryOutcome {
+pub(crate) enum WorkerRecoveryOutcome {
     Alive,
     Starting,
     TargetMissing,
+    Suppressed,
     WorkspaceMissing(PathBuf),
     RestartedDead,
     RestartedUnresponsive,
@@ -239,79 +243,107 @@ async fn recover_worker(
 }
 
 async fn recover_worker_for_session(
-    mut plan: WorkerRecoveryPlan,
+    plan: WorkerRecoveryPlan,
     restart_unresponsive: bool,
     session_id: Option<String>,
 ) -> Result<WorkerRecoveryOutcome> {
     tokio::task::spawn_blocking(move || {
-        // A failed Move can leave this actor with a plan from before recovery.
-        // Never overwrite the durable checkpoint-only launch with that old plan.
-        if let Some(id) = session_id.as_deref()
-            && crate::database::load_move_operation(id)?
-                .is_some_and(|op| op.source_checkpoint_only && op.destination_target.is_none())
-        {
-            plan = crate::controller::Controller::load()?.worker_recovery_plan(id)?;
-        }
         let executor = CancellableProcessExecutor::with_timeout(WORKER_RESTART_TIMEOUT);
-        if ensure_recovery_target_running(&executor, plan.target.as_ref())
-            .context("restore relay worker target")?
-            == TargetRecoveryOutcome::Missing
-        {
-            return Ok(WorkerRecoveryOutcome::TargetMissing);
-        }
-        let output = executor
-            .execute(&plan.liveness_probe)
-            .context("probe relay worker liveness")?;
-        if output.status != 0 {
-            bail!(
-                "{} failed with status {}: {}",
-                plan.liveness_probe.purpose,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        match String::from_utf8_lossy(&output.stdout).trim() {
-            "starting" => Ok(WorkerRecoveryOutcome::Starting),
-            "alive" if !restart_unresponsive => Ok(WorkerRecoveryOutcome::Alive),
-            "alive" => {
-                if let Some(workspace) = plan.workspace.as_ref()
-                    && !crate::controller::path_exists_on_managed_target(
-                        &executor,
-                        &workspace.target,
-                        &workspace.directory,
-                    )?
-                {
-                    return Ok(WorkerRecoveryOutcome::WorkspaceMissing(
-                        workspace.directory.clone(),
-                    ));
-                }
-                refresh_worker_binary_if_stale(&executor, plan.binary_refresh.as_ref())?;
-                refresh_worker_launch_if_stale(&executor, plan.launch_refresh.as_ref())?;
-                plan.restart.execute(&executor)?;
-                Ok(WorkerRecoveryOutcome::RestartedUnresponsive)
-            }
-            "dead" => {
-                if let Some(workspace) = plan.workspace.as_ref()
-                    && !crate::controller::path_exists_on_managed_target(
-                        &executor,
-                        &workspace.target,
-                        &workspace.directory,
-                    )?
-                {
-                    return Ok(WorkerRecoveryOutcome::WorkspaceMissing(
-                        workspace.directory.clone(),
-                    ));
-                }
-                refresh_worker_binary_if_stale(&executor, plan.binary_refresh.as_ref())?;
-                refresh_worker_launch_if_stale(&executor, plan.launch_refresh.as_ref())?;
-                plan.restart.execute(&executor)?;
-                Ok(WorkerRecoveryOutcome::RestartedDead)
-            }
-            output => bail!("worker liveness probe returned unexpected output {output:?}"),
-        }
+        recover_worker_controlled(plan, restart_unresponsive, session_id.as_deref(), &executor)
     })
     .await
     .context("worker recovery task failed")?
+}
+
+pub(crate) fn recover_worker_controlled(
+    mut plan: WorkerRecoveryPlan,
+    restart_unresponsive: bool,
+    session_id: Option<&str>,
+    executor: &impl CommandExecutor,
+) -> Result<WorkerRecoveryOutcome> {
+    let target_mutex = session_id.map(crate::recovery_gate::worker_target_mutex);
+    let _target_guard = target_mutex
+        .as_ref()
+        .map(|lock| {
+            lock.lock()
+                .map_err(|_| anyhow::anyhow!("worker target ownership lock poisoned"))
+        })
+        .transpose()?;
+    if let Some(id) = session_id {
+        let state =
+            crate::database::load_state().context("read durable session before worker recovery")?;
+        let eligible = state.sessions.get(id).is_some_and(|session| {
+            crate::pollers::session_target_is_pollable(session)
+                && session.target.as_ref() == Some(&plan.source_target)
+        });
+        if !eligible || crate::controller::move_session::move_owns_session(id) {
+            return Ok(WorkerRecoveryOutcome::Suppressed);
+        }
+    }
+    // A failed Move can leave this actor with a plan from before recovery.
+    // Never overwrite the durable checkpoint-only launch with that old plan.
+    if let Some(id) = session_id
+        && crate::database::load_move_operation(id)?
+            .is_some_and(|op| op.source_checkpoint_only && op.destination_target.is_none())
+    {
+        plan = crate::controller::Controller::load()?.worker_recovery_plan(id)?;
+    }
+    if ensure_recovery_target_running(executor, plan.target.as_ref())
+        .context("restore relay worker target")?
+        == TargetRecoveryOutcome::Missing
+    {
+        return Ok(WorkerRecoveryOutcome::TargetMissing);
+    }
+    let output = executor
+        .execute(&plan.liveness_probe)
+        .context("probe relay worker liveness")?;
+    if output.status != 0 {
+        bail!(
+            "{} failed with status {}: {}",
+            plan.liveness_probe.purpose,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "starting" => Ok(WorkerRecoveryOutcome::Starting),
+        "alive" if !restart_unresponsive => Ok(WorkerRecoveryOutcome::Alive),
+        "alive" => {
+            if let Some(workspace) = plan.workspace.as_ref()
+                && !crate::controller::path_exists_on_managed_target(
+                    executor,
+                    &workspace.target,
+                    &workspace.directory,
+                )?
+            {
+                return Ok(WorkerRecoveryOutcome::WorkspaceMissing(
+                    workspace.directory.clone(),
+                ));
+            }
+            refresh_worker_binary_if_stale(executor, plan.binary_refresh.as_ref())?;
+            refresh_worker_launch_if_stale(executor, plan.launch_refresh.as_ref())?;
+            plan.restart.execute(executor)?;
+            Ok(WorkerRecoveryOutcome::RestartedUnresponsive)
+        }
+        "dead" => {
+            if let Some(workspace) = plan.workspace.as_ref()
+                && !crate::controller::path_exists_on_managed_target(
+                    executor,
+                    &workspace.target,
+                    &workspace.directory,
+                )?
+            {
+                return Ok(WorkerRecoveryOutcome::WorkspaceMissing(
+                    workspace.directory.clone(),
+                ));
+            }
+            refresh_worker_binary_if_stale(executor, plan.binary_refresh.as_ref())?;
+            refresh_worker_launch_if_stale(executor, plan.launch_refresh.as_ref())?;
+            plan.restart.execute(executor)?;
+            Ok(WorkerRecoveryOutcome::RestartedDead)
+        }
+        output => bail!("worker liveness probe returned unexpected output {output:?}"),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1865,6 +1897,7 @@ async fn run_session_actor(
                                         WorkerRecoveryOutcome::Alive
                                         | WorkerRecoveryOutcome::Starting
                                         | WorkerRecoveryOutcome::TargetMissing
+                                        | WorkerRecoveryOutcome::Suppressed
                                         | WorkerRecoveryOutcome::WorkspaceMissing(_) => {
                                             unreachable!()
                                         }
@@ -1907,6 +1940,15 @@ async fn run_session_actor(
                                         ))),
                                     }, &view_tx, &updates);
                                     interval.reset_after(reconnect_delay(failures));
+                                }
+                                Ok(WorkerRecoveryOutcome::Suppressed) => {
+                                    tracing::info!(
+                                        session_id = target.session_id,
+                                        "automatic worker recovery suppressed by durable lifecycle or target change"
+                                    );
+                                    // The desired-target refresher will remove or replace this
+                                    // stale actor. It must not reconnect in the meantime.
+                                    break;
                                 }
                                 Ok(WorkerRecoveryOutcome::TargetMissing) => {
                                     let snapshot = view_tx.borrow().snapshot.clone();
@@ -3308,6 +3350,12 @@ fn replacement_session_test_fixture(
 mod tests {
     use super::*;
 
+    fn recovery_source_target() -> mj_core::state::TargetLocator {
+        mj_core::state::TargetLocator::LocalBare {
+            worker_root: PathBuf::from("/test-worker").join(LEASED_RELAY_SESSION),
+        }
+    }
+
     #[tokio::test]
     async fn client_adapter_preserves_actor_replacement_and_submit_completion() {
         let mut fixture = replacement_session_test_fixture("client-session", 73);
@@ -3732,6 +3780,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let restarted = directory.path().join("restarted");
         let recovery = |liveness: &str| WorkerRecoveryPlan {
+            source_target: recovery_source_target(),
             target: None,
             workspace: Some(WorkerWorkspace {
                 target: mj_core::state::ManagedWorktreeTarget::Local,
@@ -3788,6 +3837,7 @@ mod tests {
         let missing = directory.path().join("removed-worktree");
         let restarted = directory.path().join("worker-restarted");
         let plan = WorkerRecoveryPlan {
+            source_target: recovery_source_target(),
             target: None,
             workspace: Some(WorkerWorkspace {
                 target: mj_core::state::ManagedWorktreeTarget::Local,
@@ -3846,6 +3896,7 @@ mod tests {
                 restarted.to_string_lossy().into_owned(),
             );
             WorkerRecoveryPlan {
+                source_target: recovery_source_target(),
                 target: None,
                 workspace: None,
                 liveness_probe: CommandSpec::new("printf", ["dead\n"])
@@ -3916,6 +3967,7 @@ mod tests {
         );
         let outcome = recover_worker(
             WorkerRecoveryPlan {
+                source_target: recovery_source_target(),
                 target: None,
                 workspace: None,
                 liveness_probe: CommandSpec::new("printf", ["dead\n"])
@@ -4008,6 +4060,7 @@ mod tests {
 
         let outcome = recover_worker(
             WorkerRecoveryPlan {
+                source_target: recovery_source_target(),
                 target: Some(TargetRecoveryPlan {
                     exists: CommandSpec::new("true", std::iter::empty::<&str>())
                         .purpose("check test target"),
@@ -4045,6 +4098,7 @@ mod tests {
         let unreachable = CommandSpec::new("false", std::iter::empty::<&str>());
         let outcome = recover_worker(
             WorkerRecoveryPlan {
+                source_target: recovery_source_target(),
                 target: Some(TargetRecoveryPlan {
                     exists: unreachable,
                     inspect: CommandSpec::new("false", std::iter::empty::<&str>()),
@@ -4365,6 +4419,7 @@ mod tests {
                 .args(["--exact", &test_name, "--nocapture"])
                 .env(UNREACHABLE_VIEW_TEST_CHILD, "1")
                 .env("MJ_DATA_DIR", directory.path())
+                .env("MJ_CONFIG_DIR", directory.path().join("config"))
                 .output()
                 .unwrap();
             assert!(
@@ -4446,6 +4501,7 @@ mod tests {
                 ])
                 .env(UNREADABLE_PROJECTION_TEST_CHILD, "1")
                 .env("MJ_DATA_DIR", directory.path())
+                .env("MJ_CONFIG_DIR", directory.path().join("config"))
                 .output()
                 .unwrap();
             assert!(
@@ -4567,6 +4623,7 @@ mod tests {
             .args(["--exact", &exact_test_name(test), "--nocapture"])
             .env(marker, "1")
             .env("MJ_DATA_DIR", directory.path())
+            .env("MJ_CONFIG_DIR", directory.path().join("config"))
             .output()
             .unwrap();
         assert!(
@@ -4764,6 +4821,128 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn stale_recovery_checks_durable_state_under_target_ownership() {
+        const CHILD: &str = "MJ_STALE_RECOVERY_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_in_isolated_child(
+                CHILD,
+                "stale_recovery_checks_durable_state_under_target_ownership",
+            );
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        register_leased_relay_session();
+        let mut record =
+            crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
+        record.target = Some(recovery_source_target());
+        let plan = WorkerRecoveryPlan {
+            source_target: recovery_source_target(),
+            target: None,
+            workspace: None,
+            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+            binary_refresh: None,
+            launch_refresh: None,
+            restart: CommandPlan {
+                description: "restart".into(),
+                commands: vec![CommandSpec::new("restart", std::iter::empty::<&str>())],
+            },
+        };
+        #[derive(Default)]
+        struct RecordingExecutor(Mutex<Vec<String>>);
+        impl CommandExecutor for RecordingExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
+                self.0.lock().unwrap().push(command.program.clone());
+                Ok(crate::targets::CommandOutput {
+                    status: 0,
+                    stdout: b"dead\n".to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let executor = RecordingExecutor::default();
+        use mj_core::state::SessionState;
+        for state in [
+            SessionState::Destroying,
+            SessionState::Stopped,
+            SessionState::Lost,
+            SessionState::Error,
+            SessionState::Provisioning,
+            SessionState::DestroyedWithDataLoss,
+        ] {
+            record.state = state;
+            record.last_error = Some("cleanup is safely retryable".into());
+            crate::database::save_session(&record).unwrap();
+            assert_eq!(
+                recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor).unwrap(),
+                WorkerRecoveryOutcome::Suppressed
+            );
+        }
+        record.state = SessionState::Running;
+        for target in [
+            None,
+            Some(mj_core::state::TargetLocator::LocalBare {
+                worker_root: PathBuf::from("/replacement-worker").join(LEASED_RELAY_SESSION),
+            }),
+        ] {
+            record.target = target;
+            crate::database::save_session(&record).unwrap();
+            assert_eq!(
+                recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor).unwrap(),
+                WorkerRecoveryOutcome::Suppressed
+            );
+        }
+        assert_eq!(
+            recover_worker_controlled(plan.clone(), true, Some("removed-session"), &executor)
+                .unwrap(),
+            WorkerRecoveryOutcome::Suppressed
+        );
+        assert!(executor.0.lock().unwrap().is_empty());
+
+        record.target = Some(recovery_source_target());
+        for state in [
+            SessionState::Running,
+            SessionState::Disconnected,
+            SessionState::Checkpointing,
+            SessionState::Closing,
+        ] {
+            record.state = state;
+            crate::database::save_session(&record).unwrap();
+            assert_eq!(
+                recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor).unwrap(),
+                WorkerRecoveryOutcome::RestartedDead
+            );
+        }
+        executor.0.lock().unwrap().clear();
+
+        // A plan queued while Closing must read Destroying only after cleanup
+        // releases ownership, rather than use the actor's old observation.
+        let mutex = crate::recovery_gate::worker_target_mutex(&record.id);
+        let guard = mutex.lock().unwrap();
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(|| {
+                recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor)
+            });
+            let mut destroying = record.clone();
+            destroying.state = SessionState::Destroying;
+            crate::database::save_session(&destroying).unwrap();
+            drop(guard);
+            assert_eq!(
+                pending.join().unwrap().unwrap(),
+                WorkerRecoveryOutcome::Suppressed
+            );
+        });
+        assert!(executor.0.lock().unwrap().is_empty());
+
+        // A storage failure also refuses recovery before touching the target.
+        let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+        connection.execute("DROP TABLE sessions", []).unwrap();
+        let error = recover_worker_controlled(plan, true, Some(&record.id), &executor).unwrap_err();
+        assert!(format!("{error:#}").contains("read durable session before worker recovery"));
+        assert!(executor.0.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
         if std::env::var_os(AUTO_RESTART_TEST_CHILD).is_none() {
@@ -4777,6 +4956,10 @@ mod tests {
         let _writer = crate::database::install_isolated_test_writer();
         fail_if_the_actor_stalls("unresponsive live relay worker was never restarted");
         register_leased_relay_session();
+        let mut record =
+            crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
+        record.target = Some(recovery_source_target());
+        crate::database::save_session(&record).unwrap();
         let relay_root = tempfile::tempdir().unwrap();
         let restarted = relay_root.path().join("worker-restarted");
         let script = format!(
@@ -4805,6 +4988,7 @@ mod tests {
             restarted.to_string_lossy().into_owned(),
         );
         let worker_recovery = WorkerRecoveryPlan {
+            source_target: recovery_source_target(),
             target: None,
             workspace: None,
             liveness_probe: CommandSpec::new("printf", ["alive\n"])

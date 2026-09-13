@@ -950,7 +950,8 @@ fn dashboard_resource_targets(controller: &Controller) -> Vec<ResourcePollTarget
 /// `is_active` means visible on the active dashboard, not necessarily backed
 /// by a live target. A recoverable error stays visible so the user can resume
 /// its checkpoint, but its failed target must not keep reconnecting or being
-/// sampled.
+/// sampled. `Destroying` also stays visible, but its verified close has
+/// permanently handed the target to cleanup, even after a cleanup task fails.
 ///
 /// `Provisioning` is excluded for the same reason `credential_sync_targets`
 /// excludes it, and for a sharper one: a session gets its `target` as soon as
@@ -964,7 +965,7 @@ pub fn session_target_is_pollable(session: &mj_core::state::SessionRecord) -> bo
     session.state.is_active()
         && !matches!(
             session.state,
-            SessionState::Error | SessionState::Provisioning
+            SessionState::Error | SessionState::Provisioning | SessionState::Destroying
         )
         && session.target.is_some()
 }
@@ -2284,6 +2285,24 @@ mod tests {
         let running = podman_controller(SessionState::Running);
         assert_eq!(dashboard_worker_targets(&running).len(), 1);
         assert_eq!(dashboard_resource_targets(&running).len(), 1);
+    }
+
+    #[test]
+    fn failed_destruction_stays_out_of_pollers_without_an_active_lifecycle() {
+        let mut controller = podman_controller(SessionState::Destroying);
+        for session in controller.state.sessions.values_mut() {
+            session.last_error =
+                Some("verified checkpoint retained; cleanup is safely retryable".into());
+        }
+        // No in-flight lifecycle exclusion survives a failed close or restart.
+        let excluded = std::collections::BTreeSet::new();
+        for _ in 0..3 {
+            assert!(dashboard_worker_targets_excluding(&controller, &excluded).is_empty());
+            assert!(dashboard_resource_targets(&controller).is_empty());
+            assert!(credential_sync_targets(&controller).is_empty());
+        }
+        let closing = podman_controller(SessionState::Closing);
+        assert_eq!(dashboard_worker_targets(&closing).len(), 1);
     }
 
     #[test]

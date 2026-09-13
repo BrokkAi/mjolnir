@@ -301,6 +301,10 @@ impl Controller {
         executor: &impl CommandExecutor,
         persist: impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<bool> {
+        let target_mutex = crate::recovery_gate::worker_target_mutex(session_id);
+        let _target_guard = target_mutex.lock().map_err(|_| {
+            anyhow::anyhow!("worker target ownership lock poisoned for {session_id}")
+        })?;
         let session = self
             .state
             .sessions
@@ -407,6 +411,10 @@ impl Controller {
         executor: &impl CommandExecutor,
         persist: impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<()> {
+        let target_mutex = crate::recovery_gate::worker_target_mutex(session_id);
+        let _target_guard = target_mutex.lock().map_err(|_| {
+            anyhow::anyhow!("worker target ownership lock poisoned for {session_id}")
+        })?;
         let previous = self
             .state
             .sessions
@@ -911,6 +919,169 @@ mod tests {
         let stopped = &controller.state.sessions[session_id];
         assert_eq!(stopped.state, SessionState::Stopped);
         assert!(stopped.target.is_none());
+    }
+
+    #[test]
+    fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target() {
+        use crate::session_manager::{
+            WorkerRecoveryOutcome, WorkerRecoveryPlan, recover_worker_controlled,
+        };
+        use std::sync::{Mutex, mpsc};
+        const CHILD: &str = "MJ_DESTRUCTION_RECOVERY_TEST_CHILD";
+        const TEST: &str = "controller::lifecycle::tests::destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD, "1")
+                .env("MJ_DATA_DIR", directory.path())
+                .env("MJ_CONFIG_DIR", directory.path().join("config"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
+        let mut controller = stopped_podman_cleanup_controller(session_id);
+        let record = controller.state.sessions.get_mut(session_id).unwrap();
+        record.state = SessionState::Closing;
+        record.checkpoint = Some(checkpoint.clone());
+        crate::database::save_session(record).unwrap();
+        let plan = WorkerRecoveryPlan {
+            source_target: record.target.clone().unwrap(),
+            target: None,
+            workspace: None,
+            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+            binary_refresh: None,
+            launch_refresh: None,
+            restart: targets::CommandPlan {
+                description: "restart worker".into(),
+                commands: vec![CommandSpec::new("restart", std::iter::empty::<&str>())],
+            },
+        };
+        struct PausedRecovery {
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+            restarted: Mutex<bool>,
+        }
+        impl CommandExecutor for PausedRecovery {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                if command.program == "probe" {
+                    self.entered.send(()).unwrap();
+                    self.release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                } else {
+                    assert_eq!(command.program, "restart");
+                    assert_eq!(crate::database::load_state().unwrap().sessions["0123456789abcdef0123456789abcdef"].state,
+                        SessionState::Closing, "recovery must finish before destruction is persisted");
+                    *self.restarted.lock().unwrap() = true;
+                }
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"dead\n".to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let recovery = PausedRecovery {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+            restarted: Mutex::new(false),
+        };
+        let (persisted_tx, persisted_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let recovering = scope.spawn(|| {
+                recover_worker_controlled(plan.clone(), false, Some(session_id), &recovery)
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let closing = scope.spawn(|| {
+                controller.destroy_after_verified_checkpoint_with(
+                    session_id,
+                    &checkpoint,
+                    &DeferredCleanupExecutor {
+                        statuses: RefCell::new(vec![125]),
+                    },
+                    |record| {
+                        assert!(*recovery.restarted.lock().unwrap());
+                        crate::database::save_lifecycle_session(record)?;
+                        persisted_tx.send(record.state).unwrap();
+                        Ok(())
+                    },
+                )
+            });
+            assert!(
+                persisted_rx
+                    .recv_timeout(Duration::from_millis(50))
+                    .is_err()
+            );
+            release_tx.send(()).unwrap();
+            assert_eq!(
+                recovering.join().unwrap().unwrap(),
+                WorkerRecoveryOutcome::RestartedDead
+            );
+            assert!(closing.join().unwrap().is_err());
+        });
+        assert_eq!(
+            persisted_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            SessionState::Destroying
+        );
+        assert_eq!(
+            crate::database::load_state().unwrap().sessions[session_id].state,
+            SessionState::Destroying
+        );
+        assert_eq!(
+            controller.state.sessions[session_id].checkpoint.as_ref(),
+            Some(&checkpoint)
+        );
+        // An empty executor panics if a stale retry attempts any target command.
+        for _ in 0..3 {
+            assert!(crate::pollers::dashboard_worker_targets(&controller).is_empty());
+            assert_eq!(
+                recover_worker_controlled(
+                    plan.clone(),
+                    true,
+                    Some(session_id),
+                    &DeferredCleanupExecutor {
+                        statuses: RefCell::new(Vec::new())
+                    }
+                )
+                .unwrap(),
+                WorkerRecoveryOutcome::Suppressed
+            );
+        }
+        assert!(
+            controller
+                .destroy_after_verified_checkpoint_with(
+                    session_id,
+                    &checkpoint,
+                    &DeferredCleanupExecutor {
+                        statuses: RefCell::new(vec![0])
+                    },
+                    crate::database::save_lifecycle_session
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            crate::database::load_state().unwrap().sessions[session_id].state,
+            SessionState::Stopped
+        );
+        assert_eq!(
+            mj_checkpoint::checkpoint::checkpoint_sha256(&checkpoint.archive_path).unwrap(),
+            checkpoint.sha256
+        );
     }
 
     #[test]

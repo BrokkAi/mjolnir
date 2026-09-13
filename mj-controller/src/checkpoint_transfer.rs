@@ -83,6 +83,7 @@ pub fn restore_command(
 pub struct CheckpointTransfer<'a> {
     pub locator: &'a TargetLocator,
     pub session_id: &'a str,
+    pub operation_id: &'a str,
     pub remote_archive: &'a str,
     pub destination: &'a Path,
     pub expected_sha256: &'a str,
@@ -128,12 +129,17 @@ impl CheckpointTransfer<'_> {
             .prefix(".hel-checkpoint-")
             .tempfile_in(parent)?;
         let path = temporary.path().to_path_buf();
-        let transfer_result =
-            transfer_plan(self.locator, self.session_id, self.remote_archive, &path)?
-                .execute(executor)
-                .context("download target checkpoint");
-        let staging_cleanup_result =
-            cleanup_transfer_staging(self.locator, self.session_id, executor);
+        let staging = remote_staging_path(self.session_id, self.operation_id)?;
+        let transfer_result = transfer_plan(
+            self.locator,
+            self.session_id,
+            self.remote_archive,
+            &path,
+            &staging,
+        )?
+        .execute(executor)
+        .context("download target checkpoint");
+        let staging_cleanup_result = cleanup_transfer_staging(self.locator, &staging, executor);
         if let Err(error) = transfer_result {
             return match staging_cleanup_result {
                 Ok(()) => Err(error),
@@ -146,7 +152,19 @@ impl CheckpointTransfer<'_> {
         let sha256 = checkpoint_sha256(&path).context("hash downloaded checkpoint")?;
         ensure!(
             sha256 == self.expected_sha256,
-            "target and controller checkpoint checksums differ"
+            "target and controller checkpoint checksums differ for complete checkpoint archive: \
+             session={}, operation={}, expected_sha256={}, downloaded_sha256={}, downloaded_bytes={}; \
+             target archive retained at {}. The previous verified checkpoint was not replaced and \
+             the source workspace was not removed. Preserve the source and retry a fresh export; \
+             if this repeats, inspect the retained archive and its transfer path",
+            self.session_id,
+            self.operation_id,
+            self.expected_sha256,
+            sha256,
+            fs::metadata(&path)
+                .context("stat downloaded checkpoint")?
+                .len(),
+            self.remote_archive,
         );
         temporary
             .persist(self.destination)
@@ -185,12 +203,13 @@ impl CheckpointTransfer<'_> {
 /// [`CheckpointTransfer::cleanup_plan`] until the local copy is verified.
 fn cleanup_transfer_staging(
     locator: &TargetLocator,
-    session_id: &str,
+    staging: &str,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
+    validate_remote_path(staging)?;
     let command = match locator {
         TargetLocator::SshPodman { ssh, .. } | TargetLocator::SshDocker { ssh, .. } => Some(
-            ssh_command(ssh, ["rm", "-f", "--", &remote_staging_path(session_id)?])
+            ssh_command(ssh, ["rm", "-f", "--", staging])
                 .purpose("remove remote checkpoint staging"),
         ),
         _ => None,
@@ -214,8 +233,10 @@ pub fn transfer_plan(
     session_id: &str,
     remote_archive: &str,
     local_temporary: &Path,
+    staging: &str,
 ) -> Result<CommandPlan> {
     validate_remote_path(remote_archive)?;
+    validate_remote_path(staging)?;
     ensure!(
         local_temporary.is_absolute(),
         "local temporary path must be absolute"
@@ -255,7 +276,6 @@ pub fn transfer_plan(
             ssh, container_id, ..
         }
         | TargetLocator::SshDocker { ssh, container_id } => {
-            let staging = remote_staging_path(session_id)?;
             vec![
                 ssh_command(ssh, ["mkdir", "-p", ".local/share/hel/transfers"])
                     .purpose("create remote checkpoint staging directory"),
@@ -265,7 +285,7 @@ pub fn transfer_plan(
                         locator.container_engine().expect("remote container"),
                         "cp",
                         &format!("{container_id}:{remote_archive}"),
-                        &staging,
+                        staging,
                     ],
                 )
                 .purpose("stage remote container checkpoint"),
@@ -274,7 +294,7 @@ pub fn transfer_plan(
     };
     if let TargetLocator::SshPodman { ssh, .. } | TargetLocator::SshDocker { ssh, .. } = locator {
         commands.push(
-            scp_command(ssh, &remote_staging_path(session_id)?, &local)
+            scp_command(ssh, staging, &local)
                 .purpose("download remote container checkpoint over SSH"),
         );
     }
@@ -313,21 +333,18 @@ fn cleanup_plan(locator: &TargetLocator, session_id: &str, remote: &str) -> Resu
         TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | TargetLocator::SshDocker { ssh, container_id } => vec![
-            ssh_command(
-                ssh,
-                [
-                    locator.container_engine().expect("remote container"),
-                    "exec",
-                    container_id,
-                    "rm",
-                    "-f",
-                    "--",
-                    remote,
-                ],
-            ),
-            ssh_command(ssh, ["rm", "-f", "--", &remote_staging_path(session_id)?]),
-        ],
+        | TargetLocator::SshDocker { ssh, container_id } => vec![ssh_command(
+            ssh,
+            [
+                locator.container_engine().expect("remote container"),
+                "exec",
+                container_id,
+                "rm",
+                "-f",
+                "--",
+                remote,
+            ],
+        )],
     };
     Ok(CommandPlan {
         description: format!("clean checkpoint for {session_id}"),
@@ -335,9 +352,12 @@ fn cleanup_plan(locator: &TargetLocator, session_id: &str, remote: &str) -> Resu
     })
 }
 
-fn remote_staging_path(session_id: &str) -> Result<String> {
+fn remote_staging_path(session_id: &str, operation_id: &str) -> Result<String> {
     validate_component(session_id, "session ID")?;
-    Ok(format!(".local/share/hel/transfers/{session_id}.hel.zip"))
+    validate_component(operation_id, "checkpoint operation ID")?;
+    Ok(format!(
+        ".local/share/hel/transfers/{session_id}-{operation_id}.hel.zip"
+    ))
 }
 
 fn scp_command(ssh: &SshTarget, remote: &str, local: &str) -> CommandSpec {
@@ -458,6 +478,7 @@ mod tests {
                     SESSION,
                     "/var/lib/hel/workers/checkpoint.hel.zip",
                     Path::new("/var/tmp/checkpoint.zip"),
+                    &remote_staging_path(SESSION, "test-transfer").unwrap(),
                 )
                 .unwrap()
             })
@@ -688,6 +709,7 @@ mod tests {
         let gate = CheckpointTransfer {
             locator,
             session_id: SESSION,
+            operation_id: "test-transfer",
             remote_archive: "/var/lib/hel/workers/source.hel.zip",
             destination: &destination,
             expected_sha256: &target.sha256,
@@ -761,6 +783,7 @@ mod tests {
         let error = CheckpointTransfer {
             locator: &locators()[0],
             session_id: SESSION,
+            operation_id: "test-transfer",
             remote_archive: "/var/lib/hel/workers/source.hel.zip",
             destination: &destination,
             expected_sha256: &unexpected_sha256,
@@ -785,6 +808,7 @@ mod tests {
         let error = CheckpointTransfer {
             locator: &ssh_docker_locator(),
             session_id: SESSION,
+            operation_id: "test-transfer",
             remote_archive: "/var/lib/hel/workers/source.hel.zip",
             destination: &destination,
             expected_sha256: &"0".repeat(64),
@@ -821,6 +845,7 @@ mod tests {
         let error = CheckpointTransfer {
             locator: &ssh_docker_locator(),
             session_id: SESSION,
+            operation_id: "test-transfer",
             remote_archive: "/var/lib/hel/workers/source.hel.zip",
             destination: &destination,
             expected_sha256: &"0".repeat(64),
@@ -854,29 +879,168 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_transfer_preserves_previous_checkpoint() {
-        let temp = tempfile::tempdir().unwrap();
-        let corrupt = temp.path().join("bad.zip");
-        fs::write(&corrupt, b"bad").unwrap();
-        let destination = temp.path().join("session.hel.zip");
-        fs::write(&destination, b"previous").unwrap();
-        let locator = &locators()[0];
-        let expected_sha256 = "0".repeat(64);
-        let expected_digest = "a".repeat(64);
-        let result = CheckpointTransfer {
-            locator,
-            session_id: SESSION,
-            remote_archive: "/var/lib/hel/workers/source.hel.zip",
-            destination: &destination,
-            expected_sha256: &expected_sha256,
-            expected_event_frontier: 0,
-            expected_event_frontier_digest: &expected_digest,
+    fn overlapping_remote_transfers_keep_their_own_bytes_and_cleanup() {
+        use std::collections::BTreeMap;
+        use std::sync::{Condvar, Mutex};
+        use std::time::Duration;
+
+        #[derive(Default)]
+        struct Staging {
+            files: BTreeMap<String, Vec<u8>>,
+            copies: usize,
+            first_cleaned: bool,
         }
-        .execute(&CopyExecutor {
-            source: corrupt,
-            calls: RefCell::new(0),
-        });
-        assert!(result.is_err());
-        assert_eq!(fs::read(destination).unwrap(), b"previous");
+        struct InterleavedExecutor<'a> {
+            staging: &'a (Mutex<Staging>, Condvar),
+            archive: &'a [u8],
+            first: bool,
+        }
+        impl CommandExecutor for InterleavedExecutor<'_> {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                let (mutex, changed) = self.staging;
+                let remote = command.args.last().unwrap();
+                // Fixture paths contain no quotes or spaces. Inspect the final
+                // remote argument, so a shared staging path really collides.
+                let remote_path = || {
+                    remote
+                        .rsplit(' ')
+                        .next()
+                        .unwrap()
+                        .trim_matches('\'')
+                        .to_owned()
+                };
+                match command.purpose.as_str() {
+                    "stage remote container checkpoint" => {
+                        let mut state = mutex.lock().unwrap();
+                        state.files.insert(remote_path(), self.archive.to_vec());
+                        state.copies += 1;
+                        changed.notify_all();
+                    }
+                    "download remote container checkpoint over SSH" => {
+                        let (state, timeout) = changed
+                            .wait_timeout_while(
+                                mutex.lock().unwrap(),
+                                Duration::from_secs(5),
+                                |state| state.copies < 2 || (!self.first && !state.first_cleaned),
+                            )
+                            .unwrap();
+                        ensure!(!timeout.timed_out(), "interleaved transfer stalled");
+                        let source = command.args[command.args.len() - 2]
+                            .split_once(':')
+                            .unwrap()
+                            .1;
+                        let bytes = state
+                            .files
+                            .get(source)
+                            .context("other transfer removed staging")?;
+                        fs::write(remote, bytes)?;
+                    }
+                    "remove remote checkpoint staging" => {
+                        let mut state = mutex.lock().unwrap();
+                        state.files.remove(&remote_path());
+                        if self.first {
+                            state.first_cleaned = true;
+                            changed.notify_all();
+                        }
+                    }
+                    "create remote checkpoint staging directory" => {}
+                    purpose => bail!("unexpected transfer command: {purpose}"),
+                }
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        for locator in [locators().pop().unwrap(), ssh_docker_locator()] {
+            let directory = tempfile::tempdir().unwrap();
+            let staging = (Mutex::new(Staging::default()), Condvar::new());
+            let first = vec![b'a'; 192 * 1024];
+            let second = vec![b'b'; 256 * 1024];
+            std::thread::scope(|scope| {
+                let run = |operation, bytes: &[u8], is_first| {
+                    let source = directory.path().join(format!("{operation}-source.zip"));
+                    fs::write(&source, bytes).unwrap();
+                    let destination = directory.path().join(format!("{operation}-verified.zip"));
+                    let digest = checkpoint_sha256(&source).unwrap();
+                    let gate = CheckpointTransfer {
+                        locator: &locator,
+                        session_id: SESSION,
+                        operation_id: operation,
+                        remote_archive: &format!("/workers/{operation}.zip"),
+                        destination: &destination,
+                        expected_sha256: &digest,
+                        expected_event_frontier: 1,
+                        expected_event_frontier_digest: &"a".repeat(64),
+                    }
+                    .execute(&InterleavedExecutor {
+                        staging: &staging,
+                        archive: bytes,
+                        first: is_first,
+                    })
+                    .unwrap();
+                    assert_eq!(fs::read(gate.archive_path()).unwrap(), bytes);
+                    assert_eq!(gate.sha256(), digest);
+                };
+                let first_run = scope.spawn(move || run("first", &first, true));
+                let second_run = scope.spawn(move || run("second", &second, false));
+                first_run.join().unwrap();
+                second_run.join().unwrap();
+            });
+            assert!(staging.0.lock().unwrap().files.is_empty());
+        }
+    }
+
+    #[test]
+    fn corrupt_or_truncated_transfer_preserves_previous_checkpoint_and_reports_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.zip");
+        let original = vec![b'a'; 192 * 1024];
+        fs::write(&source, &original).unwrap();
+        let expected_sha256 = checkpoint_sha256(&source).unwrap();
+        let mut corrupt = original.clone();
+        corrupt[80 * 1024] = b'b';
+        for bytes in [corrupt, original[..1024].to_vec()] {
+            let downloaded = temp.path().join("download.zip");
+            fs::write(&downloaded, &bytes).unwrap();
+            let actual_sha256 = checkpoint_sha256(&downloaded).unwrap();
+            let destination = temp.path().join("previous.zip");
+            fs::write(&destination, b"previous verified checkpoint").unwrap();
+            let error = CheckpointTransfer {
+                locator: &ssh_docker_locator(),
+                session_id: SESSION,
+                operation_id: "failed-export",
+                remote_archive: "/workers/failed-export.zip",
+                destination: &destination,
+                expected_sha256: &expected_sha256,
+                expected_event_frontier: 1,
+                expected_event_frontier_digest: &"a".repeat(64),
+            }
+            .execute(&SshDockerTransferExecutor::new(bytes.clone()))
+            .unwrap_err();
+            let detail = format!("{error:#}");
+            for expected in [
+                "complete checkpoint archive",
+                SESSION,
+                "failed-export",
+                &expected_sha256,
+                &actual_sha256,
+                &format!("downloaded_bytes={}", bytes.len()),
+                "target archive retained at /workers/failed-export.zip",
+                "retry a fresh export",
+            ] {
+                assert!(
+                    detail.contains(expected),
+                    "missing {expected:?} from {detail}"
+                );
+            }
+            assert_eq!(
+                fs::read(&destination).unwrap(),
+                b"previous verified checkpoint"
+            );
+            assert_eq!(fs::read(&source).unwrap(), original);
+        }
     }
 }
