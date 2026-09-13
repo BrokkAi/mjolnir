@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::web::{BrowserDiffStat, BrowserTranscript, BrowserTranscriptEntry};
-use mj_core::transcript::*;
+use mj_transcript::transcript::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptRenderMode {
     Rich,

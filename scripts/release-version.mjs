@@ -20,6 +20,7 @@ const repositoryRoot = path.resolve(
 const manifestPath = path.join(repositoryRoot, "Cargo.toml");
 const internalPackages = [
   "mj-core",
+  "mj-transcript",
   "mj-checkpoint",
   "mj-worker",
   "mj-client",

@@ -16,7 +16,6 @@ pub mod local_git;
 pub mod login_environment;
 pub mod path_input;
 pub mod project_memory;
-pub mod projection;
 pub mod relay;
 pub mod remote_git;
 pub mod review;

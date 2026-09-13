@@ -23,13 +23,13 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, Outcome};
 use crate::selection::{SelectionRange, SurfaceFrame, SurfaceId};
 use mj_core::elicitation::ElicitationRequest;
-use mj_core::projection::{apply_committed_projection_event, project_relay_event};
 use mj_core::relay::RelayEvent;
 use mj_core::second_opinion::{
     ReviewStage, ReviewWorkflow, ReviewerSetup, SetupRequest, SetupStage, WorkflowRequest,
 };
 use mj_core::state::MaterializedSession;
 use mj_core::transcript::ChatEntry;
+use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
 
 use super::rendering::TranscriptRenderMode;
 use super::transcript::{materialized_chat_entries_reusing, render_entry_rows};

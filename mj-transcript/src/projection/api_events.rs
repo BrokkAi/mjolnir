@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::ApiEventData;
+use mj_core::storage::ApiEventData;
 
 /// Retain transitions before the database page coalesces its final projection.
 pub(super) fn derive(
@@ -32,9 +32,9 @@ pub(super) fn derive(
         _ => {}
     }
     if let Some(turn) = &mutation.last_turn_outcome {
-        if let crate::state::TurnOutcomeKind::Completed { stop_reason } = &turn.outcome
-            && crate::state::classify_prompt_completion(stop_reason)
-                == crate::state::PromptCompletion::Error
+        if let mj_core::state::TurnOutcomeKind::Completed { stop_reason } = &turn.outcome
+            && mj_core::state::classify_prompt_completion(stop_reason)
+                == mj_core::state::PromptCompletion::Error
         {
             events.push(ApiEventData::Error {
                 message: stop_reason.clone(),

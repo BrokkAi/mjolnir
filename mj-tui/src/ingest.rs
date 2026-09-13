@@ -17,7 +17,7 @@ use mj_client::quota::ProfileQuota;
 use mj_core::targets::{
     DeploymentCapacityTarget, DeploymentCapacityUsage, ProvisionStage, SessionResourceUsage,
 };
-use mj_core::transcript::{materialized_content_text, materialized_tool_diffstats};
+use mj_transcript::transcript::{materialized_content_text, materialized_tool_diffstats};
 
 use crate::render::session_review_display_signature;
 use crate::render_changes::{

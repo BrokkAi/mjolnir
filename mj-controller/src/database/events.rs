@@ -152,10 +152,10 @@ pub fn record_api_error(session_id: String, message: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mj_core::projection::{apply_committed_projection_event, project_relay_event};
     use mj_core::relay::{
         RelayCommand, RelayCommandOutcome, RelayEvent, RelayObservation, relay_event_digest,
     };
+    use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
 
     fn page(path: &Path, observations: Vec<RelayObservation>, fail: bool) -> Result<()> {
         let mut current = load_materialized_session_from(path, "session-1")?.unwrap();

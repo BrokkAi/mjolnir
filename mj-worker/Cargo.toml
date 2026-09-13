@@ -49,6 +49,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mimalloc = "0.1"
 
 [dev-dependencies]
+# Projection is used only to verify relay replay in local tests.
+mj-transcript = { path = "../mj-transcript", package = "brokk-mj-transcript" }
 proptest = "1"
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-controller = { path = "../mj-controller", package = "brokk-mj-controller" }

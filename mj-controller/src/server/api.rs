@@ -1408,7 +1408,7 @@ async fn transcript(
                 position: item.position,
                 seq: item.seq(),
                 role: mj_core::transcript::transcript_item_role(&item.body).to_owned(),
-                text: mj_core::transcript::transcript_item_text(item),
+                text: mj_transcript::transcript::transcript_item_text(item),
                 created_at_ms: item.created_at_ms,
                 last_changed_at_ms: item.last_changed_at_ms,
                 body: item.body.clone(),

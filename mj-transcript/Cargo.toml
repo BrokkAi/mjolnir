@@ -1,0 +1,26 @@
+[package]
+name = "brokk-mj-transcript"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Transcript projection and presentation for Mjolnir"
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[lib]
+name = "mj_transcript"
+
+[lints]
+workspace = true
+
+[dependencies]
+mj-core.workspace = true
+agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha2 = "0.10"
+tracing = "0.1"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25.1"

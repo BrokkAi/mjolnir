@@ -26,10 +26,10 @@ use mj_checkpoint::checkpoint::{
     CheckpointRepositorySpec, canonical_session_contains_prompt, checkpoint_sha256,
 };
 use mj_core::config::{HarnessKind, sessions_dir};
-use mj_core::projection::canonical_session_from_materialized;
 use mj_core::state::{
     CheckpointMetadata, ManagedSessionSnapshot, SessionRecord, SessionState, State,
 };
+use mj_transcript::projection::canonical_session_from_materialized;
 
 use crate::targets::{
     self, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor, ProvisionStage,
@@ -2544,12 +2544,12 @@ mod tests {
     use mj_core::config::{
         Config, HarnessProfile, ProjectBundle, ProjectRepository, TargetTemplate,
     };
-    use mj_core::projection::canonical_session_from_materialized;
     #[cfg(unix)]
     use mj_core::state::TargetLocator;
     use mj_core::state::{
         CheckpointMetadata, ManagedSessionSnapshot, MaterializedSession, SessionState, State,
     };
+    use mj_transcript::projection::canonical_session_from_materialized;
 
     #[cfg(unix)]
     use crate::targets::ProvisionStage;

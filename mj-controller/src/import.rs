@@ -30,12 +30,12 @@ use mj_core::config::{
     Config, HarnessKind, ProjectBundle, ProjectRepository, TargetTemplate, validate_id,
 };
 use mj_core::local_git::main_worktree_root;
-use mj_core::projection::canonical_session_from_materialized;
 use mj_core::remote_git::resolve_repository;
 use mj_core::state::{
     CheckpointMetadata, SessionRecord, SessionState, State, harness_session_title, new_session_id,
     normalize_session_title,
 };
+use mj_transcript::projection::canonical_session_from_materialized;
 
 use crate::targets::ProcessExecutor;
 use mj_core::relay::{SequencedEvent, WorkerEvent, strip_hidden_prompt_context};
@@ -3074,7 +3074,8 @@ fn canonical_import_session(
 ) -> Result<mj_checkpoint::archive::CanonicalSessionSnapshot> {
     let mut events = events.to_vec();
     finalize_import_event_times(&mut events, source_path)?;
-    let mut materialized = mj_core::projection::imported_materialized_session(session_id, &events);
+    let mut materialized =
+        mj_transcript::projection::imported_materialized_session(session_id, &events);
     materialized.session_title = harness_session_title(&events);
     if let Some(last_activity_at_ms) = events.iter().filter_map(|event| event.recorded_at_ms).max()
     {
@@ -3200,7 +3201,9 @@ pub fn persist_imported_session_locally(session: &SessionRecord) -> Result<()> {
         .context("imported session has no checkpoint")?;
     let canonical = mj_checkpoint::archive::verify_archive_streaming(&checkpoint.archive_path)?
         .canonical_session;
-    let materialized =
-        mj_core::projection::materialized_session_from_canonical(session.id.clone(), &canonical)?;
+    let materialized = mj_transcript::projection::materialized_session_from_canonical(
+        session.id.clone(),
+        &canonical,
+    )?;
     crate::database::save_materialized_session(&materialized)
 }

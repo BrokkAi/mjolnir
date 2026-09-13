@@ -2563,7 +2563,7 @@ const RETENTION_BODY_FLOOR_BYTES: usize = 4 * 1024;
 /// below `event_frontier` is durably recorded elsewhere. What stays here is
 /// what the transcript still shows: which tool ran, on what, with what result,
 /// and each edit's diffstat. See
-/// [`mj_core::transcript::compact_tool_call_for_retention`].
+/// [`mj_transcript::transcript::compact_tool_call_for_retention`].
 pub fn compact_materialized_transcript_through(
     session_id: &str,
     event_frontier: u64,
@@ -2622,7 +2622,7 @@ fn compact_materialized_transcript_in(
                 continue;
             }
         };
-        if !mj_core::transcript::compact_tool_call_for_retention(&mut body) {
+        if !mj_transcript::transcript::compact_tool_call_for_retention(&mut body) {
             continue;
         }
         let compacted = serde_json::to_string(&body)

@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 anyhow = "1"
 mj-core.workspace = true
+mj-transcript.workspace = true
 mj-client.workspace = true
 mj-chat.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

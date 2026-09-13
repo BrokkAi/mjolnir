@@ -4610,8 +4610,9 @@ mod tests {
         assert!(relay.claim_pending_commands(true).unwrap().is_empty());
         let mut session = mj_core::state::MaterializedSession::empty(SESSION);
         for event in relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
-            let projected = mj_core::projection::project_relay_event(&session, &event).unwrap();
-            mj_core::projection::apply_committed_projection_event(
+            let projected =
+                mj_transcript::projection::project_relay_event(&session, &event).unwrap();
+            mj_transcript::projection::apply_committed_projection_event(
                 &mut session,
                 &event,
                 projected.mutation,
@@ -4653,8 +4654,9 @@ mod tests {
 
         let mut session = mj_core::state::MaterializedSession::empty(SESSION);
         for event in relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
-            let projected = mj_core::projection::project_relay_event(&session, &event).unwrap();
-            mj_core::projection::apply_committed_projection_event(
+            let projected =
+                mj_transcript::projection::project_relay_event(&session, &event).unwrap();
+            mj_transcript::projection::apply_committed_projection_event(
                 &mut session,
                 &event,
                 projected.mutation,
@@ -4691,8 +4693,8 @@ mod tests {
                 let mut session = MaterializedSession::empty(SESSION);
                 for event in relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
                     let projected =
-                        mj_core::projection::project_relay_event(&session, &event).unwrap();
-                    mj_core::projection::apply_committed_projection_event(
+                        mj_transcript::projection::project_relay_event(&session, &event).unwrap();
+                    mj_transcript::projection::apply_committed_projection_event(
                         &mut session,
                         &event,
                         projected.mutation,
@@ -6132,8 +6134,9 @@ mod tests {
 
         let mut session = mj_core::state::MaterializedSession::empty(SESSION);
         for event in relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
-            let projected = mj_core::projection::project_relay_event(&session, &event).unwrap();
-            mj_core::projection::apply_committed_projection_event(
+            let projected =
+                mj_transcript::projection::project_relay_event(&session, &event).unwrap();
+            mj_transcript::projection::apply_committed_projection_event(
                 &mut session,
                 &event,
                 projected.mutation,

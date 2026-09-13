@@ -62,7 +62,7 @@ use mj_core::relay::{
 };
 #[cfg(test)]
 use mj_core::transcript::PlanStatus;
-use mj_core::transcript::{
+use mj_transcript::transcript::{
     ChatEntry, ChatRole, apply_runtime_event_to_entries, apply_session_update_to_entries,
 };
 
@@ -1711,7 +1711,7 @@ impl ChatState {
                 serde_json::Value::String(effort.to_owned()),
             );
         }
-        mj_core::projection::materialized_session_from_entries(
+        mj_transcript::projection::materialized_session_from_entries(
             &self.session_id,
             &self.entries,
             self.latest_seq,

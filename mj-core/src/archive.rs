@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// that understands schema 2 can read the archive.
 pub const ARCHIVE_SCHEMA_VERSION: u32 = 2;
 /// Schema 2 plus sharded payloads. A payload larger than
-/// [`PAYLOAD_PART_BYTES`] is written as several `*.helpart.NNNNN` ZIP entries
+/// the archive writer’s part-size limit is written as several `*.helpart.NNNNN` ZIP entries
 /// so compression and verification can run in parallel. Archives declare this
 /// schema only when at least one payload is sharded, which keeps small
 /// sessions readable by builds that predate sharding and makes older builds

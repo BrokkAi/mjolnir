@@ -13,7 +13,7 @@ use crossterm::event::{
 use mj_client::web::BrowserTranscriptEntry;
 use mj_core::acp::RuntimeEvent;
 use mj_core::relay::{SequencedEvent, WorkerEvent};
-use mj_core::transcript::{TerminalOutputRecord, tool_content_details};
+use mj_transcript::transcript::{TerminalOutputRecord, tool_content_details};
 
 #[test]
 fn background_conversion_reuses_unchanged_entries_and_refreshes_changed_text() {

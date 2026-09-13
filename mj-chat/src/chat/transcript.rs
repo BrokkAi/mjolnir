@@ -23,12 +23,12 @@ use crate::selection::{ContentPos, SelectionRange, SurfaceFrame, SurfaceId};
 use mj_core::state::{MaterializedSession, TranscriptBody, TranscriptItem};
 
 use mj_client::web::BrowserTranscript;
-#[cfg(test)]
-use mj_core::transcript::tool_call_presentation;
 use mj_core::transcript::{ChatEntry, ChatRole, PlanStatus, ToolStatus, TranscriptSource};
+#[cfg(test)]
+use mj_transcript::transcript::tool_call_presentation;
 // The transcript text helpers live in `transcript`, which sits below every
 // module that reads a transcript. The chat view keeps naming them here.
-pub(super) use mj_core::transcript::{
+pub(super) use mj_transcript::transcript::{
     materialized_chunks_text, materialized_tool_diffstats, tool_status,
 };
 

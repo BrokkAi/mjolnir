@@ -17,8 +17,8 @@ use mj_checkpoint::archive::{
 };
 use mj_checkpoint::checkpoint::CheckpointRestoreSpec;
 use mj_core::config::{Config, HarnessKind, ProjectRepository, mount_history_host};
-use mj_core::projection::materialized_session_from_canonical;
 use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocation, SessionState};
+use mj_transcript::projection::materialized_session_from_canonical;
 
 use crate::targets::{
     self, AdditionalMount, CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec,
@@ -1362,7 +1362,7 @@ impl Controller {
                 } else if discard_queued_prompts
                     && let Err(restore_error) = crate::database::replace_materialized_queued_prompts(
                         session_id,
-                        &mj_core::projection::materialized_queued_prompts_from_canonical(
+                        &mj_transcript::projection::materialized_queued_prompts_from_canonical(
                             &canonical_session.queued_prompts,
                         ),
                     )
@@ -1784,8 +1784,8 @@ mod tests {
         Config, ContainerTemplate as ConfigContainer, HarnessProfile, ProjectBundle,
         ProjectRepository, TargetTemplate,
     };
-    use mj_core::projection::materialized_session_from_canonical;
     use mj_core::state::{SessionRecord, SessionState, State, TargetLocator};
+    use mj_transcript::projection::materialized_session_from_canonical;
 
     use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
 

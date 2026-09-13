@@ -16,11 +16,11 @@ use crate::worker_client::{RelayClient, RelayEventPage, RelayRejected, RelayTran
 use mj_checkpoint::archive::verify_archive_streaming;
 use mj_core::credentials::{CredentialSyncSignal, relay_event_credential_sync_reason};
 use mj_core::elicitation::ElicitationResponse;
-use mj_core::projection::{
+use mj_core::state::{ManagedSessionSnapshot, MaterializedSession};
+use mj_transcript::projection::{
     ProjectionIndex, apply_committed_projection_event_indexed, materialized_session_from_canonical,
     project_relay_event_indexed,
 };
-use mj_core::state::{ManagedSessionSnapshot, MaterializedSession};
 
 use crate::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandPlan, CommandSpec, TargetLocator,

@@ -18,23 +18,23 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::archive::{
+use crate::transcript::{ChatEntry, ChatRole, PlanStatus, ToolStatus, tool_call_presentation};
+use mj_core::archive::{
     CanonicalExecutionState, CanonicalQueuedCommandKind, CanonicalQueuedPrompt,
     CanonicalSessionSnapshot, CanonicalSessionState, CanonicalTerminalOutput,
     CanonicalTranscriptBody, CanonicalTranscriptItem,
 };
-use crate::relay::{
+use mj_core::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RelayCommand, RelayCommandKind, RelayEvent, RelayObservation,
     SequencedEvent, WorkerEvent, WorkerPhase, validate_relay_event,
 };
-use crate::state::{
+use mj_core::state::{
     MaterializedExecutionState, MaterializedQueuedPrompt, MaterializedSession, MaterializedTurn,
     MaterializedTurnOutcome, QueuedCommandKind, TerminalOutputRecord, TranscriptBody,
     TranscriptItem, TurnOutcomeKind, config_command_text, normalize_session_title,
     provisional_session_title,
 };
-use crate::storage::{MaterializedSessionMutation, ProjectionIntegrityError, TranscriptMutation};
-use crate::transcript::{ChatEntry, ChatRole, PlanStatus, ToolStatus, tool_call_presentation};
+use mj_core::storage::{MaterializedSessionMutation, ProjectionIntegrityError, TranscriptMutation};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedRelayEvent {
@@ -416,7 +416,7 @@ fn project_observation(
             // point the harness proposed it, so the proposal renders inline
             // after the conversation that produced it and outlives both the
             // decision dialog and the session's process.
-            if let Some(plan) = crate::acp::plan_review_proposal(request) {
+            if let Some(plan) = mj_core::acp::plan_review_proposal(request) {
                 close_streams(index, mutation, event.recorded_at_ms);
                 upsert(
                     mutation,
@@ -568,13 +568,13 @@ fn project_observation(
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
             match outcome {
-                crate::relay::RelayCommandOutcome::Prompt {
+                mj_core::relay::RelayCommandOutcome::Prompt {
                     stop_reason,
                     usage,
                     diagnostic,
                 } => {
                     let native_running =
-                        crate::goal::GoalState::from_configuration(&current.configuration)?
+                        mj_core::goal::GoalState::from_configuration(&current.configuration)?
                             .running();
                     if !native_running {
                         close_streams(index, mutation, event.recorded_at_ms);
@@ -598,7 +598,7 @@ fn project_observation(
                     });
                     mutation.active_turn = Some(None);
                 }
-                crate::relay::RelayCommandOutcome::UserShell { result } => {
+                mj_core::relay::RelayCommandOutcome::UserShell { result } => {
                     if let Some(existing) = index.get(&user_shell_item_id(command_id)) {
                         let mut item = TranscriptItem::clone(existing);
                         item.body = TranscriptBody::System {
@@ -608,18 +608,18 @@ fn project_observation(
                         upsert(mutation, item);
                     }
                 }
-                crate::relay::RelayCommandOutcome::Closed => {
+                mj_core::relay::RelayCommandOutcome::Closed => {
                     close_streams(index, mutation, event.recorded_at_ms);
                     mutation.execution = Some(MaterializedExecutionState::Closed);
                 }
-                crate::relay::RelayCommandOutcome::QueueChanged {
+                mj_core::relay::RelayCommandOutcome::QueueChanged {
                     removed_command_ids,
                 } => queue.retain(|queued| {
                     !removed_command_ids
                         .iter()
                         .any(|command_id| command_id == &queued.command_id)
                 }),
-                crate::relay::RelayCommandOutcome::Steered { queued_command_id } => {
+                mj_core::relay::RelayCommandOutcome::Steered { queued_command_id } => {
                     let Some(queue_index) = queue
                         .iter()
                         .position(|queued| queued.command_id == *queued_command_id)
@@ -654,16 +654,16 @@ fn project_observation(
                         },
                     );
                 }
-                crate::relay::RelayCommandOutcome::Configured => {
+                mj_core::relay::RelayCommandOutcome::Configured => {
                     mutation.config_results.push((command_id.clone(), None));
                 }
-                crate::relay::RelayCommandOutcome::SessionModeSet
-                | crate::relay::RelayCommandOutcome::Cancelled
-                | crate::relay::RelayCommandOutcome::CheckpointCompleted
-                | crate::relay::RelayCommandOutcome::CheckpointReleased
-                | crate::relay::RelayCommandOutcome::RecoveryFloorAdvanced
-                | crate::relay::RelayCommandOutcome::NoticeRecorded
-                | crate::relay::RelayCommandOutcome::UserShellCancelled => {}
+                mj_core::relay::RelayCommandOutcome::SessionModeSet
+                | mj_core::relay::RelayCommandOutcome::Cancelled
+                | mj_core::relay::RelayCommandOutcome::CheckpointCompleted
+                | mj_core::relay::RelayCommandOutcome::CheckpointReleased
+                | mj_core::relay::RelayCommandOutcome::RecoveryFloorAdvanced
+                | mj_core::relay::RelayCommandOutcome::NoticeRecorded
+                | mj_core::relay::RelayCommandOutcome::UserShellCancelled => {}
             }
             if queue != current.queued_prompts {
                 mutation.queued_prompts = Some(queue);
@@ -696,7 +696,7 @@ fn project_observation(
                 mutation.queued_prompts = Some(queue);
             }
             if prompt_was_started
-                && !crate::goal::GoalState::from_configuration(&current.configuration)?.running()
+                && !mj_core::goal::GoalState::from_configuration(&current.configuration)?.running()
             {
                 close_streams(index, mutation, event.recorded_at_ms);
                 mutation.execution = Some(MaterializedExecutionState::Idle);
@@ -890,12 +890,12 @@ fn project_observation(
             push_system(mutation, event, format!("warning: {message}"));
         }
         RelayObservation::SessionRestarted => {
-            if let Some(value) = current.configuration.get(crate::goal::PROJECTION_KEY) {
-                let mut goal: crate::goal::GoalState = serde_json::from_value(value.clone())?;
+            if let Some(value) = current.configuration.get(mj_core::goal::PROJECTION_KEY) {
+                let mut goal: mj_core::goal::GoalState = serde_json::from_value(value.clone())?;
                 goal.restart();
                 let mut configuration = current.configuration.clone();
                 configuration.insert(
-                    crate::goal::PROJECTION_KEY.into(),
+                    mj_core::goal::PROJECTION_KEY.into(),
                     serde_json::to_value(goal)?,
                 );
                 mutation.configuration = Some(configuration);
@@ -1020,21 +1020,21 @@ fn user_shell_text(
     text
 }
 
-fn user_shell_result_text(result: &crate::relay::UserShellResult) -> String {
+fn user_shell_result_text(result: &mj_core::relay::UserShellResult) -> String {
     let status = match result.status {
-        crate::relay::UserShellStatus::Exited => match result.exit_code {
+        mj_core::relay::UserShellStatus::Exited => match result.exit_code {
             Some(0) => "done".to_owned(),
             Some(code) => format!("failed (exit {code})"),
             None => "finished".to_owned(),
         },
-        crate::relay::UserShellStatus::Signaled => format!(
+        mj_core::relay::UserShellStatus::Signaled => format!(
             "signaled ({})",
             result.signal.as_deref().unwrap_or("unknown signal")
         ),
-        crate::relay::UserShellStatus::TimedOut => "timed out".to_owned(),
-        crate::relay::UserShellStatus::Cancelled => "cancelled".to_owned(),
-        crate::relay::UserShellStatus::Interrupted => "interrupted".to_owned(),
-        crate::relay::UserShellStatus::Failed => "failed".to_owned(),
+        mj_core::relay::UserShellStatus::TimedOut => "timed out".to_owned(),
+        mj_core::relay::UserShellStatus::Cancelled => "cancelled".to_owned(),
+        mj_core::relay::UserShellStatus::Interrupted => "interrupted".to_owned(),
+        mj_core::relay::UserShellStatus::Failed => "failed".to_owned(),
     };
     let mut text = user_shell_text(
         &result.command,
@@ -1229,11 +1229,11 @@ fn project_session_update(
             mutation.configuration = Some(configuration);
         }
         SessionUpdate::SessionInfoUpdate(update) => {
-            let mut goal = crate::goal::GoalState::from_configuration(&current.configuration)?;
+            let mut goal = mj_core::goal::GoalState::from_configuration(&current.configuration)?;
             if goal.apply(&SessionUpdate::SessionInfoUpdate(update.clone()))? {
                 let mut configuration = current.configuration.clone();
                 configuration.insert(
-                    crate::goal::PROJECTION_KEY.into(),
+                    mj_core::goal::PROJECTION_KEY.into(),
                     serde_json::to_value(&goal)?,
                 );
                 mutation.configuration = Some(configuration);
@@ -1248,7 +1248,7 @@ fn project_session_update(
         }
         SessionUpdate::UsageUpdate(update) => {
             if let Some(cost) = &update.cost {
-                mutation.provider_cost = Some(crate::usage::ProviderCost {
+                mutation.provider_cost = Some(mj_core::usage::ProviderCost {
                     amount: cost.amount,
                     currency: cost.currency.clone(),
                     observed_at_ms: event.recorded_at_ms,
@@ -1445,7 +1445,7 @@ fn replace_or_push_terminal_record(
 fn fallback_terminal_tool_item_id(terminal_id: &str) -> String {
     format!(
         "tool:{}",
-        crate::acp::fallback_terminal_tool_call_id(terminal_id)
+        mj_core::acp::fallback_terminal_tool_call_id(terminal_id)
     )
 }
 
@@ -1454,7 +1454,7 @@ fn fallback_tool_item(item: &TranscriptItem) -> Result<bool> {
         return Ok(false);
     };
     let call = serde_json::from_value(call.clone()).context("parse fallback terminal tool call")?;
-    Ok(crate::acp::is_fallback_terminal_tool_call(&call))
+    Ok(mj_core::acp::is_fallback_terminal_tool_call(&call))
 }
 
 /// The one provider tool demonstrably owning a result through its raw value.
@@ -1482,7 +1482,7 @@ fn uniquely_matching_raw_tool(
 /// the terminal. In that ordering the existing call already provides the
 /// durable start item, so the compatibility call would only duplicate it.
 fn fallback_terminal_already_claimed(index: &ProjectionIndex, call: &ToolCall) -> Result<bool> {
-    if !crate::acp::is_fallback_terminal_tool_call(call) {
+    if !mj_core::acp::is_fallback_terminal_tool_call(call) {
         return Ok(false);
     }
     let value = serde_json::to_value(call)?;
@@ -1494,7 +1494,7 @@ fn fallback_terminal_already_claimed(index: &ProjectionIndex, call: &ToolCall) -
                     return false;
                 };
                 serde_json::from_value::<ToolCall>(call.clone())
-                    .is_ok_and(|call| !crate::acp::is_fallback_terminal_tool_call(&call))
+                    .is_ok_and(|call| !mj_core::acp::is_fallback_terminal_tool_call(&call))
             })
         }))
 }
@@ -1520,7 +1520,7 @@ fn consume_fallback_terminal_tools(
     };
     let materialized: ToolCall = serde_json::from_value(call.clone())
         .context("parse ACP tool call while claiming fallback terminal tools")?;
-    if crate::acp::is_fallback_terminal_tool_call(&materialized) {
+    if mj_core::acp::is_fallback_terminal_tool_call(&materialized) {
         return Ok(());
     }
 
@@ -1545,7 +1545,7 @@ fn consume_fallback_terminal_tools(
         };
         let fallback_call: ToolCall = serde_json::from_value(fallback_call.clone())
             .context("parse fallback terminal tool call")?;
-        if !crate::acp::is_fallback_terminal_tool_call(&fallback_call) {
+        if !mj_core::acp::is_fallback_terminal_tool_call(&fallback_call) {
             continue;
         }
         for record in fallback_outputs {
@@ -1587,7 +1587,7 @@ fn finalize_fallback_terminal_tool(item: &mut TranscriptItem) -> Result<()> {
     }
     let mut materialized: ToolCall = serde_json::from_value(call.clone())
         .context("parse ACP tool call while finalizing fallback terminal tool")?;
-    if !crate::acp::is_fallback_terminal_tool_call(&materialized) {
+    if !mj_core::acp::is_fallback_terminal_tool_call(&materialized) {
         return Ok(());
     }
     materialized.status = if terminal_outputs
@@ -1796,7 +1796,7 @@ pub fn materialized_session_from_entries(
     phase: WorkerPhase,
     configuration: BTreeMap<String, serde_json::Value>,
     queued_prompts: Vec<MaterializedQueuedPrompt>,
-    pending_elicitations: Vec<crate::elicitation::ElicitationRequest>,
+    pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
 ) -> MaterializedSession {
     let mut stable_ids = BTreeSet::new();
     let transcript = entries
@@ -2032,18 +2032,18 @@ fn apply_imported_event(
         WorkerEvent::Closing => *phase = WorkerPhase::Closing,
         WorkerEvent::Closed => *phase = WorkerPhase::Closed,
         WorkerEvent::Adapter { payload, .. } => {
-            let runtime = match serde_json::from_value::<crate::acp::RuntimeEvent>(payload.clone())
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    tracing::warn!(
-                        seq = event.seq,
-                        %error,
-                        "ignoring malformed persisted runtime event"
-                    );
-                    return;
-                }
-            };
+            let runtime =
+                match serde_json::from_value::<mj_core::acp::RuntimeEvent>(payload.clone()) {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        tracing::warn!(
+                            seq = event.seq,
+                            %error,
+                            "ignoring malformed persisted runtime event"
+                        );
+                        return;
+                    }
+                };
             crate::transcript::apply_runtime_event_to_entries(
                 entries,
                 event.seq,
@@ -2274,7 +2274,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::relay::{
+    use mj_core::relay::{
         RelayCommand, RelayCommandOutcome, RelayObservation, UserShellResult, UserShellStatus,
         relay_event_digest,
     };
@@ -2282,7 +2282,7 @@ mod tests {
 
     fn event(previous: &MaterializedSession, observation: RelayObservation) -> RelayEvent {
         let mut event = RelayEvent {
-            format: crate::relay::RELAY_EVENT_FORMAT_V1,
+            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
             ordinal: previous.applied_event_ordinal + 1,
             previous_digest: previous.applied_event_digest.clone(),
             digest: String::new(),
@@ -2552,12 +2552,12 @@ mod tests {
             "settling closes the streams a canonical export refuses to hold open"
         );
         assert_eq!(
-            crate::state::latest_completed_turn_ordinal(&session),
+            mj_core::state::latest_completed_turn_ordinal(&session),
             Some(1),
             "the finished turn is covered from the marker that began it"
         );
         assert_eq!(
-            crate::state::ProjectionWindow::of(&session).latest_turn_start_position,
+            mj_core::state::ProjectionWindow::of(&session).latest_turn_start_position,
             Some(1)
         );
     }
@@ -2866,7 +2866,7 @@ mod tests {
     #[test]
     fn elicitation_projection_keeps_only_pending_request_metadata() {
         let mut session = MaterializedSession::empty("session-1");
-        let request = crate::elicitation::ElicitationRequest {
+        let request = mj_core::elicitation::ElicitationRequest {
             id: "elicitation-1".into(),
             message: "Choose one".into(),
             title: None,
@@ -2896,7 +2896,7 @@ mod tests {
     fn a_plan_decision_also_becomes_a_durable_proposal_item() {
         let mut session = MaterializedSession::empty("session-1");
         let plan = "1. Read the code\n2. Change it";
-        let request = crate::acp::normalized_plan_review(
+        let request = mj_core::acp::normalized_plan_review(
             "plan-review-3".into(),
             &serde_json::json!({ "plan": plan }),
         );
@@ -2939,7 +2939,7 @@ mod tests {
         apply_observation(
             &mut session,
             RelayObservation::ElicitationRequested {
-                request: crate::acp::normalized_plan_review(
+                request: mj_core::acp::normalized_plan_review(
                     "plan-review-1".into(),
                     &serde_json::json!({ "plan": "do the work" }),
                 ),
@@ -3459,7 +3459,7 @@ mod tests {
     fn fallback_terminal_tool(terminal_id: &str, command: &str) -> RelayObservation {
         RelayObservation::SessionUpdate {
             update: Box::new(SessionUpdate::ToolCall(
-                crate::acp::fallback_terminal_tool_call(terminal_id, command.into()),
+                mj_core::acp::fallback_terminal_tool_call(terminal_id, command.into()),
             )),
         }
     }
@@ -4225,7 +4225,7 @@ mod tests {
                 command_id: "close-1".into(),
                 command: RelayCommand::Close {
                     barrier_command_id: "barrier-1".into(),
-                    expected: crate::relay::RelayCursor {
+                    expected: mj_core::relay::RelayCursor {
                         ordinal: 0,
                         digest: "0".repeat(64),
                     },

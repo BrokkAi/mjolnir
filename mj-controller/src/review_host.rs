@@ -651,10 +651,11 @@ impl RoleTranscript {
             .session
             .get_or_insert_with(|| MaterializedSession::empty(session_id));
         for event in events {
-            let Ok(projected) = mj_core::projection::project_relay_event(session, event) else {
+            let Ok(projected) = mj_transcript::projection::project_relay_event(session, event)
+            else {
                 continue;
             };
-            if mj_core::projection::apply_committed_projection_event(
+            if mj_transcript::projection::apply_committed_projection_event(
                 session,
                 event,
                 projected.mutation,
