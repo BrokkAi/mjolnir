@@ -25,9 +25,10 @@ function fixture(os, arch) {
   tool('cargo', `
     command=$1
     shift
-    target_dir='' triple='' root='' path='' locked=0
+    target_dir='' triple='' root='' path='' binary='' locked=0
     while [ $# -gt 0 ]; do
       case "$1" in
+        --bin) binary=$2; shift ;;
         --target-dir) target_dir=$2; shift ;;
         --target) triple=$2; shift ;;
         --root) root=$2; shift ;;
@@ -38,10 +39,10 @@ function fixture(os, arch) {
     done
     test "$locked" = 1
     if [ "$command" = build ]; then
-      if [ "\${FAIL_BUILD:-0}" = 1 ] || [ "\${FAIL_TARGET:-none}" = "\${triple:-native}" ]; then exit 42; fi
+      if [ "\${FAIL_BUILD:-0}" = 1 ] || [ "\${FAIL_TARGET:-none}" = "\${triple:-native}" ] || [ "\${FAIL_TARGET:-none}" = "$binary" ]; then exit 42; fi
       output="$target_dir/\${triple:+$triple/}release"
       mkdir -p "$output"
-      echo "worker \${triple:-native}" > "$output/mj-worker"
+      echo "worker \${triple:-native}" > "$output/$binary"
     elif [ "$command" = install ]; then
       test "$path" = mj-cli
       mkdir -p "$root/bin"
@@ -78,6 +79,7 @@ test('Linux install replaces a stale native worker and installs the portable wor
     writeFileSync(installed('mj-worker'), 'stale');
     const result = run({ INSTALLED_TARGET: 'x86_64-unknown-linux-musl' });
     assert.equal(readFileSync(installed('mj-worker'), 'utf8'), 'worker native\n');
+    assert.equal(readFileSync(installed('mj-voice-worker'), 'utf8'), 'worker native\n');
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /mj test/);
     assert.equal(
@@ -102,6 +104,7 @@ test('macOS install places the native worker and the container-built Linux worke
     const result = run();
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(installed('mj-worker'), 'utf8'), 'worker native\n');
+    assert.equal(readFileSync(installed('mj-voice-worker'), 'utf8'), 'worker native\n');
     assert.equal(
       readFileSync(installed('mj-worker-aarch64-unknown-linux-musl'), 'utf8'),
       'worker from container\n',
@@ -109,12 +112,12 @@ test('macOS install places the native worker and the container-built Linux worke
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-for (const target of ['native', 'x86_64-unknown-linux-musl']) {
+for (const target of ['native', 'x86_64-unknown-linux-musl', 'mj-voice-worker']) {
   test(`failed ${target} build preserves an existing installation`, () => {
     const { root, installed, run } = fixture('Linux', 'x86_64');
     try {
       mkdirSync(path.dirname(installed('mj')), { recursive: true });
-      const names = ['mj', 'mj-worker', 'mj-worker-x86_64-unknown-linux-musl'];
+      const names = ['mj', 'mj-voice-worker', 'mj-worker', 'mj-worker-x86_64-unknown-linux-musl'];
       for (const name of names) writeFileSync(installed(name), `previous ${name}`);
       const result = run({ INSTALLED_TARGET: 'x86_64-unknown-linux-musl', FAIL_TARGET: target });
       assert.equal(result.status, 42, result.stderr);

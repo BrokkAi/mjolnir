@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Rebuild native and portable workers, then build and run the host `mj`.
+# Rebuild native and portable workers and the dictation helper, then run `mj`.
 # Local sessions prefer the native worker, so rebuilding only the portable
 # worker can leave localhost running old code even with a fresh controller.
 # Both workers use the run's profile and isolated target/worker directory.
@@ -90,14 +90,21 @@ case "$(uname -s)" in
     ;;
 esac
 
-export MJ_DEV_RESTART_STALE_DAEMON=1
-executable=$(cargo build -p brokk-mjolnir --bin mj ${cargo_args[@]+"${cargo_args[@]}"} --message-format=json-render-diagnostics |
+build_executable() {
+  local package=$1 binary=$2
+  cargo build -p "$package" --bin "$binary" ${cargo_args[@]+"${cargo_args[@]}"} --message-format=json-render-diagnostics |
   node --input-type=module -e '
     import { readFileSync } from "node:fs";
     const artifacts = readFileSync(0, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
     const paths = new Set(artifacts.filter(item => item.reason === "compiler-artifact" &&
-      item.target?.name === "mj" && item.target.kind.includes("bin") && item.executable).map(item => item.executable));
-    if (paths.size !== 1) throw new Error("Cargo did not report exactly one mj executable");
+      item.target?.name === process.argv[1] && item.target.kind.includes("bin") && item.executable).map(item => item.executable));
+    if (paths.size !== 1) throw new Error(`Cargo did not report exactly one ${process.argv[1]} executable`);
     process.stdout.write([...paths][0]);
-  ')
+  ' "$binary"
+}
+
+export MJ_DEV_RESTART_STALE_DAEMON=1
+MJ_VOICE_WORKER=$(build_executable brokk-mj-voice-worker mj-voice-worker)
+export MJ_VOICE_WORKER
+executable=$(build_executable brokk-mjolnir mj)
 exec "$executable" ${app_args[@]+"${app_args[@]}"}

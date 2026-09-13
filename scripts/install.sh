@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# Install `mj` from this checkout together with the portable worker that
-# container and remote (SSH) sessions need.
+# Install `mj` from this checkout together with its dictation helper and the
+# portable worker that container and remote (SSH) sessions need.
 #
 # `cargo install --path mj-cli` installs only the controller. Managed targets
 # then fail with "no Linux worker", because the controller looks for a static
 # musl worker named `mj-worker-<target-triple>` beside its own binary, the
 # layout the release archives use. This wrapper builds that worker first, so a
 # failed worker build leaves the existing installation alone, then installs
-# `mj` and places both workers beside it. Both hosts get a native worker for
+# `mj` and places the helpers beside it. Both hosts get a native worker for
 # local sessions. On macOS, Docker or Podman builds the portable Linux worker.
 #
 # Cargo's install root receives the binaries: CARGO_INSTALL_ROOT, else
@@ -82,6 +82,11 @@ case "$(uname -s)" in
     exit 1
     ;;
 esac
+
+# Dictation runs on the host, including when the session worker is remote.
+cargo build --release --locked --target-dir target/worker -p brokk-mj-voice-worker --bin mj-voice-worker
+worker_sources+=("target/worker/release/mj-voice-worker")
+worker_names+=("mj-voice-worker")
 
 cargo install --locked --path mj-cli --root "$install_root" "$@"
 

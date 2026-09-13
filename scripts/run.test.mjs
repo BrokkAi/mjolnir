@@ -39,17 +39,23 @@ const value = (key, fallback) => {
   const i = args.indexOf(key);
   return i >= 0 ? args[i+1] : args.find(arg => arg.startsWith(key + '='))?.slice(key.length+1) ?? fallback;
 };
-const cli = value('--bin') === 'mj';
+const binary = value('--bin');
+const cli = binary === 'mj';
 const triple = value('--target', '');
 const profile = args.includes('--release') ? 'release' : value('--profile', 'debug');
-const kind = cli ? 'cli' : triple ? 'portable' : 'native';
-if (kind === process.env.FAIL_KIND) { console.error(kind + '-failed'); process.exit(42); }
+const kind = cli ? 'cli' : binary === 'mj-voice-worker' ? 'voice' : triple ? 'portable' : 'native';
+if (kind === process.env.FAIL_KIND) { fs.writeSync(2, kind + '-failed'); process.exit(42); }
 const dir = path.resolve(value('--target-dir', 'target'), triple, profile);
 fs.mkdirSync(dir, { recursive: true });
-const executable = path.join(dir, cli ? 'mj' : 'mj-worker');
-if (!cli) { fs.writeFileSync(executable, 'fresh'); process.exit(0); }
+const executable = path.join(dir, binary);
+if (!cli) {
+  fs.writeFileSync(executable, 'fresh');
+  if (kind === 'voice') console.log(JSON.stringify({ reason: 'compiler-artifact', target: {name: binary, kind:['bin']}, executable }));
+  process.exit(0);
+}
 fs.writeFileSync(executable, ${JSON.stringify(`#!${process.execPath}
 import fs from 'node:fs';
+if (fs.readFileSync(process.env.MJ_VOICE_WORKER, 'utf8') !== 'fresh') process.exit(43);
 fs.writeFileSync(process.env.RAN_CLIENT, JSON.stringify({ args: process.argv.slice(2), restart: process.env.MJ_DEV_RESTART_STALE_DAEMON, marker: process.env.USER_SETTING }));
 `)}, {mode: 0o755});
 if (process.env.NO_ARTIFACT !== '1') console.log(JSON.stringify({ reason: 'compiler-artifact', target: {name:'mj', kind:['bin']}, executable }));
@@ -82,7 +88,7 @@ for (const platform of ['Linux', 'Darwin']) {
   }
 }
 
-for (const failure of ['native', 'portable', 'cli']) {
+for (const failure of ['native', 'portable', 'voice', 'cli']) {
   test(`${failure} build failure is visible and prevents launching the client`, () => {
     const f = fixture();
     try {
