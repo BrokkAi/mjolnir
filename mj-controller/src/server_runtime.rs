@@ -2484,6 +2484,7 @@ async fn apply_phone_action(
             title,
             project_directory,
             create_managed_worktree,
+            mjolnir_subagents,
             dirty_ack: _dirty_ack,
         } => {
             let workspace_id = if workspace_id.is_empty() {
@@ -2518,6 +2519,7 @@ async fn apply_phone_action(
                 .start_create_session_controlled(
                     CreateSessionRequest {
                         create_managed_worktree,
+                        mjolnir_subagents,
                         initial_prompt: None,
                         workspace_id,
                         profile_id,
@@ -4357,6 +4359,7 @@ mod tests {
 
     fn new_action() -> ControllerAction {
         ControllerAction::New {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
             profile_id: "codex".into(),
@@ -4370,6 +4373,7 @@ mod tests {
 
     fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         SessionRecord {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,

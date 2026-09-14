@@ -116,6 +116,9 @@ impl Controller {
         )?;
         let created_at = now();
         let session = SessionRecord {
+            // A child never receives the Mjolnir sub-agent tools, so it can
+            // never spawn a grandchild.
+            mjolnir_subagents: Some(false),
             create_managed_worktree: Some(false),
             archived: false,
             container_cpus: None,

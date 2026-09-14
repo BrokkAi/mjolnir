@@ -4549,6 +4549,7 @@ mod tests {
 
     fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
         SessionRecord {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             id: id.to_owned(),
             workspace_id: workspace_id.to_owned(),

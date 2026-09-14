@@ -1483,6 +1483,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
+                        mjolnir_subagents: None,
                         create_managed_worktree,
                         initial_prompt: None,
                         workspace_id,
@@ -2821,6 +2822,7 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: workspace_id.to_owned(),
             archived: false,

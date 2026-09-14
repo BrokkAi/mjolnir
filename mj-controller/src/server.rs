@@ -1232,6 +1232,9 @@ pub enum ControllerAction {
     New {
         #[serde(default)]
         create_managed_worktree: Option<bool>,
+        /// None follows the global `[subagents] enabled` setting.
+        #[serde(default)]
+        mjolnir_subagents: Option<bool>,
         /// Which workspace the session belongs to. Optional on the wire so a
         /// viewer cached from before workspaces reached the phone still parses,
         /// but a controller holding more than one workspace refuses an empty
@@ -2250,6 +2253,7 @@ async fn preflight_new(
 ) -> Result<Json<PreflightNew>, ApiError> {
     let project_validation = request.project_directory.is_some();
     let action = ControllerAction::New {
+        mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: request.workspace_id,
         profile_id: request.profile_id,
@@ -2966,6 +2970,7 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
             project_directory,
             dirty_ack,
             create_managed_worktree,
+            mjolnir_subagents: _,
         } => {
             if !workspace_id.is_empty() {
                 validate_public_id(workspace_id)?;
@@ -3883,6 +3888,7 @@ mod tests {
             sessions: BTreeMap::from([(
                 "session-1".into(),
                 SessionRecord {
+                    mjolnir_subagents: None,
                     create_managed_worktree: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                     archived: false,
@@ -6668,6 +6674,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         assert_eq!(
             action.action,
             ControllerAction::New {
+                mjolnir_subagents: None,
                 create_managed_worktree: None,
                 workspace_id: String::new(),
                 profile_id: "codex-1".into(),
@@ -6690,6 +6697,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         let (config, state) = sample_config_state();
         let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
         let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
             profile_id: "codex-1".into(),

@@ -1467,6 +1467,7 @@ mod tests {
     fn failed_new_session_provisioning_retains_error_record() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let record = SessionRecord {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
@@ -1558,6 +1559,7 @@ mod tests {
                 "docker",
                 "failed image",
                 SessionLaunchOptions {
+                    mjolnir_subagents: None,
                     create_managed_worktree: None,
                     initial_prompt: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
@@ -1661,6 +1663,7 @@ mod tests {
                 "docker",
                 "missing Node",
                 SessionLaunchOptions {
+                    mjolnir_subagents: None,
                     create_managed_worktree: None,
                     initial_prompt: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
@@ -1710,6 +1713,7 @@ mod tests {
     fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let mut session = SessionRecord {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,

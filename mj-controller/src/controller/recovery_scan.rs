@@ -261,6 +261,7 @@ fn adopted_session_record(
 ) -> SessionRecord {
     let now = now();
     SessionRecord {
+        mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id,
         archived: false,
