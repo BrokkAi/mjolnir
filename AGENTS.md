@@ -164,6 +164,11 @@ documentation or agent-configuration-only changes, review the diff and run
 applicable format or configuration checks; Cargo checks are not required.
 Release work must still pass all validations in `RELEASING.md`.
 
+Run those checks on the dev profile, which is where `debug_assert!` and
+overflow checks run; this workspace sets no `[profile.release]` overrides, so a
+release test run silently drops both. The build scripts defaulting to release is
+not a reason to validate there.
+
 Do not write tests for reversible, low-impact changes that mirror the implementation. If you do choose to verify your work with tests, make sure that the tests are meaningful and necessary to verify implementation.
 
 Run tests appropriate to the change and complete required checks. Once those pass, broaden or repeat testing only when new changes, failures, or unresolved concerns justify it; otherwise, continue toward completing the task.
