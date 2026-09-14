@@ -121,7 +121,7 @@ To install `mj` from a checkout together with the worker that container and remo
 scripts/install.sh
 ```
 
-The script builds the static Linux worker for the host architecture, runs `cargo install --locked --path mj-cli`, and places the worker beside the installed `mj` as `mj-worker-<target-triple>`. On macOS it also installs the native worker for `local-bare` and builds the Linux worker through Docker or Podman when one is running. It installs into `~/.cargo/bin` unless `CARGO_INSTALL_ROOT` or `CARGO_HOME` names another root. Targets on another architecture still need the release installer or a manually built worker.
+The script builds the static Linux worker for the host architecture, builds `mj` and the dictation helper with the same `cargo build` invocations as `scripts/run.sh` so the two scripts share build caches, and places the worker beside the installed `mj` as `mj-worker-<target-triple>`. It builds the release profile unless you pass another, for example `scripts/install.sh --profile dev`. On macOS it also installs the native worker for `local-bare` and builds the Linux worker through Docker or Podman when one is running. It installs into `~/.cargo/bin` unless `CARGO_INSTALL_ROOT` or `CARGO_HOME` names another root. Targets on another architecture still need the release installer or a manually built worker.
 
 To build a portable worker manually, use:
 
