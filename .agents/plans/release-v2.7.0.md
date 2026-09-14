@@ -21,6 +21,8 @@ Publish the accumulated session API, managed subagent, recovery, configuration, 
   Evidence: `.github/workflows/publish.yml` lists twelve crates in dependency order.
 - Observation: The first macOS Clippy run found that `libc::TIOCSCTTY` is a 32-bit request while `libc::ioctl` accepts `c_ulong`; after fixing that compile error, post-exit slave-side termios reads returned `EIO` on macOS.
   Evidence: Casting the request to `libc::c_ulong` restores compilation, and inspecting the shared PTY settings through the still-open master makes all eight `termination_pty` behavior tests pass.
+- Observation: SQLite's `SQLITE_OPEN_NOFOLLOW` rejects a database path with any symlinked ancestor on macOS, including the ordinary `/var` alias used by temporary directories.
+  Evidence: Canonicalizing the trusted harness home before appending `goals_1.sqlite` preserves final-component symlink rejection and makes the focused checkpoint tests plus the full workspace suite pass.
 
 ## Decision Log
 
@@ -86,3 +88,5 @@ Revision 2026-09-14: initialized the release plan and selected v2.7.0 from the s
 Revision 2026-09-14: recorded and fixed the macOS PTY portability failures discovered by release validation.
 
 Revision 2026-09-14: incorporated the upstream daemon startup error-reporting fix into the release candidate and public notes.
+
+Revision 2026-09-14: completed the local validation matrix, fixed macOS Codex goal checkpoint paths and workspace license exceptions, and produced all twelve package archives.
