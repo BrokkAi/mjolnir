@@ -119,6 +119,26 @@ fn is_agent_output(update: &SessionUpdate) -> bool {
     )
 }
 
+/// How the Claude adapter begins the plain `agent_message_chunk` it publishes
+/// when a user-requested stop ends a background task. The SDK injects nothing
+/// into the model for that stop, so no turn and no origin marker follow it.
+/// Only the prefix is stable: the name that follows is whatever the adapter
+/// currently calls the task, which later level and start messages rename.
+/// Checked against claude-agent-acp 0.73.0 `dist/async-tasks.js`
+/// (`taskStopped`) on 2026-09-14.
+const CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX: &str = "**Task stopped by user:** ";
+
+/// The text of an agent message chunk whose content is a single text block.
+fn agent_chunk_text(update: &SessionUpdate) -> Option<&str> {
+    match update {
+        SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+            ContentBlock::Text(text) => Some(&text.text),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The command an exec card ran, from its raw input. Codex sends either a
 /// string or the argv it executed.
 fn exec_card_command(raw_input: Option<&serde_json::Value>) -> Option<String> {
@@ -231,6 +251,10 @@ pub struct DurableRelay {
     background_exec_cards: BTreeMap<String, BackgroundCommand>,
     /// Claude's process-local background-task level, replaced on every update.
     claude_background_tasks: BTreeMap<String, BackgroundCommand>,
+    /// Claude tasks whose stop this process requested and the adapter has not
+    /// yet acknowledged. The adapter answers a stop with a plain agent chunk
+    /// and no origin marker, so that chunk must not open a harness turn.
+    claude_pending_stops: BTreeSet<String>,
     /// Kimi detached agents and processes confirmed by its native journal.
     kimi_background_tasks: BTreeMap<String, KimiTaskEntry>,
     /// Positive ACP launch evidence retained until the native journal
@@ -454,6 +478,7 @@ impl DurableRelay {
             codex_execute_tools: BTreeMap::new(),
             background_exec_cards: BTreeMap::new(),
             claude_background_tasks: BTreeMap::new(),
+            claude_pending_stops: BTreeSet::new(),
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
             kimi_observed_task_ids: BTreeSet::new(),
@@ -841,7 +866,7 @@ impl DurableRelay {
     /// Resolve a public task id only while it still names stoppable background
     /// work in this process.
     pub fn background_task_stop_target(
-        &self,
+        &mut self,
         requested_id: &str,
     ) -> Result<BackgroundTaskStopTarget> {
         let command = self
@@ -866,11 +891,31 @@ impl DurableRelay {
             .iter()
             .find(|(id, _)| background_task_id("claude", id) == requested_id)
         {
+            // The adapter acknowledges the stop with a plain chunk; remember
+            // the request so `record_session_update` can pair it.
+            self.claude_pending_stops.insert(task_id.clone());
             return Ok(BackgroundTaskStopTarget::ClaudeAsyncTask {
                 task_id: task_id.clone(),
             });
         }
         bail!("background task is no longer running")
+    }
+
+    /// Forget a Claude stop that never reached the adapter, so a later chunk
+    /// with the acknowledgement prefix is not mistaken for an answer to it.
+    pub fn claude_stop_not_sent(&mut self, task_id: &str) {
+        self.claude_pending_stops.remove(task_id);
+    }
+
+    /// Whether this update is the adapter acknowledging a stop this process
+    /// requested: a single text block with the acknowledgement prefix while a
+    /// stop is pending. The adapter names no task id in the chunk and may
+    /// have renamed the task since the level reported it, so the pairing is
+    /// by count, not by name.
+    fn is_claude_stop_acknowledgement(&self, update: &SessionUpdate) -> bool {
+        !self.claude_pending_stops.is_empty()
+            && agent_chunk_text(update)
+                .is_some_and(|text| text.starts_with(CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX))
     }
 
     pub fn agent_terminal_started(&mut self, terminal: ActiveAgentTerminal) -> Result<()> {
@@ -898,6 +943,7 @@ impl DurableRelay {
         self.codex_execute_tools.clear();
         self.background_exec_cards.clear();
         self.claude_background_tasks.clear();
+        self.claude_pending_stops.clear();
         self.kimi_background_tasks.clear();
         self.kimi_provisional_tasks.clear();
         self.kimi_observed_task_ids.clear();
@@ -2172,6 +2218,7 @@ impl DurableRelay {
             self.codex_execute_tools.clear();
             self.background_exec_cards.clear();
             self.claude_background_tasks.clear();
+            self.claude_pending_stops.clear();
             self.kimi_background_tasks.clear();
             self.kimi_provisional_tasks.clear();
             self.kimi_observed_task_ids.clear();
@@ -2224,7 +2271,14 @@ impl DurableRelay {
             )?;
         }
         let claude = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter;
-        if claude && self.opens_harness_turn(&update) {
+        // A stop we requested is acknowledged with a plain chunk and nothing
+        // else: no model turn runs, so no origin marker would ever settle a
+        // turn opened for it. Consume the expectation and keep the line.
+        let ack = claude && self.is_claude_stop_acknowledgement(&update);
+        if ack {
+            self.claude_pending_stops.pop_first();
+        }
+        if claude && !ack && self.opens_harness_turn(&update) {
             self.append_relay_event(
                 None,
                 RelayObservation::HarnessTurnStarted {
@@ -5673,6 +5727,151 @@ mod tests {
                 .is_err(),
             "a stale UI id must never resolve after its task exits"
         );
+    }
+
+    /// A plain agent chunk carrying only `text`, as the Claude adapter sends
+    /// when it acknowledges a task stop.
+    fn claude_stop_acknowledgement(name: &str) -> String {
+        format!("{CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX}{name}.")
+    }
+
+    fn agent_text_chunk(text: &str) -> SessionUpdate {
+        use agent_client_protocol::schema::v1::{ContentChunk, TextContent};
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            text,
+        ))))
+    }
+
+    /// A Claude relay with one stoppable task `sleeper` named "Sleep 600".
+    fn claude_relay_with_stoppable_task(root: &std::path::Path) -> DurableRelay {
+        let mut relay = claude_relay(root);
+        relay
+            .claude_background_tasks_changed(vec![claude_task("sleeper", "Sleep 600")])
+            .unwrap();
+        relay
+            .claude_async_task_control_changed("sleeper".into(), true)
+            .unwrap();
+        relay
+    }
+
+    fn assert_chunk_opened_a_harness_turn(relay: &DurableRelay) {
+        let state = relay.operational_state();
+        assert_eq!(state.execution, RelayExecutionState::Running);
+        assert!(state.harness_turn.is_some(), "the chunk must open a turn");
+        assert!(matches!(
+            observations(relay).as_slice(),
+            [
+                RelayObservation::HarnessTurnStarted { .. },
+                RelayObservation::SessionUpdate { .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn a_requested_stop_acknowledgement_does_not_open_a_harness_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay_with_stoppable_task(temp.path());
+        assert_eq!(
+            relay.background_task_stop_target("claude:sleeper").unwrap(),
+            BackgroundTaskStopTarget::ClaudeAsyncTask {
+                task_id: "sleeper".into(),
+            }
+        );
+
+        relay
+            .record_session_update(agent_text_chunk(&claude_stop_acknowledgement("Sleep 600")))
+            .unwrap();
+
+        let state = relay.operational_state();
+        assert_eq!(state.execution, RelayExecutionState::Idle);
+        assert!(
+            state.harness_turn.is_none(),
+            "no model turn follows a user-requested stop, so nothing would settle one"
+        );
+        assert!(
+            matches!(
+                observations(&relay).as_slice(),
+                [RelayObservation::SessionUpdate { update }]
+                    if agent_chunk_text(update) == Some(&claude_stop_acknowledgement("Sleep 600"))
+            ),
+            "the acknowledgement still enters the transcript"
+        );
+
+        // Genuine work after the acknowledgement opens a turn as before.
+        relay.record_session_update(tool_call_update()).unwrap();
+        let state = relay.operational_state();
+        assert_eq!(state.execution, RelayExecutionState::Running);
+        assert!(state.harness_turn.is_some());
+    }
+
+    #[test]
+    fn a_stop_acknowledgement_matches_whatever_name_the_adapter_now_uses() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay_with_stoppable_task(temp.path());
+        relay.background_task_stop_target("claude:sleeper").unwrap();
+
+        // The level said "Sleep 600"; a later task_started renamed it to the
+        // command text, which is what the adapter quotes.
+        relay
+            .record_session_update(agent_text_chunk(&claude_stop_acknowledgement("sleep 900")))
+            .unwrap();
+
+        let state = relay.operational_state();
+        assert_eq!(state.execution, RelayExecutionState::Idle);
+        assert!(state.harness_turn.is_none());
+        assert!(relay.claude_pending_stops.is_empty());
+    }
+
+    #[test]
+    fn an_unrequested_stop_text_still_opens_a_harness_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay_with_stoppable_task(temp.path());
+
+        relay
+            .record_session_update(agent_text_chunk(&claude_stop_acknowledgement("Sleep 600")))
+            .unwrap();
+
+        assert_chunk_opened_a_harness_turn(&relay);
+    }
+
+    #[test]
+    fn a_failed_stop_clears_its_acknowledgement() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay_with_stoppable_task(temp.path());
+        relay.background_task_stop_target("claude:sleeper").unwrap();
+        relay.claude_stop_not_sent("sleeper");
+
+        relay
+            .record_session_update(agent_text_chunk(&claude_stop_acknowledgement("Sleep 600")))
+            .unwrap();
+
+        assert_chunk_opened_a_harness_turn(&relay);
+    }
+
+    #[test]
+    fn stop_acknowledgements_clear_on_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay_with_stoppable_task(temp.path());
+        relay.background_task_stop_target("claude:sleeper").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionRestarted)
+            .unwrap();
+        assert!(relay.claude_pending_stops.is_empty());
+
+        relay
+            .record_session_update(agent_text_chunk(&claude_stop_acknowledgement("Sleep 600")))
+            .unwrap();
+
+        let state = relay.operational_state();
+        assert!(state.harness_turn.is_some(), "the chunk must open a turn");
+        assert!(matches!(
+            observations(&relay).as_slice(),
+            [
+                RelayObservation::SessionRestarted,
+                RelayObservation::HarnessTurnStarted { .. },
+                RelayObservation::SessionUpdate { .. }
+            ]
+        ));
     }
 
     #[test]

@@ -2182,6 +2182,22 @@ async fn background_task_stop_response(
         ),
         (_, Err(error)) => compaction_error(RelayErrorCode::InvalidState, &format!("{error:#}")),
         (Some(commands), Ok(target)) => {
+            // The relay expects the adapter's acknowledgement once a Claude
+            // stop is requested; forget it if the stop never gets there.
+            let claude_task_id = match &target {
+                mj_core::relay::BackgroundTaskStopTarget::ClaudeAsyncTask { task_id } => {
+                    Some(task_id.clone())
+                }
+                _ => None,
+            };
+            let stop_not_sent = || {
+                if let Some(task_id) = &claude_task_id {
+                    relay
+                        .lock()
+                        .expect("relay state lock poisoned")
+                        .claude_stop_not_sent(task_id);
+                }
+            };
             let (resolved, resolution) = tokio::sync::oneshot::channel();
             match commands
                 .send(CommandRequest::StopBackgroundTask { target, resolved })
@@ -2193,16 +2209,25 @@ async fn background_task_stop_response(
                             background_task_id,
                         },
                     },
-                    Ok(Err(message)) => compaction_error(RelayErrorCode::InvalidState, &message),
-                    Err(_) => compaction_error(
-                        RelayErrorCode::Internal,
-                        "ACP runtime stopped before resolving the background task stop",
-                    ),
+                    Ok(Err(message)) => {
+                        stop_not_sent();
+                        compaction_error(RelayErrorCode::InvalidState, &message)
+                    }
+                    Err(_) => {
+                        stop_not_sent();
+                        compaction_error(
+                            RelayErrorCode::Internal,
+                            "ACP runtime stopped before resolving the background task stop",
+                        )
+                    }
                 },
-                Err(_) => compaction_error(
-                    RelayErrorCode::Internal,
-                    "ACP runtime stopped before accepting the background task stop",
-                ),
+                Err(_) => {
+                    stop_not_sent();
+                    compaction_error(
+                        RelayErrorCode::Internal,
+                        "ACP runtime stopped before accepting the background task stop",
+                    )
+                }
             }
         }
     };
