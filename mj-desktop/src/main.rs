@@ -38,6 +38,9 @@ fn run_cli() -> Result<()> {
     if let Some(argument) = args.next() {
         bail!("unexpected argument {}", argument.to_string_lossy());
     }
+    // The desktop app honors MJ_INSTANCE from the environment (it takes no
+    // flags). Reject a malformed name before any state is touched.
+    mj_core::config::validate_instance_env()?;
 
     #[cfg(any(
         target_os = "macos",

@@ -46,6 +46,17 @@ use crate::import::{ImportArgs, import};
 #[derive(Debug, Parser)]
 #[command(name = "mj", version, about = "ACP session control plane")]
 struct Cli {
+    /// Isolate configuration, database, daemon, and logs under
+    /// `instances/<name>`. This is a different `mj` world, not a harness
+    /// profile; explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR` still take precedence.
+    #[arg(
+        short = 'i',
+        long,
+        global = true,
+        env = "MJ_INSTANCE",
+        value_name = "NAME"
+    )]
+    instance: Option<String>,
     /// Select a workspace by name for workspace-scoped commands.
     #[arg(long, global = true)]
     workspace: Option<String>,
@@ -267,6 +278,11 @@ enum SetupPlatform {
 fn main() -> Result<()> {
     mj_controller::server::install_rustls_crypto_provider();
     let cli = Cli::parse();
+    // Apply before logging, daemon startup, or any path lookup: everything
+    // derives its directories from the instance environment, and the daemon
+    // child inherits it. This also covers `daemon-run`, which is this same
+    // binary, so a per-instance daemon validates its own environment on boot.
+    mj_core::config::apply_instance_flag(cli.instance.as_deref())?;
     let log = Some(logging::ControllerLog::start(command_name(
         cli.command.as_ref(),
     ))?);

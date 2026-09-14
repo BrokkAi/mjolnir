@@ -1772,13 +1772,73 @@ pub fn env_override(name: &str) -> Option<String> {
     std::env::var(format!("MJ_{name}")).ok()
 }
 
+/// Environment variable selecting an isolated Mjolnir instance. An instance
+/// keeps its own configuration, database, daemon, and logs, so `MJ_INSTANCE=dev`
+/// never shares state with the default setup.
+pub const INSTANCE_ENV: &str = "MJ_INSTANCE";
+
+/// Directory under the default configuration and data roots holding one
+/// isolated instance's files (`<root>/mjolnir/instances/<name>`).
+const INSTANCE_DIR: &str = "instances";
+
+/// Instance name from [`INSTANCE_ENV`], trimmed. Empty means no instance.
+pub fn instance_name() -> Option<String> {
+    let name = env_override("INSTANCE")?;
+    let trimmed = name.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// Whether `name` is safe to use as a single path segment under [`INSTANCE_DIR`].
+pub fn is_valid_instance_name(name: &str) -> bool {
+    validate_id("instance", name).is_ok()
+}
+
+/// Fail when [`INSTANCE_ENV`] names something that cannot be an instance.
+/// Every shipped binary calls this during startup so a typo fails closed
+/// instead of silently using the default directories.
+pub fn validate_instance_env() -> Result<()> {
+    if let Some(name) = instance_name() {
+        validate_id("instance", &name)?;
+    }
+    Ok(())
+}
+
+/// Record a `--instance` flag value for this process and the daemon and
+/// workers it spawns. The explicit flag wins over [`INSTANCE_ENV`].
+pub fn apply_instance_flag(value: Option<&str>) -> Result<()> {
+    if let Some(raw) = value {
+        let name = raw.trim();
+        validate_id("instance", name)?;
+        // SAFETY: every caller runs this during single-threaded process startup,
+        // before the Tokio runtime or any other thread exists, so no other
+        // thread can observe the environment while it is being mutated.
+        unsafe {
+            std::env::set_var(INSTANCE_ENV, name);
+        }
+    }
+    validate_instance_env()
+}
+
+/// Nest `base` under [`INSTANCE_DIR`] when an instance is selected. A name that
+/// fails validation falls back to `base`; startup validation rejects it first,
+/// so this only guards against future callers that skip that check.
+fn with_instance_dir(base: PathBuf, instance: Option<&str>) -> PathBuf {
+    match instance {
+        Some(name) if is_valid_instance_name(name) => base.join(INSTANCE_DIR).join(name),
+        _ => base,
+    }
+}
+
 pub fn config_dir() -> PathBuf {
     if let Some(path) = env_override_os("CONFIG_DIR") {
         return PathBuf::from(path);
     }
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from(".config"))
-        .join(PRODUCT_DIR)
+    with_instance_dir(
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from(".config"))
+            .join(PRODUCT_DIR),
+        instance_name().as_deref(),
+    )
 }
 
 pub fn config_path() -> PathBuf {
@@ -1789,10 +1849,13 @@ pub fn data_dir() -> PathBuf {
     if let Some(path) = env_override_os("DATA_DIR") {
         return PathBuf::from(path);
     }
-    dirs::data_local_dir()
-        .or_else(dirs::data_dir)
-        .unwrap_or_else(|| PathBuf::from(".local/share"))
-        .join(PRODUCT_DIR)
+    with_instance_dir(
+        dirs::data_local_dir()
+            .or_else(dirs::data_dir)
+            .unwrap_or_else(|| PathBuf::from(".local/share"))
+            .join(PRODUCT_DIR),
+        instance_name().as_deref(),
+    )
 }
 
 pub fn sessions_dir() -> PathBuf {
@@ -3464,5 +3527,61 @@ image = "ubuntu:24.04"
                 .to_string()
                 .contains("only supported by Podman")
         );
+    }
+
+    #[test]
+    fn instance_names_accept_single_segment_identifiers() {
+        for valid in ["dev", "dev-2", "x.y_z", "A1", "a".repeat(64).as_str()] {
+            assert!(is_valid_instance_name(valid), "rejects valid {valid:?}");
+        }
+    }
+
+    #[test]
+    fn instance_names_reject_empty_and_path_escapes() {
+        for invalid in [
+            "",
+            "   ",
+            ".",
+            "..",
+            "dev/dev",
+            "../evil",
+            "..\\evil",
+            "has space",
+            "semi;colon",
+            "uniçode",
+            "a".repeat(65).as_str(),
+        ] {
+            assert!(
+                !is_valid_instance_name(invalid),
+                "accepts invalid {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_instance_flag_rejects_bad_names_without_touching_the_environment() {
+        // Validation runs before any environment mutation, so these cases
+        // cannot leak state even though the environment is process-global.
+        for invalid in ["", "../evil", "has space"] {
+            let error = apply_instance_flag(Some(invalid)).unwrap_err();
+            assert!(
+                error.to_string().contains("invalid instance id"),
+                "unexpected error for {invalid:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn instance_directories_nest_under_instances_and_reject_escapes() {
+        let base = PathBuf::from("/base/mjolnir");
+        assert_eq!(
+            with_instance_dir(base.clone(), Some("dev")),
+            PathBuf::from("/base/mjolnir/instances/dev")
+        );
+        assert_eq!(with_instance_dir(base.clone(), None), base);
+        // An invalid name never becomes a path segment, even if a future
+        // caller skips startup validation: it falls back to the base directory.
+        assert_eq!(with_instance_dir(base.clone(), Some("../evil")), base);
+        assert_eq!(with_instance_dir(base.clone(), Some("")), base);
     }
 }

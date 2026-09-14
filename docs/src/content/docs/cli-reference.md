@@ -6,10 +6,10 @@ description: Public mj commands for the dashboard, setup, diagnosis, login, impo
 Running `mj` without a subcommand starts the per-user daemon when necessary and opens the terminal dashboard. If no workspace exists, it creates one using the current directory name and leaves it ready for an explicit new session. Otherwise it opens the requested workspace or the most recently opened workspace. The terminal surface requires at least 80 columns.
 
 ```text
-mj [--workspace <name>] [command]
+mj [--instance <name>] [--workspace <name>] [command]
 ```
 
-`--workspace` is global and selects a named workspace for workspace-scoped commands. Hidden worker, broker, daemon-run, and desktop-bootstrap commands are internal implementation interfaces and are intentionally omitted here.
+`--workspace` is global and selects a named workspace for workspace-scoped commands. `--instance` (`-i`, or `MJ_INSTANCE`) is also global and runs a fully isolated copy — configuration, database, daemon, and logs under `instances/<name>` (for example `mj -i dev daemon status`). Hidden worker, broker, daemon-run, and desktop-bootstrap commands are internal implementation interfaces and are intentionally omitted here.
 
 ## Open a surface
 
