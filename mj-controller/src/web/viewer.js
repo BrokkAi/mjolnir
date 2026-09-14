@@ -1787,9 +1787,109 @@ function resumeChoiceField(label, id, items, value, onChange) {
   return field;
 }
 
+// ---------------------------------------------------------------------------
+// Moving a local checkout into an isolated workspace
+// ---------------------------------------------------------------------------
+//
+// Both the move dialog and the resume card show the same preview of what a
+// conversion does, so the wording lives in one place here. The controller
+// renders the same sentences for the terminal.
+
+function conversionBytes(bytes) {
+  const kb = 1024;
+  const mb = kb * 1024;
+  const value = Number(bytes) || 0;
+  return value < mb ? `${(value / kb).toFixed(1)} KB` : `${(value / mb).toFixed(1)} MB`;
+}
+
+function conversionSummary(preview) {
+  const push = (preview.push_urls || []).length ? preview.push_urls.join(', ') : preview.fetch_url;
+  return `Clone ${preview.fetch_url} (default branch ${preview.default_branch}) into ${preview.destination} on branch ${preview.branch || 'a detached head'}; push to ${push}.`;
+}
+
+function conversionWarnings(preview) {
+  const lines = [];
+  const staged = preview.staged_files || 0;
+  const unstaged = preview.unstaged_files || 0;
+  const untracked = preview.untracked_files || 0;
+  const dirty = staged + unstaged + untracked;
+  if (dirty > 0) {
+    lines.push(`${staged} staged, ${unstaged} unstaged, and ${untracked} untracked ${dirty === 1 ? 'file' : 'files'} (${conversionBytes(preview.untracked_bytes)}) will be copied into the container. Ignored files such as build output, .env, and node_modules will not.`);
+  }
+  const commits = preview.unpushed_commits || 0;
+  if (commits > 0) {
+    let line = `${commits} ${commits === 1 ? 'commit' : 'commits'} not on ${preview.fetch_url} ${commits === 1 ? 'travels' : 'travel'} in the checkpoint.`;
+    if (commits > 200) line += ' That is a large history; consider pushing first.';
+    lines.push(line);
+  }
+  if (preview.host_checkout_retained) {
+    lines.push(`${preview.checkout} stays on this machine and will no longer track this session. Edits made in the container do not come back automatically; push the branch or move the session back.`);
+  }
+  return lines;
+}
+
+/// Whether resuming this session on `targetId` moves its checkout off this
+/// machine: the session runs in a directory (its current target needs one)
+/// and the destination supplies its own isolated workspace. The controller
+/// decides for real; this only decides whether to ask.
+function conversionApplies(session, targetId) {
+  if (!targetId) return false;
+  const target = id => (snapshot.targets || []).find(item => item.id === id);
+  return target(session.target_id)?.requires_project_directory === true
+    && target(targetId)?.requires_project_directory === false;
+}
+
+function ensureResumeConversionPreflight(session) {
+  const draft = resumeDraft(session);
+  const targetId = draft.targetId;
+  if (!conversionApplies(session, targetId)) {
+    if (draft.conversion) draft.conversion = null;
+    return;
+  }
+  if (draft.conversion && draft.conversion.targetId === targetId) return;
+  draft.conversion = { targetId, status: 'checking', preview: null, detail: '', acknowledged: false };
+  request('/api/preflight/resume', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: session.id, target_id: targetId }),
+  }).then(answer => {
+    const current = resumeDraft(session).conversion;
+    if (!current || current.targetId !== targetId) return;
+    if (answer.kind === 'converting-raw-checkout') {
+      current.status = 'converting';
+      current.preview = answer.preview;
+    } else if (answer.kind === 'unavailable') {
+      current.status = 'error';
+      current.detail = answer.detail;
+    } else {
+      current.status = 'ready';
+    }
+    renderResumeDetail();
+  }).catch(error => {
+    const current = resumeDraft(session).conversion;
+    if (!current || current.targetId !== targetId) return;
+    current.status = 'error';
+    current.detail = error.message;
+    renderResumeDetail();
+  });
+}
+
+/// A conversion the person has not agreed to yet blocks Resume, and so does a
+/// check that has not finished or could not be made.
+function conversionBlocksResume(draft) {
+  const conversion = draft.conversion;
+  if (!conversion) return false;
+  if (conversion.status === 'checking' || conversion.status === 'error') return true;
+  return conversion.status === 'converting' && !conversion.acknowledged;
+}
+
 function resumeCardSignature(session) {
+  const draft = resumeDraft(session);
   return JSON.stringify([
     session.compatible_resume_targets || [],
+    draft.targetId,
+    draft.conversion?.status || '',
+    draft.conversion?.detail || '',
+    draft.conversion?.preview || null,
     (snapshot.profiles || []).map(profile => [profile.id, profile.harness_kind]),
     session.move_recovery,
     session.profile_id,
@@ -1824,6 +1924,7 @@ function resumeCard(session) {
 }
 
 function updateResumeCard(card, session, rebuild = false) {
+  ensureResumeConversionPreflight(session);
   const focused = document.activeElement;
   const previousFocus = card.contains(focused) ? focused.closest?.('[data-role]')?.dataset?.role : null;
   const signature = resumeCardSignature(session);
@@ -1832,7 +1933,7 @@ function updateResumeCard(card, session, rebuild = false) {
     const draft = resumeDraft(session);
     card._errorNode.textContent = draft.error;
     card._pendingNode.textContent = pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '';
-    card._invalid = !draft.profileId || !draft.targetId;
+    card._invalid = !draft.profileId || !draft.targetId || conversionBlocksResume(draft);
     const submit = card.querySelector('button[data-action="resume"]');
     if (submit) {
       submit.dataset.profile = draft.profileId;
@@ -1924,12 +2025,34 @@ function updateResumeCard(card, session, rebuild = false) {
       queueField.dataset.role = 'resume-queue';
       body.append(queueField);
     }
+    const conversion = draft.conversion;
+    if (conversion?.status === 'checking') {
+      body.append(el('p', 'dim', 'Checking checkout…'));
+    } else if (conversion?.status === 'error') {
+      body.append(el('p', 'resume-status error', conversion.detail || 'This checkout cannot move into that target.'));
+    } else if (conversion?.status === 'converting' && conversion.preview) {
+      body.append(el('p', '', conversionSummary(conversion.preview)));
+      for (const warning of conversionWarnings(conversion.preview)) {
+        body.append(el('p', 'move-warning', warning));
+      }
+      const acknowledge = el('label', 'move-warning');
+      acknowledge.dataset.role = 'resume-conversion';
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.checked = conversion.acknowledged === true;
+      check.onchange = () => {
+        conversion.acknowledged = check.checked;
+        renderResumeDetail();
+      };
+      acknowledge.append(check, el('span', '', 'I understand; move this checkout into the container'));
+      body.append(acknowledge);
+    }
     const row = el('div', 'row');
     const submit = action('Resume', '', { action: 'resume', id: session.id, profile: draft.profileId, target: draft.targetId });
-    submit.disabled = submit.disabled || !draft.profileId || !draft.targetId;
+    submit.disabled = submit.disabled || !draft.profileId || !draft.targetId || conversionBlocksResume(draft);
     row.append(submit);
     body.append(row);
-    card._invalid = !draft.profileId || !draft.targetId;
+    card._invalid = !draft.profileId || !draft.targetId || conversionBlocksResume(draft);
   }
   const pendingNode = el('p', 'dim', pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '');
   pendingNode.setAttribute('role', 'status');
@@ -2076,6 +2199,12 @@ function renderMoveForm() {
     moveStep.append(el('p', 'dim', preparation.cross_harness ? 'This is a cross-harness handoff. Harness-private state is rebuilt from the canonical transcript.' : 'The same harness session state will be restored when supported.'));
     if (preparation.source_unavailable) {
       moveStep.append(el('p', 'move-warning', 'Source is unavailable; Move will recover its saved data without starting its old harness.'));
+    }
+    if (preparation.conversion) {
+      moveStep.append(el('p', '', conversionSummary(preparation.conversion)));
+      for (const warning of conversionWarnings(preparation.conversion)) {
+        moveStep.append(el('p', 'move-warning', warning));
+      }
     }
     if (preparation.active) {
       const warning = el('label', 'move-warning');

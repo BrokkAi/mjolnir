@@ -2197,6 +2197,13 @@ impl DashboardContext {
                                     self, *launch, receipt,
                                 );
                             }
+                            ResumeRepositorySourcePreflight::ConvertingRawCheckout {
+                                receipt,
+                                preview,
+                            } => {
+                                self.dashboard
+                                    .show_raw_conversion_confirmation(*launch, receipt, *preview);
+                            }
                             ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) => {
                                 if submitted_repository_id.as_deref()
                                     == Some(mismatch.repository_id.as_str())

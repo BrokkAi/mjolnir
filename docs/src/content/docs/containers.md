@@ -22,6 +22,16 @@ behavior instead. Codex, Claude Code, and Grok Build expose guardian modes
 through their harnesses; Kimi Code and DeepSeek Harness do not. Mjolnir warns
 against running either unsupported harness on a raw, unsandboxed target.
 
+A container session's repository content always comes from a network clone. A
+local session that runs the agent in a directory on this machine can still move
+or resume into a container: Mjolnir re-snapshots that checkout, the container
+clones the checkout's own network remote, and the snapshot restores the
+checkout's unpushed commits and its staged, unstaged, and untracked files over
+the clone at `/workspace/<directory name>`. Files Git ignores and anything
+outside the checkout do not travel, and a checkout with no network remote cannot
+become a container workspace. See
+[Resume a local session into a container](/sessions/#resume-a-local-session-into-a-container).
+
 Closing a session first writes and verifies a recovery archive, then removes
 that exact container. No mutable session workspace persists past the session
 except what the recovery archive captured and whatever you pushed to a

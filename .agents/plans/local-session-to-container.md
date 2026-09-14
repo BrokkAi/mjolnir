@@ -19,7 +19,7 @@ The checkout must have a network Git remote (GitHub or any `https`/`ssh` URL). A
 
 - [x] Checkpoint A (2026-09-14): compatibility gate, network-remote resolution in the conversion plan, host checkout snapshot builder, and `RawConversionPreview` computation, with real-Git tests.
 - [x] Checkpoint B (2026-09-14): resume wiring (conversion archive, checkpoint swap, restore of repository content, notice, rollback test) and move preparation carrying the preview.
-- [ ] Checkpoint C: surfaces (TUI review lines and resume confirm dialog, web resume preflight and move dialog, `mj move` output), user docs, and this plan's closing sections.
+- [x] Checkpoint C (2026-09-14): surfaces (TUI review lines and resume confirm dialog, web resume preflight and move dialog, `mj move` output), user docs, and this plan's closing sections.
 
 
 ## Surprises & Discoveries
@@ -75,6 +75,41 @@ before provisioning. Fixtures push their base commit to the fixture remote.
 A managed worktree's archive bundles commits since its creation commit (`DeltaFrom{base_commit}`). If that creation commit was never pushed, a fresh network clone cannot fetch the bundle because Git bundles require their prerequisite commits to exist. Bundling "commits not on any origin ref" (`GitHistoryMode::SessionDelta`) avoids this because every prerequisite is then on the remote.
 
 
+`ResumeRepositorySourcePreflight` lives in `mj-controller/src/controller/resume.rs`,
+not in `mj-core/src/state.rs` as the Interfaces section said, and it carries no
+serde attributes; only its `Ready` payload,
+`ResumeRepositorySourceReceipt`, is a `mj-core` type. The new
+`ConvertingRawCheckout` variant therefore went beside the others in the
+controller and carries the preview boxed, and the browser gets its own
+serializable answer (`server::PreflightResume`) instead.
+
+Computing the preview inside `preflight_resume_repository_sources` broke
+Checkpoint B's rollback test. The resume itself re-runs that preflight whenever
+it has no current receipt, and it only reads the `RepositoryMoved` case, so the
+conversion's remote probe ran a second time against the real network. The
+function now splits: the public entry describes the conversion, and the resume
+path asks a private one with `describe_conversion: false`.
+
+The browser's resume preflight shares the new-session preflight's channel, so
+`server::PreflightRequest` became an enum of `NewPreflightRequest` and
+`ResumePreflightRequest`. Sharing the channel also shares
+`MAX_CONCURRENT_PREFLIGHTS` and the cancellation-on-disconnect behavior, which
+a second channel would have had to duplicate.
+
+The resume route answers `Ready` without reading anything when
+`resume_compatibility` is not `RawToWorkspace`, and a conversion that cannot be
+planned comes back as `Unavailable { detail }` with the plan's own message
+rather than an `ApiError`: `ApiError::message` is a `&'static str`, and the
+message is the part that says what to do (add a remote, commit a submodule).
+
+The resume card had to gain a render trigger. `resumeCardSignature` ignored the
+draft, so selecting a target re-rendered nothing — the `<select>` held its own
+state. The signature now includes the selected target and the preflight's
+answer, while the acknowledgement checkbox deliberately stays out of it and
+updates the Resume button through the existing `card._invalid` path instead of
+rebuilding the card under the person's cursor.
+
+
 ## Decision Log
 
 
@@ -92,7 +127,55 @@ A managed worktree's archive bundles commits since its creation commit (`DeltaFr
 ## Outcomes & Retrospective
 
 
-To be completed at the end of Checkpoint C.
+A local session on a whole checkout with a network remote can now be moved or
+resumed into a container, and every surface says what that does before it
+happens. The wording is computed once per language:
+`RawConversionPreview::summary_line` and `warning_lines` in
+`mj-core/src/state/session_move.rs` serve the TUI review, the TUI confirmation,
+and `mj move`; `conversionSummary` and `conversionWarnings` in
+`mj-controller/src/web/viewer.js` serve the move dialog and the resume card.
+
+What each surface does. The TUI move review appends the summary and the
+warnings after the existing move warnings. A TUI resume onto a container opens
+a `Confirmation::ConvertRawCheckout` dialog focused on Cancel; Cancel restores
+the wizard exactly, Confirm returns `DashboardAction::ConfirmRawConversion`
+carrying the preflight receipt, which the CLI dispatches straight into
+`start_preflighted_session_launch`. `mj move` prints the same lines to stderr
+before its prompt and with `--yes`. The web move dialog renders them as
+`move-warning` paragraphs; the web resume card fetches
+`POST /api/preflight/resume` when the destination is not bare, shows
+"Checking checkout…" while it waits, and then either an error, nothing, or the
+warnings plus a checkbox that gates the Resume button.
+
+Validation, on the dev profile from the repository root:
+
+- `cargo test -- --quiet`: pass. 1220 controller, 436 TUI, 513 core, 415 CLI,
+  and every other crate's suite green; no failures and no reruns needed (the
+  known `npm_upgrade_restarts_after_the_running_package_is_removed` flake did
+  not appear).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `cargo fmt --all -- --check`: clean.
+- `MJ_BROWSER_SPEC=resume-conversion.spec.js npm --prefix tests/e2e/web test`:
+  27 unit tests and 3 browser tests pass. `resume.spec.js` (17 tests) was rerun
+  to prove the resume card's existing behavior is unchanged.
+
+New tests. `move_review_reports_what_a_local_checkout_conversion_copies_and_leaves_behind`
+and `a_raw_conversion_resume_launches_only_after_it_is_confirmed`
+(`mj-tui/src/wizards/tests.rs`) cover the review lines and the confirmation's
+state transitions. `a_local_checkout_resuming_into_a_container_preflights_its_conversion`
+(`mj-controller/src/controller/resume.rs`) proves the preflight returns the
+preview for a container and asks nothing for an in-place resume, using real
+Git against a fixture remote. Two `server.rs` tests cover the route's wiring
+and its refusal of an unknown session. `tests/e2e/web/resume-conversion.spec.js`
+covers the browser's warnings, the gated button, and the unavailable case.
+
+What is left. Nothing in this plan's scope. The acceptance walkthrough under
+"Validation and Acceptance" still needs a real Podman target and a real GitHub
+remote; it was not run here, and the automated coverage stands in for it. The
+`Unavailable` detail sent to the browser is the plan's own error text, which
+can name a host path — the same choice the preview itself already makes by
+carrying the checkout path, and worth revisiting if the viewer's path policy
+tightens.
 
 
 ## Context and Orientation

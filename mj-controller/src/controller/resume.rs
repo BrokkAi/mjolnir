@@ -39,8 +39,8 @@ use super::worktree::{
     apply_workspace_to_raw, cleanup_managed_worktree, create_managed_worktree,
     managed_worktree_checkout_exists, plan_raw_to_workspace,
     preserve_retained_managed_worktree_branch, raw_checkout_divergence_notice,
-    raw_checkout_position, raw_checkout_snapshot, restore_managed_worktree, resume_compatibility,
-    retire_managed_worktree,
+    raw_checkout_position, raw_checkout_snapshot, raw_conversion_preview, restore_managed_worktree,
+    resume_compatibility, retire_managed_worktree,
 };
 use super::{
     Controller, SessionResumeOptions, execute_checked, now, selected_host_container_size,
@@ -63,6 +63,14 @@ pub use mj_core::state::ResumeRepositorySourceReceipt;
 pub enum ResumeRepositorySourcePreflight {
     Ready(ResumeRepositorySourceReceipt),
     RepositoryMoved(ResumeRepositorySourceMismatch),
+    /// The resume converts a local checkout into an isolated workspace. The
+    /// receipt is already valid; the preview is what a person has to confirm
+    /// before the checkout is snapshotted and the session moves off this
+    /// machine.
+    ConvertingRawCheckout {
+        receipt: ResumeRepositorySourceReceipt,
+        preview: Box<mj_core::state::RawConversionPreview>,
+    },
 }
 
 struct ResumeRepositoryBundles {
@@ -123,11 +131,26 @@ impl Controller {
         Ok(())
     }
     /// Prove that each configured repository source still supplies the commit
-    /// boundary its checkpoint bundle expects, before provisioning anything.
+    /// boundary its checkpoint bundle expects, before provisioning anything,
+    /// and describe a local checkout's conversion so a person can confirm it.
     pub fn preflight_resume_repository_sources(
         &self,
         session_id: &str,
         target_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        self.preflight_repository_sources(session_id, target_id, true, executor)
+    }
+
+    /// `describe_conversion` buys the conversion preview with a read of the
+    /// checkout and a question to its remote. The resume itself only needs to
+    /// know whether a configured source moved, and the person has already
+    /// confirmed by then, so it asks for the cheap answer.
+    fn preflight_repository_sources(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        describe_conversion: bool,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
         let session = self
@@ -150,14 +173,24 @@ impl Controller {
             // bundle is only a grouping identity and may no longer be in the
             // config; neither an in-place resume nor a raw-to-workspace
             // conversion restores repository contents from that bundle.
-            return Ok(ResumeRepositorySourcePreflight::Ready(
-                ResumeRepositorySourceReceipt {
-                    session_id: session_id.to_owned(),
-                    bundle_id: session.bundle_id.clone(),
-                    checkpoint_sha256: checkpoint.sha256.clone(),
-                    repositories: Vec::new(),
-                },
-            ));
+            let receipt = ResumeRepositorySourceReceipt {
+                session_id: session_id.to_owned(),
+                bundle_id: session.bundle_id.clone(),
+                checkpoint_sha256: checkpoint.sha256.clone(),
+                repositories: Vec::new(),
+            };
+            // A conversion reads the checkout and its remote so the person
+            // sees what will travel. Planning failures (no network remote, an
+            // unreachable remote, a dirty submodule) are this preflight's
+            // error, which every surface already reports.
+            if describe_conversion && plan == ResumePlan::RawToWorkspace {
+                let preview = raw_conversion_preview_for(session, &self.config, executor)?;
+                return Ok(ResumeRepositorySourcePreflight::ConvertingRawCheckout {
+                    receipt,
+                    preview: Box::new(preview),
+                });
+            }
+            return Ok(ResumeRepositorySourcePreflight::Ready(receipt));
         }
         let repositories = read_checkpoint_repository_bundles(&checkpoint.archive_path)?;
         self.preflight_verified_repository_sources(
@@ -395,6 +428,21 @@ impl Controller {
             executor,
         )
     }
+}
+
+/// Plan a local checkout's conversion into an isolated workspace and describe
+/// it, without changing anything.
+///
+/// The resume preflight and the browser's resume card both need this answer
+/// before a person confirms, and neither owns a [`Controller`] at that point,
+/// so it takes the record and the configuration directly.
+pub fn raw_conversion_preview_for(
+    session: &SessionRecord,
+    config: &Config,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<mj_core::state::RawConversionPreview> {
+    let conversion = plan_raw_to_workspace(session, config, executor)?;
+    raw_conversion_preview(session, &conversion, executor)
 }
 
 fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectRepository> {
@@ -701,7 +749,7 @@ impl Controller {
         {
             let _phase = ResumePhaseTimer::new(session_id, "preflight repository sources");
             if let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) =
-                self.preflight_resume_repository_sources(session_id, target_id, executor)?
+                self.preflight_repository_sources(session_id, target_id, false, executor)?
             {
                 bail!(
                     "checkpoint base commit {} is missing from configured source {:?} for repository {:?}; the repository may have moved (archived origin: {:?})",
@@ -1954,10 +2002,10 @@ mod tests {
     use anyhow::Result;
 
     use crate::controller::test_support::{
-        FIXTURE_FETCH_URL, checkout_with_network_remote, checkpoint_test_session,
-        committed_repository, managed_worktree_session, network_remote_for,
-        resume_compatibility_config, write_checkpoint_archive_with_native_state,
-        write_checkpoint_gate_archive,
+        FIXTURE_FETCH_URL, FixtureRemoteExecutor, checkout_with_network_remote,
+        checkpoint_test_session, committed_repository, managed_worktree_session,
+        network_remote_for, raw_session_on, resume_compatibility_config,
+        write_checkpoint_archive_with_native_state, write_checkpoint_gate_archive,
     };
     use crate::controller::{Controller, SessionResumeOptions};
     use mj_checkpoint::archive::{GitCommandRunner, verify_archive_streaming};
@@ -1971,6 +2019,54 @@ mod tests {
     use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
 
     use super::*;
+
+    /// A person choosing a container for a local session has to see what the
+    /// move does before it happens, and a person resuming the same session in
+    /// place must not be asked anything.
+    #[test]
+    fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() {
+        let (checkout, _remote_parent, remote) = checkout_with_network_remote();
+        std::fs::write(checkout.path().join("untracked.txt"), "u".repeat(2048)).unwrap();
+        let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+        session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+            archive_path: checkout.path().join("unused.hel.zip"),
+            sha256: "a".repeat(64),
+            created_at: "2026-09-14T00:00:00Z".into(),
+            event_frontier: 3,
+        });
+        let session_id = session.id.clone();
+        let controller = Controller {
+            config: resume_compatibility_config(),
+            state: State {
+                sessions: BTreeMap::from([(session_id.clone(), session)]),
+                ..State::default()
+            },
+        };
+        let executor = FixtureRemoteExecutor { remote };
+
+        let converting = controller
+            .preflight_resume_repository_sources(&session_id, "podman", &executor)
+            .unwrap();
+        let ResumeRepositorySourcePreflight::ConvertingRawCheckout { receipt, preview } =
+            converting
+        else {
+            panic!("a container destination converts the checkout, got {converting:?}");
+        };
+        assert_eq!(receipt.session_id, session_id);
+        assert_eq!(preview.fetch_url, FIXTURE_FETCH_URL);
+        assert_eq!(preview.untracked_files, 1);
+        assert!(preview.host_checkout_retained);
+
+        assert!(
+            matches!(
+                controller
+                    .preflight_resume_repository_sources(&session_id, "local-bare", &executor)
+                    .unwrap(),
+                ResumeRepositorySourcePreflight::Ready(_)
+            ),
+            "resuming in place asks nothing"
+        );
+    }
 
     const RESUME_ROLLBACK_TEST_CHILD: &str = "MJ_RESUME_ROLLBACK_TEST_CHILD";
     const RETIRED_WORKTREE_RESUME_TEST_CHILD: &str = "MJ_RETIRED_WORKTREE_RESUME_TEST_CHILD";

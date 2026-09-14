@@ -198,6 +198,13 @@ pub enum DashboardAction {
     PreflightResumeRepositories {
         launch: Box<DashboardAction>,
     },
+    /// A person confirmed moving a local checkout into an isolated workspace.
+    /// The receipt travels with the confirmation so the launch does not have
+    /// to run the preflight again.
+    ConfirmRawConversion {
+        launch: Box<DashboardAction>,
+        receipt: Box<mj_core::state::ResumeRepositorySourceReceipt>,
+    },
     ReplaceResumeRepositoryOrigin {
         session_id: String,
         repository_id: String,

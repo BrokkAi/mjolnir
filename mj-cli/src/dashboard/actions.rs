@@ -500,6 +500,9 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::PreflightResumeRepositories { launch } => {
             start_resume_repository_preflight(context, launch)?;
         }
+        DashboardAction::ConfirmRawConversion { launch, receipt } => {
+            start_preflighted_session_launch(context, *launch, *receipt);
+        }
         DashboardAction::ReplaceResumeRepositoryOrigin {
             session_id,
             repository_id,

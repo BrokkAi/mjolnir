@@ -128,6 +128,36 @@ Resume provisions a fresh target and restores the verified archive; it does not 
 
 Cross-harness resume is supported. When the new profile uses a different harness, Mjolnir condenses the canonical transcript into a size-bounded handoff. The repository state and visible conversation survive, but harness-private implementation details do not become portable history.
 
+### Resume a local session into a container
+
+A session that runs the agent in a directory on this machine can resume on an
+isolated target when that directory is a whole Git checkout with a network
+remote. Choosing such a target shows what the move will do before anything is
+stopped, and asks you to confirm it:
+
+- which remote is cloned, which branch the session continues on, and where
+  `git push` will go;
+- how many commits are not on the remote yet, because those travel inside the
+  checkpoint;
+- how many staged, unstaged, and untracked files are copied in, and their size;
+- whether the checkout stays behind on this machine.
+
+What travels is the checkout's own content: commits on no remote branch, and
+staged, unstaged, and untracked files. What does not travel is anything Git
+ignores—build output, `.env` files, `node_modules`—and anything outside the
+checkout. Install steps and files elsewhere on the host are not migrated.
+
+The branch rule follows the session. A Mjolnir-managed worktree arrives on its
+`mj/<session>` branch. A session opened directly on your own checkout arrives on
+whatever branch that checkout was on, and `git push` inside the container pushes
+that branch. In the second case your checkout stays on this machine and stops
+tracking the session: edits made in the container do not come back on their own,
+so push the branch or move the session back.
+
+A checkout with no network remote cannot become an isolated workspace. Add one
+(`git remote add origin <url>`) or keep the session on a bare target; the picker
+says which it is.
+
 ## Move a live session
 
 Use **Move…** from the session action menu when a live session should continue
@@ -148,6 +178,12 @@ Queued prompts and configuration commands are listed during confirmation.
 **Run queued work** restores the entries in their original order only after the
 destination is ready. An interrupted active prompt is never replayed
 automatically.
+
+Moving a local session into a container shows the same preview and warnings
+that [resuming one](#resume-a-local-session-into-a-container) does: the remote
+that is cloned, the branch, the unpushed commits, the uncommitted files that are
+copied in, and whether the checkout stays behind. `mj move` prints those lines
+before its prompt, and with `--yes` as well.
 
 The viewer keeps the source workspace's resource sizing and attached
 directories fixed. It offers one explicit confirmation to clear inherited

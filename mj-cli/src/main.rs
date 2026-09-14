@@ -557,6 +557,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         (None, _, false) => Some(prompt_queue_choice(pending).await?),
     };
 
+    print_move_conversion(&preparation);
     if args.yes {
         // --yes acknowledges interruption, but intentionally does not choose
         // what happens to queued work; that choice was handled above.
@@ -659,6 +660,20 @@ async fn prompt_queue_choice(pending: usize) -> Result<ResumeQueueDisposition> {
     } else {
         ResumeQueueDisposition::Discard
     })
+}
+
+/// Say what moving a local checkout into an isolated workspace will do. This
+/// prints for `--yes` too: the checkout stays behind and uncommitted work is
+/// copied, which a person should be able to read in the transcript of the
+/// command afterwards.
+fn print_move_conversion(preparation: &mj_core::state::MovePreparation) {
+    let Some(conversion) = preparation.conversion.as_deref() else {
+        return;
+    };
+    eprintln!("{}", conversion.summary_line());
+    for warning in conversion.warning_lines() {
+        eprintln!("{warning}");
+    }
 }
 
 async fn prompt_move_confirmation(
