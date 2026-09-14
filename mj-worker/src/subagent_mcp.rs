@@ -187,6 +187,7 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
     ))
 }
 
+#[cfg(unix)]
 fn send(socket: &Path, request: &SubagentToolRequest) -> Result<Value> {
     let mut stream = std::os::unix::net::UnixStream::connect(socket)
         .with_context(|| format!("connect to sub-agent socket {}", socket.display()))?;
@@ -200,6 +201,14 @@ fn send(socket: &Path, request: &SubagentToolRequest) -> Result<Value> {
         .read_line(&mut line)
         .context("read sub-agent reply")?;
     serde_json::from_str(line.trim()).context("parse sub-agent reply")
+}
+
+#[cfg(not(unix))]
+fn send(socket: &Path, _request: &SubagentToolRequest) -> Result<Value> {
+    bail!(
+        "sub-agent sockets are unavailable on this platform: {}",
+        socket.display()
+    )
 }
 
 fn tool_definitions() -> Vec<Value> {

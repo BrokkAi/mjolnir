@@ -23,6 +23,8 @@ Publish the accumulated session API, managed subagent, recovery, configuration, 
   Evidence: Casting the request to `libc::c_ulong` restores compilation, and inspecting the shared PTY settings through the still-open master makes all eight `termination_pty` behavior tests pass.
 - Observation: SQLite's `SQLITE_OPEN_NOFOLLOW` rejects a database path with any symlinked ancestor on macOS, including the ordinary `/var` alias used by temporary directories.
   Evidence: Canonicalizing the trusted harness home before appending `goals_1.sqlite` preserves final-component symlink rejection and makes the focused checkpoint tests plus the full workspace suite pass.
+- Observation: Exact-commit CI exposed an unguarded Unix socket client in the subagent MCP path and a reliability fixture pinned to Codex ACP 1.11.1 after production advanced to 1.11.3.
+  Evidence: The non-Unix build now returns an explicit unsupported-platform error, and the fixture seeds the current managed install under the profile's `XDG_CACHE_HOME`; host Clippy and the full workspace test suite pass.
 
 ## Decision Log
 
@@ -92,3 +94,5 @@ Revision 2026-09-14: incorporated the upstream daemon startup error-reporting fi
 Revision 2026-09-14: completed the local validation matrix, fixed macOS Codex goal checkpoint paths and workspace license exceptions, and produced all twelve package archives.
 
 Revision 2026-09-14: resumed after incorporating the global `--instance` / `-i` isolation flag from commit `1cbe5778`; restarted exact-candidate validation before tagging.
+
+Revision 2026-09-14: fixed the Windows subagent MCP compile failure and synchronized the deterministic reliability harness with the current managed Codex ACP pin.
