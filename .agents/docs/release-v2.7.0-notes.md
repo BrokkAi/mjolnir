@@ -18,6 +18,7 @@
 - Runtime launchers and session Git authentication survive installation relocation and branch export.
 - Daemon startup failures are reported directly to the launching client instead of timing out without the underlying error.
 - Imported sessions reconcile native task identities and preserve configured model pins.
+- Moving a session to another Claude profile freshly probes the destination with that profile's credentials and refuses a move that would drop the model or effort pin. A profile with a setup token advertises a different Opus menu than one using login credentials; see `.agents/plans/claude-model-resume.md`.
 - Daemon startup continues to work after the client executable is replaced.
 
 Existing configuration and session history are preserved. No breaking database migration is required.
