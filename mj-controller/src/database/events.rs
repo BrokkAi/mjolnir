@@ -364,6 +364,38 @@ mod tests {
     }
 
     #[test]
+    fn a_lifecycle_save_that_records_a_launch_failure_emits_one_error_event() {
+        // The launch-failure path persists through `save_lifecycle_session`
+        // (a plain UPDATE), so prove that path fires the error trigger once so
+        // `mj events` shows the reason exactly once, not zero or twice.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.sqlite");
+        let mut record = super::super::tests::session("session-1", "project-1");
+        save_session_to(&path, &record).unwrap();
+
+        record.state = mj_core::state::SessionState::Error;
+        record.last_error = Some("worker bootstrap failed: Connection closed by host".into());
+        save_lifecycle_session_to(&path, &record).unwrap();
+        // An unchanged re-save must not add a second event.
+        save_lifecycle_session_to(&path, &record).unwrap();
+
+        let page = load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100).unwrap();
+        let errors: Vec<_> = page
+            .events
+            .iter()
+            .filter_map(|event| match &event.event {
+                ApiEventData::Error { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            errors,
+            vec!["worker bootstrap failed: Connection closed by host".to_owned()],
+            "a recorded launch failure surfaces as exactly one error event"
+        );
+    }
+
+    #[test]
     fn api_events_preserve_command_identity_for_failed_completions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.sqlite");

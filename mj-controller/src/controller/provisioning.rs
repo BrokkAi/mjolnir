@@ -180,13 +180,7 @@ impl Controller {
                 "new-session rollback cleanup reported failures"
             );
         }
-        let original = format!("{error:#}");
-        let original = match persist_launch_failure(session_id, &original) {
-            Ok(path) => format!("{original}; full diagnostic saved to {}", path.display()),
-            Err(save_error) => {
-                format!("{original}; saving the local diagnostic failed: {save_error:#}")
-            }
-        };
+        let original = note_new_session_launch_failure(session_id, &error);
         let failure = apply_failed_new_session_rollback(
             &mut self.state,
             session_id,
@@ -426,14 +420,17 @@ impl Controller {
                 Err(error)
             }
             Err(error) => {
-                let error = match apply_new_session_provisioning_result(
-                    &mut self.state,
-                    session_id,
-                    Err(error),
-                ) {
-                    Ok(()) => unreachable!("an unsuccessful provisioning result returned Ok"),
-                    Err(error) => error,
-                };
+                // This arm (no managed worktree to unwind) is the one a
+                // provisioning failure such as a dropped target connection
+                // hits; record the diagnostic and the session-id log here too.
+                let detail = note_new_session_launch_failure(session_id, &error);
+                {
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    record.state = SessionState::Error;
+                    record.target = None;
+                    record.updated_at = super::now();
+                    record.last_error = Some(format!("session provisioning failed: {detail}"));
+                }
                 return match self.persist_session_state(session_id) {
                     Ok(()) => Err(error),
                     Err(persistence_error) => Err(error.context(format!(
@@ -593,8 +590,28 @@ const MAX_LAUNCH_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 
 const RETAINED_LAUNCH_DIAGNOSTICS: usize = 20;
 
-fn persist_launch_failure(session_id: &str, detail: &str) -> Result<PathBuf> {
-    persist_launch_failure_to(&data_dir().join("diagnostics"), session_id, detail)
+/// Record a failed new-session launch consistently across every failure arm:
+/// log the failure with the session id (so `logs/mj-*.log` names the session)
+/// and save the local diagnostic file. Returns the underlying error chain
+/// annotated with the diagnostic path, which the caller stores in `last_error`
+/// so the reason travels to `mj sessions`, `mj wait`, and `mj events`.
+pub(super) fn note_new_session_launch_failure(session_id: &str, error: &anyhow::Error) -> String {
+    note_new_session_launch_failure_in(&data_dir().join("diagnostics"), session_id, error)
+}
+
+fn note_new_session_launch_failure_in(
+    directory: &Path,
+    session_id: &str,
+    error: &anyhow::Error,
+) -> String {
+    let original = format!("{error:#}");
+    tracing::warn!(session_id, error = %original, "session launch failed");
+    match persist_launch_failure_to(directory, session_id, &original) {
+        Ok(path) => format!("{original}; full diagnostic saved to {}", path.display()),
+        Err(save_error) => {
+            format!("{original}; saving the local diagnostic failed: {save_error:#}")
+        }
+    }
 }
 
 fn persist_launch_failure_to(directory: &Path, session_id: &str, detail: &str) -> Result<PathBuf> {
@@ -1798,6 +1815,29 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn noting_a_launch_failure_writes_the_diagnostic_and_returns_the_reason() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let error = anyhow::anyhow!("connect worker")
+            .context("Connection closed by 10.0.0.1 port 22");
+
+        let detail = note_new_session_launch_failure_in(directory.path(), session_id, &error);
+
+        assert!(
+            detail.contains("Connection closed by 10.0.0.1 port 22"),
+            "the returned reason keeps the underlying error text"
+        );
+        assert!(
+            detail.contains("full diagnostic saved to"),
+            "the reason points at the saved diagnostic"
+        );
+        let saved =
+            std::fs::read_to_string(directory.path().join(format!("{session_id}-launch-error.txt")))
+                .unwrap();
+        assert!(saved.contains("Connection closed by 10.0.0.1 port 22"));
     }
     #[test]
     fn inherited_git_settings_allow_only_portable_non_executable_values() {

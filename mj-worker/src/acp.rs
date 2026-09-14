@@ -1283,14 +1283,38 @@ where
                         }
                     }
                 }
-                let update = serde_json::from_value::<SessionUpdate>(notification.update)
-                    .map_err(|error| {
-                        agent_client_protocol::Error::invalid_params().data(
-                            serde_json::Value::String(format!(
-                                "decode ACP session update: {error}"
-                            )),
-                        )
-                    })?;
+                // A single tool card carrying a status or shape outside the
+                // ACP v1 vocabulary must not discard the whole notification and
+                // strand the tracked tool item in_progress forever. Coerce an
+                // out-of-spec status to `failed` so the item settles, and, if
+                // the update is still unrepresentable, salvage a minimal settle
+                // for the named tool rather than dropping everything.
+                let mut raw_update = notification.update;
+                if let Some(replaced) = coerce_tool_call_status(&mut raw_update) {
+                    tracing::debug!(
+                        replaced_status = %replaced,
+                        "coerced an out-of-spec ACP tool status to failed"
+                    );
+                }
+                let update = match serde_json::from_value::<SessionUpdate>(raw_update.clone()) {
+                    Ok(update) => update,
+                    Err(error) => match salvage_tool_call_update(&raw_update) {
+                        Some(update) => {
+                            tracing::warn!(
+                                %error,
+                                "salvaged an unrepresentable ACP tool update as a failed settle"
+                            );
+                            update
+                        }
+                        None => {
+                            return Err(agent_client_protocol::Error::invalid_params().data(
+                                serde_json::Value::String(format!(
+                                    "decode ACP session update: {error}"
+                                )),
+                            ));
+                        }
+                    },
+                };
                 notification_goal.lock().expect("goal lock poisoned").state.apply(&update)
                     .map_err(|e| agent_client_protocol::Error::invalid_params().data(serde_json::json!(e.to_string())))?;
                 notification_step_clock.observe(&update);
@@ -1971,6 +1995,97 @@ where
 
 /// Stop reason reported for a turn the bridge rejected instead of finishing.
 const PROMPT_ERROR_STOP_REASON: &str = "error";
+
+/// The tool-call statuses ACP v1 defines. An adapter that sends anything else
+/// (a Muse `cancelled`, say) makes the whole `session/update` unparseable.
+const ACP_TOOL_CALL_STATUSES: [&str; 4] = ["pending", "in_progress", "completed", "failed"];
+
+/// If `update` is a `tool_call`/`tool_call_update` whose `status` is outside the
+/// ACP v1 vocabulary, rewrite it to `failed` (the nearest legal terminal) in
+/// place so the update parses and the tracked tool item settles instead of
+/// stranding in_progress. Returns the replaced status when it coerced one.
+fn coerce_tool_call_status(update: &mut serde_json::Value) -> Option<String> {
+    let object = update.as_object_mut()?;
+    let kind = object.get("sessionUpdate").and_then(|value| value.as_str())?;
+    if kind != "tool_call" && kind != "tool_call_update" {
+        return None;
+    }
+    let status = object.get("status").and_then(|value| value.as_str())?.to_owned();
+    if ACP_TOOL_CALL_STATUSES.contains(&status.as_str()) {
+        return None;
+    }
+    object.insert(
+        "status".to_owned(),
+        serde_json::Value::String("failed".to_owned()),
+    );
+    Some(status)
+}
+
+/// Last resort when a tool update cannot be represented at all (for example an
+/// unknown nested content type): build a minimal `tool_call_update` that
+/// settles the named tool as `failed`, so a later completion the client can no
+/// longer parse does not leave the card running forever.
+fn salvage_tool_call_update(update: &serde_json::Value) -> Option<SessionUpdate> {
+    let object = update.as_object()?;
+    let kind = object.get("sessionUpdate").and_then(|value| value.as_str())?;
+    if kind != "tool_call" && kind != "tool_call_update" {
+        return None;
+    }
+    let tool_call_id = object.get("toolCallId").and_then(|value| value.as_str())?;
+    serde_json::from_value(serde_json::json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": tool_call_id,
+        "status": "failed",
+    }))
+    .ok()
+}
+
+/// How long a prompt may run with no ACP activity before the worker gives up on
+/// it. `MJ_TURN_STALL_TIMEOUT_MS` overrides the default; `0` disables the
+/// watchdog. Ten minutes clears a slow first token (seen at ~6 minutes) while
+/// still catching an adapter that stops relaying a turn it has completed.
+const DEFAULT_TURN_STALL_TIMEOUT_MS: u64 = 600_000;
+
+fn turn_stall_timeout() -> Option<Duration> {
+    let millis = match std::env::var("MJ_TURN_STALL_TIMEOUT_MS") {
+        Ok(value) => value.trim().parse::<u64>().unwrap_or(DEFAULT_TURN_STALL_TIMEOUT_MS),
+        Err(_) => DEFAULT_TURN_STALL_TIMEOUT_MS,
+    };
+    (millis > 0).then(|| Duration::from_millis(millis))
+}
+
+/// Whether a harness's turn ends only when the `session/prompt` reply arrives.
+/// Claude and Codex mark their own turns; every other harness (Muse included)
+/// leaves the turn Running until the reply, so a lost reply hangs it forever
+/// unless the watchdog steps in.
+fn turn_ends_only_on_prompt_reply(harness: HarnessKind) -> bool {
+    !matches!(harness, HarnessKind::Claude | HarnessKind::Codex)
+}
+
+/// Milliseconds since the last ACP activity, saturating at zero.
+fn acp_idle_millis(activity: &mj_core::relay::AcpActivityClock) -> u64 {
+    let now = mj_core::clock::epoch_millis();
+    now.saturating_sub(activity.last_at_ms().unwrap_or(now))
+        .max(0) as u64
+}
+
+/// The transcript message shown when a turn is failed for going silent. It says
+/// what happened and what the user can do, because the work may already be
+/// finished in the container even though mj never received it.
+fn turn_stall_message(harness: HarnessKind, idle_ms: u64) -> String {
+    let minutes = (idle_ms / 60_000).max(1);
+    format!(
+        "The {name} turn stopped responding: mj received no activity from the harness for about \
+         {minutes} minute(s) while a turn was running, so it failed the turn. The work may already \
+         be finished inside the container even though mj did not receive it.\n\
+         - Inspect the workspace before discarding it: check `git status` and `git log` for edits \
+         or a commit the model made.\n\
+         - Resend your prompt to continue; the relay reconnects on the next prompt and clears any \
+         tool card left running.\n\
+         - If this keeps happening it is a known harness relay stall (mjolnir #1007).",
+        name = harness.display_name(),
+    )
+}
 
 fn prompt_failure_warning(error: &agent_client_protocol::Error) -> String {
     if error.code == agent_client_protocol::ErrorCode::AuthRequired {
@@ -2674,6 +2789,11 @@ async fn serve_session(
                         ),
                     }
                 }
+                // Start the stall clock at send time so the watchdog measures
+                // silence within this turn, not idle time carried from before.
+                spec.acp_activity.mark();
+                let stall_timeout =
+                    turn_stall_timeout().filter(|_| turn_ends_only_on_prompt_reply(spec.harness));
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
                         .send_request(PromptRequest::new(session_id.clone(), prompt))
@@ -2837,6 +2957,49 @@ async fn serve_session(
                             .await?;
                             // An acknowledged cancel leaves the bridge in
                             // place; the next prompt goes to the same session.
+                            break;
+                        }
+                        _ = async {
+                            let timeout = stall_timeout
+                                .expect("stall branch is guarded by stall_timeout")
+                                .as_millis() as u64;
+                            // Keep waiting as long as the harness keeps sending
+                            // updates; only sustained silence trips the watchdog.
+                            loop {
+                                let idle = acp_idle_millis(&spec.acp_activity);
+                                if idle >= timeout {
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(timeout - idle)).await;
+                            }
+                        }, if prompt_running && stall_timeout.is_some() => {
+                            let idle_ms = acp_idle_millis(&spec.acp_activity);
+                            tracing::warn!(
+                                session_id = %session_id,
+                                idle_ms,
+                                harness = ?spec.harness,
+                                "turn stalled with no ACP activity; failing the turn"
+                            );
+                            emit_runtime_event(
+                                events,
+                                RuntimeEvent::Warning {
+                                    message: turn_stall_message(spec.harness, idle_ms),
+                                },
+                            )
+                            .await?;
+                            // Fail the turn so it leaves Running and `mj wait`
+                            // returns; leave the session serving so a resend or
+                            // a late recovery still works.
+                            emit_runtime_event(
+                                events,
+                                RuntimeEvent::PromptFinished {
+                                    request_id,
+                                    stop_reason: PROMPT_ERROR_STOP_REASON.to_owned(),
+                                    usage: None,
+                                    diagnostic: None,
+                                },
+                            )
+                            .await?;
                             break;
                         }
                         _ = async {

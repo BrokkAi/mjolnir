@@ -375,7 +375,10 @@ pub struct ViewerSnapshot {
     pub launch_failures: Vec<ViewerLaunchFailure>,
 }
 
-/// Deliberately excludes raw diagnostics, which can contain credentials.
+/// Carries the launch failure's reason so a client can show why a session
+/// never came up. The reason is the provisioning error chain, the same text
+/// the session's `last_error` already publishes through `mj events`; it is not
+/// the full local diagnostic file, which can hold credentials.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ViewerLaunchFailure {
     /// Identifies the notice itself, so the browser can dismiss one. It is not
@@ -386,6 +389,9 @@ pub struct ViewerLaunchFailure {
     /// Absent when the launch failed before any session record existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Why the launch failed, when the action recorded a reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl ViewerSnapshot {
@@ -432,6 +438,12 @@ impl ViewerSnapshot {
                     has_error: session.last_error.is_some()
                         || session.configuration_issue(config).is_some(),
                     configuration_issue: session.configuration_issue(config),
+                    // A session that failed to launch (or a close that left it
+                    // dead) carries its reason here so a client need not open
+                    // the local diagnostic to learn why.
+                    launch_error: (session.state == SessionState::Error)
+                        .then(|| session.last_error.clone())
+                        .flatten(),
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
                     active_user_shells: Vec::new(),
@@ -593,6 +605,12 @@ pub struct ViewerSession {
     /// Public identifiers and repair guidance only; never raw runtime errors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration_issue: Option<String>,
+    /// Why a launch failed, for a session that ended in the error state. This
+    /// is the same provisioning error text `last_error` already publishes
+    /// through `mj events`, surfaced here so `mj sessions`/`mj wait` can show
+    /// the reason instead of a bare "failed to launch".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_error: Option<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<String>,

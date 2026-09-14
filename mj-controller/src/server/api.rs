@@ -221,6 +221,9 @@ pub struct ApiSession {
     pub chat_phase: super::ViewerChatPhase,
     pub is_idle: bool,
     pub has_error: bool,
+    /// Why a launch failed, for a session in the error state. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// How the last finished prompt ended. Absent unless the caller asked for
@@ -252,6 +255,7 @@ impl From<&ViewerSession> for ApiSession {
             chat_phase: session.chat_phase,
             is_idle: session.is_idle,
             has_error: session.has_error,
+            error: session.launch_error.clone(),
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             last_turn_outcome: None,
@@ -827,6 +831,8 @@ pub struct WaitObservation {
     pub lifecycle: Option<ViewerLifecycleCategory>,
     /// A recorded launch failure names this session.
     pub launch_failed: bool,
+    /// Why the launch failed, when a reason was recorded.
+    pub launch_error: Option<String>,
     pub execution: MaterializedExecutionState,
     pub active_turn: Option<MaterializedTurn>,
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
@@ -930,7 +936,9 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
     if observation.launch_failed {
         return Some(WaitDecision::simple(
             WaitOutcome::Error,
-            Some("the session failed to launch".to_owned()),
+            Some(observation.launch_error.clone().unwrap_or_else(|| {
+                "the session failed to launch".to_owned()
+            })),
         ));
     }
     if let Some(StartStatus::Failed { message }) = &observation.start_status {
@@ -2023,6 +2031,14 @@ fn build_observation(
             .launch_failures
             .iter()
             .any(|failure| failure.session_id.as_deref() == Some(session.id.as_str())),
+        // Prefer the reason the failing action recorded on the workspace
+        // notice; fall back to the session's own launch error text.
+        launch_error: snapshot
+            .launch_failures
+            .iter()
+            .find(|failure| failure.session_id.as_deref() == Some(session.id.as_str()))
+            .and_then(|failure| failure.error.clone())
+            .or_else(|| session.launch_error.clone()),
         capacity_retry: session.capacity_retry.clone(),
         start_status,
         ..WaitObservation::default()
@@ -3590,12 +3606,30 @@ mod tests {
     fn a_launch_failure_fails_the_wait_but_an_unrelated_session_error_does_not() {
         let mut launch_failed = idle(None);
         launch_failed.launch_failed = true;
+        launch_failed.launch_error =
+            Some("worker bootstrap failed: Connection closed by 10.0.0.1 port 22".into());
+        let decision = resolve_wait(&launch_failed, &WaitRequest::default()).unwrap();
         assert_eq!(
-            resolve_wait(&launch_failed, &WaitRequest::default())
-                .unwrap()
-                .outcome,
+            decision.outcome,
             WaitOutcome::Error,
             "nothing will finish a turn on a session that never launched"
+        );
+        assert_eq!(
+            decision.message.as_deref(),
+            Some("worker bootstrap failed: Connection closed by 10.0.0.1 port 22"),
+            "the wait reports why the launch failed, not a bare sentence"
+        );
+
+        // A launch failure with no recorded reason still fails, with the
+        // fixed sentence as a fallback.
+        let mut launch_failed_bare = idle(None);
+        launch_failed_bare.launch_failed = true;
+        assert_eq!(
+            resolve_wait(&launch_failed_bare, &WaitRequest::default())
+                .unwrap()
+                .message
+                .as_deref(),
+            Some("the session failed to launch")
         );
 
         let failed_start = WaitObservation {
@@ -3654,6 +3688,7 @@ mod tests {
             id: format!("{}-4", std::process::id()),
             workspace_id: snapshot.sessions[0].workspace_id.clone(),
             session_id: Some("some-other-session".to_owned()),
+            error: Some("worker bootstrap failed".to_owned()),
         }];
 
         let observation = build_observation(&snapshot, &snapshot.sessions[0], None, None, None);
@@ -3665,6 +3700,44 @@ mod tests {
         snapshot.launch_failures[0].session_id = Some(session_id);
         let observation = build_observation(&snapshot, &snapshot.sessions[0], None, None, None);
         assert!(observation.launch_failed);
+    }
+
+    #[test]
+    fn api_session_exposes_a_launch_failure_reason_only_when_the_session_errored() {
+        let (config, mut state) = sample_config_state();
+
+        // A running session that carries an internal error still only flags it;
+        // it never puts the raw text on the wire.
+        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        let running = ApiSession::from(&snapshot.sessions[0]);
+        assert!(running.has_error, "the running session still flags an error");
+        assert_eq!(
+            running.error, None,
+            "a running session does not expose raw error text"
+        );
+        assert!(
+            serde_json::to_value(&running).unwrap().get("error").is_none(),
+            "the error field is omitted when there is nothing to show"
+        );
+
+        // Once the same session has failed to launch, it carries its reason so
+        // a client sees why instead of a bare state.
+        state
+            .sessions
+            .get_mut("session-1")
+            .unwrap()
+            .state = mj_core::state::SessionState::Error;
+        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        let failed = ApiSession::from(&snapshot.sessions[0]);
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("secret-token at /highly/secret/codex"),
+            "a failed launch surfaces its recorded reason"
+        );
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap()["error"],
+            "secret-token at /highly/secret/codex"
+        );
     }
 
     #[test]
