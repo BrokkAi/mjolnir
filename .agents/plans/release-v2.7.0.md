@@ -84,3 +84,5 @@ Use the repository-pinned Rust 1.96.0 toolchain, cargo-about 0.9.1, cargo-deny 0
 Revision 2026-09-14: initialized the release plan and selected v2.7.0 from the scope accumulated since v2.6.4.
 
 Revision 2026-09-14: recorded and fixed the macOS PTY portability failures discovered by release validation.
+
+Revision 2026-09-14: incorporated the upstream daemon startup error-reporting fix into the release candidate and public notes.

@@ -115,7 +115,9 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
         let log_path = log_path.clone();
         move || -> Result<LaunchedDaemon> {
             // Everything the daemon writes from here on belongs to this launch.
-            let log_offset = fs::metadata(&log_path).map(|metadata| metadata.len()).unwrap_or(0);
+            let log_offset = fs::metadata(&log_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
             let executable = daemon_launch_executable()?;
             let mut command = std::process::Command::new(executable);
             command

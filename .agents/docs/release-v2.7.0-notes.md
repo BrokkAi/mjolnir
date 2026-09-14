@@ -15,6 +15,7 @@
 
 - Worker recovery no longer races checkpointed session destruction.
 - Runtime launchers and session Git authentication survive installation relocation and branch export.
+- Daemon startup failures are reported directly to the launching client instead of timing out without the underlying error.
 - Imported sessions reconcile native task identities and preserve configured model pins.
 - Daemon startup continues to work after the client executable is replaced.
 
