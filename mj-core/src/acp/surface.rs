@@ -127,6 +127,17 @@ impl AcpSessionSurface {
     }
 
     /// Muse's /plan is a host skill, not its approval-mode selector.
+    ///
+    /// Muse's bundled `plan` skill (`muse-core/skills/plan/SKILL.md`) says it is
+    /// "planning guidance, not a host-enforced mode", and muse-acp advertises no
+    /// `plan` session mode or `mode` config pair. So the whole command is sent to
+    /// Muse as prompt text and none of mj's plan-mode state engages: no `PLAN MODE`
+    /// indicator, no `/implement`. The same skill also forbids `request_user_input`
+    /// for final approval and asks in prose ("Reply Approve, Request changes, or
+    /// Cancel"), so the plan-review elicitation (`normalized_plan_review`) never
+    /// triggers either; the user answers by typing `Approve` as the next prompt.
+    /// Both gaps need muse-acp to advertise a plan mode and emit a `plan_review`
+    /// permission before mj can do better.
     pub fn forwards_plan_command(&self) -> bool {
         self.harness_kind == Some(HarnessKind::Muse) && self.advertises_command("plan")
     }
@@ -179,6 +190,7 @@ impl AcpSessionSurface {
         let value = if active { "plan" } else { "default" };
         match self.harness_kind {
             Some(HarnessKind::Deepseek) => Err(PlanControlError::DeepseekUnsupported),
+            // Muse has no plan mode over ACP; see `forwards_plan_command`.
             Some(HarnessKind::Muse) => Err(PlanControlError::Incompatible),
             Some(HarnessKind::Codex) => self
                 .exact_config_has_plan_pair("collaboration_mode")
@@ -187,7 +199,12 @@ impl AcpSessionSurface {
                     value: value.into(),
                 })
                 .ok_or(PlanControlError::CodexIncompatible),
-            Some(HarnessKind::Claude | HarnessKind::Kimi) => {
+            Some(HarnessKind::Claude | HarnessKind::Kimi | HarnessKind::Zcode) => {
+                let value = if self.harness_kind == Some(HarnessKind::Zcode) && !active {
+                    "build"
+                } else {
+                    value
+                };
                 if self.exact_config_has_plan_pair("mode") {
                     Ok(PlanControl::SetConfig {
                         key: "mode".into(),

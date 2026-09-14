@@ -1211,6 +1211,13 @@ fn target_profile_home(
             PathBuf::from(home)
         };
         root.join("muse").to_string_lossy().into_owned()
+    } else if profile.kind == mj_core::config::HarnessKind::Zcode
+        && !matches!(locator, targets::TargetLocator::LocalBare { .. })
+    {
+        Path::new(&home)
+            .join(".zcode")
+            .to_string_lossy()
+            .into_owned()
     } else {
         home
     }

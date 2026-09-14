@@ -408,6 +408,7 @@ pub fn locate_native_session(
             (located.native_session_id, located.session_path)
         }
         HarnessKind::Deepseek => return deepseek::locate(home, selection),
+        HarnessKind::Zcode => bail!("ZCode native-session import is not yet supported"),
     };
     Ok(LocatedNativeSession {
         native_session_id,
@@ -427,6 +428,7 @@ pub fn read_native_transcript(
         HarnessKind::Kimi => read_kimi_transcript(source_path),
         HarnessKind::Grok => read_grok_transcript(source_path),
         HarnessKind::Deepseek => deepseek::read_transcript(source_path),
+        HarnessKind::Zcode => bail!("ZCode native-session import is not yet supported"),
     }
 }
 
@@ -505,6 +507,7 @@ pub fn scan_native_sessions(
         HarnessKind::Deepseek => deepseek::scan(home, |progress| {
             forward(progress.scanned, progress.total, progress.session);
         }),
+        HarnessKind::Zcode => Ok(()),
     }
 }
 

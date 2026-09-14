@@ -1480,6 +1480,7 @@ pub(super) fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage
             | HarnessKind::Kimi
             | HarnessKind::Grok
             | HarnessKind::Muse
+            | HarnessKind::Zcode
     ) {
         ProvisionStage::Installing(profile.kind)
     } else {
@@ -1543,6 +1544,17 @@ pub(super) fn bridge_launch(
                 ],
             )
         }
+        mj_core::config::HarnessKind::Zcode => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                format!(
+                    "if [ -z \"${{ZCODE_BIN:-}}\" ] || [ ! -f \"$ZCODE_BIN\" ]; then echo 'Mjolnir target image lacks the ZCode backend; rebuild it from containers/Containerfile.agent-dev or set ZCODE_BIN to the headless zcode.cjs runtime' >&2; exit 127; fi; if command -v zcode-acp-server >/dev/null 2>&1; then exec zcode-acp-server; fi; {}; exec npx -y zcode-acp-server@{}",
+                    ensure_node_22_script(),
+                    mj_core::harness_runtime::ZCODE_ACP_VERSION,
+                ),
+            ],
+        ),
     }
 }
 
@@ -1554,7 +1566,7 @@ pub(super) fn preflight_harness(
     use mj_core::config::TargetTemplate;
     if !matches!(
         profile.kind,
-        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Deepseek
+        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Deepseek | HarnessKind::Zcode
     ) {
         return Ok(());
     }
@@ -1660,6 +1672,14 @@ pub(super) fn stage_profile(
             "skills",
             ".agent-presets",
         ],
+        mj_core::config::HarnessKind::Zcode => &[
+            "v2/config.json",
+            "v2/credentials.json",
+            "v2/setting.json",
+            "cli/config.json",
+            "AGENTS.md",
+            "skills",
+        ],
     };
     // Allowlist entries (and, within each, a copied directory's children) are
     // independent of one another, so copying them concurrently shortens the
@@ -1700,6 +1720,7 @@ fn append_hel_target_environment(
         mj_core::config::HarnessKind::Grok => "AGENTS.md",
         mj_core::config::HarnessKind::Deepseek => "AGENTS.md",
         mj_core::config::HarnessKind::Muse => "AGENTS.md",
+        mj_core::config::HarnessKind::Zcode => "AGENTS.md",
     };
     let path = destination.join(instructions);
     let separator = match std::fs::read_to_string(&path) {
@@ -2948,7 +2969,7 @@ pub(super) fn worker_last_words(
 ) -> Option<String> {
     let script = format!(
         "if [ -f {root}/worker-exit.json ]; then echo '{marker}'; cat {root}/worker-exit.json; fi; if [ -f {root}/worker.log ]; then echo '--- worker.log (tail) ---'; tail -n 20 {root}/worker.log; fi",
-        root = worker_root,
+        root = targets::posix_quote(worker_root),
         marker = WORKER_EXIT_RECORD_MARKER
     );
     let command = match locator {
@@ -3712,6 +3733,69 @@ mod tests {
         assert!(failure.contains("provide a musl worker"), "{failure}");
     }
 
+    /// macOS puts worker roots under `~/Library/Application Support/...`.
+    /// An unquoted root split the diagnostic script into separate words, so
+    /// the probe silently reported nothing exactly when it was needed.
+    #[test]
+    fn worker_last_words_reads_a_root_containing_spaces() {
+        struct RecordingExecutor {
+            commands: RefCell<Vec<CommandSpec>>,
+        }
+
+        impl CommandExecutor for RecordingExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands.borrow_mut().push(command.clone());
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Application Support").join("hel worker");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("worker-exit.json"),
+            b"{\n  \"reason\": \"panic\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("worker.log"),
+            b"Mjolnir worker exited with an error\n",
+        )
+        .unwrap();
+        let root = root.to_str().unwrap();
+
+        let locator = targets::TargetLocator::LocalBare {
+            worker_root: root.into(),
+        };
+        let reported = worker_last_words(&ProcessExecutor, &locator, root)
+            .expect("the probe reads a root containing spaces");
+        assert!(reported.contains(WORKER_EXIT_RECORD_MARKER), "{reported}");
+        assert!(reported.contains("\"reason\": \"panic\""), "{reported}");
+        assert!(
+            reported.contains("Mjolnir worker exited with an error"),
+            "{reported}"
+        );
+
+        let recorder = RecordingExecutor {
+            commands: RefCell::new(Vec::new()),
+        };
+        worker_last_words(&recorder, &locator, root);
+        let commands = recorder.commands.borrow();
+        let script = commands
+            .iter()
+            .flat_map(|command| command.args.iter())
+            .find(|argument| argument.contains("worker-exit.json"))
+            .expect("the probe builds a diagnostic script");
+        assert!(
+            script.contains(&format!("'{root}'")),
+            "the root must be single-quoted: {script}"
+        );
+    }
+
     /// A worker that died leaves an exit record behind. Starting a new worker
     /// must clear it first, or the startup connect loop reads the previous
     /// death as this worker's and gives up on a healthy daemon.
@@ -4238,8 +4322,9 @@ mod tests {
         );
         assert_eq!(codex_command, "sh");
         assert_eq!(codex_arguments[0], "-c");
-        assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.3"));
+        assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.4"));
         assert!(codex_arguments[1].contains("codex-acp --version"));
+        assert!(codex_arguments[1].contains("npx -y @brokkai/codex-acp@1.11.4"));
 
         let (claude_command, claude_arguments) = bridge_launch(
             mj_core::config::HarnessKind::Claude,
@@ -4413,6 +4498,24 @@ mod tests {
             "containers/Containerfile.agent-dev must install {deepseek}"
         );
         assert!(!CONTAINERFILE.contains("dsh-acp-server"));
+
+        let zcode = format!(
+            "zcode-acp-server@{}",
+            mj_core::harness_runtime::ZCODE_ACP_VERSION
+        );
+        assert!(
+            CONTAINERFILE.contains(&zcode),
+            "containers/Containerfile.agent-dev must install {zcode}"
+        );
+        assert!(CONTAINERFILE.contains(mj_core::harness_runtime::ZCODE_VERSION));
+        assert!(CONTAINERFILE.contains(mj_core::harness_runtime::ZCODE_CLI_VERSION));
+        let (command, arguments) = bridge_launch(
+            mj_core::config::HarnessKind::Zcode,
+            ExecutionPolicy::Unconstrained,
+        );
+        assert_eq!(command, "sh");
+        assert!(arguments[1].contains("target image lacks the ZCode backend"));
+        assert!(arguments[1].contains("[ ! -f \"$ZCODE_BIN\" ]"));
     }
     #[test]
     fn kimi_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {

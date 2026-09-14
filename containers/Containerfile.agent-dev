@@ -72,10 +72,11 @@ RUN apt-get update \
 # intentionally left to Hel's official on-demand installer because that path is
 # not version-pinned yet.
 RUN npm install --global --no-audit --no-fund \
-        @brokkai/codex-acp@1.11.3 \
+        @brokkai/codex-acp@1.11.4 \
         @agentclientprotocol/claude-agent-acp@0.73.0 \
         @deepseek-ai/dsh@0.1.2-rc.1 \
         @openai/codex@0.153.4 \
+        zcode-acp-server@0.37.1 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version \
@@ -86,9 +87,37 @@ RUN npm install --global --no-audit --no-fund \
 # the same version regardless of the bridge's transitive dependency.
 ENV CODEX_PATH=/usr/local/lib/node_modules/@openai/codex/bin/codex.js
 
+COPY mj-worker/assets/zcode/runtime.json /opt/mjolnir/zcode-runtime.json
+COPY mj-worker/assets/zcode/patch-adapter.mjs /opt/mjolnir/patch-zcode-adapter.mjs
+ARG TARGETARCH
+RUN node /opt/mjolnir/patch-zcode-adapter.mjs /usr/local/lib/node_modules/zcode-acp-server \
+    && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$ARCH" in \
+        amd64) ZCODE_ARCH=linux-x64; ZCODE_SHA256=fc4cc851286a40ea8090cebfaac1a9f9bdc44eab349e36eef0d3b3219f39303f ;; \
+        arm64) ZCODE_ARCH=linux-arm64; ZCODE_SHA256=6b4e9af5a943caea4bccb384ed1e2731b77db9fec9fe9973769a1015544fe619 ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac \
+    && ZCODE_VERSION=3.11.2 \
+    && curl --fail --location --silent --show-error \
+        "https://cdn-zcode.z.ai/zcode/electron/releases/${ZCODE_VERSION}/${ZCODE_ARCH}/ZCode-${ZCODE_VERSION}-${ZCODE_ARCH}.AppImage" \
+        --output /tmp/zcode.AppImage \
+    && echo "$ZCODE_SHA256  /tmp/zcode.AppImage" | sha256sum --check --strict \
+    && chmod +x /tmp/zcode.AppImage \
+    && cd /tmp \
+    && ./zcode.AppImage --appimage-extract >/dev/null \
+    && mkdir -p /opt/zcode \
+    && mv /tmp/squashfs-root/resources/glm /opt/zcode/glm \
+    && rm -rf /tmp/squashfs-root /tmp/zcode.AppImage \
+    && node /opt/zcode/glm/zcode.cjs --version | grep -Fx 0.16.5
+
+ENV ZCODE_BIN=/opt/zcode/glm/zcode.cjs \
+    ZCODE_ACP_RUNTIME=node \
+    ZCODE_PROVIDER=builtin:zai-coding-plan \
+    ZCODE_MODEL=GLM-5.3-Flash \
+    ZCODE_DISALLOWED_TOOLS="Agent Task Expert"
+
 # Buildx sets TARGETARCH per platform; the dpkg fallback keeps a plain
 # single-arch `podman build` working.
-ARG TARGETARCH
 ARG CARGO_NEXTEST_VERSION=0.9.143
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
     && case "$ARCH" in \
@@ -192,10 +221,16 @@ RUN printf '%s\n' \
         'export CODEX_PATH=/usr/local/lib/node_modules/@openai/codex/bin/codex.js' \
         'export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright' \
         'export MUSE_CLI=/usr/local/bin/muse' \
+        'export ZCODE_BIN=/opt/zcode/glm/zcode.cjs' \
+        'export ZCODE_ACP_RUNTIME=node' \
+        'export ZCODE_PROVIDER=builtin:zai-coding-plan' \
+        'export ZCODE_MODEL=GLM-5.3-Flash' \
+        'export ZCODE_DISALLOWED_TOOLS="Agent Task Expert"' \
         > /etc/profile.d/20-mjolnir-tools.sh
 
 RUN useradd --create-home --shell /bin/bash hel \
     && mkdir -p /workspace /var/lib/hel \
+    && chmod -R a+rX /opt/zcode \
     && chown -R hel:hel /workspace /var/lib/hel \
     && chmod 0755 /workspace /var/lib/hel
 

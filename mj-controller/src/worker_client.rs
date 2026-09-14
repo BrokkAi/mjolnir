@@ -57,25 +57,37 @@ const REVIEW_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(660);
 const RELAY_PROXY_DETACH_GRACE: Duration = Duration::from_millis(500);
 const RELAY_PROXY_REAP_POLL: Duration = Duration::from_millis(10);
 
+/// How many trailing stderr lines a failed connect reports back to its caller.
+const RELAY_PROXY_STDERR_TAIL: usize = 10;
+
 /// Forward a relay proxy's stderr to the log, one line at a time, until the
 /// child closes it. Reporting rather than dropping keeps connect failures
 /// diagnosable now that the controller no longer shares its terminal.
+///
+/// Returns the last [`RELAY_PROXY_STDERR_TAIL`] non-empty lines, so a connect
+/// that fails can put the proxy's own complaint in the error the caller sees
+/// rather than only in the log.
 async fn drain_proxy_stderr(
     errors: tokio::process::ChildStderr,
     purpose: String,
     session_id: String,
-) {
+) -> VecDeque<String> {
+    let mut tail: VecDeque<String> = VecDeque::new();
     let mut lines = BufReader::new(errors).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
             Ok(Some(line)) => {
-                tracing::warn!(%session_id, %purpose, %line, "relay proxy stderr")
+                tracing::warn!(%session_id, %purpose, %line, "relay proxy stderr");
+                if tail.len() == RELAY_PROXY_STDERR_TAIL {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
             }
-            Ok(None) => return,
+            Ok(None) => return tail,
             Err(error) => {
                 tracing::warn!(%session_id, %purpose, %error, "read relay proxy stderr");
-                return;
+                return tail;
             }
         }
     }
@@ -268,11 +280,11 @@ impl RelayClient {
                 );
                 error
             })?;
-        if let Some(errors) = child.stderr.take() {
+        let stderr_tail = child.stderr.take().map(|errors| {
             let purpose = spec.purpose.clone();
             let session_id = expected_session_id.to_owned();
-            tokio::spawn(drain_proxy_stderr(errors, purpose, session_id));
-        }
+            tokio::spawn(drain_proxy_stderr(errors, purpose, session_id))
+        });
         let input = child
             .stdin
             .take()
@@ -330,7 +342,58 @@ impl RelayClient {
             latest_ordinal: 0,
             latest_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
         };
-        let response = client
+        match client
+            .complete_handshake(expected_session_id, handshake_timeout)
+            .await
+        {
+            Ok(()) => {
+                // The drain task keeps logging for the life of the connection.
+                Ok(client)
+            }
+            Err(error) => {
+                // Stop the proxy so it closes stderr; otherwise a proxy that
+                // is merely slow would hold the drain task open past its
+                // grace period and the tail would be lost. The child stays
+                // in place so dropping `client` reaps it as usual.
+                if let Some(child) = client.child.as_mut() {
+                    let _ = child.start_kill();
+                }
+                Err(Self::with_proxy_stderr(error, stderr_tail).await)
+            }
+        }
+    }
+
+    /// Attach the proxy's own stderr tail to a failed connect. The proxy
+    /// explains failures the controller cannot see any other way, such as a
+    /// worker socket path longer than `sun_path`.
+    async fn with_proxy_stderr(
+        error: anyhow::Error,
+        stderr_tail: Option<tokio::task::JoinHandle<VecDeque<String>>>,
+    ) -> anyhow::Error {
+        let Some(handle) = stderr_tail else {
+            return error;
+        };
+        let Ok(Ok(lines)) = tokio::time::timeout(RELAY_PROXY_DETACH_GRACE, handle).await else {
+            return error;
+        };
+        if lines.is_empty() {
+            return error;
+        }
+        let lines: Vec<String> = lines.into();
+        error.context(format!(
+            "relay proxy stderr (last {} lines):\n{}",
+            lines.len(),
+            lines.join("\n")
+        ))
+    }
+
+    /// Exchange `Hello` and record what the relay negotiated.
+    async fn complete_handshake(
+        &mut self,
+        expected_session_id: &str,
+        handshake_timeout: Duration,
+    ) -> Result<()> {
+        let response = self
             .call_hello(
                 RelayRequest::Hello {
                     controller_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -347,12 +410,12 @@ impl RelayClient {
         } = response
         else {
             let error = anyhow!("relay returned an unexpected hello response");
-            log_relay_client_failure(&client, "hello", "relay-hello", &error);
+            log_relay_client_failure(self, "hello", "relay-hello", &error);
             return Err(error);
         };
         if session_id != expected_session_id {
             let error = anyhow!("relay belongs to session {session_id}, not {expected_session_id}");
-            log_relay_client_failure(&client, "hello", "relay-hello", &error);
+            log_relay_client_failure(self, "hello", "relay-hello", &error);
             return Err(error);
         }
         if !RelayVersionRange::CURRENT.contains(negotiated) {
@@ -361,14 +424,14 @@ impl RelayClient {
                 RELAY_MIN_PROTOCOL_VERSION,
                 RELAY_PROTOCOL_VERSION
             );
-            log_relay_client_failure(&client, "hello", "relay-hello", &error);
+            log_relay_client_failure(self, "hello", "relay-hello", &error);
             return Err(error);
         }
-        client.protocol_version = negotiated;
-        client.session_id = session_id;
-        client.relay_version = relay_version;
-        client.worker_build = worker_build;
-        Ok(client)
+        self.protocol_version = negotiated;
+        self.session_id = session_id;
+        self.relay_version = relay_version;
+        self.worker_build = worker_build;
+        Ok(())
     }
 
     pub fn session_id(&self) -> &str {
@@ -2266,6 +2329,28 @@ sys.stdin.read()
             .err()
             .expect("a proxy that exits cannot complete hello");
 
+        assert!(RelayTransportDead::marks(&error), "{error:#}");
+        assert!(RelayTransportDead::marks_failed_handshake(&error));
+    }
+
+    /// The proxy explains failures the controller cannot observe itself, such
+    /// as a worker socket path longer than `sun_path`. Logging that line is
+    /// not enough: the error the caller reports must carry it too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hello_failure_carries_the_proxy_stderr_tail() {
+        const COMPLAINT: &str =
+            "connect worker socket /x/control.sock: path must be shorter than SUN_LEN";
+        let spec = CommandSpec::new("sh", ["-c", &format!("echo '{COMPLAINT}' >&2; exit 1")])
+            .purpose("complaining relay proxy");
+
+        let error = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+            .await
+            .err()
+            .expect("a proxy that exits cannot complete hello");
+
+        assert!(format!("{error:#}").contains(COMPLAINT), "{error:#}");
+        // Added context must not hide the classification recovery reads.
         assert!(RelayTransportDead::marks(&error), "{error:#}");
         assert!(RelayTransportDead::marks_failed_handshake(&error));
     }

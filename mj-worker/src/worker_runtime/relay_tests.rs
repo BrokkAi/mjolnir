@@ -5408,3 +5408,80 @@ while True: time.sleep(1)
         );
     }
 }
+
+/// macOS caps a Unix socket address at 104 bytes, and worker roots under
+/// `<data_dir>/workers/<session id>/` routinely pass that. The reviewer and
+/// sub-agent sockets only bind under their own configuration, so proving that
+/// `control.sock` binds and serves is enough to show the daemon no longer
+/// trips over `sun_path`.
+#[tokio::test]
+async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut root = temp.path().to_owned();
+    while root.join("control.sock").as_os_str().len() <= 120 {
+        root.push("nested-worker-root-component");
+    }
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(
+        root.join("control.sock").as_os_str().len()
+            > mj_core::local_sockets::unix_socket_path_limit(),
+        "the test root must be long enough to need the relative-name bind"
+    );
+
+    let mut config = launch_config("profile-home-that-must-not-be-used");
+    config.bridge_command = temp.path().join("missing-acp-bridge");
+    config.cwd = temp.path().to_owned();
+    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
+
+    let socket = root.join("control.sock");
+    let stream = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(stream) = mj_core::local_sockets::connect_unix_stream(&socket) {
+                break stream;
+            }
+            assert!(
+                !daemon.is_finished(),
+                "the daemon stopped before binding a long control socket path"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    stream.set_nonblocking(true).unwrap();
+    let stream = tokio::net::UnixStream::from_std(stream).unwrap();
+
+    let (reader, mut writer) = stream.into_split();
+    let request = RelayRequestEnvelope {
+        request_id: "status-over-a-long-socket-path".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Status,
+    };
+    let mut encoded = serde_json::to_vec(&request).unwrap();
+    encoded.push(b'\n');
+    writer.write_all(&encoded).await.unwrap();
+    let response = BufReader::new(reader)
+        .lines()
+        .next_line()
+        .await
+        .unwrap()
+        .unwrap();
+    let response: RelayResponseEnvelope = serde_json::from_str(&response).unwrap();
+    assert!(
+        matches!(
+            response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Status(_)
+            }
+        ),
+        "a worker on a long root did not serve status: {:?}",
+        response.body
+    );
+
+    writer.shutdown().await.unwrap();
+    daemon.abort();
+    // Under load the daemon's own bridge failure can land before the abort
+    // does. This test is about the socket path, not about how the daemon
+    // eventually stops.
+    let _ = daemon.await;
+}

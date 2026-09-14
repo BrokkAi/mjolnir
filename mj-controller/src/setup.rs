@@ -291,6 +291,13 @@ fn discover_installed_harnesses(
         if homes.iter().any(|home| home.kind == kind) {
             continue;
         }
+        // The `zcode` executable is the Electron desktop launcher, including
+        // for `--version`. Probing it would open the GUI. An initialized ZCode
+        // installation is discovered from its `.zcode` home instead, while
+        // target sessions use Mjolnir's pinned headless backend.
+        if kind == HarnessKind::Zcode {
+            continue;
+        }
         let Some(home) = overrides
             .get(&kind)
             .cloned()
@@ -1589,6 +1596,7 @@ mod tests {
         struct InstalledMuse;
         impl CommandExecutor for InstalledMuse {
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                assert_ne!(command.program, "zcode", "Setup must not open ZCode's GUI");
                 assert_eq!(command.args, ["--version"]);
                 Ok(CommandOutput {
                     status: if command.program == "muse" { 0 } else { 127 },

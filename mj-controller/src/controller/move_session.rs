@@ -284,6 +284,47 @@ impl Controller {
         ))
     }
 
+    async fn validate_move_destination_configuration(
+        &self,
+        selection: &MoveSelection,
+        source_harness: mj_core::config::HarnessKind,
+        operational: &mj_core::relay::RelayOperationalState,
+    ) -> Result<()> {
+        let profile_id = selection
+            .profile_id
+            .as_deref()
+            .context("move profile is unresolved")?;
+        let profile = self
+            .config
+            .profiles
+            .get(profile_id)
+            .context("move profile no longer exists")?;
+        let source = self
+            .state
+            .sessions
+            .get(&selection.session_id)
+            .context("unknown move session")?;
+        if profile.kind != source_harness || profile_id == source.last_profile {
+            return Ok(());
+        }
+        let accepted = mj_core::acp::AcceptedSessionConfig::from_configuration(
+            &operational.config,
+            &operational.config_options,
+        );
+        if accepted.model.is_none() && accepted.effort.is_none() {
+            return Ok(());
+        }
+        // A fresh probe prevents a stale local catalogue from approving a
+        // move that the destination profile will immediately reset.
+        let choices =
+            super::profile_config::discover(profile_id.to_owned(), accepted.model.clone(), true)
+                .await
+                .with_context(|| {
+                    format!("discover destination profile {profile_id:?} configuration")
+                })?;
+        validate_preserved_configuration(profile_id, &accepted, &choices)
+    }
+
     pub async fn prepare_move_session_controlled(
         &self,
         mut selection: MoveSelection,
@@ -480,6 +521,14 @@ impl Controller {
                         operational.checkpoint_barrier = None;
                         !operational.safe_to_replace(source_harness)
                     });
+                if let Some(snapshot) = &snapshot {
+                    self.validate_move_destination_configuration(
+                        &checked.selection,
+                        source_harness,
+                        &snapshot.operational,
+                    )
+                    .await?;
+                }
                 checked.queued_commands = queue;
                 checked.fingerprint = fingerprint;
             }
@@ -973,6 +1022,29 @@ impl Controller {
         }
         Ok(())
     }
+}
+
+fn validate_preserved_configuration(
+    profile_id: &str,
+    accepted: &mj_core::acp::AcceptedSessionConfig,
+    choices: &mj_core::worker_launch::ProfileConfig,
+) -> Result<()> {
+    for (key, value, offered) in [
+        ("model", accepted.model.as_deref(), &choices.models),
+        ("effort", accepted.effort.as_deref(), &choices.efforts),
+    ] {
+        let Some(value) = value else { continue };
+        ensure!(
+            offered.iter().any(|choice| choice.value == value),
+            "destination profile {profile_id:?} does not offer the session's accepted {key} {value:?}; choices: {}",
+            offered
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn outcome(

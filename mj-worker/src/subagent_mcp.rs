@@ -189,7 +189,7 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
 
 #[cfg(unix)]
 fn send(socket: &Path, request: &SubagentToolRequest) -> Result<Value> {
-    let mut stream = std::os::unix::net::UnixStream::connect(socket)
+    let mut stream = mj_core::local_sockets::connect_unix_stream(socket)
         .with_context(|| format!("connect to sub-agent socket {}", socket.display()))?;
     let mut body = serde_json::to_vec(request)?;
     body.push(b'\n');

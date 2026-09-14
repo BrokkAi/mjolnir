@@ -722,6 +722,7 @@ fn migration_twenty_two_preserves_existing_podman_targets_as_container_layers() 
     save_session_to(&database, &record).unwrap();
 
     let connection = open(&database).unwrap();
+    strip_zcode_harness_constraints(&connection);
     connection
         .execute_batch(
             "DROP TABLE session_moves;
@@ -1149,6 +1150,9 @@ fn version_thirteen_restores_checkpointed_lost_sessions_to_recoverable_errors() 
 /// after it created. Re-running a migration over its own table fails, so a
 /// rewind has to undo the table as well as the version marker.
 fn rewind_schema_to(connection: &Connection, version: i64) {
+    if version < 32 {
+        strip_zcode_harness_constraints(connection);
+    }
     if version < 26 {
         connection
             .execute_batch("DROP TABLE IF EXISTS session_moves;")
@@ -1181,6 +1185,18 @@ fn rewind_schema_to(connection: &Connection, version: i64) {
              DELETE FROM schema_migrations WHERE version > {version};
              PRAGMA user_version = {version};"
         ))
+        .unwrap();
+}
+
+fn strip_zcode_harness_constraints(connection: &Connection) {
+    connection
+        .execute_batch(
+            "PRAGMA writable_schema=ON;
+             UPDATE sqlite_schema SET sql=replace(sql, ',''zcode''', '')
+                 WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
+             PRAGMA writable_schema=OFF;
+             PRAGMA schema_version=2001;",
+        )
         .unwrap();
 }
 
@@ -2257,7 +2273,7 @@ fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
         INSERT INTO hidden_native_sessions VALUES ('claude','native-existing','now');
         CREATE INDEX migration_fixture_index ON sessions(title);
         PRAGMA writable_schema=ON;
-        UPDATE sqlite_schema SET sql=replace(sql, ',''muse''', '') WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
+        UPDATE sqlite_schema SET sql=replace(replace(sql, ',''zcode''', ''), ',''muse''', '') WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
         PRAGMA writable_schema=OFF;
         PRAGMA schema_version=1000;
         ALTER TABLE sessions DROP COLUMN create_managed_worktree;
@@ -2314,6 +2330,74 @@ fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
         SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn zcode_migration_preserves_revision_31_rows_indexes_and_foreign_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("mj.sqlite3");
+    let connection = open(&database).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO session_contexts(session_id,bundle_id,created_at)
+                 VALUES ('existing-zcode-migration','project','now');
+             INSERT INTO sessions(
+                 session_id,title,harness_kind,last_profile,target_template_id,state,updated_at
+             ) VALUES (
+                 'existing-zcode-migration','Existing','codex','codex','local','running','now'
+             );
+             INSERT INTO hidden_native_sessions VALUES ('muse','native-existing','now');
+             CREATE INDEX zcode_migration_fixture_index ON sessions(title);
+             PRAGMA writable_schema=ON;
+             UPDATE sqlite_schema SET sql=replace(sql, ',''zcode''', '')
+                 WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
+             PRAGMA writable_schema=OFF;
+             PRAGMA schema_version=2000;
+             UPDATE schema_compatibility SET minimum_compatible_version=31;
+             DELETE FROM schema_migrations WHERE version=32;
+             PRAGMA user_version=31;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let connection = open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET harness_kind='zcode'
+                 WHERE session_id='existing-zcode-migration'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO hidden_native_sessions VALUES ('zcode','native-zcode','now')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT minimum_compatible_version FROM schema_compatibility",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        32
+    );
+    assert!(
+        connection
+            .prepare("SELECT 1 FROM sqlite_schema WHERE name='zcode_migration_fixture_index'")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    assert!(
+        !connection
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap()
     );
 }
 
@@ -3974,6 +4058,7 @@ fn migration_twenty_five_adds_pane_sizes_without_losing_workspaces() {
     let workspace = create_workspace_at(&database, "Preexisting").unwrap();
 
     let connection = open(&database).unwrap();
+    strip_zcode_harness_constraints(&connection);
     connection
         .execute_batch(
             "DROP TABLE session_moves;
@@ -4521,6 +4606,7 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
     // drops present and populated, rather than through the broad rewind helper
     // that other migration tests use: only migration 21 is under test here.
     let connection = open(&database).unwrap();
+    strip_zcode_harness_constraints(&connection);
     connection
         .execute_batch(
             "DROP TABLE session_moves;
@@ -4641,6 +4727,7 @@ fn migration_twenty_four_preserves_targets_and_accepts_ssh_docker() {
     });
     save_session_to(&database, &old).unwrap();
     let connection = open(&database).unwrap();
+    strip_zcode_harness_constraints(&connection);
     // Rebuild the preceding constrained schema so this tests the actual migration.
     connection.execute_batch("PRAGMA writable_schema = ON;
         UPDATE sqlite_master SET sql = replace(replace(sql, ',''ssh-docker''', ''), '''ssh-podman'',''ssh-docker''', '''ssh-podman''') WHERE name = 'session_targets';

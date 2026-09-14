@@ -216,7 +216,10 @@ fn create_owner_only_directory(directory: &Path) -> Result<()> {
 ///
 /// Anything unparseable is `None` rather than a guess.
 pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
-    if matches!(kind, HarnessKind::Deepseek | HarnessKind::Muse) {
+    if matches!(
+        kind,
+        HarnessKind::Deepseek | HarnessKind::Muse | HarnessKind::Zcode
+    ) {
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -244,6 +247,7 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
             .max(),
         HarnessKind::Deepseek => unreachable!("handled before JSON parsing"),
         HarnessKind::Muse => unreachable!("handled before JSON parsing"),
+        HarnessKind::Zcode => unreachable!("handled before JSON parsing"),
     }
 }
 
@@ -260,7 +264,7 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
 pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
     if matches!(
         kind,
-        HarnessKind::Grok | HarnessKind::Deepseek | HarnessKind::Muse
+        HarnessKind::Grok | HarnessKind::Deepseek | HarnessKind::Muse | HarnessKind::Zcode
     ) {
         return None;
     }
@@ -274,7 +278,7 @@ pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
             .get("expires_at")?
             .as_i64()
             .and_then(|seconds| seconds.checked_mul(1000)),
-        HarnessKind::Grok | HarnessKind::Deepseek | HarnessKind::Muse => {
+        HarnessKind::Grok | HarnessKind::Deepseek | HarnessKind::Muse | HarnessKind::Zcode => {
             unreachable!("handled before JSON parsing")
         }
     }
@@ -647,7 +651,8 @@ pub fn events_report_auth_failure(_kind: HarnessKind, events: &[RelayEvent]) -> 
 ///
 /// Verified against the locally installed CLIs with `--help`: `codex login`,
 /// `claude auth login` (there is no bare `claude login`), `kimi login`,
-/// `grok login`, and DeepSeek's `dsh web` credential settings UI.
+/// `grok login`, DeepSeek's `dsh web` credential settings UI, and ZCode's
+/// headless backend. The desktop `zcode` launcher is deliberately never used.
 ///
 pub fn login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
     match profile.kind {
@@ -660,6 +665,14 @@ pub fn login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
         HarnessKind::Grok => ("grok".to_owned(), vec!["login".to_owned()]),
         HarnessKind::Deepseek => ("dsh".to_owned(), vec!["web".to_owned()]),
         HarnessKind::Muse => ("muse".to_owned(), vec!["login".to_owned()]),
+        HarnessKind::Zcode => (
+            profile
+                .environment
+                .get("ZCODE_BIN")
+                .cloned()
+                .unwrap_or_else(|| "/opt/ZCode/resources/glm/zcode.cjs".to_owned()),
+            vec!["login".to_owned()],
+        ),
     }
 }
 
@@ -1001,10 +1014,12 @@ mod tests {
                 grok_credentials(&["2026-08-17T02:19:01.724226598Z"]),
             ),
         ];
-        for kind in HarnessKind::ALL
-            .into_iter()
-            .filter(|kind| !matches!(kind, HarnessKind::Deepseek | HarnessKind::Muse))
-        {
+        for kind in HarnessKind::ALL.into_iter().filter(|kind| {
+            !matches!(
+                kind,
+                HarnessKind::Deepseek | HarnessKind::Muse | HarnessKind::Zcode
+            )
+        }) {
             let (_, bytes) = fixtures
                 .iter()
                 .find(|(fixture, _)| *fixture == kind)
@@ -1041,6 +1056,7 @@ mod tests {
             ),
             (HarnessKind::Deepseek, b"version: 1\n".to_vec(), None),
             (HarnessKind::Muse, b"{}".to_vec(), None),
+            (HarnessKind::Zcode, b"{}".to_vec(), None),
         ];
         for kind in HarnessKind::ALL {
             let (_, bytes, expected) = fixtures
@@ -1405,6 +1421,13 @@ mod tests {
         assert_eq!(
             login_command(&profile(HarnessKind::Deepseek)),
             ("dsh".to_owned(), vec!["web".to_owned()])
+        );
+        assert_eq!(
+            login_command(&profile(HarnessKind::Zcode)),
+            (
+                "/opt/ZCode/resources/glm/zcode.cjs".to_owned(),
+                vec!["login".to_owned()]
+            )
         );
     }
 
