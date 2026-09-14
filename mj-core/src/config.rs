@@ -446,7 +446,7 @@ impl HarnessKind {
                 label: "allowAll / sandbox-off",
                 acp_mode: Some("allowAll"),
                 launch_flag: None,
-                launch_environment: Some(("MUSE_APPROVAL_MODE", "auto")),
+                launch_environment: Some(("MUSE_APPROVAL_MODE", "allowAll")),
             }),
             (Self::Codex, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
                 label: "agent / guardian",
@@ -2122,7 +2122,7 @@ mod tests {
     #[test]
     fn muse_guardian_preserves_policy_and_unconstrained_launch_is_explicit() {
         let original = BTreeMap::from([
-            ("MUSE_APPROVAL_MODE".into(), "ask".into()),
+            ("MUSE_APPROVAL_MODE".into(), "promptUnmatched".into()),
             (
                 "MUSE_SERVE_ARGS".into(),
                 "--sandbox-network restricted".into(),
@@ -2139,7 +2139,7 @@ mod tests {
         HarnessKind::Muse
             .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
             .unwrap();
-        assert_eq!(environment["MUSE_APPROVAL_MODE"], "auto");
+        assert_eq!(environment["MUSE_APPROVAL_MODE"], "allowAll");
         assert_eq!(
             environment["MUSE_SERVE_ARGS"],
             "--sandbox-network restricted --disable-sandbox"
@@ -2323,7 +2323,7 @@ mod tests {
         assert_eq!(muse.label(), "allowAll / sandbox-off");
         assert_eq!(
             muse.launch_environment(),
-            Some(("MUSE_APPROVAL_MODE", "auto"))
+            Some(("MUSE_APPROVAL_MODE", "allowAll"))
         );
     }
 
