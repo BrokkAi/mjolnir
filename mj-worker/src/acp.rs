@@ -1022,6 +1022,43 @@ async fn emit_runtime_event(
         .map_err(|_| anyhow!("relay event coordinator stopped"))
 }
 
+/// Emit the runtime events for a finished `session/close` request.
+///
+/// A harness that answers "method not found" does not implement
+/// `session/close`, so it has no session state to release and the worker tears
+/// its runtime down after this either way. Treat that answer as applied;
+/// rejecting it leaves the session stuck in "closing" forever.
+async fn emit_close_outcome<T>(
+    events: &mpsc::Sender<RuntimeEvent>,
+    request_id: String,
+    outcome: std::result::Result<T, agent_client_protocol::Error>,
+) -> Result<()> {
+    match outcome {
+        Ok(_) => emit_runtime_event(events, RuntimeEvent::CloseApplied { request_id }).await,
+        Err(error) if error.code == agent_client_protocol::ErrorCode::MethodNotFound => {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::Warning {
+                    message: "the harness has no session/close method; closing its runtime instead"
+                        .into(),
+                },
+            )
+            .await?;
+            emit_runtime_event(events, RuntimeEvent::CloseApplied { request_id }).await
+        }
+        Err(error) => {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::CommandRejected {
+                    request_id,
+                    message: format!("close ACP session: {error}"),
+                },
+            )
+            .await
+        }
+    }
+}
+
 /// Answer for a `terminal/*` request naming a terminal this connection does
 /// not have, most often one the agent already released.
 fn unknown_terminal_error(terminal_id: &str) -> agent_client_protocol::Error {
@@ -2838,31 +2875,11 @@ async fn serve_session(
                                     },
                                 )
                                 .await?;
-                                match connection
+                                let outcome = connection
                                     .send_request(CloseSessionRequest::new(session_id.clone()))
                                     .block_task()
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        emit_runtime_event(
-                                            events,
-                                            RuntimeEvent::CloseApplied {
-                                                request_id: close_id,
-                                            },
-                                        )
-                                        .await?;
-                                    }
-                                    Err(error) => {
-                                        emit_runtime_event(
-                                            events,
-                                            RuntimeEvent::CommandRejected {
-                                                request_id: close_id,
-                                                message: format!("close ACP session: {error}"),
-                                            },
-                                        )
-                                        .await?;
-                                    }
-                                }
+                                    .await;
+                                emit_close_outcome(events, close_id, outcome).await?;
                                 return Ok(None);
                             }
                             None => {
@@ -3167,26 +3184,11 @@ async fn serve_session(
                     .await;
             }
             CommandRequest::Close { request_id } => {
-                match connection
+                let outcome = connection
                     .send_request(CloseSessionRequest::new(session_id.clone()))
                     .block_task()
-                    .await
-                {
-                    Ok(_) => {
-                        emit_runtime_event(events, RuntimeEvent::CloseApplied { request_id })
-                            .await?;
-                    }
-                    Err(error) => {
-                        emit_runtime_event(
-                            events,
-                            RuntimeEvent::CommandRejected {
-                                request_id,
-                                message: format!("close ACP session: {error}"),
-                            },
-                        )
-                        .await?;
-                    }
-                }
+                    .await;
+                emit_close_outcome(events, request_id, outcome).await?;
                 break;
             }
         }
