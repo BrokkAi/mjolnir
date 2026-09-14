@@ -14,10 +14,8 @@ use super::AcpSupervisorSpec;
 pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileConfig> {
     let policy = ExecutionPolicy::ConfiguredApprovals;
     let mut environment = spec.environment;
-    environment.insert(
-        spec.harness.home_env().into(),
-        spec.profile_home.to_string_lossy().into_owned(),
-    );
+    spec.harness
+        .configure_home_environment(&spec.profile_home, &mut environment);
     let managed = super::harness::resolve(
         HarnessRuntimePolicy::Managed,
         spec.harness,

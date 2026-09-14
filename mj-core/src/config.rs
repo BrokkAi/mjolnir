@@ -245,6 +245,7 @@ pub enum HarnessKind {
     Grok,
     Deepseek,
     Muse,
+    Zcode,
 }
 
 /// The target-level execution policy Hel applies independently of the selected
@@ -329,6 +330,7 @@ pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf 
         HarnessKind::Grok => "auth.json",
         HarnessKind::Deepseek => ".credentials.yaml",
         HarnessKind::Muse => "auth.json",
+        HarnessKind::Zcode => "v2/config.json",
     })
 }
 
@@ -345,6 +347,9 @@ impl HarnessKind {
                 "XDG_DATA_HOME".into(),
                 home.join(".data").to_string_lossy().into_owned(),
             );
+            home.parent().unwrap_or(home)
+        } else if self == Self::Zcode {
+            environment.insert("ZCODE_HOME".into(), home.to_string_lossy().into_owned());
             home.parent().unwrap_or(home)
         } else {
             home
@@ -367,13 +372,14 @@ impl HarnessKind {
         !matches!(self, Self::Muse)
     }
 
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Codex,
         Self::Claude,
         Self::Kimi,
         Self::Grok,
         Self::Deepseek,
         Self::Muse,
+        Self::Zcode,
     ];
 
     /// Environment variable used to isolate this harness's configuration.
@@ -385,6 +391,7 @@ impl HarnessKind {
             Self::Grok => "GROK_HOME",
             Self::Deepseek => "DSH_HOME",
             Self::Muse => "XDG_CONFIG_HOME",
+            Self::Zcode => "ZCODE_DATA_BASE_DIR",
         }
     }
 
@@ -398,6 +405,7 @@ impl HarnessKind {
             Self::Grok => ".grok",
             Self::Deepseek => ".dsh",
             Self::Muse => ".config/muse",
+            Self::Zcode => ".zcode",
         }
     }
 
@@ -410,6 +418,7 @@ impl HarnessKind {
             Self::Grok => "grok",
             Self::Deepseek => "deepseek",
             Self::Muse => "muse",
+            Self::Zcode => "zcode",
         }
     }
 
@@ -422,6 +431,7 @@ impl HarnessKind {
             Self::Grok => "Grok Build",
             Self::Deepseek => "DSH",
             Self::Muse => "Muse Code",
+            Self::Zcode => "ZCode",
         }
     }
 
@@ -449,6 +459,18 @@ impl HarnessKind {
                 acp_mode: Some("agent-full-access"),
                 launch_flag: None,
                 launch_environment: Some(("INITIAL_AGENT_MODE", "agent-full-access")),
+            }),
+            (Self::Zcode, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
+                label: "build / guardian",
+                acp_mode: Some("build"),
+                launch_flag: None,
+                launch_environment: Some(("ZCODE_ACP_MODE", "build")),
+            }),
+            (Self::Zcode, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
+                label: "yolo",
+                acp_mode: Some("yolo"),
+                launch_flag: None,
+                launch_environment: Some(("ZCODE_ACP_MODE", "yolo")),
             }),
             (_, ExecutionPolicy::ConfiguredApprovals) => None,
             (Self::Claude, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
@@ -506,7 +528,10 @@ impl HarnessKind {
     }
 
     pub const fn supports_guardian_approvals(self) -> bool {
-        matches!(self, Self::Codex | Self::Claude | Self::Grok | Self::Muse)
+        matches!(
+            self,
+            Self::Codex | Self::Claude | Self::Grok | Self::Muse | Self::Zcode
+        )
     }
 
     /// Shared warning for selecting a harness without guardian approvals on a
@@ -534,7 +559,7 @@ impl HarnessKind {
     pub fn bridge_args(self, policy: ExecutionPolicy) -> Vec<&'static str> {
         let flag = self.launch_flag_for(policy);
         match self {
-            Self::Codex | Self::Claude | Self::Muse => Vec::new(),
+            Self::Codex | Self::Claude | Self::Muse | Self::Zcode => Vec::new(),
             Self::Deepseek => vec!["--profile", "acp"],
             Self::Kimi => vec!["acp"],
             Self::Grok => ["agent"].into_iter().chain(flag).chain(["stdio"]).collect(),

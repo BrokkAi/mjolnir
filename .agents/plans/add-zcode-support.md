@@ -7,9 +7,7 @@ This ExecPlan follows `.agents/PLANS.md` and must be maintained from research th
 
 Mjolnir users will be able to select a ZCode profile, discover its GLM models, and use the actual ZCode coding agent through normal Mjolnir chat. Claude and Codex parents will be able to launch ZCode children, inspect their transcripts, send follow-up input, interrupt them, and close them in the existing sub-agent workspace. Each child shares its parent's target and project directory while retaining its own conversation and profile state.
 
-The first delivery supports local bare targets and raw SSH targets with the ZCode backend installed. The adapter is managed by Mjolnir. Automatic installation or redistribution of the proprietary desktop bundle and inclusion in the default container image are a subsequent packaging milestone; an unavailable backend must produce a clear target preflight error. A child never installs a separate container or changes its parent's target. Test the user's Linux installation first, then configure their normal install only after the isolated campaign and the live-store compatibility decision described below.
-
-This turn produces a plan only. Implementation, paid-provider tests, configuration changes, installation, and migrations have not been performed for ZCode.
+The first delivery includes managed ZCode backend installation and the default container image, as well as local bare and raw SSH targets. The adapter and backend are both pinned and managed by Mjolnir. A child never installs a separate container or changes its parent's target. The authenticated Linux installation is the live acceptance platform.
 
 ## Progress
 
@@ -18,11 +16,11 @@ This turn produces a plan only. Implementation, paid-provider tests, configurati
 - [x] (2026-09-13) Locate installed ZCode desktop backend; its headless CLI reports 0.16.5. Locate existing settings and credential files without printing secret values.
 - [x] (2026-09-13) Inspect two community ACP adapters and select the current TypeScript adapter as the compatibility-probe candidate.
 - [x] (2026-09-13) Write this implementation plan, including target scope, compatibility gates, migration handling, and live tmux acceptance.
-- [ ] Prove adapter compatibility with isolated profiles, authenticated GLM-5.3-Flash, approvals, model discovery, process cleanup, and session continuation.
-- [ ] Add ZCode harness metadata, managed adapter installation, target preflight, authentication/profile staging, and breaking storage migration.
-- [ ] Integrate quota reporting, session persistence/recovery, skills, and ordinary/sub-agent control surfaces.
-- [ ] Complete automated validation and the isolated live tmux campaign with both parent harnesses.
-- [ ] Prepare installation and the backup/upgrade procedure; configure and validate the user's normal install after the required live-store upgrade authorization.
+- [x] (2026-09-13) Prove authenticated adapter compatibility with GLM-5.3-Flash, model/effort discovery, Coding Plan quota, and approved/denied guardian writes.
+- [x] (2026-09-13) Add ZCode harness metadata, pinned managed adapter/backend installation, target environment handling, profile staging, and breaking schema migration 32.
+- [x] (2026-09-13) Integrate quota reporting, skills, ordinary sessions, and the existing sub-agent control surfaces.
+- [x] (2026-09-13) Complete the isolated tmux campaign with Claude Sonnet and GPT Luna parents, including prompt-border navigation and daemon reattachment.
+- [ ] Complete full Rust test/clippy gates, install the committed build, and smoke the configured live profile.
 
 ## Surprises & Discoveries
 
@@ -33,7 +31,17 @@ The user's configuration is `/home/jonathan/.config/mjolnir/config.toml`; the in
 
 The candidate `william0wang/zcode-acp` source at commit `ad31b663eab446c2478f573498e5f7e3025d4c20` declares npm package `zcode-acp-server` version 0.37.1, Node >=22, ACP protocol 1, and support for ZCode CLI >=0.16.0. Registry publication and artifact integrity remain to be verified. Its source was inspected under `/tmp/mj-zcode-acp-plan`. The older Rust adapter `jpalmae/zcode-acp`, inspected under `/tmp/mj-zcode-acp-review` at `42fe149d4b501469343c01f23ba3801832306d53`, targets an older backend and offers less relevant recent compatibility evidence.
 
+The npm registry publishes adapter 0.37.1 at `https://registry.npmjs.org/zcode-acp-server/-/zcode-acp-server-0.37.1.tgz` with integrity `sha512-D8Ejw2RzkaxKtpO5ZJR/h41fRdpIjTKxHlPMCiO5hhCOLCe2+1k/U+fGWjBTp+IuKWDL8weEr/6VToyTWiV0DA==`. The host provides Node 24.15.0, satisfying the adapter and backend requirement for Node's built-in SQLite module.
+
 The TypeScript adapter reads credentials, skills, plugins, and several state paths directly from HOME/.zcode. It does not currently reference `ZCODE_DATA_BASE_DIR`. The ZCode bundle contains that environment variable, but its exact path semantics and encrypted credential portability need a probe. The adapter also initially creates native sessions with `mode: "yolo"`, and spawns the backend as a detached process group with its own watchdog. These are concrete isolation, approval, and teardown concerns to resolve before production integration.
+
+The validated adapter required a deterministic compatibility patch. The patch makes all adapter-owned paths honor `ZCODE_HOME`, selects only `builtin:zai-coding-plan`, applies the requested model after native session creation, establishes `build` before the first prompt, forwards native-tool suppression, and keeps the backend under the adapter watchdog. The managed runtime downloads the official ZCode 3.11.2 AppImage, verifies its architecture-specific SHA-256, and extracts only the headless `resources/glm` runtime; Mjolnir never launches the Electron application.
+
+Ordinary ACP tool permissions were previously surfaced only for Muse. ZCode therefore received an immediate cancelled response even though its backend was correctly in `build` mode. Generalizing that existing structured elicitation path to Muse and ZCode produced a real `allow_once` decision and a real `deny` decision; the accepted file existed with exact content and the denied file remained absent.
+
+The `disallowedTools` implementation was initially present only at sibling `../codex-acp` commit `e72eb6d`; merely sending the metadata to npm 1.11.3 did not suppress native collaboration after resume, and GPT Luna invoked native `sendInput`. After the user authorized publication, the exact change passed the adapter's unit/type/build gates and packed-artifact guardian/yolo live tests, then shipped as `@brokkai/codex-acp` 1.11.4 through its trusted GitHub workflow. Mjolnir pins that published artifact directly. A post-restart GPT Luna transcript contained only `mcp.mj-subagents.*` delegation tools and completed child follow-up.
+
+ZCode stores all native conversations in one live SQLite database and offers no selected-session export in this backend generation. Copying that database or its WAL into a checkpoint would leak unrelated desktop conversations and can be inconsistent. This delivery therefore supports daemon/worker reattachment against the original profile store but intentionally advertises native checkpoint recovery as unavailable for ZCode. Relocatable ZCode checkpoint/import support is deferred until a selected-session export exists.
 
 Mjolnir currently has six closed harness enum values. Its database revision is 31, with CHECK constraints and stored harness enum values. Adding ZCode is breaking for older readers and writers even though existing rows can be preserved. The prior sub-agent tmux campaign succeeded on local bare targets; its container campaign was blocked by host runtime prerequisites. Recheck target capability during implementation instead of assuming that historical limitation persists.
 
@@ -46,14 +54,22 @@ Decision: use the current TypeScript adapter as the first compatibility candidat
 
 Decision: keep Claude and Codex as the only Mjolnir delegation parents. ZCode is an ordinary selectable harness and an eligible child. Rationale: this preserves the user's explicit parent scope. ZCode children must not recursively create invisible native children; verify native `Agent`/`Task` suppression through the backend's advertised `--disallowedTools` option before enabling that child role. Date/author: 2026-09-13, Codex.
 
-Decision: first support an installed native ZCode backend on bare local/SSH targets, with a managed, pinned ACP adapter and explicit backend preflight. Rationale: the known working installation is a desktop-distributed Node bundle, not a verified redistributable package. Do not silently promise portable containers or download a mutable proprietary bundle. Date/author: 2026-09-13, Codex.
+Decision: include full target support in the first delivery: managed adapter and backend installation on bare targets plus the default container image. Rationale: the user selected parity with other Mjolnir harnesses rather than an installed-target-only increment. Obtain official versioned ZCode artifacts and checksums for each supported platform; do not redistribute or fetch an unversioned desktop bundle. Date/author: 2026-09-13, user and Codex.
+
+Decision: use the existing `builtin:zai-coding-plan` provider and its GLM Coding Plan allowance. Do not select the simultaneously enabled `builtin:zai-start-plan` provider. Rationale: the adapter documents that Start Plan requires browser-solved Aliyun CAPTCHA headers and cannot operate headlessly, while Coding Plan uses an API key and is supported. Date/author: 2026-09-13, user and Codex.
 
 Decision: use isolated stores for all implementation tests. Plan a new breaking migration at the next unused revision (32 if 31 is still current), including its compatibility floor in the same transaction. Rationale: AGENTS.md explicitly says a feature request does not authorize an incompatible upgrade of the live store. Prepare the complete validated upgrade and backup procedure before seeking that final authorization. Date/author: 2026-09-13, Codex.
+
+Decision: do not archive ZCode's shared native SQLite database. Rationale: a full database snapshot would expose unrelated conversations and a live file copy is not transactionally safe. Same-store restart/resume is supported; selected-session checkpoint recovery and native import remain explicitly unavailable. Date/author: 2026-09-13, Codex.
+
+Decision: publish Codex ACP `disallowedTools` as `@brokkai/codex-acp` 1.11.4 and pin that registry version directly, replacing the temporary generated patch over 1.11.3. Rationale: the user explicitly authorized publication, and a normal immutable package pin keeps bare installs, ambient fallback, and the container image aligned without commit-specific patch machinery. Date/author: 2026-09-13, user and Codex.
 
 ## Outcomes & Retrospective
 
 
-Planning is complete. No ZCode code, profile, credentials, installed executable, or live database has been changed. The preceding unrelated requested improvements are already committed: timeout alignment in `5bcfc194` and highest-quota profile selection per harness in `f26a86a3`. ZCode authentication and successful sub-agent execution remain unproven. Adapter isolation and approval behavior are the highest-priority implementation questions.
+ZCode now runs as a native Mjolnir harness through `zcode-acp-server` 0.37.1 and the headless ZCode 3.11.2/CLI 0.16.5 backend. The isolated store at `/tmp/mj-zcode-live-20260913` proved direct GLM-5.3-Flash inference (`c57132ed7973002429f9407dbcef54e3`), live Coding Plan quota, approved and denied guardian writes (`e4ab5a8c0906a78b1fcb26b831cf584b`), Claude Sonnet parenting (`3091f770ec5a7a7b0479f6b181346dea`), and GPT Luna parenting plus post-restart follow-up (`21852a46a85efd48f3e8f3673835313b`). Parent and child database rows had the same `localhost` target and exact project worktree.
+
+The tmux interface showed `Sub-agents (1)`, opened a virtual workspace whose Workspaces header was `codex-zcode-parent  X`, displayed and accepted interaction with the ZCode child, and returned to the parent workspace through the X. Host Podman remains unavailable because `/run/user/1000` does not exist, so the disposable-container runtime smoke could not run; container parity is covered by pinned assets and build-time checks. Native selected-session checkpoint/import remains the explicit limitation described above.
 
 ## Context and Orientation
 
@@ -145,7 +161,7 @@ The live campaign succeeds when both a Claude parent and a Codex parent call Mjo
 
 Open the prompt-border Sub-agents entry with both keyboard and mouse. Confirm the parent's session name appears at the top of the Workspaces list with the existing dialog-style X, observe ZCode output and attention state, answer a question or approval, close the virtual workspace while work continues, and reopen it. Verify UI responsiveness throughout. Restart the isolated daemon, reattach, and confirm the existing child and native conversation survive; perform checkpoint/restore with nonce recall. Closing the family must terminate all owning processes before removing private files and must preserve the parent project's user-owned data.
 
-Live local bare behavior is required. Add a raw SSH smoke when an installed backend and authorized target are available. Container packaging and cross-platform execution are explicitly unproven until separately exercised; a missing backend on the parent's target must yield a visible, specific launch error. Record all executed models, versions, session IDs, target kinds, failures, and coverage limits. The user's normal-install success is only claimed after the final deployment smoke, not from isolated tests alone.
+Live local bare and disposable-container behavior are required. Add a raw SSH smoke when an authorized target is available. Managed installation and container packaging must use verified official artifacts; any unavailable architecture remains incomplete work rather than being silently omitted. Record all executed models, versions, session IDs, target kinds, failures, and coverage limits. The user's normal-install success is only claimed after the final deployment smoke, not from isolated tests alone.
 
 ## Idempotence and Recovery
 
@@ -167,3 +183,7 @@ Add `HarnessKind::Zcode` in the existing core crate. Centralize ZCode profile-ro
 Keep all target filesystem work, provider HTTP requests, installation, migrations, and process operations off terminal/web event loops in supervised tasks. Reuse shared subprocess helpers and drain output concurrently with input. Do not create a new workspace crate for this integration. Any new native checkpoint format must be versioned and tested independently from live credentials.
 
 Revision 2026-09-13: initial researched plan. Chose a compatibility-first integration of the recent TypeScript adapter, made raw-target/backend prerequisites explicit, retained Claude/Codex-only parenting, and separated isolated acceptance from the breaking live-store deployment boundary.
+
+Revision 2026-09-13 during implementation: record the user's decisions for full target support and the existing GLM Coding Plan allowance, plus the verified npm adapter metadata and local Node/backend versions.
+
+Revision 2026-09-13 after live acceptance: record the pinned ZCode compatibility patch, guardian elicitation fix, published Codex ACP 1.11.4 consumption, concrete tmux/session evidence, daemon reattachment, Podman host blocker, and the deliberate selected-session checkpoint limitation.

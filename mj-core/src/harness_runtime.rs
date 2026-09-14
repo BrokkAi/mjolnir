@@ -7,7 +7,7 @@
 use crate::config::HarnessKind;
 
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
-pub const CODEX_ACP_VERSION: &str = "1.11.3";
+pub const CODEX_ACP_VERSION: &str = "1.11.4";
 pub const CODEX_CLI_VERSION: &str = "0.153.4";
 pub const CLAUDE_ACP_VERSION: &str = "0.73.0";
 pub const KIMI_VERSION: &str = "0.41.0";
@@ -15,6 +15,9 @@ pub const GROK_VERSION: &str = "1.0.13";
 pub const DEEPSEEK_DSH_VERSION: &str = "0.1.2-rc.1";
 pub const MUSE_ACP_VERSION: &str = "0.2.4";
 pub const MUSE_VERSION: &str = "1.0.3-R2198.1";
+pub const ZCODE_ACP_VERSION: &str = "0.37.1";
+pub const ZCODE_VERSION: &str = "3.11.2";
+pub const ZCODE_CLI_VERSION: &str = "0.16.5";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HarnessPin {
@@ -31,8 +34,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             entrypoint: "bin/muse-acp",
         },
         HarnessKind::Codex => HarnessPin {
-            install_id: "brokkai-codex-acp-1.11.3_codex-0.153.4",
-            display_version: "@brokkai/codex-acp 1.11.3 + codex 0.153.4",
+            install_id: "brokkai-codex-acp-1.11.4_codex-0.153.4",
+            display_version: "@brokkai/codex-acp 1.11.4 + codex 0.153.4",
             entrypoint: "node_modules/.bin/codex-acp",
         },
         HarnessKind::Claude => HarnessPin {
@@ -54,6 +57,11 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             install_id: "dsh-0.1.2-rc.1",
             display_version: "dsh 0.1.2-rc.1 (bundled ACP)",
             entrypoint: "node_modules/.bin/dsh",
+        },
+        HarnessKind::Zcode => HarnessPin {
+            install_id: "zcode-acp-0.37.1_zcode-3.11.2-cli-0.16.5_mj2",
+            display_version: "zcode-acp-server 0.37.1 + ZCode 3.11.2 (CLI 0.16.5)",
+            entrypoint: "node_modules/.bin/zcode-acp-server",
         },
     }
 }

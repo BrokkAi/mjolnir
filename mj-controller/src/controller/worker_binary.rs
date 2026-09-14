@@ -1480,6 +1480,7 @@ pub(super) fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage
             | HarnessKind::Kimi
             | HarnessKind::Grok
             | HarnessKind::Muse
+            | HarnessKind::Zcode
     ) {
         ProvisionStage::Installing(profile.kind)
     } else {
@@ -1543,6 +1544,17 @@ pub(super) fn bridge_launch(
                 ],
             )
         }
+        mj_core::config::HarnessKind::Zcode => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                format!(
+                    "if command -v zcode-acp-server >/dev/null 2>&1; then exec zcode-acp-server; fi; {}; exec npx -y zcode-acp-server@{}",
+                    ensure_node_22_script(),
+                    mj_core::harness_runtime::ZCODE_ACP_VERSION,
+                ),
+            ],
+        ),
     }
 }
 
@@ -1554,7 +1566,7 @@ pub(super) fn preflight_harness(
     use mj_core::config::TargetTemplate;
     if !matches!(
         profile.kind,
-        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Deepseek
+        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Deepseek | HarnessKind::Zcode
     ) {
         return Ok(());
     }
@@ -1660,6 +1672,14 @@ pub(super) fn stage_profile(
             "skills",
             ".agent-presets",
         ],
+        mj_core::config::HarnessKind::Zcode => &[
+            "v2/config.json",
+            "v2/credentials.json",
+            "v2/setting.json",
+            "cli/config.json",
+            "AGENTS.md",
+            "skills",
+        ],
     };
     // Allowlist entries (and, within each, a copied directory's children) are
     // independent of one another, so copying them concurrently shortens the
@@ -1700,6 +1720,7 @@ fn append_hel_target_environment(
         mj_core::config::HarnessKind::Grok => "AGENTS.md",
         mj_core::config::HarnessKind::Deepseek => "AGENTS.md",
         mj_core::config::HarnessKind::Muse => "AGENTS.md",
+        mj_core::config::HarnessKind::Zcode => "AGENTS.md",
     };
     let path = destination.join(instructions);
     let separator = match std::fs::read_to_string(&path) {
@@ -4238,8 +4259,9 @@ mod tests {
         );
         assert_eq!(codex_command, "sh");
         assert_eq!(codex_arguments[0], "-c");
-        assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.3"));
+        assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.4"));
         assert!(codex_arguments[1].contains("codex-acp --version"));
+        assert!(codex_arguments[1].contains("npx -y @brokkai/codex-acp@1.11.4"));
 
         let (claude_command, claude_arguments) = bridge_launch(
             mj_core::config::HarnessKind::Claude,
@@ -4413,6 +4435,17 @@ mod tests {
             "containers/Containerfile.agent-dev must install {deepseek}"
         );
         assert!(!CONTAINERFILE.contains("dsh-acp-server"));
+
+        let zcode = format!(
+            "zcode-acp-server@{}",
+            mj_core::harness_runtime::ZCODE_ACP_VERSION
+        );
+        assert!(
+            CONTAINERFILE.contains(&zcode),
+            "containers/Containerfile.agent-dev must install {zcode}"
+        );
+        assert!(CONTAINERFILE.contains(mj_core::harness_runtime::ZCODE_VERSION));
+        assert!(CONTAINERFILE.contains(mj_core::harness_runtime::ZCODE_CLI_VERSION));
     }
     #[test]
     fn kimi_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {

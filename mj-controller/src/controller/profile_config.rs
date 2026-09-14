@@ -204,7 +204,11 @@ fn probe_profile(
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ProfileConfig> {
     let root = tempfile::tempdir().context("create private profile discovery directory")?;
-    let home = root.path().join("profile");
+    let home = if profile.kind == mj_core::config::HarnessKind::Zcode {
+        root.path().join("profile/.zcode")
+    } else {
+        root.path().join("profile")
+    };
     super::worker_binary::stage_profile(profile, &home)?;
     let cwd = root.path().join("workspace");
     std::fs::create_dir(&cwd)?;

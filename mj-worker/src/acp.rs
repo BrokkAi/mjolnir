@@ -1259,7 +1259,9 @@ where
             async move |request: RequestPermissionRequest, responder, _cx| {
                 permission_activity.mark();
                 permission_step_clock.begin_client_work();
-                if permission_harness == HarnessKind::Muse && !permission_policy.is_unconstrained() {
+                if matches!(permission_harness, HarnessKind::Muse | HarnessKind::Zcode)
+                    && !permission_policy.is_unconstrained()
+                {
                     let id = format!("tool-permission-{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                     let options: Vec<_> = request.options.iter().map(|option| serde_json::json!({
                         "const": option.option_id.to_string(), "title": option.name,
@@ -1268,7 +1270,10 @@ where
                         .map_err(|_| agent_client_protocol::Error::internal_error())?;
                     let form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
                         "mode": "form", "sessionId": request.session_id.to_string(),
-                        "message": format!("Muse Code requests permission:\n{message}"),
+                        "message": format!(
+                            "{} requests permission:\n{message}",
+                            permission_harness.display_name()
+                        ),
                         "requestedSchema": {"type":"object", "required":["choice"], "properties":{
                             "choice":{"type":"string", "title":"Permission", "oneOf":options}
                         }}
@@ -1295,13 +1300,13 @@ where
                         let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option|
                             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone())));
                         if let Err(error) = responder.respond(RequestPermissionResponse::new(outcome)) {
-                            tracing::debug!(%error, "Muse permission responder closed");
+                            tracing::debug!(%error, "harness permission responder closed");
                         }
                         if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
                             elicitation_id: id,
                             action: response.as_ref().map_or("cancel", ElicitationResponse::action_name).into(),
                         }).await {
-                            tracing::debug!(%error, "Muse permission result receiver closed");
+                            tracing::debug!(%error, "harness permission result receiver closed");
                         }
                     });
                     return Ok(());
