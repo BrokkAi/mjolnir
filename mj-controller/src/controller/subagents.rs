@@ -34,7 +34,6 @@ impl Controller {
         )? {
             return Ok(existing);
         }
-        ensure!(self.config.subagents.enabled, "sub-agents are disabled");
         ensure!(
             !request.request_key.trim().is_empty(),
             "sub-agent request key cannot be empty"
@@ -62,6 +61,7 @@ impl Controller {
             ),
             "only Claude and Codex sessions can spawn sub-agents"
         );
+        ensure_parent_may_delegate(&parent, self.config.subagents.enabled)?;
         ensure!(parent.state.is_active(), "parent session is not active");
         ensure!(parent.target.is_some(), "parent session has no live target");
         ensure!(
@@ -254,9 +254,46 @@ fn borrowed_locator(
     })
 }
 
+/// A parent may delegate to Mjolnir children only if its own stored choice
+/// says so; `None` follows the global `[subagents] enabled` setting. A parent
+/// using its harness's native delegation never received the Mjolnir tools, so
+/// a request from it is stale.
+fn ensure_parent_may_delegate(parent: &SessionRecord, global_enabled: bool) -> Result<()> {
+    match parent.mjolnir_subagents {
+        Some(false) => bail!("this session uses native sub-agents"),
+        None if !global_enabled => bail!("sub-agents are disabled"),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_parent_using_native_delegation_cannot_spawn_mjolnir_children() {
+        let parent = |choice| {
+            let mut session = crate::controller::test_support::checkpoint_test_session("parent");
+            session.mjolnir_subagents = choice;
+            session
+        };
+
+        assert_eq!(
+            ensure_parent_may_delegate(&parent(Some(false)), true)
+                .unwrap_err()
+                .to_string(),
+            "this session uses native sub-agents"
+        );
+        assert_eq!(
+            ensure_parent_may_delegate(&parent(None), false)
+                .unwrap_err()
+                .to_string(),
+            "sub-agents are disabled"
+        );
+        // An explicit opt-in outlives the global setting being turned off.
+        assert!(ensure_parent_may_delegate(&parent(Some(true)), false).is_ok());
+        assert!(ensure_parent_may_delegate(&parent(None), true).is_ok());
+    }
 
     #[test]
     fn borrowed_bare_locator_gets_a_private_worker_identity() {

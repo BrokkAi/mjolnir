@@ -98,12 +98,8 @@ impl Controller {
             &workspace_session_id,
             target,
         )?;
-        launch.subagent_tools = self.config.subagents.enabled
-            && subagent.is_none()
-            && matches!(
-                session.harness_kind,
-                mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Codex
-            );
+        launch.subagent_tools =
+            subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
         if let Some(subagent) = &subagent {
             let parent = self
                 .state
@@ -375,6 +371,24 @@ impl Controller {
             canonical_root: canonical_memory_root(&launch.project_key),
         })
     }
+}
+
+/// Whether this session gets Mjolnir's delegation tools in place of its
+/// harness's own. The session's stored choice governs and `None` follows the
+/// global `[subagents] enabled` setting, so a session created before the
+/// per-session choice existed behaves as it always did. A child never gets
+/// them, and only Claude and Codex can receive them at all.
+fn subagent_tools_enabled(
+    session: &mj_core::state::SessionRecord,
+    global_enabled: bool,
+    is_child: bool,
+) -> bool {
+    session.mjolnir_subagents.unwrap_or(global_enabled)
+        && !is_child
+        && matches!(
+            session.harness_kind,
+            mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Codex
+        )
 }
 
 fn worker_workspace_for_recovery(
@@ -3032,6 +3046,34 @@ mod tests {
     use std::collections::BTreeMap;
 
     use std::path::{Path, PathBuf};
+
+    /// The session's stored choice decides, with the global setting as the
+    /// fallback, and a child never gets the tools whatever either says.
+    #[test]
+    fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
+        let claude = |choice| {
+            let mut session = crate::controller::test_support::checkpoint_test_session("s-1");
+            session.harness_kind = HarnessKind::Claude;
+            session.mjolnir_subagents = choice;
+            session
+        };
+
+        assert!(!subagent_tools_enabled(&claude(Some(false)), true, false));
+        assert!(subagent_tools_enabled(&claude(Some(true)), false, false));
+        assert!(subagent_tools_enabled(&claude(None), true, false));
+        assert!(!subagent_tools_enabled(&claude(None), false, false));
+        assert!(!subagent_tools_enabled(&claude(Some(true)), true, true));
+
+        let mut grok = claude(Some(true));
+        grok.harness_kind = HarnessKind::Grok;
+        assert!(!subagent_tools_enabled(&grok, true, false));
+
+        let mut codex = claude(None);
+        codex.harness_kind = HarnessKind::Codex;
+        assert!(subagent_tools_enabled(&codex, true, false));
+        codex.mjolnir_subagents = Some(false);
+        assert!(!subagent_tools_enabled(&codex, true, false));
+    }
 
     #[cfg(unix)]
     #[test]

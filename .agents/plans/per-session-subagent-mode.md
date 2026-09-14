@@ -15,7 +15,7 @@ This change also fixes a defect in the current code: the worker hides the native
 
 
 - [x] (2026-09-14) Milestone 1: session record, create request, API request, database column and migration 33.
-- [ ] Milestone 2: controller resolves the per-session value; worker keys native suppression on the MCP socket.
+- [x] (2026-09-14) Milestone 2: controller resolves the per-session value; worker keys native suppression on the MCP socket.
 - [ ] Milestone 3: terminal new-session wizard checkbox.
 - [ ] Milestone 4: web new-session wizard checkbox.
 - [ ] Validation: `cargo fmt --all -- --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `git diff --check`, web unit and Playwright tests; commit.
@@ -23,6 +23,8 @@ This change also fixes a defect in the current code: the worker hides the native
 ## Surprises & Discoveries
 
 
+- Observation: resume does not build its launch configuration on a different path. `mj-controller/src/controller/worker_binary.rs::prepare_worker_files` has three callers -- `controller/provisioning.rs:109`, `controller/provisioning.rs:538`, and `controller/resume.rs:1165` -- so the one expression covers first launch, worker payload install, and resume.
+  Evidence: `grep -rn prepare_worker_files mj-controller/src`.
 - Observation: the compatibility floor is already 32, not 30, because migration 32 (ZCode harness constraints) was breaking. Three tests in `mj-controller/src/database/schema.rs` asserted `minimum_compatible == Some(SCHEMA_VERSION)`, which held only by coincidence while the newest migration was the breaking one. Milestone 1 introduced a `MINIMUM_COMPATIBLE_VERSION` constant in that file's `reader_tests` module and pinned the two real assertions to it, so a future compatible migration no longer breaks the test.
   Evidence: `assertion \`left == right\` failed; left: Some(32); right: Some(33)` at `mj-controller/src/database/schema.rs:1758`.
 - Observation: every migration-downgrade fixture that rewinds `PRAGMA user_version` below 33 must also drop the new column, or migration 33 re-runs and fails with `duplicate column name: mjolnir_subagents`. Nine fixtures in `mj-controller/src/database/tests.rs` and one in `schema.rs` needed the extra `ALTER TABLE sessions DROP COLUMN mjolnir_subagents;`.
