@@ -1020,3 +1020,109 @@ fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_it
         manager.shutdown.shutdown().await.unwrap();
     });
 }
+
+/// Real Git for the checkout, canned answers for the container runtime, and
+/// the fixture's network URL rewritten wherever Git really contacts a remote.
+struct GitWithPodmanPreflightExecutor {
+    remote: PathBuf,
+}
+
+impl CommandExecutor for GitWithPodmanPreflightExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if command.program == "git" {
+            return crate::controller::test_support::FixtureRemoteExecutor {
+                remote: self.remote.clone(),
+            }
+            .execute(command);
+        }
+        assert_eq!(command.program, "podman", "unexpected {}", command.program);
+        let stdout: &[u8] = if command.args.iter().any(|argument| argument == "--version") {
+            b"podman version 5.4.2\n"
+        } else if command.args.iter().any(|argument| argument == "info") {
+            b"true\n"
+        } else {
+            b"         0       1000          1\n         1     100000      65536\n"
+        };
+        Ok(CommandOutput {
+            status: 0,
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+#[test]
+fn preparing_a_local_session_for_a_container_previews_the_conversion() {
+    let short = "preparing_a_local_session_for_a_container_previews_the_conversion";
+    if !isolated_test_child(&test_name(short), "MJ_MOVE_CONVERSION_PREVIEW_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let repository = committed_repository();
+    let (_remote_parent, remote) =
+        crate::controller::test_support::network_remote_for(repository.path());
+    let home = tempfile::tempdir().unwrap();
+    let mut config = resume_compatibility_config();
+    add_codex_profile(&mut config, home.path());
+    config
+        .bundles
+        .insert("project".into(), local_bundle(repository.path()));
+
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
+    session.bundle_id = "project".into();
+    session.state = SessionState::Running;
+    let state = State {
+        sessions: BTreeMap::from([(session_id.into(), session)]),
+        ..State::default()
+    };
+    crate::database::save_state(&state).unwrap();
+    let controller = Controller { config, state };
+    let selection = mj_core::state::MoveSelection {
+        clear_resource_allocation: false,
+        session_id: session_id.into(),
+        profile_id: Some("codex".into()),
+        target_template_id: Some("podman".into()),
+        additional_mounts: None,
+        resource_allocation: None,
+    };
+    let executor = GitWithPodmanPreflightExecutor { remote };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let first = runtime
+        .block_on(controller.prepare_move_session_controlled(selection.clone(), &executor))
+        .unwrap();
+
+    let preview = first.conversion.as_deref().expect("a conversion preview");
+    assert_eq!(
+        preview.fetch_url,
+        crate::controller::test_support::FIXTURE_FETCH_URL
+    );
+    assert_eq!(preview.branch.as_deref(), Some("master"));
+    assert_eq!(preview.default_branch, "master");
+    assert_eq!(
+        preview.destination,
+        PathBuf::from(mj_core::targets::CONTAINER_WORKSPACE)
+            .join(repository.path().file_name().unwrap())
+    );
+    assert_eq!(preview.unpushed_commits, 0);
+    assert_eq!(preview.untracked_files, 0);
+    assert!(preview.host_checkout_retained);
+
+    // A live agent keeps editing, so the dirty counts must not be able to
+    // invalidate a confirmation the person is still reading.
+    fs::write(repository.path().join("agent-edit.txt"), "written\n").unwrap();
+    let second = runtime
+        .block_on(controller.prepare_move_session_controlled(selection, &executor))
+        .unwrap();
+
+    assert_eq!(
+        second.conversion.as_deref().unwrap().untracked_files,
+        1,
+        "the preview reports the new file"
+    );
+    assert_eq!(first.fingerprint, second.fingerprint);
+}

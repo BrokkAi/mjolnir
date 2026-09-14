@@ -18,7 +18,7 @@ The checkout must have a network Git remote (GitHub or any `https`/`ssh` URL). A
 
 
 - [x] Checkpoint A (2026-09-14): compatibility gate, network-remote resolution in the conversion plan, host checkout snapshot builder, and `RawConversionPreview` computation, with real-Git tests.
-- [ ] Checkpoint B: resume wiring (conversion archive, checkpoint swap, restore of repository content, notice, rollback test) and move preparation carrying the preview.
+- [x] Checkpoint B (2026-09-14): resume wiring (conversion archive, checkpoint swap, restore of repository content, notice, rollback test) and move preparation carrying the preview.
 - [ ] Checkpoint C: surfaces (TUI review lines and resume confirm dialog, web resume preflight and move dialog, `mj move` output), user docs, and this plan's closing sections.
 
 
@@ -34,6 +34,43 @@ A fixture cannot put `url.<path>.insteadOf` in the checkout's own Git configurat
 `MovePreparation.conversion` is `Option<Box<RawConversionPreview>>`, not the unboxed `Option` this plan's Interfaces section first described. `MoveSessionRequest` is a variant payload of `DaemonAction` and of `ControllerAction`, and the unboxed preview pushed both enums past clippy's `large_enum_variant` threshold. Boxing one field was smaller than boxing the payload in every enum that carries it, and the serialized form is identical either way.
 
 The conversion snapshot uses the repository id `project`, which a raw checkpoint has always used, while `converted_raw_bundle` synthesizes a bundle whose repository id is derived from the checkout's name. Checkpoint B must write the conversion archive's `BundleManifest.primary_repository` as `project` so `bundle_from_manifest` can still find the primary repository.
+
+Pointing the session record at the conversion archive is not enough. The resume
+uploads and restores from its own local `archive_path` variable, not from the
+record, so a conversion also has to route the restore specification and the
+archive upload to the new file; otherwise the container would clone the right
+remote and then restore the raw archive's content over it.
+
+`move_confirmation` runs twice for one move: once in `prepare_move_session_controlled`
+and again in `move_session_managed_controlled`, which overwrites the prepared
+fingerprint and compares it with the one the person confirmed. The conversion
+fields therefore enter the digest through a parameter both call sites pass;
+computing them in only the preparation would make every raw move fail its own
+fingerprint check.
+
+A failed converting resume leaves behind the bundle it installed in the
+configuration. The rollback restores the record, including its bundle id, but
+nothing removes a configured bundle, and `converted_raw_bundle` reuses a
+matching one, so retries do not pile up. The rollback test asserts exactly that
+instead of "the configuration is unchanged".
+
+`reconcile_managed_checkpoint_archives` only recognizes archives named
+`<session>-<frontier>-archive-<32 hex>.hel.zip`, and they live in
+`sessions_dir()` (the data directory's `sessions`), not `archives`. The
+conversion archive keeps that shape and distinguishes itself inside the session
+segment, as `<session>-converted-<frontier>-archive-<nonce>.hel.zip`, so an
+interrupted conversion's file is still reconciled away.
+
+A restore reads nothing from `TargetManifest` beyond validating that its
+`details` carry no secrets, so the conversion archive keeps the previous
+archive's target and bundle identity and changes only
+`BundleManifest.primary_repository`, which is how `restore_checkpoint` and
+`bundle_from_manifest` find the primary repository, its destination, and the
+working directory the native transcript is rewritten to.
+
+`raw_checkout_snapshot` refuses a checkout with no origin refs (through
+`repair_origin_refs`), so a conversion of a checkout that has never pushed fails
+before provisioning. Fixtures push their base commit to the fixture remote.
 
 A managed worktree's archive bundles commits since its creation commit (`DeltaFrom{base_commit}`). If that creation commit was never pushed, a fresh network clone cannot fetch the bundle because Git bundles require their prerequisite commits to exist. Bundling "commits not on any origin ref" (`GitHistoryMode::SessionDelta`) avoids this because every prerequisite is then on the remote.
 

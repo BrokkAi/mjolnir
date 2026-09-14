@@ -739,9 +739,6 @@ const RAW_CONVERSION_REPOSITORY_ID: &str = "project";
 /// The metadata carries the checkout's own network remote, so the container
 /// clones real provenance and its later checkpoints behave like any other
 /// workspace session's.
-// Checkpoint B of .agents/plans/local-session-to-container.md calls this from
-// the resume and move paths; until then only its tests do.
-#[allow(dead_code)]
 pub(super) fn raw_checkout_snapshot(
     checkout: &Path,
     source: &mj_core::remote_git::NetworkGitSource,
@@ -836,9 +833,6 @@ fn git_runner_stdout(
 
 /// Describe a raw-to-workspace conversion for a person to confirm. Reads Git
 /// and asks the remote for its default branch; changes nothing.
-// Checkpoint B of .agents/plans/local-session-to-container.md calls this from
-// the resume and move paths; until then only its tests do.
-#[allow(dead_code)]
 pub(super) fn raw_conversion_preview(
     session: &SessionRecord,
     conversion: &RawToWorkspaceConversion,
@@ -1784,6 +1778,7 @@ mod tests {
     use crate::controller::Controller;
     use crate::controller::resume::apply_failed_resume_rollback;
     use crate::controller::test_support::{
+        FIXTURE_FETCH_URL, FixtureRemoteExecutor, checkout_with_network_remote,
         checkpoint_test_session, committed_repository, local_bundle, managed_raw_session,
         managed_worktree_session, raw_session_on, resume_compatibility_config, ssh_worktree_target,
         test_git,
@@ -2538,11 +2533,6 @@ mod tests {
             );
         }
     }
-    /// The network URL a fixture checkout records for its remote. Git reaches
-    /// the bare repository on disk through `insteadOf`, so the code under test
-    /// sees real network provenance without a network.
-    const FIXTURE_FETCH_URL: &str = "https://fetch.example.test/repo.git";
-
     /// Give a checkout the network remote a conversion requires. Planning
     /// never contacts it.
     fn add_network_remote(checkout: &Path) {
@@ -2553,68 +2543,6 @@ mod tests {
         mj_core::remote_git::NetworkGitSource {
             fetch_url: FIXTURE_FETCH_URL.to_owned(),
             push_urls: vec![FIXTURE_FETCH_URL.to_owned()],
-        }
-    }
-
-    /// A committed checkout whose `origin` is a bare repository on disk behind
-    /// [`FIXTURE_FETCH_URL`], with `master` already pushed.
-    fn checkout_with_network_remote() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
-        let remote_parent = tempfile::tempdir().unwrap();
-        let remote = remote_parent.path().join("remote.git");
-        let output = Command::new("git")
-            .args(["init", "--bare", "--initial-branch=master"])
-            .arg(&remote)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let checkout = committed_repository();
-        test_git(
-            checkout.path(),
-            &["remote", "add", "origin", &remote.to_string_lossy()],
-        );
-        test_git(
-            checkout.path(),
-            &["push", "--set-upstream", "origin", "master"],
-        );
-        // `git remote get-url` applies `insteadOf` rewrites, so the rewrite
-        // cannot live in this repository's configuration: the checkout records
-        // the network URL, and only the commands that really reach a remote
-        // are rewritten, by `FixtureRemoteExecutor`.
-        test_git(
-            checkout.path(),
-            &["remote", "set-url", "origin", FIXTURE_FETCH_URL],
-        );
-        (checkout, remote_parent, remote)
-    }
-
-    /// Rewrites the fixture's network URL for the one preview step that really
-    /// contacts a remote, the way `FixtureTransport` does in `network_git`.
-    struct FixtureRemoteExecutor {
-        remote: PathBuf,
-    }
-
-    impl CommandExecutor for FixtureRemoteExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            let mut command = command.clone();
-            assert_eq!(command.program, "git", "the fixture executes only Git");
-            // Rewrite only the commands that contact the remote. Rewriting
-            // `remote get-url` would hide the network URL the checkout records.
-            if command
-                .args
-                .iter()
-                .any(|argument| argument == "ls-remote" || argument == "fetch")
-            {
-                let mut args = vec![
-                    "-c".to_owned(),
-                    format!(
-                        "url.{}.insteadOf={FIXTURE_FETCH_URL}",
-                        self.remote.display()
-                    ),
-                ];
-                args.extend(command.args);
-                command.args = args;
-            }
-            ProcessExecutor.execute(&command)
         }
     }
 

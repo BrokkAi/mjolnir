@@ -59,7 +59,33 @@ pub(super) fn write_checkpoint_gate_archive(
     session_id: &str,
     event_frontier: u64,
 ) -> CheckpointMetadata {
-    write_checkpoint_archive(directory, session_id, event_frontier, Vec::new())
+    write_checkpoint_archive(
+        directory,
+        session_id,
+        event_frontier,
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+/// A raw session's archive with native harness state in it, which is what a
+/// conversion has to carry across unchanged.
+pub(super) fn write_checkpoint_archive_with_native_state(
+    directory: &Path,
+    session_id: &str,
+    event_frontier: u64,
+) -> CheckpointMetadata {
+    write_checkpoint_archive(
+        directory,
+        session_id,
+        event_frontier,
+        Vec::new(),
+        vec![mj_checkpoint::archive::NativeArtifact {
+            relative_path: PathBuf::from("sessions/native-session.jsonl"),
+            data: b"{\"type\":\"message\"}\n".to_vec(),
+            mode: 0o600,
+        }],
+    )
 }
 
 pub(super) fn write_network_checkpoint_archive(
@@ -88,6 +114,7 @@ pub(super) fn write_network_checkpoint_archive(
             unstaged_patch: Vec::new(),
             untracked_tar: Vec::new(),
         }],
+        Vec::new(),
     )
 }
 
@@ -96,6 +123,7 @@ fn write_checkpoint_archive(
     session_id: &str,
     event_frontier: u64,
     repositories: Vec<mj_checkpoint::archive::RepositorySnapshot>,
+    native_artifacts: Vec<mj_checkpoint::archive::NativeArtifact>,
 ) -> CheckpointMetadata {
     let archive_path = directory.join(format!("{session_id}.hel.zip"));
     let verified = write_archive_atomic(
@@ -138,7 +166,7 @@ fn write_checkpoint_archive(
                 transcript: Vec::new(),
                 queued_prompts: Vec::new(),
             },
-            native_artifacts: Vec::new(),
+            native_artifacts,
             repositories,
         },
     )
@@ -265,6 +293,79 @@ pub(super) fn committed_repository() -> tempfile::TempDir {
     test_git(directory.path(), &["add", "."]);
     test_git(directory.path(), &["commit", "-m", "base"]);
     directory
+}
+
+/// The network URL a fixture checkout records for its remote. Git reaches the
+/// bare repository on disk through `insteadOf`, so the code under test sees
+/// real network provenance without a network.
+pub(super) const FIXTURE_FETCH_URL: &str = "https://fetch.example.test/repo.git";
+
+/// A committed checkout whose `origin` is a bare repository on disk behind
+/// [`FIXTURE_FETCH_URL`], with `master` already pushed.
+pub(super) fn checkout_with_network_remote() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+    let checkout = committed_repository();
+    let (remote_parent, remote) = network_remote_for(checkout.path());
+    (checkout, remote_parent, remote)
+}
+
+/// Give an existing checkout the pushed network remote a conversion requires.
+pub(super) fn network_remote_for(checkout: &Path) -> (tempfile::TempDir, PathBuf) {
+    let remote_parent = tempfile::tempdir().unwrap();
+    let remote = remote_parent.path().join("remote.git");
+    let output = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=master"])
+        .arg(&remote)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    test_git(
+        checkout,
+        &["remote", "add", "origin", &remote.to_string_lossy()],
+    );
+    test_git(checkout, &["push", "--set-upstream", "origin", "master"]);
+    // `git remote get-url` applies `insteadOf` rewrites, so the rewrite cannot
+    // live in this repository's configuration: the checkout records the network
+    // URL, and only the commands that really reach a remote are rewritten, by
+    // `FixtureRemoteExecutor`.
+    test_git(
+        checkout,
+        &["remote", "set-url", "origin", FIXTURE_FETCH_URL],
+    );
+    (remote_parent, remote)
+}
+
+/// Rewrites the fixture's network URL for the steps that really contact a
+/// remote, the way `FixtureTransport` does in `network_git`.
+pub(super) struct FixtureRemoteExecutor {
+    pub(super) remote: PathBuf,
+}
+
+impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
+    fn execute(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        let mut command = command.clone();
+        assert_eq!(command.program, "git", "the fixture executes only Git");
+        // Rewrite only the commands that contact the remote. Rewriting
+        // `remote get-url` would hide the network URL the checkout records.
+        if command
+            .args
+            .iter()
+            .any(|argument| argument == "ls-remote" || argument == "fetch")
+        {
+            let mut args = vec![
+                "-c".to_owned(),
+                format!(
+                    "url.{}.insteadOf={FIXTURE_FETCH_URL}",
+                    self.remote.display()
+                ),
+            ];
+            args.extend(command.args);
+            command.args = args;
+        }
+        ProcessExecutor.execute(&command)
+    }
 }
 
 /// A managed raw session whose worktree really exists in `repository`.

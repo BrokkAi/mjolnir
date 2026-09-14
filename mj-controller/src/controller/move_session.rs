@@ -158,18 +158,25 @@ impl Drop for MovePhaseTimer<'_> {
 }
 
 impl Controller {
+    /// Returns the planned conversion when this move turns a local checkout
+    /// into an isolated workspace, so the caller can describe it without
+    /// reading Git a second time.
     fn validate_move_destination_paths(
         &self,
         source: &mj_core::state::SessionRecord,
         target_id: &str,
         executor: &(impl CommandExecutor + Sync),
-    ) -> Result<()> {
+    ) -> Result<Option<super::worktree::RawToWorkspaceConversion>> {
         use super::worktree::ResumePlan;
         match super::worktree::resume_compatibility(source, &self.config, target_id)
             .map_err(anyhow::Error::msg)?
         {
             ResumePlan::RawToWorkspace => {
-                super::worktree::plan_raw_to_workspace(source, &self.config, executor)?;
+                return Ok(Some(super::worktree::plan_raw_to_workspace(
+                    source,
+                    &self.config,
+                    executor,
+                )?));
             }
             ResumePlan::WorkspaceToRaw => {
                 self.plan_workspace_to_raw(source, target_id, executor)?;
@@ -181,11 +188,12 @@ impl Controller {
             }
             ResumePlan::InPlace => {}
         }
-        Ok(())
+        Ok(None)
     }
     fn move_confirmation(
         &self,
         selection: &MoveSelection,
+        conversion: Option<&mj_core::state::RawConversionPreview>,
     ) -> Result<(bool, Vec<mj_core::state::MaterializedQueuedPrompt>, String)> {
         let source = self
             .state
@@ -244,6 +252,17 @@ impl Controller {
             selection,
             self.move_configuration_fingerprint(selection)?,
             &queued,
+            // Only what the destination is built from. The dirty counts move
+            // with every keystroke of a live agent, and hashing them would
+            // invalidate the confirmation the person is reading.
+            conversion.map(|preview| {
+                (
+                    &preview.fetch_url,
+                    &preview.push_urls,
+                    &preview.branch,
+                    &preview.destination,
+                )
+            }),
         ))?;
         Ok((active, queued, fingerprint))
     }
@@ -419,7 +438,8 @@ impl Controller {
         for mount in mounts {
             self.validate_mount_source(target_id, &mount.source, executor)?;
         }
-        self.validate_move_destination_paths(source, target_id, executor)?;
+        let planned_conversion =
+            self.validate_move_destination_paths(source, target_id, executor)?;
         ensure!(
             profile.home.is_dir(),
             "destination profile home is unavailable; configure the profile before moving"
@@ -448,7 +468,17 @@ impl Controller {
                 }
             }
         }
-        let (active, mut queued_commands, fingerprint) = self.move_confirmation(&selection)?;
+        // What moving a local checkout into a target really does, computed
+        // before anything is stopped so a person can confirm it.
+        let conversion = planned_conversion
+            .map(|conversion| {
+                super::worktree::raw_conversion_preview(source, &conversion, executor)
+                    .context("describe the move of this checkout into the target")
+            })
+            .transpose()?
+            .map(Box::new);
+        let (active, mut queued_commands, fingerprint) =
+            self.move_confirmation(&selection, conversion.as_deref())?;
         // Confirmation is an inspector, not transport for attachment bytes.
         // Replay always reads the verified archive after destination readiness.
         for entry in &mut queued_commands {
@@ -473,7 +503,7 @@ impl Controller {
             .unwrap_or(new_command_id("move")?);
         Ok(MovePreparation {
             source_unavailable: false,
-            conversion: None,
+            conversion,
             selection,
             source_profile_id: source.last_profile.clone(),
             source_target_template_id: source.target_template_id.clone(),
@@ -510,7 +540,8 @@ impl Controller {
             ) {
                 let source_harness = self.state.sessions[&id].harness_kind;
                 let snapshot = refresh_move_source(manager, &id).await?;
-                let (active, queue, fingerprint) = self.move_confirmation(&checked.selection)?;
+                let (active, queue, fingerprint) =
+                    self.move_confirmation(&checked.selection, checked.conversion.as_deref())?;
                 checked.source_unavailable = snapshot
                     .as_ref()
                     .is_none_or(|snapshot| !snapshot.operational.native_session_is_ready());
