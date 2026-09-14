@@ -108,6 +108,7 @@ pub enum DashboardAction {
     },
     CreateSession {
         create_managed_worktree: Option<bool>,
+        mjolnir_subagents: Option<bool>,
         /// Workspace selected when the creation request was submitted. The
         /// dashboard may switch tabs while validation or dirty-repository
         /// confirmation is still in flight, so the request keeps its origin.

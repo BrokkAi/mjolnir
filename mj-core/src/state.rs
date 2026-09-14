@@ -876,6 +876,10 @@ pub struct SessionRecord {
     /// None preserves automatic selection; false uses the selected directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_managed_worktree: Option<bool>,
+    /// None follows the global `[subagents] enabled` setting at launch time;
+    /// Some(true) and Some(false) are explicit per-session choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mjolnir_subagents: Option<bool>,
     pub target_template_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_allocation: Option<SessionResourceAllocation>,
@@ -1722,6 +1726,7 @@ mod tests {
 
     fn sample_state() -> State {
         let session = SessionRecord {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,

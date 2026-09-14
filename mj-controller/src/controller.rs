@@ -442,6 +442,7 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 
 pub struct SessionLaunchOptions {
     pub create_managed_worktree: Option<bool>,
+    pub mjolnir_subagents: Option<bool>,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -717,6 +718,7 @@ impl Controller {
     ) -> Result<String> {
         let SessionLaunchOptions {
             create_managed_worktree,
+            mjolnir_subagents,
             initial_prompt,
             workspace_id,
             additional_mounts,
@@ -796,6 +798,7 @@ impl Controller {
         let now = now();
         let record = SessionRecord {
             create_managed_worktree,
+            mjolnir_subagents,
             archived: false,
             container_cpus: None,
             container_memory: None,
@@ -1718,6 +1721,7 @@ mod tests {
 
     fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
         SessionLaunchOptions {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             initial_prompt: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),

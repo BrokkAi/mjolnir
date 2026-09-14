@@ -355,6 +355,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         (None, None) => None,
     };
     let request = StartSessionRequest {
+        mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id,
         profile_id: args.profile.clone(),

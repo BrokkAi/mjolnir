@@ -216,6 +216,45 @@ test('an aborted preflight cannot clear a replacement check for the same draft',
   assert.equal(context.pendingNewPreflight, null);
 });
 
+test('the create payload carries a sub-agent choice only for Claude and Codex', async () => {
+  const posted = [];
+  const makeContext = (profileId, harnessKind, mjolnirSubagents) => vm.createContext({
+    snapshot: { profiles: [{ id: profileId, harness_kind: harnessKind }] },
+    newDraft: {
+      workspaceId: 'test',
+      profileId,
+      bundleId: 'bundle',
+      targetId: 'container',
+      projectDirectory: '',
+      title: '',
+      worktreeOptions: { available: false, default_create: false },
+      createManagedWorktree: false,
+      mjolnirSubagents,
+    },
+    targetIsBare: () => false,
+    renderNewForm: () => {},
+    refresh: async () => {},
+    navigate: () => {},
+    newError: makeNode(),
+    request: async (_path, options) => { posted.push(JSON.parse(options.body)); },
+  });
+
+  for (const [kind, choice, expected] of [
+    ['claude', true, true],
+    ['claude', false, false],
+    ['codex', true, true],
+    ['grok', true, null],
+    ['kimi', false, null],
+  ]) {
+    const context = makeContext('profile', kind, choice);
+    context.newDraft.committing = false;
+    vm.runInContext(sourceBetween('/// Only Claude and Codex receive', '\nfunction targetIsBare('), context);
+    vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
+    await vm.runInContext('commitNew()', context);
+    assert.equal(posted.at(-1).mjolnir_subagents, expected, `${kind} with ${choice}`);
+  }
+});
+
 test('rolled-back launch errors remain visible only in their workspace and can be dismissed', () => {
   const notices = makeNode();
   const context = vm.createContext({
