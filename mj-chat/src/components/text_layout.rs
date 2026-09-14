@@ -2,6 +2,8 @@
 
 use std::collections::VecDeque;
 
+use ratatui::Frame;
+use ratatui::layout::Rect;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -90,7 +92,7 @@ pub(crate) fn grapheme_offset_for_wrapped_row(line: &str, width: usize, row: usi
     )
 }
 
-pub(crate) fn input_cursor_visual_position(
+pub fn input_cursor_visual_position(
     input: &str,
     cursor: usize,
     width: usize,
@@ -251,4 +253,33 @@ fn display_width(text: &str) -> usize {
     } else {
         text.width()
     }
+}
+
+/// Place the terminal cursor over word-wrapped composer input, `queue_rows`
+/// below the top of `area` and adjusted by the paragraph's `scroll`.
+pub fn set_input_cursor(
+    frame: &mut Frame,
+    area: Rect,
+    input: &str,
+    cursor: usize,
+    queue_rows: usize,
+    scroll: usize,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let width = usize::from(area.width);
+    let (column, input_row) = input_cursor_visual_position(input, cursor, width);
+    let row = queue_rows.saturating_add(input_row).saturating_sub(scroll);
+    if row < usize::from(area.height) {
+        frame.set_cursor_position((
+            area.x + column.min(width.saturating_sub(1)) as u16,
+            area.y + row as u16,
+        ));
+    }
+}
+
+/// Rows the word-wrapped input occupies at `width`.
+pub fn input_visual_rows(input: &str, width: usize) -> usize {
+    input_cursor_visual_position(input, input.len(), width).1 + 1
 }

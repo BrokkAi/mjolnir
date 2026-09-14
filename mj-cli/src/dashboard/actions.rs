@@ -1236,6 +1236,25 @@ impl DashboardContext {
         }
         self.dashboard
             .begin_session_operation(session_id.to_owned(), kind, None);
+        // A restart or resume parks the conversation behind the type-ahead
+        // composer. Select the session coming back so that composer is the
+        // one on screen, seed it with the warm chat's text so nothing typed
+        // is lost, and put the keyboard where the typing happens.
+        if matches!(
+            kind,
+            SessionOperationKind::Launching | SessionOperationKind::Resuming
+        ) {
+            self.dashboard.select_active_session(session_id);
+            if let Some(text) = self
+                .active_chat
+                .as_ref()
+                .filter(|chat| chat.session_id() == session_id)
+                .map(|chat| chat.draft())
+            {
+                self.dashboard.seed_transition_composer(session_id, text);
+            }
+            self.dashboard.focus_prompt();
+        }
         let cancelled = Arc::new(AtomicBool::new(false));
         self.lifecycle_operations.insert(
             session_id.to_owned(),
