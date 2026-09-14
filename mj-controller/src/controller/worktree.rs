@@ -758,6 +758,43 @@ fn read_checkout_position(
     })
 }
 
+/// The commit the session branch was created at, as the base for diffs and
+/// checkpoint bundles. Prefers the recorded base; sessions created before it
+/// was recorded fall back to the branch reflog, like `branch_creation_commit`
+/// in mj-checkpoint. A reflog that has expired leaves only the live head,
+/// which yields an empty bundle rather than a failed checkpoint.
+pub(super) fn managed_worktree_base_commit(
+    worktree: &ManagedWorktree,
+    executor: &impl CommandExecutor,
+) -> Result<String> {
+    if let Some(base) = &worktree.base_commit {
+        return Ok(base.clone());
+    }
+    let reference = format!("refs/heads/{}", worktree.branch);
+    let reflog_command = managed_git_command(
+        &worktree.target,
+        &worktree.source_repository,
+        ["reflog", "show", "--format=%H", &reference],
+        "read the session branch reflog",
+    );
+    let reflog_output = executor.execute(&reflog_command)?;
+    if reflog_output.status == 0 {
+        let text = String::from_utf8(reflog_output.stdout)
+            .context("the session branch reflog was not UTF-8")?;
+        // The oldest entry is the branch's creation, so it is where the session
+        // started.
+        if let Some(creation) = text.lines().rfind(|line| !line.trim().is_empty()) {
+            return Ok(creation.trim().to_owned());
+        }
+    }
+    let head = read_checkout_position(executor, &worktree.target, &worktree.worktree_root)?;
+    tracing::warn!(
+        branch = %worktree.branch,
+        "the reflog for this session branch is gone, so its checkpoint bundle will carry no commits"
+    );
+    Ok(head.head_commit)
+}
+
 /// Read where a raw session's checkout stands right now, on whichever host
 /// owns it.
 pub(super) fn raw_checkout_position(

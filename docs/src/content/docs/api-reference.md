@@ -409,7 +409,7 @@ Preconditions, all answering `409` with the reason:
 | `diff`, `files`, `branch` | A live target. A stopped session has none; use the bundle. |
 | `branch` | An idle session — a push mid-turn would publish a tree the agent is still changing — a valid branch name, and a configured push remote. |
 | `diff` | A recorded base commit, or a session branch whose reflog still names where it started. |
-| `bundle` | Commits beyond the session base. A live session is checkpointed first; a stopped one is read from its last checkpoint, so this is the one export that still works after the target is gone. |
+| `bundle` | Commits beyond the session base. For a session on a bare target, the base is the commit the session's worktree branch was created from. A live session is checkpointed first; a stopped one is read from its last checkpoint, so this is the one export that still works after the target is gone. |
 
 ## CLI equivalents
 
