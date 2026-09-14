@@ -23,6 +23,7 @@ use super::worktree::{
 
 pub(super) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
+        mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
@@ -274,7 +275,9 @@ pub(super) fn managed_worktree_session(repository: &Path, session_id: &str) -> S
         worktree_root: repository.join(".mj/worktrees").join(session_id),
         branch: format!("mj/{session_id}"),
         target: ManagedWorktreeTarget::Local,
-        base_commit: None,
+        // Production records the owning repository's head when the worktree is
+        // created; tests need the same base.
+        base_commit: Some(test_git(repository, &["rev-parse", "HEAD"])),
     };
     create_managed_worktree(
         &ProcessExecutor,

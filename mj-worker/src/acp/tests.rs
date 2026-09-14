@@ -83,6 +83,60 @@ fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
     ));
 }
 
+/// Native delegation is hidden only when Mjolnir's own delegation socket
+/// replaced it. Without the socket the session keeps `Agent` and
+/// `spawn_agent`, rather than ending up with neither.
+#[test]
+fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
+    let mut spec = LaunchSpec {
+        subagent_mcp_socket: None,
+        goal_recovery: Default::default(),
+        command: "/worker/mj".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: "/workspace/app".into(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Claude,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: StepClock::default(),
+    };
+
+    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+        spec.harness = harness;
+
+        spec.subagent_mcp_socket = None;
+        let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+        assert!(
+            meta.pointer("/claudeCode/options/disallowedTools")
+                .is_none(),
+            "{harness:?} without a socket must keep its native tools: {meta}"
+        );
+        assert!(
+            meta.pointer("/codex/options/disallowedTools").is_none(),
+            "{harness:?} without a socket must keep its native tools: {meta}"
+        );
+
+        spec.subagent_mcp_socket = Some("/worker/subagents.sock".into());
+        let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+        let hidden = match harness {
+            HarnessKind::Claude => meta.pointer("/claudeCode/options/disallowedTools"),
+            _ => meta.pointer("/codex/options/disallowedTools"),
+        };
+        let expected = match harness {
+            HarnessKind::Claude => {
+                serde_json::json!(["Agent", "Task", "TaskOutput", "TaskStop"])
+            }
+            _ => serde_json::json!(["spawn_agent"]),
+        };
+        assert_eq!(hidden, Some(&expected), "{harness:?}: {meta}");
+    }
+}
+
 #[test]
 fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
     let mut spec = LaunchSpec {

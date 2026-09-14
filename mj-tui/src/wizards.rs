@@ -13,8 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use mj_core::config::{
-    Config, TargetTemplate, container_size_host, is_bare_project_target, mount_history_host,
-    project_history_host, raw_project_context_id,
+    Config, HarnessKind, TargetTemplate, container_size_host, is_bare_project_target,
+    mount_history_host, project_history_host, raw_project_context_id,
 };
 use mj_core::state::{
     MaterializedQueuedPrompt, MoveOperation, MovePreparation, ResumeQueueDisposition,
@@ -67,6 +67,7 @@ pub(crate) enum WizardControl {
     MountReadOnly,
     ReviewAttachments,
     CreateManagedWorktree,
+    MjolnirSubagents,
     DiscardQueue,
     Cancel,
     Back,
@@ -79,6 +80,10 @@ pub(crate) enum WizardControl {
 pub(crate) struct NewWizard {
     pub(crate) worktree_options: Option<(String, String, mj_core::state::ManagedWorktreeOptions)>,
     pub(crate) create_managed_worktree: bool,
+    /// Whether this session gets Mjolnir's delegation tools instead of its
+    /// harness's own. Only Claude and Codex can, so the review step hides the
+    /// control for every other kind and the request then sends `None`.
+    pub(crate) mjolnir_subagents: bool,
     /// Creation stays in this workspace even if the visible tab changes.
     pub(crate) workspace_id: String,
     pub(crate) step: WizardStep,
@@ -113,6 +118,7 @@ impl PartialEq for NewWizard {
     fn eq(&self, other: &Self) -> bool {
         self.worktree_options == other.worktree_options
             && self.create_managed_worktree == other.create_managed_worktree
+            && self.mjolnir_subagents == other.mjolnir_subagents
             && self.workspace_id == other.workspace_id
             && self.step == other.step
             && self.profile == other.profile
@@ -218,6 +224,23 @@ impl MountWizard {
 }
 
 impl NewWizard {
+    /// The harness kind of the profile the wizard has selected.
+    pub(crate) fn selected_profile_kind(&self, config: &Config) -> Option<HarnessKind> {
+        config
+            .profiles
+            .get(&nth_enabled_profile(config, self.profile))
+            .map(|profile| profile.kind)
+    }
+
+    /// Only Claude and Codex receive Mjolnir's delegation tools, so only they
+    /// get the choice.
+    pub(crate) fn subagent_choice_applies(&self, config: &Config) -> bool {
+        matches!(
+            self.selected_profile_kind(config),
+            Some(HarnessKind::Claude | HarnessKind::Codex)
+        )
+    }
+
     fn selected_worktree_options(
         &self,
         config: &Config,
@@ -793,6 +816,9 @@ pub(crate) fn render_new_wizard(
             area,
             dashboard,
             ReviewWizardView {
+                subagents: wizard
+                    .subagent_choice_applies(&dashboard.config)
+                    .then_some(wizard.mjolnir_subagents),
                 worktree: Some((
                     wizard.create_managed_worktree,
                     raw_project
@@ -1222,6 +1248,8 @@ pub(crate) fn render_new_wizard(
 
 struct ReviewWizardView<'a> {
     worktree: Option<(bool, bool)>,
+    /// `Some(checked)` shows the Mjolnir sub-agent checkbox; `None` hides it.
+    subagents: Option<bool>,
     pub(crate) profile_id: &'a str,
     pub(crate) project_label: &'a str,
     pub(crate) project: &'a str,
@@ -1257,6 +1285,7 @@ fn render_review_wizard(
 ) {
     let ReviewWizardView {
         worktree,
+        subagents,
         profile_id,
         project_label,
         project,
@@ -1394,6 +1423,19 @@ fn render_review_wizard(
         ));
         row
     });
+    let subagent_row = subagents.map(|checked| {
+        let row = lines.len() as u16;
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            if checked {
+                "Delegation goes to Mjolnir sub-agents that share this session's files."
+            } else {
+                "Unchecked keeps the harness's own Agent or spawn_agent tools."
+            },
+            theme::muted(),
+        ));
+        row
+    });
     let queue_label = queue.map(|(count, _)| format!("Queued prompts: {count}"));
     if let Some(label) = &queue_label {
         lines.push(Line::raw(label.clone()));
@@ -1469,6 +1511,7 @@ fn render_review_wizard(
     );
     let focused_row = match form.focused() {
         Some(WizardControl::CreateManagedWorktree) => worktree_row,
+        Some(WizardControl::MjolnirSubagents) => subagent_row,
         Some(WizardControl::ReviewAttachments) => Some(
             summary_height.saturating_add(
                 mounts
@@ -1495,6 +1538,17 @@ fn render_review_wizard(
             available,
             form,
             WizardControl::CreateManagedWorktree,
+        );
+    }
+    if let Some((checked, row)) = subagents.zip(subagent_row) {
+        Checkbox::render(
+            frame,
+            viewport.row(row, 1),
+            "Use Mjolnir sub-agents",
+            checked,
+            true,
+            form,
+            WizardControl::MjolnirSubagents,
         );
     }
     if can_attach && !mounts.mounts.is_empty() {
@@ -1876,6 +1930,7 @@ pub(crate) fn render_resume_wizard(
             dashboard,
             ReviewWizardView {
                 worktree: None,
+                subagents: None,
                 profile_id,
                 project_label,
                 project,

@@ -273,6 +273,9 @@ pub struct SessionListResponse {
 pub struct StartSessionRequest {
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
+    /// None follows the global `[subagents] enabled` setting.
+    #[serde(default)]
+    pub mjolnir_subagents: Option<bool>,
     #[serde(default)]
     pub workspace_id: Option<String>,
     pub profile_id: String,
@@ -1301,6 +1304,7 @@ async fn start_session(
     };
     let action = ControllerAction::New {
         create_managed_worktree: request.create_managed_worktree,
+        mjolnir_subagents: request.mjolnir_subagents,
         workspace_id: request.workspace_id.clone().unwrap_or_default(),
         profile_id: request.profile_id.clone(),
         bundle_id,
@@ -2957,6 +2961,7 @@ mod tests {
         assert_eq!(
             request.action,
             ControllerAction::New {
+                mjolnir_subagents: None,
                 create_managed_worktree: None,
                 workspace_id: String::new(),
                 profile_id: "codex-1".into(),
@@ -3048,6 +3053,7 @@ mod tests {
         assert_eq!(
             request.action,
             ControllerAction::New {
+                mjolnir_subagents: None,
                 create_managed_worktree: None,
                 workspace_id: String::new(),
                 profile_id: "codex-1".into(),

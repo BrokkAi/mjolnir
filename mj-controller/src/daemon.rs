@@ -1068,6 +1068,7 @@ impl RuntimeState {
                 request.title,
                 SessionLaunchOptions {
                     create_managed_worktree: request.create_managed_worktree,
+                    mjolnir_subagents: request.mjolnir_subagents,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,
@@ -4133,6 +4134,7 @@ mod tests {
 
     fn runtime_test_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             id: id.into(),
             workspace_id: workspace_id.into(),

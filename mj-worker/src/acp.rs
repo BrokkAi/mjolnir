@@ -164,10 +164,15 @@ fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, ser
             "goal".into(),
             serde_json::json!({"resumePolicy": if asking {"pause"} else {"preserve"}}),
         )]);
-        meta.insert(
-            "codex".into(),
-            serde_json::json!({"options":{"disallowedTools":["spawn_agent"]}}),
-        );
+        // Hide the harness's own delegation tool only when Mjolnir replaced
+        // it. The socket exists exactly when the controller asked for Mjolnir
+        // sub-agents, so the two halves cannot disagree.
+        if spec.subagent_mcp_socket.is_some() {
+            meta.insert(
+                "codex".into(),
+                serde_json::json!({"options":{"disallowedTools":["spawn_agent"]}}),
+            );
+        }
         return Some(meta);
     }
     if spec.harness != HarnessKind::Claude {
@@ -200,10 +205,14 @@ fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, ser
             serde_json::json!({ "enabled": false }),
         );
     }
-    options.insert(
-        "disallowedTools".to_owned(),
-        serde_json::json!(["Agent", "Task", "TaskOutput", "TaskStop"]),
-    );
+    // Same rule as Codex above: without the Mjolnir delegation socket the
+    // session keeps Claude's own Agent and Task tools.
+    if spec.subagent_mcp_socket.is_some() {
+        options.insert(
+            "disallowedTools".to_owned(),
+            serde_json::json!(["Agent", "Task", "TaskOutput", "TaskStop"]),
+        );
+    }
     claude_code.insert("options".to_owned(), serde_json::Value::Object(options));
     Some(serde_json::Map::from_iter([(
         "claudeCode".to_owned(),

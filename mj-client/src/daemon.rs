@@ -172,6 +172,9 @@ pub struct ResumeSessionRequest {
 pub struct CreateSessionRequest {
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
+    /// None follows the global `[subagents] enabled` setting at launch time.
+    #[serde(default)]
+    pub mjolnir_subagents: Option<bool>,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     pub workspace_id: String,

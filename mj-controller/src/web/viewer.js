@@ -1186,12 +1186,21 @@ function freshDraft() {
     preflighted: false,
     worktreeOptions: null,
     createManagedWorktree: false,
+    mjolnirSubagents: snapshot?.subagents_enabled === true,
     worktreeSelection: null,
     bundleSource: '',
     creatingBundle: false,
     showBundleSource: false,
     projectDirectories: {},
   };
+}
+
+/// Only Claude and Codex receive Mjolnir's delegation tools, so only they are
+/// offered the choice. Every other harness sends no opinion and keeps
+/// following the global `[subagents] enabled` setting.
+function subagentChoiceApplies() {
+  const kind = snapshot?.profiles.find(profile => profile.id === newDraft?.profileId)?.harness_kind;
+  return kind === 'claude' || kind === 'codex';
 }
 
 function targetIsBare(targetId) {
@@ -1231,7 +1240,7 @@ function renderNewForm() {
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? snapshot.targets.map(t => [t.id, t.kind]) : null,
     project: step.key === 'project' ? [newDraft.targetId, snapshot.bundles, snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories, newDraft.showBundleSource] : null,
-    remote: step.key === 'review' ? [newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree] : null,
+    remote: step.key === 'review' ? [newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.mjolnirSubagents, subagentChoiceApplies()] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
     creating: newDraft.creatingBundle,
@@ -1382,6 +1391,21 @@ function renderNewForm() {
         ? 'The target provides its own isolated workspace.'
         : checkbox.checked ? 'Create a separate session-owned checkout from the selected checkout’s HEAD.'
           : 'Use the selected directory directly.'));
+      if (subagentChoiceApplies()) {
+        const subagents = el('label', 'field-inline');
+        const subagentBox = el('input');
+        subagentBox.type = 'checkbox';
+        subagentBox.id = 'new-mjolnir-subagents';
+        subagentBox.checked = newDraft.mjolnirSubagents === true;
+        subagentBox.onchange = () => {
+          newDraft.mjolnirSubagents = subagentBox.checked;
+          renderNewForm();
+        };
+        subagents.append(subagentBox, document.createTextNode('Use Mjolnir sub-agents'));
+        body.append(subagents, el('p', 'dim', subagentBox.checked
+          ? 'Delegation goes to Mjolnir sub-agents that share this session’s files.'
+          : 'Unchecked keeps the harness’s own Agent or spawn_agent tools.'));
+      }
 
     }
   }
@@ -1576,6 +1600,7 @@ async function commitNew() {
     target_id: newDraft.targetId,
     project_directory: bare ? newDraft.projectDirectory : null,
     create_managed_worktree: bare && draft.worktreeOptions?.available === true && draft.createManagedWorktree,
+    mjolnir_subagents: subagentChoiceApplies() ? draft.mjolnirSubagents === true : null,
   };
   if (newDraft.title.trim()) body.title = newDraft.title.trim();
   draft.committing = true;

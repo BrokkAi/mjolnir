@@ -800,6 +800,22 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 32 {
         migrate_zcode_harness_kind(connection)?;
     }
+    // Compatible: adds one nullable column. Older readers ignore it, and the
+    // older writer's session upsert lists columns explicitly, so it preserves
+    // the value. An older executable launching such a session falls back to the
+    // global `[subagents] enabled` setting, which is a behaviour difference,
+    // not data loss. The compatibility floor stays where it is.
+    if version < 33 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE sessions ADD COLUMN mjolnir_subagents INTEGER
+                 CHECK(mjolnir_subagents IN (0, 1));
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (33, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 33;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1610,6 +1626,11 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
 mod reader_tests {
     use super::*;
 
+    /// The oldest executable revision that can still read and write a store at
+    /// `SCHEMA_VERSION`. Migration 32 (ZCode) was the last breaking one; the
+    /// compatible migrations after it leave the floor where it is.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 32;
+
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
     fn stamp_schema_version(path: &Path, version: i64) {
@@ -1739,10 +1760,11 @@ mod reader_tests {
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.minimum_compatible, Some(SCHEMA_VERSION));
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         connection
             .execute_batch(
                 "DROP TABLE schema_compatibility;
+             ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              DELETE FROM schema_migrations WHERE version >= 30;
              PRAGMA user_version = 29;
              CREATE TRIGGER reject_baseline BEFORE INSERT ON schema_migrations
@@ -1774,7 +1796,7 @@ mod reader_tests {
         let writer = open_writer(&path).unwrap();
         let state = read_schema_state(&writer).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(SCHEMA_VERSION));
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
     }
 
     /// A store ahead of this build cannot be fixed by starting a daemon of
