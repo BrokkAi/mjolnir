@@ -17,6 +17,7 @@ pub use kimi_tasks::*;
 mod plan_tests;
 #[cfg(test)]
 mod session_config_tests;
+mod zcode_usage;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
@@ -2661,6 +2662,9 @@ async fn serve_session(
                             let stop_reason = match response {
                                 Ok(response) => {
                                     usage = response.usage.map(|usage| mj_core::usage::TokenUsage::from_acp(spec.harness, usage));
+                                    if spec.harness == HarnessKind::Zcode {
+                                        usage = usage.map(|usage| zcode_usage::attach_provider_details(usage, response.meta.as_ref()));
+                                    }
                                     if spec.harness == HarnessKind::Grok {
                                         match grok_usage.complete(response.meta.as_ref(), usage.clone()).await {
                                             Ok(reported) => usage = reported,

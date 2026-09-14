@@ -1792,7 +1792,8 @@ fn collect_native_artifacts_cached(
         HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Deepseek => &["sessions"],
         HarnessKind::Muse => &[".data/muse/sessions"],
         // ZCode persists all conversations in a shared live SQLite database.
-        // Do not archive it without a consistent selected-session export.
+        // Do not archive it without a consistent selected-session export, so
+        // an empty artifact set is expected here and allowed below.
         HarnessKind::Zcode => &[],
     };
     let mut probe = match harness {
@@ -1826,7 +1827,7 @@ fn collect_native_artifacts_cached(
     }
     output.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     ensure!(
-        allow_empty || !output.is_empty(),
+        allow_empty || !harness.captures_native_session() || !output.is_empty(),
         "no session artifacts found"
     );
     let total = output
@@ -2493,6 +2494,32 @@ mod tests {
             collect_native_artifacts(HarnessKind::Codex, temp.path(), NATIVE, true).unwrap();
         assert!(artifacts.is_empty());
     }
+    /// ZCode keeps every conversation in one shared live SQLite database, so
+    /// its checkpoints hold no native artifacts even after a prompt. Every
+    /// other harness still has to find at least one.
+    #[test]
+    fn zcode_native_artifacts_are_empty_even_for_prompted_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("cli/db")).unwrap();
+        fs::write(
+            temp.path().join("cli/db/db.sqlite"),
+            b"shared live database",
+        )
+        .unwrap();
+        fs::create_dir_all(temp.path().join("v2")).unwrap();
+        fs::write(temp.path().join("v2/config.json"), b"{}").unwrap();
+
+        let artifacts =
+            collect_native_artifacts(HarnessKind::Zcode, temp.path(), NATIVE, false).unwrap();
+        assert!(artifacts.is_empty());
+
+        let empty = tempfile::tempdir().unwrap();
+        let error = collect_native_artifacts(HarnessKind::Codex, empty.path(), NATIVE, false)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "no session artifacts found");
+    }
+
     #[test]
     fn codex_collection_ignores_malformed_unrelated_rollouts() {
         let temp = tempfile::tempdir().unwrap();
@@ -3511,6 +3538,70 @@ mod tests {
         let staged = read_archive_verified(&staged_path).unwrap();
         assert_eq!(staged.manifest, legacy.manifest);
         assert_eq!(staged.payloads, legacy.payloads);
+    }
+
+    /// A prompted ZCode session must still checkpoint. The archive carries the
+    /// repository work and no native artifacts.
+    #[test]
+    fn zcode_capture_carries_repositories_without_native_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut export_spec, _) = fixture(temp.path());
+        export_spec.session.harness_kind = HarnessKind::Zcode;
+        export_spec.session.profile_id = "zcode-1".into();
+        let zcode_home = temp.path().join("zcode");
+        fs::create_dir_all(zcode_home.join("cli/db")).unwrap();
+        fs::write(zcode_home.join("cli/db/db.sqlite"), b"shared live database").unwrap();
+        export_spec.harness_home = zcode_home;
+
+        // Work past the recorded base so the committed bundle is not empty.
+        let repository = export_spec.workspace_root.join("app");
+        fs::write(repository.join("README.md"), b"hello from the session").unwrap();
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-m", "session work"]);
+
+        let stage_path = export_spec.relay_root.join("checkpoint-stage-zcode");
+        let capture_spec = CheckpointCaptureSpec {
+            protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+            session: export_spec.session.clone(),
+            target: export_spec.target.clone(),
+            bundle: export_spec.bundle.clone(),
+            relay_root: export_spec.relay_root.clone(),
+            harness_home: export_spec.harness_home.clone(),
+            workspace_root: export_spec.workspace_root.clone(),
+            repositories: export_spec.repositories.clone(),
+            allow_empty_native: false,
+            stage_path: stage_path.clone(),
+            refresh_existing: false,
+        };
+        let captured = capture_checkpoint(&capture_spec, &SystemGit).unwrap();
+        assert_eq!(captured.native_bytes, 0);
+        assert!(captured.repository_bytes > 0);
+
+        let output_path = export_spec.relay_root.join("zcode.hel.zip");
+        let pack_spec = CheckpointPackSpec {
+            protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+            relay_root: export_spec.relay_root.clone(),
+            stage_path,
+            canonical_session: export_spec.canonical_session.clone(),
+            output_path: output_path.clone(),
+        };
+        pack_checkpoint(&pack_spec).unwrap();
+
+        let archive = read_archive_verified(&output_path).unwrap();
+        assert!(
+            !archive
+                .manifest
+                .payloads
+                .iter()
+                .any(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. })),
+            "ZCode archive carried a native artifact"
+        );
+        let bundle = archive
+            .payload_by_role(&PayloadRole::GitBundle {
+                repository_id: "app".into(),
+            })
+            .unwrap();
+        assert!(!bundle.is_empty());
     }
 
     #[test]

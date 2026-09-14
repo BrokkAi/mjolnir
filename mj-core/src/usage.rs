@@ -42,6 +42,9 @@ impl TokenUsage {
             (HarnessKind::Codex, Some(_)) => UsageScope::Unspecified,
             (HarnessKind::Claude, _) => UsageScope::Turn,
             (HarnessKind::Codex, None) => UsageScope::LastRequest,
+            // The ZCode adapter reports the backend's merged whole-turn usage on
+            // the prompt response, and omits it when the backend reported none.
+            (HarnessKind::Zcode, _) => UsageScope::Turn,
             _ => UsageScope::Unspecified,
         };
         Self {
@@ -82,6 +85,18 @@ mod tests {
             assert_eq!(result.total_tokens, 100);
         }
     }
+
+    #[test]
+    fn zcode_reports_are_whole_turn_and_other_adapters_stay_unspecified() {
+        let zcode = TokenUsage::from_acp(HarnessKind::Zcode, Usage::new(100, 80, 20));
+        assert_eq!(zcode.scope, UsageScope::Turn);
+        assert_eq!(
+            (zcode.total_tokens, zcode.input_tokens, zcode.output_tokens),
+            (100, 80, 20)
+        );
+        let kimi = TokenUsage::from_acp(HarnessKind::Kimi, Usage::new(100, 80, 20));
+        assert_eq!(kimi.scope, UsageScope::Unspecified);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,7 +108,7 @@ pub struct ProviderCost {
 }
 
 /// Provider-reported accounting for this turn, separate from session cost.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderTurnUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<ProviderTurnCost>,
