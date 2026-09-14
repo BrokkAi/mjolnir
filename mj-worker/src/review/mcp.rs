@@ -119,7 +119,7 @@ fn call_tool(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
 /// is only reachable from inside this container.
 #[cfg(unix)]
 pub fn send_dispatch(socket: &Path, dispatch: &LaneDispatch) -> Result<LaneDispatchReply> {
-    let mut stream = std::os::unix::net::UnixStream::connect(socket)
+    let mut stream = mj_core::local_sockets::connect_unix_stream(socket)
         .with_context(|| format!("connect to the review dispatch socket {}", socket.display()))?;
     let mut body = serde_json::to_vec(dispatch)?;
     body.push(b'\n');

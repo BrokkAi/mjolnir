@@ -74,6 +74,10 @@ image = "ubuntu:24.04"
         "the client did not relay the daemon's own explanation:\n{stderr}"
     );
     assert!(
+        stderr.contains("isolated data directory"),
+        "the client did not relay how to run this build anyway:\n{stderr}"
+    );
+    assert!(
         !stderr.contains("daemon.json"),
         "the client blamed the endpoint the daemon never published:\n{stderr}"
     );

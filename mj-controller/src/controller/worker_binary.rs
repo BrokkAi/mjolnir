@@ -2948,7 +2948,7 @@ pub(super) fn worker_last_words(
 ) -> Option<String> {
     let script = format!(
         "if [ -f {root}/worker-exit.json ]; then echo '{marker}'; cat {root}/worker-exit.json; fi; if [ -f {root}/worker.log ]; then echo '--- worker.log (tail) ---'; tail -n 20 {root}/worker.log; fi",
-        root = worker_root,
+        root = targets::posix_quote(worker_root),
         marker = WORKER_EXIT_RECORD_MARKER
     );
     let command = match locator {
@@ -3710,6 +3710,69 @@ mod tests {
 
         assert!(failure.contains("GLIBC_2.39"), "{failure}");
         assert!(failure.contains("provide a musl worker"), "{failure}");
+    }
+
+    /// macOS puts worker roots under `~/Library/Application Support/...`.
+    /// An unquoted root split the diagnostic script into separate words, so
+    /// the probe silently reported nothing exactly when it was needed.
+    #[test]
+    fn worker_last_words_reads_a_root_containing_spaces() {
+        struct RecordingExecutor {
+            commands: RefCell<Vec<CommandSpec>>,
+        }
+
+        impl CommandExecutor for RecordingExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands.borrow_mut().push(command.clone());
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Application Support").join("hel worker");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("worker-exit.json"),
+            b"{\n  \"reason\": \"panic\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("worker.log"),
+            b"Mjolnir worker exited with an error\n",
+        )
+        .unwrap();
+        let root = root.to_str().unwrap();
+
+        let locator = targets::TargetLocator::LocalBare {
+            worker_root: root.into(),
+        };
+        let reported = worker_last_words(&ProcessExecutor, &locator, root)
+            .expect("the probe reads a root containing spaces");
+        assert!(reported.contains(WORKER_EXIT_RECORD_MARKER), "{reported}");
+        assert!(reported.contains("\"reason\": \"panic\""), "{reported}");
+        assert!(
+            reported.contains("Mjolnir worker exited with an error"),
+            "{reported}"
+        );
+
+        let recorder = RecordingExecutor {
+            commands: RefCell::new(Vec::new()),
+        };
+        worker_last_words(&recorder, &locator, root);
+        let commands = recorder.commands.borrow();
+        let script = commands
+            .iter()
+            .flat_map(|command| command.args.iter())
+            .find(|argument| argument.contains("worker-exit.json"))
+            .expect("the probe builds a diagnostic script");
+        assert!(
+            script.contains(&format!("'{root}'")),
+            "the root must be single-quoted: {script}"
+        );
     }
 
     /// A worker that died leaves an exit record behind. Starting a new worker

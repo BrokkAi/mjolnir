@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::SessionUpdate;
 use anyhow::{Context, Result, bail};
+use mj_core::local_sockets::{bind_unix_listener, connect_unix_stream};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
@@ -96,7 +97,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // Refuse a second daemon before touching durable state: opening the
     // relay recovers the journal in place, so getting that far would
     // corrupt the files a live worker is still writing.
-    if socket.exists() && UnixStream::connect(&socket).await.is_ok() {
+    if socket.exists() && connect_unix_stream(&socket).is_ok() {
         bail!("a worker is already running at {}", socket.display());
     }
     // A dead daemon can leave its socket inode behind. Remove it before
@@ -179,8 +180,13 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         std::fs::remove_file(&exit_record)
             .with_context(|| format!("clear stale exit record {}", exit_record.display()))?;
     }
-    let listener = UnixListener::bind(&socket)
+    let listener = bind_unix_listener(&socket)
         .with_context(|| format!("bind worker socket {}", socket.display()))?;
+    listener
+        .set_nonblocking(true)
+        .with_context(|| format!("set worker socket {} nonblocking", socket.display()))?;
+    let listener = UnixListener::from_std(listener)
+        .with_context(|| format!("register worker socket {}", socket.display()))?;
     let _socket_guard = SocketGuard(socket.clone());
     #[cfg(unix)]
     {
@@ -1972,8 +1978,16 @@ pub(super) fn serve_review_dispatch(
     // A socket left behind by a previous worker would refuse the bind; the
     // previous worker is gone, so its socket is stale by definition.
     let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path)
+    let listener = bind_unix_listener(&path)
         .with_context(|| format!("bind the review dispatch socket {}", path.display()))?;
+    listener.set_nonblocking(true).with_context(|| {
+        format!(
+            "set the review dispatch socket {} nonblocking",
+            path.display()
+        )
+    })?;
+    let listener = UnixListener::from_std(listener)
+        .with_context(|| format!("register the review dispatch socket {}", path.display()))?;
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
@@ -3156,9 +3170,14 @@ pub(super) async fn forward_proxy_streams(
 }
 
 pub async fn proxy(root: PathBuf) -> Result<()> {
-    let stream = UnixStream::connect(root.join("control.sock"))
-        .await
-        .with_context(|| format!("connect worker at {}", root.display()))?;
+    let socket = root.join("control.sock");
+    let stream = connect_unix_stream(&socket)
+        .with_context(|| format!("connect worker socket {}", socket.display()))?;
+    stream
+        .set_nonblocking(true)
+        .with_context(|| format!("set worker socket {} nonblocking", socket.display()))?;
+    let stream = UnixStream::from_std(stream)
+        .with_context(|| format!("register worker socket {}", socket.display()))?;
     let (socket_read, socket_write) = stream.into_split();
     let outcome = forward_proxy_streams(
         tokio::io::stdin(),

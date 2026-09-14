@@ -48,7 +48,7 @@ impl std::fmt::Display for StoreSchemaMismatch {
         match reason {
             StoreSchemaMismatchReason::Incompatible { minimum_compatible } => write!(
                 formatter,
-                "Mjolnir database schema {found} requires at least build schema {minimum_compatible} for reads and writes; this build supports {supported}; upgrade Mjolnir"
+                "Mjolnir database schema {found} requires at least build schema {minimum_compatible} for reads and writes; this build supports {supported}; upgrade Mjolnir, run this build with an isolated data directory (--instance NAME or MJ_DATA_DIR), or restore a backup made by the older build"
             ),
             StoreSchemaMismatchReason::NeedsMigration => write!(
                 formatter,
