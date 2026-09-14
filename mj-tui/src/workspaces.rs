@@ -369,8 +369,9 @@ fn workspace_manager_in_mode(mode: &mut Mode) -> Option<&mut WorkspaceManager> {
 
 impl DashboardState {
     /// Handles the two keyboard stops inside the workspace pane. Tabs own
-    /// left/right selection; the pinned menu is a second local stop before
-    /// the ordinary dashboard Tab ring continues to Sessions.
+    /// left/right selection (with up/down as vertical mirrors of the same
+    /// moves); the pinned menu is a second local stop before the ordinary
+    /// dashboard Tab ring continues to Sessions.
     pub(crate) fn handle_workspace_pane_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
         if self.focus != crate::Focus::Workspaces
             || key
@@ -385,6 +386,19 @@ impl DashboardState {
             self.record_event_handled();
             return Some(DashboardAction::ExitSubagentWorkspace);
         }
+        // The tab row is horizontal, so Up/Down carry the same meaning as
+        // Left/Right everywhere in this pane.
+        let key = match key.code {
+            KeyCode::Up => KeyEvent {
+                code: KeyCode::Left,
+                ..key
+            },
+            KeyCode::Down => KeyEvent {
+                code: KeyCode::Right,
+                ..key
+            },
+            _ => key,
+        };
         let back_tab = key.code == KeyCode::BackTab
             || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
         match (self.workspace_control_focus, key.code, back_tab) {
@@ -1565,6 +1579,91 @@ mod tests {
         assert_eq!(
             dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             DashboardAction::LoadWorkspaceManagement { generation: 1 }
+        );
+    }
+
+    #[test]
+    fn vertical_arrows_mirror_left_and_right_on_the_tabs() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_workspace_names(std::collections::BTreeMap::from([
+            ("a".into(), "First".into()),
+            ("b".into(), "Second".into()),
+            ("c".into(), "Last".into()),
+        ]));
+        dashboard.set_active_workspace(Some("b".into()));
+        dashboard.focus = crate::Focus::Workspaces;
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            DashboardAction::SelectWorkspace {
+                workspace_id: "c".into()
+            }
+        );
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            DashboardAction::SelectWorkspace {
+                workspace_id: "a".into()
+            }
+        );
+        // Down at the last tab hands the pane to the pinned menu, like Right.
+        dashboard.set_active_workspace(Some("c".into()));
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.workspace_control_focus,
+            WorkspaceControlFocus::Menu
+        );
+        // Up from the menu returns to the tabs, like Left.
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.workspace_control_focus,
+            WorkspaceControlFocus::Tabs
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_over_the_workspace_pane_switches_tabs_without_focus() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_workspace_names(std::collections::BTreeMap::from([
+            ("a".into(), "First".into()),
+            ("b".into(), "Second".into()),
+            ("c".into(), "Last".into()),
+        ]));
+        dashboard.set_active_workspace(Some("b".into()));
+        dashboard.focus = crate::Focus::Sessions;
+        let mut terminal = Terminal::new(TestBackend::new(24, 3)).unwrap();
+        terminal
+            .draw(|frame| render_workspace_tabs(frame, Rect::new(0, 0, 24, 3), &mut dashboard))
+            .unwrap();
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: 2,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            dashboard.handle_mouse(wheel(MouseEventKind::ScrollDown)),
+            DashboardAction::SelectWorkspace {
+                workspace_id: "c".into()
+            }
+        );
+        assert_eq!(
+            dashboard.focus,
+            crate::Focus::Sessions,
+            "the wheel switches tabs without stealing focus"
+        );
+        dashboard.set_active_workspace(Some("c".into()));
+        assert_eq!(
+            dashboard.handle_mouse(wheel(MouseEventKind::ScrollUp)),
+            DashboardAction::SelectWorkspace {
+                workspace_id: "b".into()
+            }
         );
     }
 

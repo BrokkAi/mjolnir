@@ -45,10 +45,12 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// Current durable ACP relay protocol. Peers that only speak an older
 /// version in [`RELAY_MIN_PROTOCOL_VERSION`]..=this range still connect.
 /// Protocol 0 is the retired pre-relay worker protocol and is rejected.
-pub const RELAY_PROTOCOL_VERSION: u32 = 12;
-/// New writers require readers that understand durable goal-control events.
+pub const RELAY_PROTOCOL_VERSION: u32 = 13;
+/// New writers require readers that preserve per-turn plan credits in event
+/// digests. An older reader drops the unknown field when it re-serializes an
+/// observation, so its recomputed digest would not match.
 /// Controllers still read older workers using RELAY_MIN_PROTOCOL_VERSION.
-pub const RELAY_WRITER_MIN_PROTOCOL_VERSION: u32 = 11;
+pub const RELAY_WRITER_MIN_PROTOCOL_VERSION: u32 = 13;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
 /// Digest for the empty relay event prefix (ordinal zero).
 pub const RELAY_EVENT_GENESIS_DIGEST: &str = crate::archive::EVENT_FRONTIER_GENESIS_DIGEST;
