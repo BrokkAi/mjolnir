@@ -20,7 +20,7 @@ The first delivery includes managed ZCode backend installation and the default c
 - [x] (2026-09-13) Add ZCode harness metadata, pinned managed adapter/backend installation, target environment handling, profile staging, and breaking schema migration 32.
 - [x] (2026-09-13) Integrate quota reporting, skills, ordinary sessions, and the existing sub-agent control surfaces.
 - [x] (2026-09-13) Complete the isolated tmux campaign with Claude Sonnet and GPT Luna parents, including prompt-border navigation and daemon reattachment.
-- [ ] Complete full Rust test/clippy gates, install the committed build, and smoke the configured live profile.
+- [x] (2026-09-14) Complete full Rust test/clippy gates, install committed build `825f23df`, and smoke the configured live profile through tmux.
 
 ## Surprises & Discoveries
 
@@ -70,6 +70,12 @@ Decision: publish Codex ACP `disallowedTools` as `@brokkai/codex-acp` 1.11.4 and
 ZCode now runs as a native Mjolnir harness through `zcode-acp-server` 0.37.1 and the headless ZCode 3.11.2/CLI 0.16.5 backend. The isolated store at `/tmp/mj-zcode-live-20260913` proved direct GLM-5.3-Flash inference (`c57132ed7973002429f9407dbcef54e3`), live Coding Plan quota, approved and denied guardian writes (`e4ab5a8c0906a78b1fcb26b831cf584b`), Claude Sonnet parenting (`3091f770ec5a7a7b0479f6b181346dea`), and GPT Luna parenting plus post-restart follow-up (`21852a46a85efd48f3e8f3673835313b`). Parent and child database rows had the same `localhost` target and exact project worktree.
 
 The tmux interface showed `Sub-agents (1)`, opened a virtual workspace whose Workspaces header was `codex-zcode-parent  X`, displayed and accepted interaction with the ZCode child, and returned to the parent workspace through the X. Host Podman remains unavailable because `/run/user/1000` does not exist, so the disposable-container runtime smoke could not run; container parity is covered by pinned assets and build-time checks. Native selected-session checkpoint/import remains the explicit limitation described above.
+
+The final published-artifact campaign used Codex ACP 1.11.4 rather than a local checkout. Isolated GPT Luna parent `f2585e416234fadaf330c5765c1e323a` created GLM-5.3-Flash child `e3a229a8ba362c1bebfc17dff0f52685`, received `MJ_ZCODE_PUBLISHED_OK`, survived a daemon restart, and received `MJ_ZCODE_REATTACH_OK` through parent `send_input`. Both rows retained the same `localhost` target and managed project worktree. Delayed tool-result delivery led the model to issue one redundant spawn in the first turn; an explicit no-retry instruction prevented that in the final installed smoke.
+
+The committed build was installed with `scripts/install.sh --force` after an online SQLite backup plus config/controller/worker copies under `/home/jonathan/.local/share/mjolnir/backups/zcode-20260914T050609Z`. The live daemon reattached its existing sessions and discovered both GLM models from profile `zcode`. In tmux, live GPT Luna parent `910cd235d9a8d3b103971c9d256f77aa` created exactly one GLM-5.3-Flash child `9cb9bfd6465e094713dacd6939514383`, which returned `MJ_ZCODE_LIVE_INSTALL_OK`; both rows use target `localhost` and exact project directory `/home/jonathan/Projects/hel2`. Ordinary close of the child records the expected `no session artifacts found` checkpoint limitation, so the two acceptance records remain available rather than being force-destroyed.
+
+Final automated validation passed `cargo fmt --all -- --check`, `cargo test` (including 1,185 controller tests and 402 worker tests in their largest suites), `cargo clippy --all-targets -- -D warnings`, the focused headless-login test, and the controller/worker build. A pre-final full run exposed a fork/exec lease-descriptor race in a managed-harness repair test; retrying the repair operation itself across the bounded lease-release window fixed the test without changing runtime policy, and both the complete worker suite and full workspace suite then passed.
 
 ## Context and Orientation
 
@@ -187,3 +193,5 @@ Revision 2026-09-13: initial researched plan. Chose a compatibility-first integr
 Revision 2026-09-13 during implementation: record the user's decisions for full target support and the existing GLM Coding Plan allowance, plus the verified npm adapter metadata and local Node/backend versions.
 
 Revision 2026-09-13 after live acceptance: record the pinned ZCode compatibility patch, guardian elicitation fix, published Codex ACP 1.11.4 consumption, concrete tmux/session evidence, daemon reattachment, Podman host blocker, and the deliberate selected-session checkpoint limitation.
+
+Revision 2026-09-14 after installation: record final full-suite validation, committed/live binary installation and backup, published-adapter restart evidence, exact live parent/child identities, and the expected close/checkpoint limitation.
