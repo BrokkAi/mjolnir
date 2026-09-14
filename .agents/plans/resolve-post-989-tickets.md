@@ -32,6 +32,9 @@ Validate and resolve every Mjolnir issue filed after issue 989. A user should be
 - Observation: Claude model catalogues genuinely vary by authenticated profile: `claude2` offers `opus` and `opus[1m]`, while `claude3` offers only `opus[1m]`.
   Evidence: fresh live profile discovery for both profiles. A global normalization would advertise a value the destination cannot accept.
 
+- Observation: The first live ZCode image build contained the checksum-verified backend, but AppImage extraction preserved root-only directory modes, so the runtime `hel` user received `Permission denied` for `/opt/zcode/glm/zcode.cjs`.
+  Evidence: direct `podman run` as the image's default user could read the environment but could not `ls` the backend. The container recipe now applies `chmod -R a+rX /opt/zcode` before switching users.
+
 ## Decision Log
 
 - Decision: Treat issues 992 through 996 as the active resolution set and audit already-closed issues 990 and 991 only for regression coverage rather than reopening them without evidence.
@@ -116,3 +119,5 @@ Use the existing `ApiBackend` idempotency methods and durable database writer ra
 Revision 2026-09-14: created after locating the correct Mjolnir tracker and reading issues 992 through 996; records the complete validation and implementation strategy before edits.
 
 Revision 2026-09-14 06:20Z: records source validation, implemented behavior, the Muse usage limitation, live Claude catalogue differences, and the passing controller suite.
+
+Revision 2026-09-14 06:21Z: live image validation exposed and fixed AppImage-extracted backend permissions before rollout.

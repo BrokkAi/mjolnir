@@ -230,6 +230,7 @@ RUN printf '%s\n' \
 
 RUN useradd --create-home --shell /bin/bash hel \
     && mkdir -p /workspace /var/lib/hel \
+    && chmod -R a+rX /opt/zcode \
     && chown -R hel:hel /workspace /var/lib/hel \
     && chmod 0755 /workspace /var/lib/hel
 
