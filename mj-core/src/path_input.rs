@@ -46,6 +46,24 @@ pub fn validate_absolute_input(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Interpret one path exactly as Git emitted it in `-z` output.
+///
+/// Git writes raw bytes, which are not UTF-8 on every filesystem, so the
+/// platform's own path encoding decides how they are read.
+pub fn from_git_bytes(bytes: &[u8]) -> Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(PathBuf::from(
+            std::str::from_utf8(bytes).context("Git path is not UTF-8")?,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

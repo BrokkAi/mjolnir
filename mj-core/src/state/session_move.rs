@@ -21,11 +21,49 @@ pub struct MoveSelection {
     pub resource_allocation: Option<SessionResourceAllocation>,
 }
 
+/// What moving a local checkout into an isolated workspace will do, shown
+/// before anything is stopped or provisioned.
+///
+/// Every field is read from the host checkout and its remote. The dirty counts
+/// are deliberately not part of a move fingerprint: a running local session has
+/// an agent editing files, so they change under the confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawConversionPreview {
+    /// The checkout that is snapshotted: a managed worktree, or the user's own
+    /// directory when the session opened one directly.
+    pub checkout: PathBuf,
+    /// Where the checkout lands inside the target.
+    pub destination: PathBuf,
+    /// The branch the session continues on, or `None` for a detached head.
+    pub branch: Option<String>,
+    pub fetch_url: String,
+    pub push_urls: Vec<String>,
+    /// The branch the remote's `HEAD` names, which is what a fresh clone
+    /// starts on before the session's own branch is restored.
+    pub default_branch: String,
+    /// Commits reachable from `HEAD` that are on no origin ref, and so have to
+    /// travel in the conversion archive.
+    pub unpushed_commits: u64,
+    pub staged_files: u64,
+    pub unstaged_files: u64,
+    pub untracked_files: u64,
+    pub untracked_bytes: u64,
+    /// True when the session opened the user's own checkout, which stays on
+    /// this machine untouched after the move.
+    pub host_checkout_retained: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MovePreparation {
     #[serde(default)]
     pub source_unavailable: bool,
+    /// Present only when this move converts a local checkout into an isolated
+    /// workspace. Boxed because this preparation travels inside several
+    /// request enums whose other variants are far smaller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversion: Option<Box<RawConversionPreview>>,
     pub selection: MoveSelection,
     pub source_profile_id: String,
     pub source_target_template_id: String,

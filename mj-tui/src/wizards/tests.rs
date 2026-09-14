@@ -1480,6 +1480,7 @@ fn open_move_review(dashboard: &mut DashboardState) -> u64 {
 fn move_preparation() -> mj_core::state::MovePreparation {
     mj_core::state::MovePreparation {
         source_unavailable: false,
+        conversion: None,
         selection: mj_core::state::MoveSelection {
             session_id: "session-1".into(),
             profile_id: Some("codex-1".into()),

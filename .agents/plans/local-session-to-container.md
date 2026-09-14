@@ -17,7 +17,7 @@ The checkout must have a network Git remote (GitHub or any `https`/`ssh` URL). A
 ## Progress
 
 
-- [ ] Checkpoint A: compatibility gate, network-remote resolution in the conversion plan, host checkout snapshot builder, and `RawConversionPreview` computation, with real-Git tests.
+- [x] Checkpoint A (2026-09-14): compatibility gate, network-remote resolution in the conversion plan, host checkout snapshot builder, and `RawConversionPreview` computation, with real-Git tests.
 - [ ] Checkpoint B: resume wiring (conversion archive, checkpoint swap, restore of repository content, notice, rollback test) and move preparation carrying the preview.
 - [ ] Checkpoint C: surfaces (TUI review lines and resume confirm dialog, web resume preflight and move dialog, `mj move` output), user docs, and this plan's closing sections.
 
@@ -26,6 +26,14 @@ The checkout must have a network Git remote (GitHub or any `https`/`ssh` URL). A
 
 
 The controller still contains a complete `ResumePlan::RawToWorkspace` conversion, but it was never reachable: `resume_compatibility` in `mj-client/src/target.rs` never returns it. Its downstream expected repository content to be "seeded from its own checkout" (comment in `mj-controller/src/controller/resume.rs` near `restore_repositories: (resumed_project_directory.is_none() && conversion.is_none())`). That seeding mechanism was removed by `.agents/plans/remote-only-isolated-sessions.md`, so today a converted session would land in an empty default-branch clone.
+
+`resume_session_controlled_with_repository_preflight` calls `network_git::bundle_from_manifest` on the stored archive before it plans any conversion, and that call refuses an archive without network repository provenance. Checkpoint A therefore changes no session at runtime even though the gate now returns `RawToWorkspace`: a converting resume still stops at that archive check, with the record and configuration untouched. Checkpoint B has to write the conversion archive and point the record at it before that check, or move the check after the conversion.
+
+A fixture cannot put `url.<path>.insteadOf` in the checkout's own Git configuration, because `git remote get-url` applies `insteadOf` rewrites: `resolve_local_repository` would then read the local path and refuse it as a non-network URL. The tests record the network URL on the remote and rewrite only the commands that really contact it (`ls-remote`, `fetch`), which is what `FixtureRemoteExecutor` does.
+
+`MovePreparation.conversion` is `Option<Box<RawConversionPreview>>`, not the unboxed `Option` this plan's Interfaces section first described. `MoveSessionRequest` is a variant payload of `DaemonAction` and of `ControllerAction`, and the unboxed preview pushed both enums past clippy's `large_enum_variant` threshold. Boxing one field was smaller than boxing the payload in every enum that carries it, and the serialized form is identical either way.
+
+The conversion snapshot uses the repository id `project`, which a raw checkpoint has always used, while `converted_raw_bundle` synthesizes a bundle whose repository id is derived from the checkout's name. Checkpoint B must write the conversion archive's `BundleManifest.primary_repository` as `project` so `bundle_from_manifest` can still find the primary repository.
 
 A managed worktree's archive bundles commits since its creation commit (`DeltaFrom{base_commit}`). If that creation commit was never pushed, a fresh network clone cannot fetch the bundle because Git bundles require their prerequisite commits to exist. Bundling "commits not on any origin ref" (`GitHistoryMode::SessionDelta`) avoids this because every prerequisite is then on the remote.
 
@@ -97,4 +105,4 @@ Preview and plan functions read Git only. The conversion archive is a new file; 
 ## Interfaces and Dependencies
 
 
-`mj_client::target::resume_compatibility` returns `Ok(ResumePlan::RawToWorkspace)` for the cases above. `mj_controller::controller::worktree::RawToWorkspaceConversion` gains `source: mj_core::remote_git::NetworkGitSource`. `mj_core::state::session_move::RawConversionPreview` is a serializable struct with `checkout: PathBuf`, `destination: PathBuf`, `branch: Option<String>`, `fetch_url: String`, `push_urls: Vec<String>`, `default_branch: String`, `unpushed_commits: u64`, `staged_files: u64`, `unstaged_files: u64`, `untracked_files: u64`, `untracked_bytes: u64`, `host_checkout_retained: bool`. `MovePreparation` gains `#[serde(default)] conversion: Option<RawConversionPreview>`. `ResumeRepositorySourcePreflight` gains `ConvertingRawCheckout(RawConversionPreview)`. No new crates.
+`mj_client::target::resume_compatibility` returns `Ok(ResumePlan::RawToWorkspace)` for the cases above. `mj_controller::controller::worktree::RawToWorkspaceConversion` gains `source: mj_core::remote_git::NetworkGitSource`. `mj_core::state::session_move::RawConversionPreview` is a serializable struct with `checkout: PathBuf`, `destination: PathBuf`, `branch: Option<String>`, `fetch_url: String`, `push_urls: Vec<String>`, `default_branch: String`, `unpushed_commits: u64`, `staged_files: u64`, `unstaged_files: u64`, `untracked_files: u64`, `untracked_bytes: u64`, `host_checkout_retained: bool`. `MovePreparation` gains `#[serde(default)] conversion: Option<Box<RawConversionPreview>>` (boxed for `large_enum_variant`, as recorded under Surprises). `ResumeRepositorySourcePreflight` gains `ConvertingRawCheckout(RawConversionPreview)`. No new crates.

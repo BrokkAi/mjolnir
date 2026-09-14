@@ -3240,6 +3240,9 @@ mod tests {
                 &GitWithoutPodmanExecutor,
             ))
             .unwrap_err();
+        // Until the conversion writes its own archive, a raw checkpoint's
+        // archive is still refused before the conversion is even planned, so
+        // nothing about the session may have changed by then.
         assert!(
             format!("{error:#}").contains("network repository provenance"),
             "{error:#}"

@@ -473,6 +473,7 @@ impl Controller {
             .unwrap_or(new_command_id("move")?);
         Ok(MovePreparation {
             source_unavailable: false,
+            conversion: None,
             selection,
             source_profile_id: source.last_profile.clone(),
             source_target_template_id: source.target_template_id.clone(),
