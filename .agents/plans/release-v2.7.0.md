@@ -25,6 +25,8 @@ Publish the accumulated session API, managed subagent, recovery, configuration, 
   Evidence: Canonicalizing the trusted harness home before appending `goals_1.sqlite` preserves final-component symlink rejection and makes the focused checkpoint tests plus the full workspace suite pass.
 - Observation: Exact-commit CI exposed an unguarded Unix socket client in the subagent MCP path and a reliability fixture pinned to Codex ACP 1.11.1 after production advanced to 1.11.3.
   Evidence: The non-Unix build now returns an explicit unsupported-platform error, and the fixture seeds the current managed install under the profile's `XDG_CACHE_HOME`; host Clippy and the full workspace test suite pass.
+- Observation: Successive Windows Clippy runs exposed Unix-only review capture declarations and a login-environment binding that was consumed only inside a Unix cfg block.
+  Evidence: Review capture is now declared only on Unix, and the cross-platform early return checks the optional login requirement before the Unix-only binding is introduced.
 
 ## Decision Log
 
@@ -96,3 +98,5 @@ Revision 2026-09-14: completed the local validation matrix, fixed macOS Codex go
 Revision 2026-09-14: resumed after incorporating the global `--instance` / `-i` isolation flag from commit `1cbe5778`; restarted exact-candidate validation before tagging.
 
 Revision 2026-09-14: fixed the Windows subagent MCP compile failure and synchronized the deterministic reliability harness with the current managed Codex ACP pin.
+
+Revision 2026-09-14: gated review capture to Unix and removed the remaining Windows-only unused login-environment binding reported by exact-commit CI.

@@ -219,12 +219,13 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
         | WorkerCommand::PushBranch { .. } => Some(true),
         _ => None,
     };
-    let Some(needs_login) = needs_login else {
+    if needs_login.is_none() {
         return Ok(());
-    };
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        let needs_login = needs_login.expect("login requirement was checked");
         let mut environment = if needs_login {
             mj_core::login_environment::discover()?
         } else {
