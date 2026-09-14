@@ -391,18 +391,23 @@ mod tests {
         assert!(!super::WorkerRestartLeftNoWorker::marks(&slow), "{slow:#}");
     }
 
+    #[cfg(unix)]
     use super::*;
 
+    #[cfg(unix)]
     use std::sync::Mutex;
 
+    #[cfg(unix)]
     use crate::targets::CommandOutput;
 
     /// Fails every command after the first, so a restart gets past its stop and
     /// then loses the worker it was replacing.
+    #[cfg(unix)]
     struct StopSucceedsThenFails {
         executed: Mutex<Vec<String>>,
     }
 
+    #[cfg(unix)]
     impl CommandExecutor for StopSucceedsThenFails {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let mut executed = self.executed.lock().expect("executed commands");
@@ -422,8 +427,10 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct FailingStop;
 
+    #[cfg(unix)]
     impl CommandExecutor for FailingStop {
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
             Ok(CommandOutput {
@@ -434,6 +441,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn bare_restart_controller() -> Controller {
         Controller {
             config: mj_core::config::Config::default(),
@@ -441,6 +449,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     async fn restart_error(
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
