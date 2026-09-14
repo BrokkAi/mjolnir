@@ -436,6 +436,7 @@ mod tests {
         assert_eq!(read_goal(&db, "selected").unwrap(), Some(original));
         assert!(collect(target.path(), "selected").is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn worker_checkpoint_entrypoints_restore_native_goal_accounting() {
         let temp = tempfile::tempdir().unwrap();

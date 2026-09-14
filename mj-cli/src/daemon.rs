@@ -1,9 +1,12 @@
 //! Application-owned daemon startup and attachment maintenance.
 use mj_controller::controller::ControllerStoreGuard;
 use mj_core::config::data_dir;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(not(unix))]
+use anyhow::bail;
 use anyhow::{Context, Result, anyhow, ensure};
 pub(crate) use mj_client::daemon::*;
 pub(crate) use mj_controller::daemon::run_daemon_process;
@@ -476,7 +479,7 @@ pub fn maintain_attachment(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;

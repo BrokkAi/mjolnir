@@ -25,8 +25,8 @@ Publish the accumulated session API, managed subagent, recovery, configuration, 
   Evidence: Canonicalizing the trusted harness home before appending `goals_1.sqlite` preserves final-component symlink rejection and makes the focused checkpoint tests plus the full workspace suite pass.
 - Observation: Exact-commit CI exposed an unguarded Unix socket client in the subagent MCP path and a reliability fixture pinned to Codex ACP 1.11.1 after production advanced to 1.11.3.
   Evidence: The non-Unix build now returns an explicit unsupported-platform error, and the fixture seeds the current managed install under the profile's `XDG_CACHE_HOME`; host Clippy and the full workspace test suite pass.
-- Observation: Successive Windows Clippy runs exposed Unix-only review capture declarations, a login-environment binding consumed only inside a Unix cfg block, and integration-fixture cleanup that directly used Unix signals.
-  Evidence: Review capture and login setup now respect their platform boundaries, while fixture cleanup uses process-group signals on Unix and the existing cross-platform process API elsewhere.
+- Observation: Successive Windows CI stages exposed Unix-only review capture, login setup, checkpoint tests, daemon test imports, and integration-fixture cleanup after each earlier compilation boundary was repaired.
+  Evidence: Unix-only modules, tests, and imports now carry matching cfg gates, while fixture cleanup uses process-group signals on Unix and the existing cross-platform process API elsewhere.
 
 ## Decision Log
 
@@ -99,4 +99,4 @@ Revision 2026-09-14: resumed after incorporating the global `--instance` / `-i` 
 
 Revision 2026-09-14: fixed the Windows subagent MCP compile failure and synchronized the deterministic reliability harness with the current managed Codex ACP pin.
 
-Revision 2026-09-14: gated review capture and login setup correctly, then made integration-fixture daemon cleanup compile and terminate processes cross-platform after exact-commit Windows CI exercised the test targets.
+Revision 2026-09-14: gated review capture, login setup, checkpoint and daemon tests correctly, then made integration-fixture daemon cleanup compile and terminate processes cross-platform as exact-commit Windows CI exercised progressively deeper test targets.
