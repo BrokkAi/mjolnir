@@ -29,9 +29,12 @@ mj --workspace "Release work"
 
 `--workspace` matches names case-insensitively. In the terminal surface, a
 bordered three-row Workspaces pane sits above Sessions. Its right-hand `☰`
-button opens the workspace manager; the command palette also exposes the
-Workspaces command. Selecting a tab, or pressing an arrow while the workspace
-tabs have focus, changes the live-session filter immediately. Tabs are local
+button opens the workspace manager. From the keyboard, focus the Workspaces
+pane, move from the tabs to `☰` with `Tab` or `Right`, then press `Enter`;
+`Shift-Tab` from the Sessions pane also lands on it. The command palette does
+not list the command, because the button is always visible. Selecting a tab, or
+pressing an arrow while the workspace tabs have focus, changes the live-session
+filter immediately. Tabs are local
 views, so sessions in other workspaces continue running independently. The web
 viewer shows each workspace as a separate tab. The terminal surface requires at
 least 80 columns.

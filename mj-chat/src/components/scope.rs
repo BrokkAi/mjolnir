@@ -353,9 +353,13 @@ impl<K: Copy + Eq> Form<K> {
     }
 
     /// Begins a metadata update between frames, preserving the drawn hitboxes.
+    ///
+    /// The dismiss control stays active. Only rendering registers it, so
+    /// deactivating it here would leave the title bar's × unclickable for every
+    /// event handled between two frames. Whether it may be used is
+    /// `dismiss_enabled`, which the owning dialog sets during the same update.
     pub fn begin_update(&mut self) {
         self.order.clear();
-        self.dismiss_active = false;
         for control in &mut self.controls {
             control.active = false;
         }

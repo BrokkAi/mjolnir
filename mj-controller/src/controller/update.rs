@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use flate2::read::GzDecoder;
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/BrokkAi/mjolnir/releases/latest";
@@ -33,10 +33,6 @@ const NPM_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPM";
 const NPX_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_NPX";
 const HOMEBREW_MANAGED_ENV: &str = "MJOLNIR_MANAGED_BY_HOMEBREW";
 const NO_UPDATE_CHECK_ENV: &str = "MJOLNIR_NO_UPDATE_CHECK";
-
-/// A check at most once a day keeps interactive startups fast while still
-/// surfacing a release the same day for daily users.
-const STAMP_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// The endpoints a channel consults, grouped so loopback tests can point
 /// every fetch at a local server instead of the real registries.
@@ -526,49 +522,6 @@ fn parse_version(raw: &str) -> Result<Version> {
     Version::parse(raw.trim_start_matches('v')).with_context(|| format!("parse version {raw}"))
 }
 
-/// Persists when the updater last reached the network, so `mj` checks at
-/// most once a day instead of on every interactive start. Written before the
-/// fetch so a hung request cannot turn into a retry on every start.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct UpdateCheckStamp {
-    last_check_ms: u64,
-}
-
-fn stamp_path() -> PathBuf {
-    mj_core::config::data_dir().join("update-check.json")
-}
-
-fn read_last_check_ms() -> Option<u64> {
-    let raw = std::fs::read_to_string(stamp_path()).ok()?;
-    let stamp: UpdateCheckStamp = serde_json::from_str(&raw).ok()?;
-    Some(stamp.last_check_ms)
-}
-
-/// Best-effort: a stamp that cannot be written only costs an extra check on
-/// the next start, never an upgrade failure.
-fn write_last_check_ms(now_ms: u64) {
-    let stamp = UpdateCheckStamp {
-        last_check_ms: now_ms,
-    };
-    let Ok(body) = serde_json::to_string(&stamp) else {
-        return;
-    };
-    if let Err(error) = mj_core::config::atomic_write(&stamp_path(), body.as_bytes()) {
-        tracing::debug!(%error, path = %stamp_path().display(), "could not persist update-check stamp");
-    }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis() as u64)
-        .unwrap_or_default()
-}
-
-fn check_is_due(last_check_ms: Option<u64>, now_ms: u64) -> bool {
-    last_check_ms.is_none_or(|last| now_ms.saturating_sub(last) >= STAMP_MAX_AGE_MS)
-}
-
 /// What the startup check decided. A successful upgrade never produces a
 /// value: the process re-execs into the new binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -594,8 +547,8 @@ pub enum StartupUpdateOutcome {
 ///   update the controller and every bundled application helper, and re-exec.
 /// - npx and cargo installs are notice-only.
 ///
-/// Runs before the dashboard's event loop exists: the version fetch is
-/// throttled and time-boxed, and the interactive package-manager runs share
+/// Runs on every interactive startup before the daemon or dashboard starts.
+/// The version fetch is time-boxed, and interactive package-manager runs share
 /// the terminal like any foreground command, so this must never be called
 /// from a UI render path.
 pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
@@ -612,10 +565,6 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
     }
 
     let method = InstallMethod::current();
-    if !check_is_due(read_last_check_ms(), now_ms()) {
-        return StartupUpdateOutcome::Skipped;
-    }
-    write_last_check_ms(now_ms());
 
     let update = match latest_update(&UpdateSources::default(), &method).await {
         Ok(Some(update)) => update,
@@ -1303,15 +1252,6 @@ end
             selected.name,
             "brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz"
         );
-    }
-
-    #[test]
-    fn stale_check_stamps_are_due() {
-        let day_ms = STAMP_MAX_AGE_MS;
-        assert!(check_is_due(None, 1_000));
-        assert!(check_is_due(Some(0), day_ms));
-        assert!(!check_is_due(Some(0), day_ms - 1));
-        assert!(check_is_due(Some(0), u64::MAX)); // never panics on overflow
     }
 
     #[test]
