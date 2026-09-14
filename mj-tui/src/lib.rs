@@ -1566,6 +1566,22 @@ impl DashboardState {
             // a stray click elsewhere can't pair up with the next row click.
             self.last_row_click = None;
         }
+        // The workspace tabs are a single horizontal row, so the wheel over
+        // that pane switches tabs even when the pane is not focused.
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && self
+            .workspace_pane_area
+            .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
+        {
+            let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                -1
+            } else {
+                1
+            };
+            return self.select_adjacent_workspace(delta);
+        }
         let hovered = self.pane_areas.and_then(|areas| {
             areas
                 .into_iter()

@@ -535,18 +535,31 @@ prompt-ledger metadata and matching completion notifications report whole-turn
 consumption; explicitly incomplete reports retain `unspecified` scope. The
 managed ZCode adapter reports the backend's merged whole-turn usage on the
 prompt response and omits the report when the backend reported none. Kimi and
-Deepseek reports retain `unspecified` scope; Muse produces no token reports.
+Deepseek reports retain `unspecified` scope. The managed Muse adapter 0.4.2 and
+later report whole-turn usage on the prompt response and omit the report when the
+backend reported no model legs; older Muse adapters produce no token reports.
 Only known whole-turn reports contribute to `totals`. Each counter includes
 `tokens` and `reported_turns`; `coverage` counts recorded turns, full reports, partial
 last-request reports, unspecified reports, and missing reports. An absent counter
 stays absent. These are reported totals for covered turns, not a billing estimate.
-Grok and ZCode usage may also carry `provider_details`: optional `model_calls`,
+Grok, ZCode, and Muse usage may also carry `provider_details`: optional `model_calls`,
 `api_duration_ms`, provider `elapsed_ms`, `cost`, and a `model_usage` map keyed by
 the provider's exact model IDs (for example, `grok-4.6-build`). ZCode reports only
-`model_calls`. Each model row uses
-the same normalized token fields. Full input already includes cache reads and
-cache creation; output already includes reasoning. Do not add those subsets to
+`model_calls` and `credits`. Muse reports `model_calls`, `api_duration_ms`, and
+`model_usage`, and no cost: the Muse plan is subscription-metered, so a turn
+carries no price. Each model row uses the same normalized token fields. Full
+input already includes cache reads and cache creation; output already includes reasoning. Do not add those subsets to
 input/output again, or add model rows to the top-level turn total.
+
+ZCode `credits` records the GLM Coding Plan credits a turn consumed: `used`
+(`after` minus `before`), the measured `window`, both readings, and two
+qualifiers. The counter is read once before the prompt and once after the
+response, so `account_shared` is always true — concurrent sessions on the same
+key land in the same delta. `window_reset_crossed` is true when the window reset
+between the two reads, which makes `used` count against two different windows.
+Credits are recorded only alongside a token report: a turn the backend did not
+report is not given an invented one. Absent `credits` means the turn was not
+measured, not that it was free.
 
 Turn `cost` carries exact integer `usd_ticks` (10¹⁰ ticks per USD), its exact
 `usd` decimal **string**, and `is_partial`. Partial cost is a reported subtotal,
@@ -555,8 +568,9 @@ is separate from Mjolnir's top-level wait `elapsed_ms`. Duplicate response and
 notification reports are reconciled by native prompt identity, not summed.
 These details are collected for future turns; historical missing usage remains
 missing. Upgrade the controller before workers: new workers require relay
-protocol 10 readers to preserve provider details when verifying event hashes.
-New controllers can still read older workers and records.
+protocol 13 readers to preserve provider details, including per-turn credits,
+when verifying event hashes. New controllers can still read older workers and
+records.
 
 `provider_session_cost`, when present, is the latest provider-reported cumulative
 session amount, currency, and observation timestamp. It is not summed across
