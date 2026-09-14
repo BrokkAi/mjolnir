@@ -19,6 +19,8 @@ Publish the accumulated session API, managed subagent, recovery, configuration, 
 
 - Observation: The crates.io workflow now publishes twelve packages rather than the nine described in the prior release plan because review, transcript, and checkpoint were split into independently published crates after v2.6.4.
   Evidence: `.github/workflows/publish.yml` lists twelve crates in dependency order.
+- Observation: The first macOS Clippy run found that `libc::TIOCSCTTY` is a 32-bit request while `libc::ioctl` accepts `c_ulong`; after fixing that compile error, post-exit slave-side termios reads returned `EIO` on macOS.
+  Evidence: Casting the request to `libc::c_ulong` restores compilation, and inspecting the shared PTY settings through the still-open master makes all eight `termination_pty` behavior tests pass.
 
 ## Decision Log
 
@@ -80,3 +82,5 @@ Public notes are stored in `.agents/docs/release-v2.7.0-notes.md`. Publisher evi
 Use the repository-pinned Rust 1.96.0 toolchain, cargo-about 0.9.1, cargo-deny 0.20.2, Node 24, Git, GitHub CLI, crates.io, npm, and the `BrokkAi/homebrew-tap` repository. Preserve the current workflow identities, package names, environments, and dependency order.
 
 Revision 2026-09-14: initialized the release plan and selected v2.7.0 from the scope accumulated since v2.6.4.
+
+Revision 2026-09-14: recorded and fixed the macOS PTY portability failures discovered by release validation.
