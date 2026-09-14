@@ -294,6 +294,57 @@ pub struct ExecutionEnforcement {
     acp_mode: Option<&'static str>,
     launch_flag: Option<&'static str>,
     launch_environment: Option<(&'static str, &'static str)>,
+    /// A word appended once to a whitespace-separated argv held in an env var.
+    launch_argument: Option<(&'static str, &'static str)>,
+    /// Value for the ACP `session/new` `_meta.sandbox.enabled` field.
+    session_sandbox: Option<bool>,
+    /// A value written into a staged profile file before upload.
+    staged_setting: Option<StagedSetting>,
+}
+
+/// A setting the controller writes into a staged harness profile because the
+/// harness reads it from disk and no launch-time channel can carry it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StagedSetting {
+    /// File inside the staged profile, for example `settings.json`.
+    pub file: &'static str,
+    /// Object keys walked from the document root to the value's key.
+    pub path: &'static [&'static str],
+    pub value: &'static str,
+    /// Key inserted when absent on the root and on every object created or
+    /// traversed along `path`. Muse requires `schema_version: 1` on both.
+    pub object_version: Option<(&'static str, u64)>,
+}
+
+impl StagedSetting {
+    /// Write this setting into a staged document's root object, creating the
+    /// objects along `path` and stamping `object_version` where it is missing.
+    pub fn apply(&self, root: &mut serde_json::Map<String, serde_json::Value>) -> Result<()> {
+        let (key, parents) = self
+            .path
+            .split_last()
+            .context("staged setting path must name a key")?;
+        let mut object = root;
+        for parent in parents {
+            self.stamp_version(object);
+            object = object
+                .entry(*parent)
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+                .as_object_mut()
+                .with_context(|| format!("{parent} must be a JSON object"))?;
+        }
+        self.stamp_version(object);
+        object.insert((*key).to_owned(), serde_json::Value::from(self.value));
+        Ok(())
+    }
+
+    fn stamp_version(&self, object: &mut serde_json::Map<String, serde_json::Value>) {
+        if let Some((key, version)) = self.object_version {
+            object
+                .entry(key)
+                .or_insert_with(|| serde_json::Value::from(version));
+        }
+    }
 }
 
 impl ExecutionEnforcement {
@@ -315,6 +366,22 @@ impl ExecutionEnforcement {
     pub const fn launch_environment(self) -> Option<(&'static str, &'static str)> {
         self.launch_environment
     }
+
+    /// An argv word appended to the environment variable that carries the
+    /// harness's own command line, when the policy needs one.
+    pub const fn launch_argument(self) -> Option<(&'static str, &'static str)> {
+        self.launch_argument
+    }
+
+    /// What the ACP `session/new` request asks for the harness's own sandbox.
+    pub const fn session_sandbox(self) -> Option<bool> {
+        self.session_sandbox
+    }
+
+    /// A setting the controller writes into the staged profile before upload.
+    pub const fn staged_setting(self) -> Option<StagedSetting> {
+        self.staged_setting
+    }
 }
 
 /// The file inside a harness home that proves the harness is logged in.
@@ -333,15 +400,6 @@ pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf 
         HarnessKind::Zcode => "v2/config.json",
     })
 }
-
-/// The Muse permission profile staged for unconstrained targets.
-///
-/// Muse 1.2.1 composes a session's permission profile from
-/// `permissions.default_profile` in its settings file, and nothing on the ACP
-/// wire overrides that choice. A container target must therefore have the
-/// profile written into the staged settings, or Muse refuses the session when
-/// the configured profile needs a facility the container does not have.
-pub const MUSE_UNCONSTRAINED_PERMISSION_PROFILE: &str = ":unrestricted";
 
 impl HarnessKind {
     /// Translate a harness home into its process environment. Muse's config
@@ -452,59 +510,94 @@ impl HarnessKind {
     ) -> Option<ExecutionEnforcement> {
         match (self, policy) {
             (Self::Muse, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
-                label: "allowAll / sandbox-off",
+                label: "allowAll / sandbox-off / :unrestricted",
                 acp_mode: Some("allowAll"),
                 launch_flag: None,
                 launch_environment: Some(("MUSE_APPROVAL_MODE", "allowAll")),
+                launch_argument: Some(("MUSE_SERVE_ARGS", "--disable-sandbox")),
+                session_sandbox: None,
+                staged_setting: Some(StagedSetting {
+                    file: "settings.json",
+                    path: &["permissions", "default_profile"],
+                    value: ":unrestricted",
+                    object_version: Some(("schema_version", 1)),
+                }),
             }),
             (Self::Codex, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
                 label: "agent / guardian",
                 acp_mode: Some("agent"),
                 launch_flag: None,
                 launch_environment: Some(("INITIAL_AGENT_MODE", "agent")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
             }),
             (Self::Codex, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "agent-full-access",
                 acp_mode: Some("agent-full-access"),
                 launch_flag: None,
                 launch_environment: Some(("INITIAL_AGENT_MODE", "agent-full-access")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
             }),
             (Self::Zcode, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
                 label: "build / guardian",
                 acp_mode: Some("build"),
                 launch_flag: None,
                 launch_environment: Some(("ZCODE_ACP_MODE", "build")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
             }),
             (Self::Zcode, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "yolo",
                 acp_mode: Some("yolo"),
                 launch_flag: None,
                 launch_environment: Some(("ZCODE_ACP_MODE", "yolo")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
             }),
+            // Every remaining harness keeps the configuration its user wrote.
+            // Muse never reaches this arm: `effective_execution_policy` has
+            // already forced it unconstrained.
             (_, ExecutionPolicy::ConfiguredApprovals) => None,
             (Self::Claude, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "bypassPermissions / sandbox-off",
                 acp_mode: Some("bypassPermissions"),
                 launch_flag: None,
                 launch_environment: None,
+                launch_argument: None,
+                session_sandbox: Some(false),
+                staged_setting: None,
             }),
             (Self::Kimi, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "auto",
                 acp_mode: Some("auto"),
                 launch_flag: None,
                 launch_environment: None,
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
             }),
             (Self::Grok, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "always-approve / sandbox-off",
                 acp_mode: None,
                 launch_flag: Some("--always-approve"),
                 launch_environment: Some(("GROK_SANDBOX", "off")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
             }),
             (Self::Deepseek, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "danger-full-access",
                 acp_mode: None,
                 launch_flag: None,
                 launch_environment: Some(("DSH_PERMISSION_MODE", "danger-full-access")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
             }),
         }
     }
@@ -518,19 +611,19 @@ impl HarnessKind {
         policy: ExecutionPolicy,
         environment: &mut BTreeMap<String, String>,
     ) -> Result<()> {
-        if self == Self::Muse && policy == ExecutionPolicy::Unconstrained {
-            let args = environment.entry("MUSE_SERVE_ARGS".into()).or_default();
-            if !args
-                .split_whitespace()
-                .any(|arg| arg == "--disable-sandbox")
-            {
-                args.push_str(" --disable-sandbox");
+        let Some(enforcement) = self.execution_enforcement(policy) else {
+            return Ok(());
+        };
+        if let Some((key, argument)) = enforcement.launch_argument() {
+            let args = environment.entry(key.to_owned()).or_default();
+            if !args.split_whitespace().any(|word| word == argument) {
+                if !args.is_empty() {
+                    args.push(' ');
+                }
+                args.push_str(argument);
             }
         }
-        if let Some((key, value)) = self
-            .execution_enforcement(policy)
-            .and_then(ExecutionEnforcement::launch_environment)
-        {
+        if let Some((key, value)) = enforcement.launch_environment() {
             environment.insert(key.to_owned(), value.to_owned());
         }
         Ok(())
@@ -546,10 +639,19 @@ impl HarnessKind {
     }
 
     pub const fn supports_guardian_approvals(self) -> bool {
-        matches!(
-            self,
-            Self::Codex | Self::Claude | Self::Grok | Self::Muse | Self::Zcode
-        )
+        matches!(self, Self::Codex | Self::Claude | Self::Grok | Self::Zcode)
+    }
+
+    /// The policy a session actually runs under. Muse cannot honor configured
+    /// approvals: its permission profile is a host-lifetime setting that
+    /// `muse serve` refuses when it names the automated reviewer, and the wire
+    /// cannot select another. Muse therefore runs unconstrained on every
+    /// target and the target wizard warns on raw ones.
+    pub const fn effective_execution_policy(self, target: ExecutionPolicy) -> ExecutionPolicy {
+        match self {
+            Self::Muse => ExecutionPolicy::Unconstrained,
+            _ => target,
+        }
     }
 
     /// Shared warning for selecting a harness without guardian approvals on a
@@ -2137,30 +2239,121 @@ mod tests {
         }
     }
 
+    /// The launch argument joins an argv the user already set, and repeated
+    /// enforcement never appends it twice.
     #[test]
-    fn muse_guardian_preserves_policy_and_unconstrained_launch_is_explicit() {
-        let original = BTreeMap::from([
-            ("MUSE_APPROVAL_MODE".into(), "promptUnmatched".into()),
-            (
-                "MUSE_SERVE_ARGS".into(),
-                "--sandbox-network restricted".into(),
-            ),
-        ]);
-        let mut environment = original.clone();
-        HarnessKind::Muse
-            .configure_execution_environment(ExecutionPolicy::ConfiguredApprovals, &mut environment)
-            .unwrap();
-        assert_eq!(environment, original);
-        HarnessKind::Muse
-            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
-            .unwrap();
-        HarnessKind::Muse
-            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
-            .unwrap();
+    fn muse_unconstrained_launch_keeps_one_disable_sandbox_argument() {
+        let mut environment = BTreeMap::from([(
+            "MUSE_SERVE_ARGS".into(),
+            "--sandbox-network restricted".into(),
+        )]);
+        for _ in 0..2 {
+            HarnessKind::Muse
+                .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
+                .unwrap();
+        }
         assert_eq!(environment["MUSE_APPROVAL_MODE"], "allowAll");
         assert_eq!(
             environment["MUSE_SERVE_ARGS"],
             "--sandbox-network restricted --disable-sandbox"
+        );
+
+        let mut carried = BTreeMap::from([("MUSE_SERVE_ARGS".into(), "--disable-sandbox".into())]);
+        HarnessKind::Muse
+            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut carried)
+            .unwrap();
+        assert_eq!(carried["MUSE_SERVE_ARGS"], "--disable-sandbox");
+    }
+
+    #[test]
+    fn muse_runs_unconstrained_on_every_target_and_other_harnesses_keep_the_target_policy() {
+        for kind in HarnessKind::ALL {
+            for policy in [
+                ExecutionPolicy::ConfiguredApprovals,
+                ExecutionPolicy::Unconstrained,
+            ] {
+                let expected = if kind == HarnessKind::Muse {
+                    ExecutionPolicy::Unconstrained
+                } else {
+                    policy
+                };
+                assert_eq!(
+                    kind.effective_execution_policy(policy),
+                    expected,
+                    "{kind:?} {policy:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_unconstrained_claude_turns_off_the_session_sandbox() {
+        for kind in HarnessKind::ALL {
+            for policy in [
+                ExecutionPolicy::ConfiguredApprovals,
+                ExecutionPolicy::Unconstrained,
+            ] {
+                let sandbox = kind
+                    .execution_enforcement(policy)
+                    .and_then(ExecutionEnforcement::session_sandbox);
+                let expected =
+                    (kind == HarnessKind::Claude && policy.is_unconstrained()).then_some(false);
+                assert_eq!(sandbox, expected, "{kind:?} {policy:?}");
+            }
+        }
+    }
+
+    fn muse_staged_setting() -> StagedSetting {
+        HarnessKind::Muse
+            .execution_enforcement(ExecutionPolicy::Unconstrained)
+            .and_then(ExecutionEnforcement::staged_setting)
+            .expect("Muse stages its permission profile")
+    }
+
+    #[test]
+    fn a_staged_setting_keeps_the_rest_of_the_document() {
+        let mut document = serde_json::json!({
+            "schema_version": 1,
+            "provider": "anthropic",
+            "permissions": {"schema_version": 2, "default_profile": ":auto-review"}
+        });
+
+        muse_staged_setting()
+            .apply(document.as_object_mut().unwrap())
+            .unwrap();
+
+        assert_eq!(document["provider"], "anthropic");
+        assert_eq!(document["schema_version"], 1);
+        assert_eq!(document["permissions"]["schema_version"], 2);
+        assert_eq!(document["permissions"]["default_profile"], ":unrestricted");
+    }
+
+    #[test]
+    fn a_staged_setting_creates_the_objects_and_versions_it_needs() {
+        let mut root = serde_json::Map::new();
+
+        muse_staged_setting().apply(&mut root).unwrap();
+
+        assert_eq!(
+            serde_json::Value::Object(root),
+            serde_json::json!({
+                "schema_version": 1,
+                "permissions": {"schema_version": 1, "default_profile": ":unrestricted"}
+            })
+        );
+    }
+
+    #[test]
+    fn a_staged_setting_reports_a_traversed_value_that_is_not_an_object() {
+        let mut document = serde_json::json!({"permissions": []});
+
+        let error = muse_staged_setting()
+            .apply(document.as_object_mut().unwrap())
+            .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("permissions must be a JSON object"),
+            "error should name the key: {error:#}"
         );
     }
 
@@ -2338,10 +2531,18 @@ mod tests {
             .execution_enforcement(ExecutionPolicy::Unconstrained)
             .unwrap();
         assert_eq!(muse.acp_mode(), Some("allowAll"));
-        assert_eq!(muse.label(), "allowAll / sandbox-off");
+        assert_eq!(muse.label(), "allowAll / sandbox-off / :unrestricted");
         assert_eq!(
             muse.launch_environment(),
             Some(("MUSE_APPROVAL_MODE", "allowAll"))
+        );
+        assert_eq!(
+            muse.launch_argument(),
+            Some(("MUSE_SERVE_ARGS", "--disable-sandbox"))
+        );
+        assert_eq!(
+            muse.staged_setting().map(|setting| setting.value),
+            Some(":unrestricted")
         );
     }
 
@@ -2444,7 +2645,7 @@ mod tests {
         for kind in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Grok] {
             assert!(kind.supports_guardian_approvals(), "{kind:?}");
         }
-        for kind in [HarnessKind::Kimi, HarnessKind::Deepseek] {
+        for kind in [HarnessKind::Kimi, HarnessKind::Deepseek, HarnessKind::Muse] {
             assert!(!kind.supports_guardian_approvals(), "{kind:?}");
         }
     }

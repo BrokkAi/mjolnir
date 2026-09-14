@@ -305,8 +305,8 @@ fn run(cli: Cli) -> Result<()> {
         .context("build Tokio runtime")?;
     if matches!(cli.command, None | Some(Command::Workspaces)) {
         // Interactive dashboard startup is the one place an update may be
-        // checked, prompted for, and applied. The check is throttled and the
-        // whole flow finishes before the TUI takes over the terminal; a
+        // checked, prompted for, and applied on every launch. The whole flow
+        // finishes before daemon startup and the TUI takes over the terminal; a
         // successful upgrade never returns because the process re-execs.
         runtime.block_on(mj_controller::controller::update::check_prompt_and_apply());
     }

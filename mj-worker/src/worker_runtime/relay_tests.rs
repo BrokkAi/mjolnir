@@ -772,6 +772,33 @@ fn muse_relative_roots_resolve_before_credential_and_history_access() {
     );
 }
 
+/// Muse has no guardian mode, so a launch config written before that rule
+/// existed is upgraded when the worker enforces it.
+#[test]
+fn enforcing_the_policy_upgrades_a_persisted_muse_guardian_config() {
+    let mut config = launch_config("/profile");
+    config.harness = HarnessKind::Muse;
+    config.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+
+    super::enforce_execution_policy(&mut config).unwrap();
+
+    assert_eq!(config.execution_policy, ExecutionPolicy::Unconstrained);
+    assert_eq!(
+        config
+            .environment
+            .get("MUSE_APPROVAL_MODE")
+            .map(String::as_str),
+        Some("allowAll")
+    );
+    assert_eq!(
+        config
+            .environment
+            .get("MUSE_SERVE_ARGS")
+            .map(String::as_str),
+        Some("--disable-sandbox")
+    );
+}
+
 #[test]
 fn a_launch_config_without_a_harness_home_cannot_serve_credentials() {
     let mut config = launch_config("/profile");

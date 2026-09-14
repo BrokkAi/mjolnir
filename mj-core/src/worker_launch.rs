@@ -119,8 +119,8 @@ pub struct WorkerLaunchConfig {
     pub project_memory: Option<ProjectMemoryLaunchConfig>,
     /// Target-level policy translated into harness-specific controls by the
     /// worker. Raw localhost and guardian SSH targets preserve configured
-    /// approvals for harnesses that support them; Codex ACP is forced into
-    /// full access as a compatibility workaround. Other targets run
+    /// approvals for harnesses that support them; Muse has no guardian mode
+    /// and is forced unconstrained on every target. Other targets run
     /// unconstrained.
     #[serde(
         alias = "force_unrestricted_mode",
