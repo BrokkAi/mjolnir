@@ -9,18 +9,23 @@
 #
 # The caller owns `set -euo pipefail` and the working directory.
 
-# Read the profile out of a Cargo argument list. Builds that take only the
-# profile repeat profile_args; builds that construct a path need profile_dir.
-# Sets: profile_args (empty for Cargo's own default, which is dev),
-# profile_dir (the directory Cargo writes that profile into).
-mj_parse_profile() {
-  profile_args=()
-  profile_dir=debug
+# Read the caller's Cargo arguments and settle the profile every binary uses.
+# Release is the default: these scripts produce the worker that gets uploaded
+# to remote and container targets, where an unoptimized binary costs both
+# transfer size and session speed. Pass `--profile dev` for a fast edit loop.
+# Sets: cargo_args (the caller's arguments, plus the default profile when they
+# chose none, for builds that take every argument), profile_args (the profile
+# alone, for builds that take nothing else), profile_dir (the directory Cargo
+# writes that profile into).
+mj_parse_cargo_args() {
+  cargo_args=("$@")
+  profile_args=(--release)
+  profile_dir=release
+  local chosen=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --release|-r)
-        profile_args=(--release)
-        profile_dir=release
+        chosen=1
         ;;
       --profile)
         if [ "$#" -lt 2 ]; then
@@ -29,13 +34,19 @@ mj_parse_profile() {
         fi
         shift
         mj_select_profile "$1"
+        chosen=1
         ;;
       --profile=*)
         mj_select_profile "${1#--profile=}"
+        chosen=1
         ;;
     esac
     shift
   done
+  # Cargo rejects two profile flags, so only supply the one the caller omitted.
+  if [ "$chosen" = 0 ]; then
+    cargo_args+=("${profile_args[@]}")
+  fi
 }
 
 # Record a named profile. Cargo names the dev profile's directory `debug`.

@@ -8,13 +8,14 @@
 #
 # Cargo arguments precede `--`; application arguments follow it, e.g.
 #   scripts/run.sh -- login
-#   scripts/run.sh --release -- daemon status
-# A `--release` before `--` builds the worker in release too, so
-# the profiles the daemon compares still match.
+#   scripts/run.sh --profile dev -- daemon status
+# The profile applies to every binary, so the profiles the daemon compares
+# still match. Release is the default, because these workers are uploaded to
+# remote and container targets; `--profile dev` trades that for link speed.
 #
 # scripts/install.sh builds the same binaries the same way through
-# scripts/lib/build.sh, and both default to the dev profile, so the two scripts
-# reuse each other's Cargo artifacts as long as their profiles match.
+# scripts/lib/build.sh, with the same default, so the two scripts reuse each
+# other's Cargo artifacts as long as their profiles match.
 #
 # On Linux and macOS, a daemon running this host build stays attached.
 # If Cargo replaced the executable since the daemon started, the first daemon
@@ -26,7 +27,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 . "$repo_root/scripts/lib/build.sh"
 
-cargo_args=()
+build_args=()
 app_args=()
 while [ "$#" -gt 0 ]; do
   if [ "$1" = -- ]; then
@@ -34,13 +35,13 @@ while [ "$#" -gt 0 ]; do
     app_args=("$@")
     break
   fi
-  cargo_args+=("$1")
+  build_args+=("$1")
   shift
 done
 # Match the run's profile so the daemon finds a current sibling: it looks for
 # the musl worker beside the controller under the same profile directory.
 # Empty-array expansions here also support macOS Bash 3.2 with nounset.
-mj_parse_profile ${cargo_args[@]+"${cargo_args[@]}"}
+mj_parse_cargo_args ${build_args[@]+"${build_args[@]}"}
 
 case "$(uname -s)" in
   Linux)

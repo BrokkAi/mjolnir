@@ -139,7 +139,7 @@ for (const target of ['native', 'x86_64-unknown-linux-musl', 'mj-voice-worker'])
 
 // The install must land in the same profile directory scripts/run.sh uses, or
 // the two scripts invalidate each other's Cargo artifacts on every run.
-for (const [args, profile] of [[[], 'debug'], [['--release'], 'release'], [['--profile', 'dev'], 'debug']]) {
+for (const [args, profile] of [[[], 'release'], [['--release'], 'release'], [['--profile', 'dev'], 'debug']]) {
   test(`install with [${args}] builds every binary under target/${profile}`, () => {
     const { root, installed, run } = fixture('Linux', 'x86_64');
     try {

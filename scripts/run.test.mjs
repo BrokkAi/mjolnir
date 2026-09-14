@@ -43,7 +43,7 @@ const value = (key, fallback) => {
 const binary = value('--bin');
 const cli = binary === 'mj';
 const triple = value('--target', '');
-const profile = args.includes('--release') ? 'release' : value('--profile', 'debug');
+const profile = args.includes('--release') ? 'release' : value('--profile', 'debug').replace(/^dev$/, 'debug');
 const kind = cli ? 'cli' : binary === 'mj-voice-worker' ? 'voice' : triple ? 'portable' : 'native';
 if (kind === process.env.FAIL_KIND) { fs.writeSync(2, kind + '-failed'); process.exit(42); }
 const dir = path.resolve(value('--target-dir', 'target'), triple, profile);
@@ -71,13 +71,15 @@ if (process.env.NO_ARTIFACT !== '1') console.log(JSON.stringify({ reason: 'compi
 }
 
 for (const platform of ['Linux', 'Darwin']) {
-  for (const release of [false, true]) {
-    test(`${platform} ${release ? 'release' : 'debug'} builds workers and directly executes the CLI`, () => {
+  // A bare run builds release, so the worker it uploads to a remote target is
+  // optimized; `--profile dev` is the opt-in fast loop. The trailing
+  // `--release` is an application argument and must not reach Cargo.
+  for (const [args, profile] of [[[], 'release'], [['--profile', 'dev'], 'debug']]) {
+    test(`${platform} ${profile} builds workers and directly executes the CLI`, () => {
       const f = fixture(platform);
       try {
-        const result = f.run([...(release ? ['--release'] : []), '--', 'doctor', 'a b', '--release']);
+        const result = f.run([...args, '--', 'doctor', 'a b', '--release']);
         assert.equal(result.status, 0, result.stderr);
-        const profile = release ? 'release' : 'debug';
         assert.equal(readFileSync(path.join(f.root, 'target/worker', profile, 'mj-worker'), 'utf8').trim(), 'fresh');
         const triple = platform === 'Linux' ? 'x86_64-unknown-linux-musl' : 'aarch64-unknown-linux-musl';
         assert.equal(readFileSync(path.join(f.root, 'target/worker', triple, profile, 'mj-worker'), 'utf8').trim(), 'fresh');

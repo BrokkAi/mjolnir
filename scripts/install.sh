@@ -14,13 +14,12 @@
 # The binaries are built exactly as scripts/run.sh builds them, through the
 # shared scripts/lib/build.sh, so the two scripts reuse each other's artifacts:
 # `mj` and the dictation helper in the default `target/`, the workers in
-# `target/worker`, all under one profile. Both scripts default to the dev
-# profile; a profile flag in the arguments applies to every binary, so pass
-# `--release` to install an optimized build. Other arguments reach the `cargo
-# build` for `mj` and the dictation helper, which share a target directory.
-# For example:
+# `target/worker`, all under one profile. Both default to release, because the
+# installed worker is uploaded to remote and container targets. A profile flag
+# applies to every binary; other arguments reach the `cargo build` for `mj` and
+# the dictation helper, which share a target directory. For example:
 #   scripts/install.sh
-#   scripts/install.sh --release
+#   scripts/install.sh --profile dev
 #   CARGO_INSTALL_ROOT="$HOME/.local" scripts/install.sh
 #
 # Cargo's install root receives the binaries: CARGO_INSTALL_ROOT, else
@@ -39,11 +38,8 @@ install_root=${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}
 bin_dir="$install_root/bin"
 
 # Match the profile across every binary, so the daemon finds workers built the
-# same way as the controller. A caller's profile flag already sits in
-# cargo_args and reaches `mj` directly; profile_args repeats it on the worker
-# builds, which take none of the other arguments.
-cargo_args=("$@")
-mj_parse_profile ${cargo_args[@]+"${cargo_args[@]}"}
+# same way as the controller.
+mj_parse_cargo_args "$@"
 
 # Built binaries and the file names they take in the install directory.
 sources=()
