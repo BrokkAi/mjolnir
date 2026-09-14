@@ -425,11 +425,13 @@ where
         state: Arc::clone(&audio_state),
     };
     let (source, mic_sample_rate) = build_audio_source(audio_sender)?;
-    if let InputSource::Cpal(stream) = &source {
-        stream.play().map_err(|error| {
+    match &source {
+        InputSource::Cpal(stream) => stream.play().map_err(|error| {
             capture_backend_error(format!("start microphone capture failed: {error}"));
             anyhow::anyhow!("start microphone capture: {error}")
-        })?;
+        })?,
+        #[cfg(target_os = "linux")]
+        InputSource::Pulse { .. } => {}
     }
     on_status("listening...".to_string());
 

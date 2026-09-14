@@ -513,7 +513,10 @@ fn admit_phone_action(
     running_actions: usize,
     active_sessions: &mut std::collections::BTreeSet<String>,
 ) -> std::result::Result<Option<String>, ActionOutcome> {
-    let closing = matches!(action, ControllerAction::Close { .. });
+    let closing = matches!(
+        action,
+        ControllerAction::Close { .. } | ControllerAction::ForceClose { .. }
+    );
     if !closing && !phone_action_capacity_available(running_actions) {
         return Err(ActionOutcome::Busy);
     }
@@ -1846,6 +1849,13 @@ pub async fn run_server(
                         request_phone_action_cancellation(session_id, &action_sessions, &action_cancellations);
                         daemon_runtime.request_close(session_id);
                     }
+                    // A force close runs even while a graceful close for the
+                    // same session is still in flight; that stuck close is
+                    // exactly what it is meant to take over.
+                    if let ControllerAction::ForceClose { session_id } = &request.action {
+                        request_phone_action_cancellation(session_id, &action_sessions, &action_cancellations);
+                        daemon_runtime.request_close(session_id);
+                    }
                     let session_id = match admit_phone_action(
                         &request.action,
                         action_cancellations.len(),
@@ -1867,7 +1877,7 @@ pub async fn run_server(
                     let started = action_started_tx.clone();
                     next_action_id = next_action_id.wrapping_add(1).max(1);
                     let action_id = next_action_id;
-                    if let ControllerAction::Close { session_id } = &action { closing_actions.insert(session_id.clone(), action_id); }
+                    if let ControllerAction::Close { session_id } | ControllerAction::ForceClose { session_id } = &action { closing_actions.insert(session_id.clone(), action_id); }
                     if let ControllerAction::New { workspace_id, .. } = &action {
                         let workspace_id = if workspace_id.is_empty() && phone_workspaces.len() == 1 {
                             phone_workspaces[0].id.clone()
@@ -2182,6 +2192,7 @@ fn controller_action_session_id(action: &ControllerAction) -> Option<String> {
         | ControllerAction::RunShell { session_id, .. }
         | ControllerAction::CancelShell { session_id, .. }
         | ControllerAction::Close { session_id }
+        | ControllerAction::ForceClose { session_id }
         | ControllerAction::Resume { session_id, .. }
         | ControllerAction::Open { session_id }
         | ControllerAction::Cancel { session_id }
@@ -2589,6 +2600,12 @@ async fn apply_phone_action(
         }
         ControllerAction::Close { session_id } => {
             services.daemon_runtime.close_session(session_id).await
+        }
+        ControllerAction::ForceClose { session_id } => {
+            services
+                .daemon_runtime
+                .force_destroy_session(session_id)
+                .await
         }
         ControllerAction::Resume {
             session_id,
@@ -4498,6 +4515,24 @@ mod tests {
         // A second resolution is a no-op, so a completion after a publication
         // cannot overwrite the answer already sent.
         replies.resolve(7, ActionOutcome::accepted());
+    }
+
+    #[test]
+    fn force_close_is_admitted_like_close() {
+        let mut active = std::collections::BTreeSet::from(["session-1".to_owned()]);
+        let force_close = ControllerAction::ForceClose {
+            session_id: "session-1".into(),
+        };
+        // A full action pool and a session already busy with a stuck close
+        // are both exactly when a force close has to get through.
+        assert_eq!(
+            admit_phone_action(&force_close, MAX_CONCURRENT_PHONE_ACTIONS, &mut active),
+            Ok(Some("session-1".into()))
+        );
+        assert_eq!(
+            controller_action_session_id(&force_close),
+            Some("session-1".to_owned())
+        );
     }
 
     #[test]

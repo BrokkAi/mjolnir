@@ -2258,6 +2258,22 @@ mod tests {
         assert_eq!(credential_sync_targets(&running).len(), 1);
 
         let recoverable_error = podman_controller(SessionState::Error);
+        assert!(
+            recoverable_error
+                .state
+                .sessions
+                .values()
+                .all(|session| session.target.is_some()),
+            "the test session keeps its target so the exclusion is about its state"
+        );
+        assert!(
+            !recoverable_error
+                .state
+                .sessions
+                .values()
+                .any(session_target_is_pollable),
+            "an errored session is not dialed even while its target exists"
+        );
         assert!(dashboard_worker_targets(&recoverable_error).is_empty());
         assert!(dashboard_resource_targets(&recoverable_error).is_empty());
         assert!(credential_sync_targets(&recoverable_error).is_empty());

@@ -1222,8 +1222,10 @@ pub struct ViewerConfigOption {
 }
 
 /// The complete set of operations a phone may ask the controller to perform.
-/// Destructive force-cleanup and secret/config editing are intentionally not
-/// representable here.
+/// Secret/config editing is intentionally not representable here, and the one
+/// destructive variant, `ForceClose`, is not representable on the wire: it is
+/// `#[serde(skip)]` so only in-process callers such as the HTTP API can build
+/// it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ControllerAction {
@@ -1322,6 +1324,17 @@ pub enum ControllerAction {
         shell_command_id: String,
     },
     Close {
+        session_id: String,
+    },
+    /// Destroy a session without checkpointing it: the live target is torn
+    /// down, the recovery archive is removed, and sub-agent children are
+    /// destroyed first. This is irreversible.
+    ///
+    /// Skipped by serde on purpose. The browser viewer posts this enum to
+    /// `/actions`, so a wire request must never be able to name this variant;
+    /// it is reachable only from the HTTP API, which builds it in process.
+    #[serde(skip)]
+    ForceClose {
         session_id: String,
     },
     Cancel {
@@ -3030,6 +3043,7 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
         ControllerAction::Move { request } => validate_move_request(request, snapshot)?,
         ControllerAction::Open { session_id }
         | ControllerAction::Close { session_id }
+        | ControllerAction::ForceClose { session_id }
         | ControllerAction::Cancel { session_id }
         | ControllerAction::StartReview { session_id } => {
             validate_public_id(session_id)?;

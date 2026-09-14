@@ -117,7 +117,7 @@ enum Command {
     /// List the sessions the daemon holds.
     Sessions(api_commands::SessionsArgs),
     /// Close a session.
-    Close(api_commands::SessionArgs),
+    Close(api_commands::CloseArgs),
     /// Cancel the turn a session is running.
     CancelTurn(api_commands::SessionArgs),
     /// Print the API base URL and where its bearer token lives.

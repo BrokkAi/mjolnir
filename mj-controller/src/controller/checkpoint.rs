@@ -1832,12 +1832,12 @@ impl std::error::Error for CheckpointDeferred {}
 
 /// Whether a failed checkpoint only means the session was busy.
 ///
-/// The marker is carried by the error, not by its text, and callers wrap
-/// checkpoint errors in context, so the whole chain is searched.
+/// The marker is carried by the error, not by its text. It may be the root
+/// error or attached with `context`, and callers wrap checkpoint errors in
+/// further context. `anyhow`'s own downcast walks every context layer;
+/// `chain()` does not expose a context value, so it must not be used here.
 pub fn checkpoint_was_deferred(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<CheckpointDeferred>().is_some())
+    error.downcast_ref::<CheckpointDeferred>().is_some()
 }
 
 /// An idle workspace operation holds the managed connection and a worker
@@ -3262,6 +3262,18 @@ mod tests {
     /// A session that is working is busy, not wedged. A copy that can run
     /// again later leaves at once instead of waiting out the deadline, which
     /// would restart the worker and kill the turn in flight.
+    #[test]
+    fn a_deferral_attached_as_context_under_more_context_is_still_a_deferral() {
+        let deferred = anyhow::anyhow!("relay proxy disconnected during hello")
+            .context(CheckpointDeferred::background_work())
+            .context("connect to the session worker for checkpoint");
+        assert!(checkpoint_was_deferred(&deferred), "{deferred:#}");
+
+        let plain = anyhow::anyhow!("relay proxy disconnected during hello")
+            .context("connect to the session worker for checkpoint");
+        assert!(!checkpoint_was_deferred(&plain), "{plain:#}");
+    }
+
     #[test]
     fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         let cursor = RelayCursor {
