@@ -9,12 +9,13 @@ function fixture(platform = 'Linux') {
   const root = mkdtempSync(path.join(tmpdir(), 'mj run '));
   const scripts = path.join(root, 'scripts');
   const bin = path.join(root, 'bin');
-  mkdirSync(scripts);
+  mkdirSync(path.join(scripts, 'lib'), { recursive: true });
   mkdirSync(bin);
   for (const name of ['run.sh', 'build-linux-worker.sh']) {
     copyFileSync(new URL(name, import.meta.url), path.join(scripts, name));
     chmodSync(path.join(scripts, name), 0o755);
   }
+  copyFileSync(new URL('lib/build.sh', import.meta.url), path.join(scripts, 'lib', 'build.sh'));
   const tool = (name, body) => writeFileSync(path.join(bin, name), `#!/bin/bash\nset -eu\n${body}\n`, { mode: 0o755 });
   tool('uname', `case "$1" in -s) echo ${platform} ;; -m) echo x86_64 ;; esac`);
   tool('rustup', 'echo x86_64-unknown-linux-musl');
@@ -50,7 +51,8 @@ fs.mkdirSync(dir, { recursive: true });
 const executable = path.join(dir, binary);
 if (!cli) {
   fs.writeFileSync(executable, 'fresh');
-  if (kind === 'voice') console.log(JSON.stringify({ reason: 'compiler-artifact', target: {name: binary, kind:['bin']}, executable }));
+  // Real Cargo reports the artifact for every binary it builds, workers included.
+  console.log(JSON.stringify({ reason: 'compiler-artifact', target: {name: binary, kind:['bin']}, executable }));
   process.exit(0);
 }
 fs.writeFileSync(executable, ${JSON.stringify(`#!${process.execPath}

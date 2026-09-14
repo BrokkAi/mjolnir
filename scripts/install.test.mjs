@@ -9,12 +9,13 @@ function fixture(os, arch) {
   const root = mkdtempSync(path.join(tmpdir(), 'mj-install-'));
   const scripts = path.join(root, 'scripts');
   const bin = path.join(root, 'bin');
-  mkdirSync(scripts);
+  mkdirSync(path.join(scripts, 'lib'), { recursive: true });
   mkdirSync(bin);
   for (const name of ['install.sh', 'build-linux-worker.sh']) {
     copyFileSync(new URL(name, import.meta.url), path.join(scripts, name));
     chmodSync(path.join(scripts, name), 0o755);
   }
+  copyFileSync(new URL('lib/build.sh', import.meta.url), path.join(scripts, 'lib', 'build.sh'));
   const tool = (name, body) => {
     writeFileSync(path.join(bin, name), `#!/bin/bash\nset -eu\n${body}\n`, { mode: 0o755 });
   };
@@ -25,7 +26,7 @@ function fixture(os, arch) {
   tool('cargo', `
     command=$1
     shift
-    target_dir='' triple='' root='' path='' binary='' locked=0
+    target_dir='' triple='' root='' path='' binary='' locked=0 profile=debug
     while [ $# -gt 0 ]; do
       case "$1" in
         --bin) binary=$2; shift ;;
@@ -34,13 +35,17 @@ function fixture(os, arch) {
         --root) root=$2; shift ;;
         --path) path=$2; shift ;;
         --locked) locked=1 ;;
+        --release|-r) profile=release ;;
+        --profile) profile=$2; shift ;;
+        --profile=*) profile=\${1#--profile=} ;;
       esac
       shift
     done
     test "$locked" = 1
+    if [ "$profile" = dev ]; then profile=debug; fi
     if [ "$command" = build ]; then
       if [ "\${FAIL_BUILD:-0}" = 1 ] || [ "\${FAIL_TARGET:-none}" = "\${triple:-native}" ] || [ "\${FAIL_TARGET:-none}" = "$binary" ]; then exit 42; fi
-      output="\${target_dir:-target}/\${triple:+$triple/}release"
+      output="\${target_dir:-target}/\${triple:+$triple/}$profile"
       mkdir -p "$output"
       if [ "$binary" = mj ]; then
         printf '#!/bin/bash\necho mj test\n' > "$output/$binary"
@@ -71,7 +76,7 @@ function fixture(os, arch) {
     done
   `);
   const installRoot = path.join(root, 'cargo-root');
-  const run = (env = {}) => spawnSync('/bin/bash', [path.join(scripts, 'install.sh')], {
+  const run = (env = {}, args = []) => spawnSync('/bin/bash', [path.join(scripts, 'install.sh'), ...args], {
     encoding: 'utf8',
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CARGO_INSTALL_ROOT: installRoot, ...env },
   });
@@ -128,6 +133,29 @@ for (const target of ['native', 'x86_64-unknown-linux-musl', 'mj-voice-worker'])
       const result = run({ INSTALLED_TARGET: 'x86_64-unknown-linux-musl', FAIL_TARGET: target });
       assert.notEqual(result.status, 0, result.stderr);
       for (const name of names) assert.equal(readFileSync(installed(name), 'utf8'), `previous ${name}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+// The install must land in the same profile directory scripts/run.sh uses, or
+// the two scripts invalidate each other's Cargo artifacts on every run.
+for (const [args, profile] of [[[], 'debug'], [['--release'], 'release'], [['--profile', 'dev'], 'debug']]) {
+  test(`install with [${args}] builds every binary under target/${profile}`, () => {
+    const { root, installed, run } = fixture('Linux', 'x86_64');
+    try {
+      const result = run({ INSTALLED_TARGET: 'x86_64-unknown-linux-musl' }, args);
+      assert.equal(result.status, 0, result.stderr);
+      const triple = 'x86_64-unknown-linux-musl';
+      for (const built of [
+        `target/worker/${profile}/mj-worker`,
+        `target/worker/${triple}/${profile}/mj-worker`,
+        `target/${profile}/mj-voice-worker`,
+        `target/${profile}/mj`,
+      ]) {
+        assert.ok(existsSync(path.join(root, built)), `missing ${built}`);
+      }
+      assert.equal(readFileSync(installed('mj-worker'), 'utf8'), 'worker native\n');
+      assert.equal(readFileSync(installed(`mj-worker-${triple}`), 'utf8'), `worker ${triple}\n`);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 }

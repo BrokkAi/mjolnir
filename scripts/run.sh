@@ -12,6 +12,10 @@
 # A `--release` before `--` builds the worker in release too, so
 # the profiles the daemon compares still match.
 #
+# scripts/install.sh builds the same binaries the same way through
+# scripts/lib/build.sh, and both default to the dev profile, so the two scripts
+# reuse each other's Cargo artifacts as long as their profiles match.
+#
 # On Linux and macOS, a daemon running this host build stays attached.
 # If Cargo replaced the executable since the daemon started, the first daemon
 # connection gracefully replaces it; detached session workers remain active and
@@ -20,11 +24,9 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
+. "$repo_root/scripts/lib/build.sh"
 
-# Match the run's profile so the daemon finds a current sibling: it looks for
-# the musl worker beside the controller under the same profile directory.
 cargo_args=()
-cargo_arg_count=0
 app_args=()
 while [ "$#" -gt 0 ]; do
   if [ "$1" = -- ]; then
@@ -33,51 +35,24 @@ while [ "$#" -gt 0 ]; do
     break
   fi
   cargo_args+=("$1")
-  cargo_arg_count=$((cargo_arg_count+1))
   shift
 done
-# Empty-array expansions below also support macOS Bash 3.2 with nounset.
-profile_args=()
-for ((index=0; index<cargo_arg_count; index++)); do
-  case "${cargo_args[index]}" in
-    --release|-r) profile_args=(--release) ;;
-    --profile)
-      if ((index+1 >= cargo_arg_count)); then echo "--profile needs a value" >&2; exit 2; fi
-      index=$((index+1))
-      profile_args=(--profile "${cargo_args[index]}") ;;
-    --profile=*) profile_args=(--profile "${cargo_args[index]#--profile=}") ;;
-  esac
-done
+# Match the run's profile so the daemon finds a current sibling: it looks for
+# the musl worker beside the controller under the same profile directory.
+# Empty-array expansions here also support macOS Bash 3.2 with nounset.
+mj_parse_profile ${cargo_args[@]+"${cargo_args[@]}"}
 
 case "$(uname -s)" in
   Linux)
-    case "$(uname -m)" in
-      x86_64 | amd64) arch=x86_64 ;;
-      aarch64 | arm64) arch=aarch64 ;;
-      *)
-        echo "Unsupported Linux architecture: $(uname -m)" >&2
-        exit 1
-        ;;
-    esac
-    triple="${arch}-unknown-linux-musl"
-    if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
-      echo "The $triple target is not installed. Run: rustup target add $triple" >&2
-      exit 1
-    fi
-    cargo build --target-dir target/worker -p brokk-mj-worker --bin mj-worker ${profile_args[@]+"${profile_args[@]}"}
-    cargo build --target-dir target/worker --target "$triple" -p brokk-mj-worker --bin mj-worker ${profile_args[@]+"${profile_args[@]}"}
+    mj_host_musl_triple
+    mj_build_worker >/dev/null
+    mj_build_worker --target "$triple" >/dev/null
     ;;
   Darwin)
-    cargo build --target-dir target/worker -p brokk-mj-worker --bin mj-worker ${profile_args[@]+"${profile_args[@]}"}
+    mj_build_worker >/dev/null
     # The native macOS worker cannot run in a Linux container. Build through
     # the available engine before the daemon snapshots its worker sources.
-    engine=""
-    for candidate in docker podman; do
-      if command -v "$candidate" >/dev/null 2>&1 && "$candidate" info >/dev/null 2>&1; then
-        engine="$candidate"
-        break
-      fi
-    done
+    mj_container_engine
     if [ -n "$engine" ]; then
       "$repo_root/scripts/build-linux-worker.sh" "$engine" ${profile_args[@]+"${profile_args[@]}"} >/dev/null
     else
@@ -90,21 +65,8 @@ case "$(uname -s)" in
     ;;
 esac
 
-build_executable() {
-  local package=$1 binary=$2
-  cargo build -p "$package" --bin "$binary" ${cargo_args[@]+"${cargo_args[@]}"} --message-format=json-render-diagnostics |
-  node --input-type=module -e '
-    import { readFileSync } from "node:fs";
-    const artifacts = readFileSync(0, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
-    const paths = new Set(artifacts.filter(item => item.reason === "compiler-artifact" &&
-      item.target?.name === process.argv[1] && item.target.kind.includes("bin") && item.executable).map(item => item.executable));
-    if (paths.size !== 1) throw new Error(`Cargo did not report exactly one ${process.argv[1]} executable`);
-    process.stdout.write([...paths][0]);
-  ' "$binary"
-}
-
 export MJ_DEV_RESTART_STALE_DAEMON=1
-MJ_VOICE_WORKER=$(build_executable brokk-mj-voice-worker mj-voice-worker)
+MJ_VOICE_WORKER=$(mj_build_executable brokk-mj-voice-worker mj-voice-worker ${cargo_args[@]+"${cargo_args[@]}"})
 export MJ_VOICE_WORKER
-executable=$(build_executable brokk-mjolnir mj)
+executable=$(mj_build_executable brokk-mjolnir mj ${cargo_args[@]+"${cargo_args[@]}"})
 exec "$executable" ${app_args[@]+"${app_args[@]}"}

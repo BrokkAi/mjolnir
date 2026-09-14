@@ -39,6 +39,12 @@ Use `scripts/run.sh` when exercising sessions: on Linux it builds the native
 controller plus the dedicated musl worker, while macOS builds both binaries
 natively for `local-bare` development.
 
+`scripts/install.sh` installs the same binaries from the checkout into Cargo's
+install root, so managed targets find the portable worker beside `mj`. Both
+scripts build through `scripts/lib/build.sh` and default to the dev profile, so
+they share Cargo artifacts and neither forces the other to recompile. A profile
+flag applies to every binary they build; pass `--release` to both, or to neither.
+
 Bare `mj` opens the workspace dashboard; a first run opens the setup dialog
 instead. The `brokk-mj-voice-worker` workspace member provides local Alt+V
 dictation.
