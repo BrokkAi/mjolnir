@@ -690,6 +690,7 @@ pub async fn run_server(
     daemon_revisions.borrow_and_update();
     let mut phone_workspaces = workspace_updates.borrow_and_update().clone();
     let mut quotas = std::collections::BTreeMap::new();
+    let subagent_quota_reports = Arc::new(std::sync::Mutex::new(quotas.clone()));
     let (quota_profiles_tx, mut quota_updates_rx) = spawn_quota_refresher();
     let mut quota_batch = QuotaRefreshBatch::default();
     let mut published_quota_profiles = std::collections::BTreeMap::new();
@@ -801,11 +802,14 @@ pub async fn run_server(
         &crate::server::api_token_path(),
     )?);
     let api_runtime = daemon_runtime.clone();
-    let api_backend = Arc::new(api::ApiBackend::new(
-        worker_commands_tx.client(),
-        Arc::new(move |session_id: &str| api_runtime.session_state(session_id)),
-        daemon_runtime.clone(),
-    ));
+    let api_backend = Arc::new(
+        api::ApiBackend::new(
+            worker_commands_tx.client(),
+            Arc::new(move |session_id: &str| api_runtime.session_state(session_id)),
+            daemon_runtime.clone(),
+        )
+        .with_quota_reports(subagent_quota_reports.clone()),
+    );
     options.set_subagent_backend(api_backend.clone());
     let renewal_cancellation = termination.child_token();
     let mut renewal_task = None;
@@ -1087,7 +1091,11 @@ pub async fn run_server(
                                 credential_sync_handle
                                     .sync_profile_now(&outcome.report.profile_id, None);
                             }
-                            quotas.insert(outcome.report.profile_id.clone(), outcome.report);
+                            quotas.insert(outcome.report.profile_id.clone(), outcome.report.clone());
+                            subagent_quota_reports
+                                .lock()
+                                .expect("sub-agent quota reports lock poisoned")
+                                .insert(outcome.report.profile_id.clone(), outcome.report);
                             revision = daemon_runtime.allocate_revision();
                             publish_snapshot!(revision);
                         }
@@ -2039,6 +2047,10 @@ pub async fn run_server(
                             }
                             controller = reloaded;
                             quotas.retain(|id, _| controller.config.enabled_profile(id).is_some());
+                            subagent_quota_reports
+                                .lock()
+                                .expect("sub-agent quota reports lock poisoned")
+                                .retain(|id, _| controller.config.enabled_profile(id).is_some());
                             worker_targets_tx.send_replace(dashboard_worker_targets(&controller));
                             publish_capacity_targets(
                                 &controller,

@@ -17,8 +17,11 @@ use std::time::Duration;
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
+use mj_core::config::HarnessKind;
 use mj_core::state::{MaterializedExecutionState, SessionState};
 use mj_core::subagent::MAX_WAIT_SECONDS;
+
+use crate::quota::ProfileQuota;
 
 use crate::controller::{Controller, SessionExportLayout};
 use crate::server::api::{
@@ -138,6 +141,9 @@ pub struct ApiBackend {
     /// How far each created session's follow-up configuration and first prompt
     /// have got.
     starts: Arc<Mutex<BTreeMap<String, Start>>>,
+    /// Latest background-refreshed quota reports, used to choose one profile
+    /// per harness without making the parent reason about credential aliases.
+    quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
 }
 
 impl ApiBackend {
@@ -151,7 +157,16 @@ impl ApiBackend {
             session_states,
             exports,
             starts: Arc::new(Mutex::new(BTreeMap::new())),
+            quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    pub fn with_quota_reports(
+        mut self,
+        quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
+    ) -> Self {
+        self.quota_reports = quota_reports;
+        self
     }
 
     pub async fn execute_subagent_tool(
@@ -190,21 +205,28 @@ impl ApiBackend {
                     .session_record(parent_session_id)
                     .context("parent session disappeared")?;
                 let config = tokio::task::spawn_blocking(mj_core::config::Config::load).await??;
-                let ids = config
+                let candidates = config
                     .enabled_profiles()
                     .filter(|(id, _)| {
                         config
                             .subagents
                             .profile_is_eligible(&parent.last_profile, id)
                     })
-                    .map(|(id, profile)| (id.to_owned(), profile.kind.id().to_owned()))
+                    .map(|(id, profile)| (id.to_owned(), profile.kind))
                     .collect::<Vec<_>>();
+                let ids = {
+                    let quota_reports = self
+                        .quota_reports
+                        .lock()
+                        .map_err(|_| anyhow!("sub-agent quota reports lock poisoned"))?;
+                    select_profile_per_harness(candidates, &quota_reports)
+                };
                 let mut profiles = Vec::with_capacity(ids.len());
                 for (id, harness) in ids {
                     let choices = self.profile_config(id.clone(), None, false).await?;
                     profiles.push(serde_json::json!({
                         "profile_id":id,
-                        "harness":harness,
+                        "harness":harness.id(),
                         "default_model":choices.model,
                         "models":choices.models,
                         "efforts":choices.efforts,
@@ -538,6 +560,33 @@ impl ApiBackend {
         }
         Ok(())
     }
+}
+
+fn select_profile_per_harness(
+    mut candidates: Vec<(String, HarnessKind)>,
+    quota_reports: &BTreeMap<String, ProfileQuota>,
+) -> Vec<(String, HarnessKind)> {
+    candidates.sort_by(|(left_id, left_harness), (right_id, right_harness)| {
+        left_harness.cmp(right_harness).then_with(|| {
+            profile_remaining_percent(quota_reports.get(right_id))
+                .cmp(&profile_remaining_percent(quota_reports.get(left_id)))
+                .then_with(|| left_id.cmp(right_id))
+        })
+    });
+    candidates.dedup_by(|left, right| left.1 == right.1);
+    candidates
+}
+
+fn profile_remaining_percent(report: Option<&ProfileQuota>) -> Option<u8> {
+    let report = report.filter(|report| report.error.is_none())?;
+    if report.is_usage_priced() {
+        return Some(100);
+    }
+    report
+        .windows
+        .iter()
+        .filter_map(|window| window.remaining_percent)
+        .min()
 }
 
 fn subagent_status(
@@ -1329,6 +1378,78 @@ impl SubagentBackend for ApiBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
+        ProfileQuota {
+            profile_id: profile_id.into(),
+            harness,
+            windows: remaining
+                .iter()
+                .map(|remaining_percent| crate::quota::QuotaWindow {
+                    label: "window".into(),
+                    remaining_percent: Some(*remaining_percent),
+                    used: None,
+                    limit: None,
+                    resets: None,
+                    resets_at_epoch_seconds: None,
+                })
+                .collect(),
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: 0,
+        }
+    }
+
+    #[test]
+    fn subagent_profiles_choose_the_most_remaining_quota_per_harness() {
+        let candidates = vec![
+            ("codex-low".into(), HarnessKind::Codex),
+            ("claude-only".into(), HarnessKind::Claude),
+            ("codex-high".into(), HarnessKind::Codex),
+        ];
+        let reports = BTreeMap::from([
+            (
+                "codex-low".into(),
+                quota("codex-low", HarnessKind::Codex, &[80, 15]),
+            ),
+            (
+                "codex-high".into(),
+                quota("codex-high", HarnessKind::Codex, &[60, 55]),
+            ),
+        ]);
+
+        assert_eq!(
+            select_profile_per_harness(candidates, &reports),
+            vec![
+                ("codex-high".into(), HarnessKind::Codex),
+                ("claude-only".into(), HarnessKind::Claude),
+            ]
+        );
+    }
+
+    #[test]
+    fn subagent_profile_selection_puts_unknown_quota_last_and_breaks_ties_by_id() {
+        let candidates = vec![
+            ("codex-unknown".into(), HarnessKind::Codex),
+            ("codex-b".into(), HarnessKind::Codex),
+            ("codex-a".into(), HarnessKind::Codex),
+        ];
+        let reports = BTreeMap::from([
+            (
+                "codex-a".into(),
+                quota("codex-a", HarnessKind::Codex, &[50]),
+            ),
+            (
+                "codex-b".into(),
+                quota("codex-b", HarnessKind::Codex, &[50]),
+            ),
+        ]);
+
+        assert_eq!(
+            select_profile_per_harness(candidates, &reports),
+            vec![("codex-a".into(), HarnessKind::Codex)]
+        );
+    }
 
     #[test]
     fn failed_subagent_followup_is_terminal_error_with_its_cause() {
