@@ -64,6 +64,7 @@ RUN apt-get update \
         python3-venv \
         ripgrep \
         sudo \
+        tmux \
         unzip \
         zip \
     && rm -rf /var/lib/apt/lists/*

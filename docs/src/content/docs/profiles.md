@@ -270,8 +270,10 @@ approval questions, cancellation, and native resume. `/plan` invokes Muse's
 advertised planning skill; it is not an approval-mode toggle, so no plan-mode
 indicator appears and plan approval arrives as chat text rather than a choice
 dialog. Guardian targets preserve Muse's configured sandbox and approval
-posture. On explicitly unconstrained targets Mjolnir uses auto approvals and
-`--disable-sandbox`.
+posture. On explicitly unconstrained targets Mjolnir writes the `:unrestricted`
+permission profile into the staged Muse settings, and uses `allowAll` approvals
+and `--disable-sandbox`. Muse decides a session's permission profile from its
+settings file, so the staged profile is what lets the session start.
 
 Muse accepts one workspace root, without attached directories. Native import
 and checkpoint restore can relocate that workspace while retaining the session
