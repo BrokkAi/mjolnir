@@ -11,6 +11,7 @@ mod grok_usage;
 #[cfg(test)]
 mod grok_usage_tests;
 mod kimi_tasks;
+mod muse_usage;
 pub use kimi_tasks::resolve_session_dir as resolve_kimi_session_dir;
 pub use kimi_tasks::*;
 #[cfg(test)]
@@ -2711,7 +2712,11 @@ async fn serve_session(
                             let mut diagnostic = None;
                             let stop_reason = match response {
                                 Ok(response) => {
+                                    let usage_meta = response.usage.as_ref().and_then(|usage| usage.meta.clone());
                                     usage = response.usage.map(|usage| mj_core::usage::TokenUsage::from_acp(spec.harness, usage));
+                                    if spec.harness == HarnessKind::Muse {
+                                        usage = usage.map(|usage| muse_usage::attach_provider_details(usage, usage_meta.as_ref()));
+                                    }
                                     if spec.harness == HarnessKind::Zcode {
                                         usage = usage.map(|usage| zcode_usage::attach_provider_details(usage, response.meta.as_ref()));
                                     }

@@ -40,11 +40,16 @@ impl TokenUsage {
         let scope = match (harness, declared_scope) {
             (HarnessKind::Codex, Some("turn")) => UsageScope::Turn,
             (HarnessKind::Codex, Some(_)) => UsageScope::Unspecified,
-            (HarnessKind::Claude, _) => UsageScope::Turn,
             (HarnessKind::Codex, None) => UsageScope::LastRequest,
+            // Any other adapter that declares its scope is believed. Muse 0.4.2
+            // and later declare `turn` on the prompt response; an undeclared
+            // Muse report stays unspecified.
+            (_, Some("turn")) => UsageScope::Turn,
+            (_, Some(_)) => UsageScope::Unspecified,
+            (HarnessKind::Claude, None) => UsageScope::Turn,
             // The ZCode adapter reports the backend's merged whole-turn usage on
             // the prompt response, and omits it when the backend reported none.
-            (HarnessKind::Zcode, _) => UsageScope::Turn,
+            (HarnessKind::Zcode, None) => UsageScope::Turn,
             _ => UsageScope::Unspecified,
         };
         Self {
@@ -96,6 +101,40 @@ mod tests {
         );
         let kimi = TokenUsage::from_acp(HarnessKind::Kimi, Usage::new(100, 80, 20));
         assert_eq!(kimi.scope, UsageScope::Unspecified);
+    }
+
+    fn declared(harness: HarnessKind, scope: &str) -> UsageScope {
+        let mut report = Usage::new(100, 80, 20);
+        report.meta = Some(serde_json::Map::from_iter([(
+            "mjolnir.dev/usage-scope".into(),
+            serde_json::json!(scope),
+        )]));
+        TokenUsage::from_acp(harness, report).scope
+    }
+
+    #[test]
+    fn muse_counts_a_whole_turn_only_when_the_adapter_declares_it() {
+        assert_eq!(
+            TokenUsage::from_acp(HarnessKind::Muse, Usage::new(100, 80, 20)).scope,
+            UsageScope::Unspecified
+        );
+        assert_eq!(declared(HarnessKind::Muse, "turn"), UsageScope::Turn);
+        assert_eq!(
+            declared(HarnessKind::Muse, "unspecified"),
+            UsageScope::Unspecified
+        );
+        assert_eq!(
+            declared(HarnessKind::Muse, "future_scope"),
+            UsageScope::Unspecified
+        );
+    }
+
+    #[test]
+    fn a_declared_scope_overrides_the_claude_and_zcode_defaults() {
+        for harness in [HarnessKind::Claude, HarnessKind::Zcode] {
+            assert_eq!(declared(harness, "turn"), UsageScope::Turn);
+            assert_eq!(declared(harness, "unspecified"), UsageScope::Unspecified);
+        }
     }
 }
 
