@@ -17,6 +17,7 @@ Validate and resolve every Mjolnir issue filed after issue 989. A user should be
 - [x] (2026-09-14 06:20Z) Resolved issue 996 by freshly probing a changed same-harness destination profile and rejecting a move before mutation if it would drop the accepted model or effort pin.
 - [ ] Run focused tests, `cargo test`, `cargo clippy --all-targets -- -D warnings`, and tmux-driven live acceptance tests.
 - [ ] Commit validated fixes, update the issues with evidence, and close the resolved tickets.
+- [x] (2026-09-14 06:43Z) Validated and resolved newly filed issue 997 in source: Muse unconstrained sessions select allow-all and synchronously choose an allow response for any residual tool permission request.
 
 ## Surprises & Discoveries
 
@@ -34,6 +35,9 @@ Validate and resolve every Mjolnir issue filed after issue 989. A user should be
 
 - Observation: The first live ZCode image build contained the checksum-verified backend, but AppImage extraction preserved root-only directory modes, so the runtime `hel` user received `Permission denied` for `/opt/zcode/glm/zcode.cjs`.
   Evidence: direct `podman run` as the image's default user could read the environment but could not `ls` the backend. The container recipe now applies `chmod -R a+rX /opt/zcode` before switching users.
+
+- Observation: Issue 997 was filed after the initial post-989 sweep. Muse advertises `allowAll` as its ACP session mode but Mjolnir selected `auto`; residual permission requests in unconstrained mode then fell through to the generic cancellation path.
+  Evidence: the issue's preserved native journals show one request recorded as aborted and a later request left pending, while the request handler excluded unconstrained Muse from its elicitation path and then returned `Cancelled`.
 
 ## Decision Log
 
@@ -55,7 +59,7 @@ Validate and resolve every Mjolnir issue filed after issue 989. A user should be
 
 ## Outcomes & Retrospective
 
-Source fixes are complete and the controller regression suite passes 1,188 tests with six live-only tests ignored. Repository-wide validation, installation, tmux acceptance, issue updates, and the final commit remain in progress.
+Source fixes through newly filed issue 997 are complete. Repository-wide `cargo test` and Clippy with warnings denied pass after both implementation rounds. Live Muse acceptance and final tracker/plan closure remain in progress.
 
 ## Context and Orientation
 
@@ -121,3 +125,5 @@ Revision 2026-09-14: created after locating the correct Mjolnir tracker and read
 Revision 2026-09-14 06:20Z: records source validation, implemented behavior, the Muse usage limitation, live Claude catalogue differences, and the passing controller suite.
 
 Revision 2026-09-14 06:21Z: live image validation exposed and fixed AppImage-extracted backend permissions before rollout.
+
+Revision 2026-09-14 06:38Z: adds newly filed issue 997 and records the Muse allow-all/permission-response root cause and implementation.

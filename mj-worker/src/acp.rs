@@ -965,6 +965,29 @@ fn permission_plan_response(
     )
 }
 
+/// Muse can still ask for individual approval after its allow-all mode was
+/// selected. An unconstrained Mjolnir session must answer that protocol edge
+/// instead of cancelling it or leaving the adapter parked forever.
+fn muse_unconstrained_permission_response(
+    request: &RequestPermissionRequest,
+) -> Option<RequestPermissionResponse> {
+    request
+        .options
+        .iter()
+        .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+        .or_else(|| {
+            request
+                .options
+                .iter()
+                .find(|option| option.kind == PermissionOptionKind::AllowAlways)
+        })
+        .map(|option| {
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(option.option_id.clone()),
+            ))
+        })
+}
+
 fn unsupported_client_request_report(method: &str) -> String {
     format!(
         "The agent sent the client request {method}, which Hel does not implement. \
@@ -1259,6 +1282,22 @@ where
             async move |request: RequestPermissionRequest, responder, _cx| {
                 permission_activity.mark();
                 permission_step_clock.begin_client_work();
+                if permission_harness == HarnessKind::Muse
+                    && permission_policy.is_unconstrained()
+                {
+                    let Some(response) = muse_unconstrained_permission_response(&request) else {
+                        permission_events
+                            .send(RuntimeEvent::Warning {
+                                message: "Muse requested permission in allow-all mode without offering an allow response.".into(),
+                            })
+                            .await
+                            .map_err(|_| relay_event_channel_error())?;
+                        return responder.respond_with_error(
+                            agent_client_protocol::Error::invalid_params(),
+                        );
+                    };
+                    return responder.respond(response);
+                }
                 if matches!(permission_harness, HarnessKind::Muse | HarnessKind::Zcode)
                     && !permission_policy.is_unconstrained()
                 {

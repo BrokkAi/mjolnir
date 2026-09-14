@@ -443,8 +443,8 @@ impl HarnessKind {
     ) -> Option<ExecutionEnforcement> {
         match (self, policy) {
             (Self::Muse, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
-                label: "auto / sandbox-off",
-                acp_mode: Some("auto"),
+                label: "allowAll / sandbox-off",
+                acp_mode: Some("allowAll"),
                 launch_flag: None,
                 launch_environment: Some(("MUSE_APPROVAL_MODE", "auto")),
             }),
@@ -2252,6 +2252,15 @@ mod tests {
         assert_eq!(
             deepseek.launch_environment(),
             Some(("DSH_PERMISSION_MODE", "danger-full-access"))
+        );
+        let muse = HarnessKind::Muse
+            .execution_enforcement(ExecutionPolicy::Unconstrained)
+            .unwrap();
+        assert_eq!(muse.acp_mode(), Some("allowAll"));
+        assert_eq!(muse.label(), "allowAll / sandbox-off");
+        assert_eq!(
+            muse.launch_environment(),
+            Some(("MUSE_APPROVAL_MODE", "auto"))
         );
     }
 
