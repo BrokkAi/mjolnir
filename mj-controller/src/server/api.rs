@@ -55,7 +55,7 @@ pub const API_VERSION: &str = "1";
 /// may ask for. Both are generous: a turn routinely runs for minutes, and the
 /// caller is a program that reconnects rather than a person holding a page.
 pub const DEFAULT_WAIT_SECS: u64 = 600;
-pub const MAX_WAIT_SECS: u64 = 3_600;
+pub use mj_core::subagent::MAX_WAIT_SECONDS as MAX_WAIT_SECS;
 
 /// Longest idempotency key accepted on session creation, matching the column
 /// the daemon stores it in.

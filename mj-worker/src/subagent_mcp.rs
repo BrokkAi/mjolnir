@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use mj_core::subagent::{SourceRange, SubagentToolAction, SubagentToolRequest};
+use mj_core::subagent::{MAX_WAIT_SECONDS, SourceRange, SubagentToolAction, SubagentToolRequest};
 
 pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
     let stdin = std::io::stdin();
@@ -237,7 +237,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "wait_agents",
             "Register interest in completion of one or more children without blocking other tools.",
-            json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":3600}},"required":["child_session_ids"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":MAX_WAIT_SECONDS}},"required":["child_session_ids"],"additionalProperties":false}),
         ),
         tool(
             "interrupt_agent",
@@ -269,4 +269,21 @@ fn write_line(output: &mut impl Write, value: &Value) -> Result<()> {
     output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_agents_advertises_the_shared_runtime_timeout_limit() {
+        let wait = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "wait_agents")
+            .expect("wait_agents definition");
+        assert_eq!(
+            wait["inputSchema"]["properties"]["timeout_seconds"]["maximum"],
+            MAX_WAIT_SECONDS
+        );
+    }
 }

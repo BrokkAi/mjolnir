@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Longest time a sub-agent completion wait may remain pending.
+pub const MAX_WAIT_SECONDS: u64 = 3_600;
+
 /// Inclusive, one-based source lines captured for a child's initial context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

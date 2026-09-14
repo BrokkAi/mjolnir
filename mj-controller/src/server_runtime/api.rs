@@ -18,6 +18,7 @@ use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use mj_core::state::{MaterializedExecutionState, SessionState};
+use mj_core::subagent::MAX_WAIT_SECONDS;
 
 use crate::controller::{Controller, SessionExportLayout};
 use crate::server::api::{
@@ -365,7 +366,7 @@ impl ApiBackend {
                         .await?;
                 }
                 let deadline = tokio::time::Instant::now()
-                    + Duration::from_secs(timeout_seconds.unwrap_or(30).clamp(1, 600));
+                    + Duration::from_secs(timeout_seconds.unwrap_or(30).clamp(1, MAX_WAIT_SECONDS));
                 loop {
                     let ids = child_session_ids.clone();
                     let summaries = tokio::task::spawn_blocking(move || {
