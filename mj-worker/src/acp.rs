@@ -965,6 +965,29 @@ fn permission_plan_response(
     )
 }
 
+/// Muse can still ask for individual approval after its allow-all mode was
+/// selected. An unconstrained Mjolnir session must answer that protocol edge
+/// instead of cancelling it or leaving the adapter parked forever.
+fn muse_unconstrained_permission_response(
+    request: &RequestPermissionRequest,
+) -> Option<RequestPermissionResponse> {
+    request
+        .options
+        .iter()
+        .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+        .or_else(|| {
+            request
+                .options
+                .iter()
+                .find(|option| option.kind == PermissionOptionKind::AllowAlways)
+        })
+        .map(|option| {
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(option.option_id.clone()),
+            ))
+        })
+}
+
 fn unsupported_client_request_report(method: &str) -> String {
     format!(
         "The agent sent the client request {method}, which Hel does not implement. \
@@ -1259,7 +1282,25 @@ where
             async move |request: RequestPermissionRequest, responder, _cx| {
                 permission_activity.mark();
                 permission_step_clock.begin_client_work();
-                if permission_harness == HarnessKind::Muse && !permission_policy.is_unconstrained() {
+                if permission_harness == HarnessKind::Muse
+                    && permission_policy.is_unconstrained()
+                {
+                    let Some(response) = muse_unconstrained_permission_response(&request) else {
+                        permission_events
+                            .send(RuntimeEvent::Warning {
+                                message: "Muse requested permission in allow-all mode without offering an allow response.".into(),
+                            })
+                            .await
+                            .map_err(|_| relay_event_channel_error())?;
+                        return responder.respond_with_error(
+                            agent_client_protocol::Error::invalid_params(),
+                        );
+                    };
+                    return responder.respond(response);
+                }
+                if matches!(permission_harness, HarnessKind::Muse | HarnessKind::Zcode)
+                    && !permission_policy.is_unconstrained()
+                {
                     let id = format!("tool-permission-{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                     let options: Vec<_> = request.options.iter().map(|option| serde_json::json!({
                         "const": option.option_id.to_string(), "title": option.name,
@@ -1268,7 +1309,10 @@ where
                         .map_err(|_| agent_client_protocol::Error::internal_error())?;
                     let form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
                         "mode": "form", "sessionId": request.session_id.to_string(),
-                        "message": format!("Muse Code requests permission:\n{message}"),
+                        "message": format!(
+                            "{} requests permission:\n{message}",
+                            permission_harness.display_name()
+                        ),
                         "requestedSchema": {"type":"object", "required":["choice"], "properties":{
                             "choice":{"type":"string", "title":"Permission", "oneOf":options}
                         }}
@@ -1295,13 +1339,13 @@ where
                         let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option|
                             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone())));
                         if let Err(error) = responder.respond(RequestPermissionResponse::new(outcome)) {
-                            tracing::debug!(%error, "Muse permission responder closed");
+                            tracing::debug!(%error, "harness permission responder closed");
                         }
                         if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
                             elicitation_id: id,
                             action: response.as_ref().map_or("cancel", ElicitationResponse::action_name).into(),
                         }).await {
-                            tracing::debug!(%error, "Muse permission result receiver closed");
+                            tracing::debug!(%error, "harness permission result receiver closed");
                         }
                     });
                     return Ok(());

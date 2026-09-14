@@ -554,7 +554,9 @@ fn restored_native_relative_path(
             rewritten.extend(components);
             Ok(rewritten)
         }
-        HarnessKind::Codex | HarnessKind::Muse => Ok(relative_path.to_path_buf()),
+        HarnessKind::Codex | HarnessKind::Muse | HarnessKind::Zcode => {
+            Ok(relative_path.to_path_buf())
+        }
     }
 }
 
@@ -1789,6 +1791,9 @@ fn collect_native_artifacts_cached(
         HarnessKind::Claude => &["projects", "session-env", "file-history"],
         HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Deepseek => &["sessions"],
         HarnessKind::Muse => &[".data/muse/sessions"],
+        // ZCode persists all conversations in a shared live SQLite database.
+        // Do not archive it without a consistent selected-session export.
+        HarnessKind::Zcode => &[],
     };
     let mut probe = match harness {
         HarnessKind::Codex => CodexProbeContext {
@@ -2165,6 +2170,7 @@ fn collect_native_tree(
         HarnessKind::Grok => inside && grok_session_artifact(relative, session_id),
         HarnessKind::Deepseek => inside && crate::native::deepseek::is_session_log(path),
         HarnessKind::Muse => inside && name == "session.jsonl",
+        HarnessKind::Zcode => false,
     };
     if !selected || is_secret_like_path(relative) {
         return Ok(());

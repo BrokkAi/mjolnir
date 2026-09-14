@@ -24,6 +24,9 @@ const CLAUDE_PACKAGE_LOCK: &[u8] =
 const DEEPSEEK_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/deepseek/package.json");
 const DEEPSEEK_PACKAGE_LOCK: &[u8] =
     include_bytes!("../../assets/harnesses/deepseek/package-lock.json");
+const ZCODE_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/zcode/package.json");
+const ZCODE_PACKAGE_LOCK: &[u8] = include_bytes!("../../assets/harnesses/zcode/package-lock.json");
+const ZCODE_ADAPTER_PATCH: &[u8] = include_bytes!("../../assets/zcode/patch-adapter.mjs");
 
 #[derive(Debug)]
 pub(crate) struct ManagedHarness {
@@ -168,6 +171,28 @@ fn resolve_at(
                 .into_owned(),
         );
     }
+    if harness == HarnessKind::Zcode {
+        launch_environment.insert(
+            "ZCODE_BIN".into(),
+            install
+                .join("zcode/zcode.cjs")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        launch_environment.insert("ZCODE_ACP_RUNTIME".into(), "node".into());
+        launch_environment.insert("ZCODE_PROVIDER".into(), "builtin:zai-coding-plan".into());
+        launch_environment.insert("ZCODE_MODEL".into(), "GLM-5.3-Flash".into());
+        launch_environment.insert("ZCODE_DISALLOWED_TOOLS".into(), "Agent Task Expert".into());
+        if let Some(base) = environment.get("ZCODE_DATA_BASE_DIR") {
+            launch_environment.insert(
+                "ZCODE_HOME".into(),
+                Path::new(base)
+                    .join(".zcode")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
     Ok(ManagedHarness {
         command: install.join(selected.entrypoint),
         args: harness
@@ -236,6 +261,7 @@ fn install_into(
         HarnessKind::Kimi => install_kimi(staging.path(), environment)?,
         HarnessKind::Grok => install_grok(staging.path(), environment)?,
         HarnessKind::Muse => install_muse(staging.path(), environment)?,
+        HarnessKind::Zcode => install_zcode(staging.path(), environment)?,
     }
     relativize_internal_links(staging.path(), staging.path())?;
     validate_entrypoint(staging.path(), selected, harness)?;
@@ -363,6 +389,69 @@ fn install_muse(staging: &Path, environment: &BTreeMap<String, String>) -> Resul
     Ok(())
 }
 
+fn install_zcode(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    use mj_core::harness_runtime::{ZCODE_CLI_VERSION, ZCODE_VERSION};
+
+    install_npm(staging, ZCODE_PACKAGE_JSON, ZCODE_PACKAGE_LOCK, environment)?;
+    let patch = staging.join("patch-zcode-adapter.mjs");
+    std::fs::write(&patch, ZCODE_ADAPTER_PATCH).context("write ZCode adapter patch")?;
+    let mut node = Command::new("node");
+    node.arg(&patch)
+        .arg(staging.join("node_modules/zcode-acp-server"));
+    apply_environment(&mut node, environment);
+    run_checked(&mut node, "apply pinned ZCode ACP compatibility patch")?;
+    std::fs::remove_file(&patch)?;
+
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../../assets/zcode/runtime.json"))?;
+    anyhow::ensure!(
+        metadata["desktop_version"] == ZCODE_VERSION
+            && metadata["cli_version"] == ZCODE_CLI_VERSION,
+        "ZCode download metadata does not match the managed runtime pin"
+    );
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let platform = metadata["platforms"]
+        .get(&key)
+        .with_context(|| format!("ZCode does not have a managed runtime for {key}"))?;
+    let artifact = platform["artifact"]
+        .as_str()
+        .context("missing ZCode artifact path")?;
+    let expected = platform["sha256"]
+        .as_str()
+        .context("missing ZCode artifact checksum")?;
+    let url = format!("https://cdn-zcode.z.ai/zcode/electron/releases/{ZCODE_VERSION}/{artifact}");
+    let appimage = staging.join("zcode.AppImage");
+    download_verified(&url, &appimage, expected, environment)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&appimage, std::fs::Permissions::from_mode(0o755))?;
+    let mut extract = Command::new(&appimage);
+    extract.arg("--appimage-extract").current_dir(staging);
+    apply_environment(&mut extract, environment);
+    run_checked(&mut extract, "extract verified ZCode AppImage")?;
+    let extracted = staging.join("squashfs-root/resources/glm");
+    anyhow::ensure!(
+        extracted.join("zcode.cjs").is_file(),
+        "ZCode artifact omitted glm/zcode.cjs"
+    );
+    std::fs::rename(&extracted, staging.join("zcode"))?;
+    std::fs::remove_dir_all(staging.join("squashfs-root"))?;
+    std::fs::remove_file(appimage)?;
+
+    let mut version = Command::new("node");
+    version
+        .arg(staging.join("zcode/zcode.cjs"))
+        .arg("--version");
+    apply_environment(&mut version, environment);
+    let output = mj_core::subprocess::run_with_input(&mut version, &[])
+        .context("inspect managed ZCode backend version")?;
+    anyhow::ensure!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).trim() == ZCODE_CLI_VERSION,
+        "managed ZCode backend version does not match {ZCODE_CLI_VERSION}"
+    );
+    Ok(())
+}
+
 fn download_verified(
     url: &str,
     destination: &Path,
@@ -384,11 +473,11 @@ fn download_verified(
     .arg(destination)
     .arg(url);
     apply_environment(&mut curl, environment);
-    run_checked(&mut curl, "download pinned Muse runtime")?;
+    run_checked(&mut curl, "download pinned harness runtime")?;
     let actual = mj_core::worker_launch::worker_executable_digest(destination)?;
     anyhow::ensure!(
         actual == expected,
-        "Muse runtime checksum mismatch for {}: expected {expected}, got {actual}",
+        "harness runtime checksum mismatch for {}: expected {expected}, got {actual}",
         destination.display()
     );
     Ok(())
@@ -542,6 +631,7 @@ fn validate_entrypoint(path: &Path, selected: HarnessPin, harness: HarnessKind) 
     let additional = match harness {
         HarnessKind::Muse => Some("bin/muse"),
         HarnessKind::Grok => Some("bin/agent"),
+        HarnessKind::Zcode => Some("zcode/zcode.cjs"),
         _ => None,
     };
     for entry in std::iter::once(selected.entrypoint).chain(additional) {
@@ -676,13 +766,17 @@ INSTALLER
         let selected = pin(HarnessKind::Grok);
         let install = cache.join("grok").join(selected.install_id);
         for attempt in 0..2 {
-            let managed = resolve_at(
-                &cache,
-                HarnessKind::Grok,
-                ExecutionPolicy::ConfiguredApprovals,
-                &environment,
-            )
-            .unwrap();
+            let managed = if attempt == 0 {
+                resolve_at(
+                    &cache,
+                    HarnessKind::Grok,
+                    ExecutionPolicy::ConfiguredApprovals,
+                    &environment,
+                )
+                .unwrap()
+            } else {
+                resolve_after_lease_release(&cache, &environment)
+            };
             assert!(complete_install(&install, HarnessKind::Grok, selected).unwrap());
             assert!(std::fs::read_dir(cache.join("grok")).unwrap().all(|entry| {
                 !entry
@@ -752,15 +846,7 @@ INSTALLER
         assert!(error.to_string().contains("repair deferred"));
         assert!(managed.lease_path.exists());
         drop(managed);
-        assert!(
-            resolve_at(
-                &cache,
-                HarnessKind::Grok,
-                ExecutionPolicy::ConfiguredApprovals,
-                &environment
-            )
-            .is_ok()
-        );
+        resolve_after_lease_release(&cache, &environment);
     }
 
     #[test]
@@ -1058,6 +1144,29 @@ INSTALLER
         }
     }
 
+    fn resolve_after_lease_release(
+        cache: &Path,
+        environment: &BTreeMap<String, String>,
+    ) -> ManagedHarness {
+        let mut resolved = None;
+        assert_lease_released(|| {
+            match resolve_at(
+                cache,
+                HarnessKind::Grok,
+                ExecutionPolicy::ConfiguredApprovals,
+                environment,
+            ) {
+                Ok(managed) => {
+                    resolved = Some(managed);
+                    true
+                }
+                Err(error) if error.to_string().contains("repair deferred") => false,
+                Err(error) => panic!("managed harness repair failed: {error:#}"),
+            }
+        });
+        resolved.unwrap()
+    }
+
     #[test]
     fn a_complete_cache_hit_does_not_execute_the_entrypoint() {
         let temp = tempfile::tempdir().unwrap();
@@ -1092,5 +1201,47 @@ INSTALLER
             .to_string_lossy()
             .into_owned();
         assert_eq!(managed.environment.get("CODEX_PATH"), Some(&expected_codex));
+    }
+
+    #[test]
+    #[ignore = "downloads the pinned ZCode adapter and official backend AppImage"]
+    fn zcode_managed_install_has_patched_adapter_and_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut environment = mj_core::login_environment::discover().unwrap();
+        HarnessKind::Zcode
+            .configure_home_environment(&temp.path().join("profile/.zcode"), &mut environment);
+        HarnessKind::Zcode
+            .configure_execution_environment(ExecutionPolicy::ConfiguredApprovals, &mut environment)
+            .unwrap();
+        let managed = resolve_at(
+            &temp.path().join("cache"),
+            HarnessKind::Zcode,
+            ExecutionPolicy::ConfiguredApprovals,
+            &environment,
+        )
+        .unwrap();
+
+        assert!(managed.command.is_file());
+        assert_eq!(
+            managed.environment["ZCODE_PROVIDER"],
+            "builtin:zai-coding-plan"
+        );
+        assert_eq!(environment["ZCODE_ACP_MODE"], "build");
+        assert_eq!(
+            managed.environment["ZCODE_DISALLOWED_TOOLS"],
+            "Agent Task Expert"
+        );
+        let backend = Path::new(&managed.environment["ZCODE_BIN"]);
+        assert!(backend.is_file());
+        assert!(backend.parent().unwrap().join("packages").is_dir());
+        let patched = std::fs::read_to_string(
+            managed
+                .command
+                .parent()
+                .unwrap()
+                .join("../zcode-acp-server/dist/handlers/session.js"),
+        )
+        .unwrap();
+        assert!(patched.contains("process.env.ZCODE_ACP_MODE"));
     }
 }

@@ -275,6 +275,26 @@ async fn refresh_profile(
                 error: None,
                 refreshed_at_epoch_seconds,
             }),
+        HarnessKind::Zcode => crate::zcode_usage::query(&source_home)
+            .await
+            .map(|windows| ProfileQuota {
+                profile_id: profile_id.clone(),
+                harness,
+                windows: windows
+                    .into_iter()
+                    .map(|window| QuotaWindow {
+                        label: window.label,
+                        remaining_percent: Some(window.remaining_percent),
+                        used: window.used,
+                        limit: window.limit,
+                        resets: window.resets_at.and_then(format_reset_local_seconds),
+                        resets_at_epoch_seconds: window.resets_at,
+                    })
+                    .collect(),
+                extra: None,
+                error: None,
+                refreshed_at_epoch_seconds,
+            }),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
         profile_id,

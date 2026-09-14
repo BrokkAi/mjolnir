@@ -120,7 +120,7 @@ async fn next(events: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
 }
 
 #[tokio::test]
-#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.2.4"]
+#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.4.1"]
 async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resume() {
     let adapter =
         PathBuf::from(std::env::var_os("MJ_MUSE_ACP_TEST_BINARY").expect("set adapter path"));

@@ -267,9 +267,11 @@ the primary coding session to another profile.
 
 Muse supports streamed chat and tools, images, model and effort selectors,
 approval questions, cancellation, and native resume. `/plan` invokes Muse's
-advertised planning skill; it is not an approval-mode toggle. Guardian targets
-preserve Muse's configured sandbox and approval posture. On explicitly
-unconstrained targets Mjolnir uses auto approvals and `--disable-sandbox`.
+advertised planning skill; it is not an approval-mode toggle, so no plan-mode
+indicator appears and plan approval arrives as chat text rather than a choice
+dialog. Guardian targets preserve Muse's configured sandbox and approval
+posture. On explicitly unconstrained targets Mjolnir uses auto approvals and
+`--disable-sandbox`.
 
 Muse accepts one workspace root, without attached directories. Native import
 and checkpoint restore can relocate that workspace while retaining the session

@@ -113,6 +113,7 @@ const fn import_label(harness: HarnessKind) -> &'static str {
         HarnessKind::Grok => "Grok Build",
         HarnessKind::Deepseek => "DeepSeek Harness",
         HarnessKind::Muse => "Muse Code",
+        HarnessKind::Zcode => "ZCode",
     }
 }
 
@@ -148,6 +149,7 @@ fn locate_for_import(
 ) -> Result<LocatedImport> {
     let archives = sessions_dir();
     Ok(match harness {
+        HarnessKind::Zcode => bail!("ZCode native-session import is not yet supported"),
         HarnessKind::Muse | HarnessKind::Deepseek => {
             let source = locate_native_session(harness, &home, selection)?;
             LocatedImport {

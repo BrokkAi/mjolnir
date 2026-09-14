@@ -5,6 +5,7 @@ mod claude_usage;
 mod codex_usage;
 mod grok_usage;
 mod muse_usage;
+mod zcode_usage;
 
 pub mod compaction;
 pub mod controller;

@@ -211,6 +211,35 @@ fn mutation_guard_rejects_conflicting_commands_but_allows_observation() {
     ));
 }
 
+#[test]
+fn move_configuration_rejects_a_destination_that_would_drop_a_pin() {
+    let accepted = mj_core::acp::AcceptedSessionConfig {
+        model: Some("opus".into()),
+        effort: Some("xhigh".into()),
+    };
+    let choices = mj_core::worker_launch::ProfileConfig {
+        model: Some("opus[1m]".into()),
+        models: vec![mj_core::acp::SessionConfigChoice {
+            value: "opus[1m]".into(),
+            name: "Opus (1M context)".into(),
+            description: None,
+        }],
+        efforts: vec![mj_core::acp::SessionConfigChoice {
+            value: "xhigh".into(),
+            name: "Extra high".into(),
+            description: None,
+        }],
+        observed_at: 1,
+    };
+
+    let error = super::validate_preserved_configuration("claude3", &accepted, &choices)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("does not offer the session's accepted model \"opus\""));
+    assert!(error.contains("opus[1m]"));
+}
+
 #[cfg(unix)]
 #[test]
 fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {

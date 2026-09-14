@@ -32,7 +32,7 @@ use mj_core::workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 31;
+const SCHEMA_VERSION: i64 = 32;
 
 mod session_move;
 pub use session_move::*;

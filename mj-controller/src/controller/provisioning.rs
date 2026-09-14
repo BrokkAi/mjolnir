@@ -679,7 +679,11 @@ fn apply_new_session_provisioning_result(
             Ok(())
         }
         Err(error) => {
-            state.sessions.remove(session_id);
+            let record = state.sessions.get_mut(session_id).unwrap();
+            record.state = SessionState::Error;
+            record.target = None;
+            record.updated_at = now();
+            record.last_error = Some(format!("session provisioning failed: {error:#}"));
             Err(error)
         }
     }
@@ -693,10 +697,12 @@ pub(super) fn apply_failed_new_session_rollback(
 ) -> anyhow::Error {
     match cleanup_error {
         None => {
-            state.sessions.remove(session_id);
-            anyhow::anyhow!(
-                "{original_error}; partial target removed and provisional session discarded"
-            )
+            let record = state.sessions.get_mut(session_id).unwrap();
+            record.state = SessionState::Error;
+            record.target = None;
+            record.updated_at = now();
+            record.last_error = Some(format!("worker bootstrap failed: {original_error}"));
+            anyhow::anyhow!("{original_error}; partial target removed and failed session retained")
         }
         Some(cleanup_error) => {
             let failure = format!(
@@ -1458,7 +1464,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_new_session_provisioning_discards_provisional_record() {
+    fn failed_new_session_provisioning_retains_error_record() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let record = SessionRecord {
             create_managed_worktree: None,
@@ -1499,16 +1505,25 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(!state.sessions.contains_key(session_id));
+        let retained = &state.sessions[session_id];
+        assert_eq!(retained.state, SessionState::Error);
+        assert!(retained.target.is_none());
+        assert!(
+            retained
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("container creation failed")
+        );
     }
 
     const SSH_DOCKER_FAILURE_CHILD: &str = "MJ_TEST_SSH_DOCKER_FAILURE_CHILD";
 
     #[test]
-    fn failed_ssh_docker_preflight_removes_durable_provisioning_record() {
+    fn failed_ssh_docker_preflight_retains_durable_error_record() {
         if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
-            let test = "failed_ssh_docker_preflight_removes_durable_provisioning_record";
+            let test = "failed_ssh_docker_preflight_retains_durable_error_record";
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command
                 .args([
@@ -1583,20 +1598,22 @@ mod tests {
             "the fake preflight did not run: {:?}",
             executor.commands()
         );
-        assert!(!controller.state.sessions.contains_key(&session_id));
+        let retained = &controller.state.sessions[&session_id];
+        assert_eq!(retained.state, SessionState::Error);
+        assert!(retained.target.is_none());
 
         let reloaded = Controller::load().unwrap();
-        assert!(
-            !reloaded.state.sessions.contains_key(&session_id),
-            "failed SSH Docker launch left a durable provisioning row"
-        );
+        let retained = &reloaded.state.sessions[&session_id];
+        assert_eq!(retained.state, SessionState::Error);
+        assert!(retained.target.is_none());
+        assert!(retained.last_error.is_some());
     }
 
     #[test]
-    fn failed_node_preflight_discards_session_before_provisioning() {
+    fn failed_node_preflight_retains_error_before_provisioning() {
         if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
-            let test = "failed_node_preflight_discards_session_before_provisioning";
+            let test = "failed_node_preflight_retains_error_before_provisioning";
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command
                 .args([
@@ -1678,17 +1695,19 @@ mod tests {
             1,
             "preflight must fail before provisioning"
         );
-        assert!(!controller.state.sessions.contains_key(&session_id));
+        let retained = &controller.state.sessions[&session_id];
+        assert_eq!(retained.state, SessionState::Error);
+        assert!(retained.target.is_none());
 
         let reloaded = Controller::load().unwrap();
-        assert!(
-            !reloaded.state.sessions.contains_key(&session_id),
-            "failed Node preflight left a durable provisioning row"
-        );
+        let retained = &reloaded.state.sessions[&session_id];
+        assert_eq!(retained.state, SessionState::Error);
+        assert!(retained.target.is_none());
+        assert!(retained.last_error.is_some());
     }
 
     #[test]
-    fn failed_new_worker_start_discards_session_only_after_target_cleanup() {
+    fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let mut session = SessionRecord {
             create_managed_worktree: None,
@@ -1729,12 +1748,10 @@ mod tests {
         let failure =
             apply_failed_new_session_rollback(&mut cleaned, session_id, "ACP startup failed", None);
 
-        assert!(!cleaned.sessions.contains_key(session_id));
-        assert!(
-            failure
-                .to_string()
-                .contains("provisional session discarded")
-        );
+        let retained = &cleaned.sessions[session_id];
+        assert_eq!(retained.state, SessionState::Error);
+        assert!(retained.target.is_none());
+        assert!(failure.to_string().contains("failed session retained"));
 
         session.state = SessionState::Disconnected;
         let mut cleanup_failed = State::default();

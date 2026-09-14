@@ -457,6 +457,7 @@ fn utility_precedence(kind: HarnessKind) -> Option<u8> {
         HarnessKind::Kimi => Some(2),
         HarnessKind::Deepseek => Some(1),
         HarnessKind::Claude => None,
+        HarnessKind::Zcode => Some(1),
     }
 }
 
@@ -493,6 +494,7 @@ fn family_matches(kind: HarnessKind, id: &str) -> bool {
         HarnessKind::Deepseek => id.starts_with("deepseek-") && id.contains("flash"),
         HarnessKind::Muse => muse_spark_model(&id),
         HarnessKind::Claude => false,
+        HarnessKind::Zcode => id.starts_with("glm-"),
     }
 }
 
@@ -583,6 +585,9 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
             MetaClient::load_with_config(config)
         }
         HarnessKind::Claude => Ok(None),
+        // ZCode is available through ACP but does not expose a direct utility
+        // inference client independent of its coding-agent session.
+        HarnessKind::Zcode => Ok(None),
     }
 }
 

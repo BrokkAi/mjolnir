@@ -907,8 +907,10 @@ impl WaitDecision {
 ///
 /// The rules run in order, and the order is the point:
 ///
-/// 1. A stopped, stopping, or failed session ends the wait as `stopped`.
-/// 2. A launch failure or failed initialization is reported before a turn.
+/// 1. A stopped or stopping session ends the wait as `stopped`, superseding
+///    any initialization result that raced with the close request.
+/// 2. A launch failure or failed initialization is reported before a turn; a durable
+///    failed lifecycle ends it as `error` even after a daemon restart.
 /// 3. Otherwise the wait has a target turn: the caller's explicit `turn_id`,
 ///    else the turn a create-with-prompt call submitted, else "the newest
 ///    one", which additionally requires the session to be idle with an empty
@@ -923,11 +925,7 @@ impl WaitDecision {
 pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Option<WaitDecision> {
     let stopping = matches!(
         observation.lifecycle,
-        Some(
-            ViewerLifecycleCategory::Stopped
-                | ViewerLifecycleCategory::Failed
-                | ViewerLifecycleCategory::Stopping
-        )
+        Some(ViewerLifecycleCategory::Stopped | ViewerLifecycleCategory::Stopping)
     ) || matches!(
         observation.execution,
         MaterializedExecutionState::Closing | MaterializedExecutionState::Closed
@@ -938,7 +936,6 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
             Some("the session is stopped or stopping".to_owned()),
         ));
     }
-
     if observation.launch_failed {
         return Some(WaitDecision::simple(
             WaitOutcome::Error,
@@ -951,7 +948,12 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
             Some(message.clone()),
         ));
     }
-
+    if observation.lifecycle == Some(ViewerLifecycleCategory::Failed) {
+        return Some(WaitDecision::simple(
+            WaitOutcome::Error,
+            Some("the session is in a failed state".to_owned()),
+        ));
+    }
     let retry_pending = |outcome: &MaterializedTurnOutcome| {
         observation.capacity_retry.is_some()
             && matches!(
@@ -1372,6 +1374,9 @@ async fn start_session(
         ));
     };
 
+    if let Some(key) = key {
+        backend.record_idempotency(key, session_id.clone()).await?;
+    }
     backend
         .start_followup(
             session_id.clone(),
@@ -1382,9 +1387,6 @@ async fn start_session(
             },
         )
         .await?;
-    if let Some(key) = key {
-        backend.record_idempotency(key, session_id.clone()).await?;
-    }
     Ok((
         StatusCode::CREATED,
         Json(StartSessionResponse {
@@ -2330,6 +2332,25 @@ mod tests {
         let queries = backend.event_queries.lock().unwrap();
         assert_eq!(queries[0].0.workspace_id.as_deref(), Some("default"));
         assert_eq!(queries[0].1, Some(1));
+    }
+
+    #[tokio::test]
+    async fn event_stream_rejects_an_unknown_session_instead_of_waiting_forever() {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
+        let response = app
+            .oneshot(
+                bearer(Request::get(
+                    "/api/v1/events?session_id=session-that-never-existed",
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(backend.event_queries.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3546,6 +3567,17 @@ mod tests {
         let decision = resolve_wait(&failed_start, &WaitRequest::default()).unwrap();
         assert_eq!(decision.outcome, WaitOutcome::Error);
         assert_eq!(decision.message.as_deref(), Some("the profile has no home"));
+
+        let durable_failure = WaitObservation {
+            lifecycle: Some(ViewerLifecycleCategory::Failed),
+            ..idle(None)
+        };
+        let decision = resolve_wait(&durable_failure, &WaitRequest::default()).unwrap();
+        assert_eq!(decision.outcome, WaitOutcome::Error);
+        assert_eq!(
+            decision.message.as_deref(),
+            Some("the session is in a failed state")
+        );
 
         // The session carries an error from some earlier action. The turn the
         // caller named is running fine, so the wait keeps waiting.

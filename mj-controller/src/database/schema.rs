@@ -797,6 +797,9 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 31 {
         migrate_subagent_sessions(connection)?;
     }
+    if version < 32 {
+        migrate_zcode_harness_kind(connection)?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -859,6 +862,68 @@ fn migrate_subagent_sessions(connection: &Connection) -> Result<()> {
          PRAGMA user_version = 31;",
     )?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// Breaking migration: older controllers cannot deserialize the new harness
+/// enum and their table constraints reject ZCode rows written by this build.
+fn migrate_zcode_harness_kind(connection: &Connection) -> Result<()> {
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let migration = (|| -> Result<()> {
+        let transaction = connection.unchecked_transaction()?;
+        for table in ["sessions", "hidden_native_sessions"] {
+            let sql: String = transaction.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )?;
+            let (_, definition) = sql
+                .split_once('(')
+                .context("missing harness table definition")?;
+            if definition.contains("'muse','zcode')") {
+                continue;
+            }
+            ensure!(
+                definition.contains("'muse')"),
+                "unexpected {table} harness constraint"
+            );
+            let definition = definition.replace("'muse')", "'muse','zcode')");
+            let objects: Vec<String> = transaction
+                .prepare(
+                    "SELECT sql FROM sqlite_schema WHERE tbl_name=?1
+                     AND type IN ('index','trigger') AND sql IS NOT NULL",
+                )?
+                .query_map([table], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            transaction.execute_batch(&format!(
+                "CREATE TABLE {table}_zcode_v32 ({definition};
+                 INSERT INTO {table}_zcode_v32 SELECT * FROM {table};
+                 DROP TABLE {table};
+                 ALTER TABLE {table}_zcode_v32 RENAME TO {table};"
+            ))?;
+            for object in objects {
+                transaction.execute_batch(&object)?;
+            }
+        }
+        ensure!(
+            !transaction
+                .prepare("PRAGMA foreign_key_check")?
+                .exists([])?,
+            "foreign key violation in ZCode migration"
+        );
+        transaction.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version = 32
+                 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (32, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 32;",
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })();
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    migration.context("migrate ZCode harness constraints")?;
+    restored.context("restore foreign key enforcement after ZCode migration")?;
     Ok(())
 }
 
@@ -1745,7 +1810,15 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         drop(open_writer(&path).unwrap());
-        stamp_schema_version(&path, SCHEMA_VERSION - 1);
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch(&format!(
+            "UPDATE schema_compatibility SET minimum_compatible_version = {0};
+             DELETE FROM schema_migrations WHERE version > {0};
+             PRAGMA user_version = {0};",
+            SCHEMA_VERSION - 1
+        ))
+        .unwrap();
+        drop(raw);
 
         let error = open_reader_strict(&path).unwrap_err();
 

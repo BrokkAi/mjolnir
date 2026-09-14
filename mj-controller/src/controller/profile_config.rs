@@ -95,12 +95,13 @@ pub async fn observe(
             &state.config_options,
             state.modes.as_ref(),
         );
-        let choices = ProfileConfig {
+        let mut choices = ProfileConfig {
             model: facts.current_model().map(str::to_owned),
             models: mj_core::acp::session_config_choices(&state.config_options, "model"),
             efforts: mj_core::acp::session_config_choices(&state.config_options, "effort"),
             observed_at: chrono::Utc::now().timestamp(),
         };
+        enrich_profile_config(profile, &mut choices)?;
         // Worker observations do not carry authentication provenance. Claude's
         // setup-token and login catalogues differ, so only probes may cache it.
         if profile.kind == mj_core::config::HarnessKind::Claude {
@@ -130,7 +131,7 @@ pub async fn observe(
 
 fn fingerprint(profile: &HarnessProfile, environment: &BTreeMap<String, String>) -> Result<String> {
     let mut hash = Sha256::new();
-    hash.update(b"profile-config-v2\0");
+    hash.update(b"profile-config-v3\0");
     hash.update(serde_json::to_vec(profile)?);
     hash.update(serde_json::to_vec(environment)?);
     hash.update(
@@ -173,7 +174,12 @@ fn discover_blocking(
             .map(|body| serde_json::from_str(&body).context("read cached profile configuration"))
             .transpose()
         },
-        || probe_profile(profile, environment.clone(), model.clone(), cancelled),
+        || {
+            let mut choices =
+                probe_profile(profile, environment.clone(), model.clone(), cancelled)?;
+            enrich_profile_config(profile, &mut choices)?;
+            Ok(choices)
+        },
         |choices| {
             if model.is_none() || choices.model == model {
                 store(profile_id, &fingerprint, &model, choices)?;
@@ -181,6 +187,36 @@ fn discover_blocking(
             store(profile_id, &fingerprint, &choices.model, choices)
         },
     )
+}
+
+/// Muse's ACP bridge reports effort choices but no model selector. Its native
+/// settings file is authoritative for the one model this profile will run, so
+/// publish that value rather than making callers create a session to learn it.
+fn enrich_profile_config(profile: &HarnessProfile, choices: &mut ProfileConfig) -> Result<()> {
+    if profile.kind != mj_core::config::HarnessKind::Muse || !choices.models.is_empty() {
+        return Ok(());
+    }
+    let path = profile.home.join("settings.json");
+    let metadata = std::fs::metadata(&path)
+        .with_context(|| format!("read Muse settings metadata {}", path.display()))?;
+    ensure!(metadata.len() <= 1024 * 1024, "Muse settings are too large");
+    let settings: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&path).with_context(|| format!("read Muse settings {}", path.display()))?,
+    )
+    .context("decode Muse settings")?;
+    let model = settings
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .context("Muse settings do not select a model")?;
+    choices.model = Some(model.to_owned());
+    choices.models.push(mj_core::acp::SessionConfigChoice {
+        value: model.to_owned(),
+        name: model.to_owned(),
+        description: Some("Configured by Muse Code settings".into()),
+    });
+    Ok(())
 }
 
 fn resolve_cached(
@@ -204,7 +240,11 @@ fn probe_profile(
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ProfileConfig> {
     let root = tempfile::tempdir().context("create private profile discovery directory")?;
-    let home = root.path().join("profile");
+    let home = if profile.kind == mj_core::config::HarnessKind::Zcode {
+        root.path().join("profile/.zcode")
+    } else {
+        root.path().join("profile")
+    };
     super::worker_binary::stage_profile(profile, &home)?;
     let cwd = root.path().join("workspace");
     std::fs::create_dir(&cwd)?;
@@ -267,6 +307,35 @@ fn store(
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn muse_discovery_publishes_the_model_selected_by_native_settings() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("settings.json"),
+            br#"{"model":"muse-spark-1.3-contributor"}"#,
+        )
+        .unwrap();
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Muse,
+            home: home.path().into(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        };
+        let mut choices = ProfileConfig {
+            model: Some(String::new()),
+            models: Vec::new(),
+            efforts: Vec::new(),
+            observed_at: 1,
+        };
+
+        enrich_profile_config(&profile, &mut choices).unwrap();
+
+        assert_eq!(choices.model.as_deref(), Some("muse-spark-1.3-contributor"));
+        assert_eq!(choices.models.len(), 1);
+        assert_eq!(choices.models[0].value, "muse-spark-1.3-contributor");
+    }
 
     #[test]
     fn setup_token_changes_invalidate_the_discovery_cache() {

@@ -749,6 +749,40 @@ fn permission_request_warning_explains_required_permission_modes() {
     assert!(UNEXPECTED_PERMISSION_REQUEST_WARNING.contains("unconstrained"));
 }
 
+#[test]
+fn unconstrained_muse_permission_prefers_a_one_time_allow_and_never_cancels() {
+    use agent_client_protocol::schema::v1::{
+        PermissionOption, ToolCallUpdate, ToolCallUpdateFields,
+    };
+
+    let request = RequestPermissionRequest::new(
+        "session-1",
+        ToolCallUpdate::new("tool-1", ToolCallUpdateFields::new().title("Run command")),
+        vec![
+            PermissionOption::new("abort", "Abort", PermissionOptionKind::RejectOnce),
+            PermissionOption::new("always", "Always allow", PermissionOptionKind::AllowAlways),
+            PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
+        ],
+    );
+
+    let response = muse_unconstrained_permission_response(&request).unwrap();
+    assert_eq!(
+        serde_json::to_value(response).unwrap()["outcome"]["optionId"],
+        "allow_once"
+    );
+
+    let rejected_only = RequestPermissionRequest::new(
+        "session-1",
+        ToolCallUpdate::new("tool-2", ToolCallUpdateFields::default()),
+        vec![PermissionOption::new(
+            "abort",
+            "Abort",
+            PermissionOptionKind::RejectOnce,
+        )],
+    );
+    assert!(muse_unconstrained_permission_response(&rejected_only).is_none());
+}
+
 #[tokio::test]
 async fn runtime_event_delivery_waits_for_bounded_channel_capacity() {
     let (events_tx, mut events_rx) = mpsc::channel(1);
