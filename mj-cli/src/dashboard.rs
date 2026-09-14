@@ -1688,6 +1688,13 @@ impl DashboardContext {
             profile: session_record.last_profile.clone(),
             title: session_record.display_title().to_owned(),
             harness_kind: Some(session_record.harness_kind),
+            subagent_count: self
+                .controller
+                .state
+                .subagents
+                .values()
+                .filter(|record| record.parent_session_id == session_record.id)
+                .count(),
         };
         let sessions = self.worker_commands_tx.clone();
         let notices = self.notices.clone();
@@ -2170,6 +2177,14 @@ impl DashboardContext {
             &self.controller.config,
             self.controller.state.sessions.get(chat.session_id()),
         );
+        let count = self
+            .controller
+            .state
+            .subagents
+            .values()
+            .filter(|record| record.parent_session_id == chat.session_id())
+            .count();
+        chat.set_subagent_count(count);
     }
 
     fn drain_runtime_config(&mut self) {
@@ -2479,6 +2494,20 @@ impl DashboardContext {
             mj_chat::chat::ChatEventOutcome::None | mj_chat::chat::ChatEventOutcome::Handled => {}
             mj_chat::chat::ChatEventOutcome::CycleFocus { reverse } => {
                 self.dashboard.cycle_focus(reverse);
+            }
+            mj_chat::chat::ChatEventOutcome::OpenSubagents => {
+                let Some(parent_id) = self
+                    .active_chat
+                    .as_ref()
+                    .map(|chat| chat.session_id().to_owned())
+                else {
+                    return;
+                };
+                self.capture_active_composer_draft();
+                self.dashboard.open_subagent_workspace(parent_id);
+                if let Some(child_id) = self.dashboard.selected_session_id().map(str::to_owned) {
+                    self.open_chat_session(&child_id);
+                }
             }
             mj_chat::chat::ChatEventOutcome::QuitDetach { .. } => {
                 self.request_shutdown();

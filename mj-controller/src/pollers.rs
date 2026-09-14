@@ -1739,6 +1739,8 @@ fn runtime_projection_view(
                     operational,
                     latest_credential_sync_signal: runtime.latest_credential_sync_signal,
                     worker_build: None,
+                    subagent_requests: Vec::new(),
+                    subagent_results: Vec::new(),
                 }),
                 connected: runtime.connected,
                 error: runtime.error,

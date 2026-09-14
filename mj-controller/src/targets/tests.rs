@@ -2152,6 +2152,7 @@ fn bare_project_plan_leaves_project_validation_to_dialog_and_launch() {
     assert!(commands.is_empty());
 
     let locator = TargetLocator::SshBare {
+        worker_id: None,
         ssh: ssh(),
         workspace: format!(".local/share/hel/workspaces/{SESSION}"),
     };
@@ -2213,6 +2214,7 @@ fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
     .unwrap();
     let remote = close_plan(
         &TargetLocator::SshBare {
+            worker_id: None,
             ssh: ssh(),
             workspace: format!(".local/share/hel/workspaces/{SESSION}"),
         },
@@ -2378,6 +2380,7 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
 
     let remote = clear_relay_state_plan(
         &TargetLocator::SshBare {
+            worker_id: None,
             ssh: ssh(),
             workspace: format!(".local/share/hel/workspaces/{SESSION}"),
         },
@@ -2821,6 +2824,7 @@ fn docker_overlay_run_rollback_removes_owned_mj_directory_after_run_failure() {
 #[test]
 fn close_rejects_broad_or_mismatched_targets() {
     let broad = TargetLocator::SshBare {
+        worker_id: None,
         ssh: ssh(),
         workspace: ".local/share/hel/workspaces".to_owned(),
     };
@@ -2831,6 +2835,7 @@ fn close_rejects_broad_or_mismatched_targets() {
     };
     assert!(close_plan(&mismatch, SESSION).is_err());
     let root = TargetLocator::SshBare {
+        worker_id: None,
         ssh: ssh(),
         workspace: "/".to_owned(),
     };

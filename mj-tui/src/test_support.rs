@@ -90,6 +90,7 @@ pub(crate) fn mouse_at_row(kind: MouseEventKind, area: Rect, row_offset: u16) ->
 
 pub(crate) fn config() -> Config {
     Config {
+        subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
         advanced: Default::default(),
@@ -222,6 +223,7 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
     DashboardState::new(
         config(),
         State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(session.id.clone(), session)]),
             mount_history: BTreeMap::new(),

@@ -15,6 +15,7 @@ use crate::credentials::CredentialSyncSignal;
 use crate::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RelayOperationalState, SequencedEvent, WorkerEvent,
 };
+use crate::subagent::SubagentRecord;
 use crate::targets::{AdditionalMount, validate_additional_mounts};
 
 pub const STATE_VERSION: u32 = 1;
@@ -415,6 +416,10 @@ pub struct ManagedSessionSnapshot {
     /// live worker or the worker predates the field; either way the worker is
     /// not known to be the build this controller would install.
     pub worker_build: Option<String>,
+    /// Pending parent-tool work fetched from the target worker.
+    pub subagent_requests: Vec<crate::subagent::SubagentToolRequest>,
+    /// Recently completed tool work cached by the worker for idempotent calls.
+    pub subagent_results: Vec<crate::subagent::SubagentToolResult>,
 }
 
 /// What a projection's transcript window leaves out.
@@ -1257,6 +1262,10 @@ pub struct State {
     pub version: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sessions: BTreeMap<String, SessionRecord>,
+    /// Child sessions keyed by their session id. The relationship lives in
+    /// controller state so every control surface sees the same session family.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subagents: BTreeMap<String, SubagentRecord>,
     /// Recently used source directories, keyed by `local` or SSH host name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mount_history: BTreeMap<String, Vec<PathBuf>>,
@@ -1270,6 +1279,7 @@ impl Default for State {
         Self {
             version: STATE_VERSION,
             sessions: BTreeMap::new(),
+            subagents: BTreeMap::new(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         }
@@ -1286,6 +1296,40 @@ impl State {
         }
         for (id, session) in &self.sessions {
             session.validate(id)?;
+        }
+        for (child_id, subagent) in &self.subagents {
+            if child_id != &subagent.child_session_id {
+                bail!("sub-agent key {child_id:?} does not match its child session id");
+            }
+            if child_id == &subagent.parent_session_id {
+                bail!("sub-agent {child_id:?} cannot be its own parent");
+            }
+            if !self.sessions.contains_key(child_id) {
+                bail!("sub-agent {child_id:?} has no child session");
+            }
+            if !self.sessions.contains_key(&subagent.parent_session_id) {
+                bail!(
+                    "sub-agent {child_id:?} has unknown parent {:?}",
+                    subagent.parent_session_id
+                );
+            }
+            if self.subagents.contains_key(&subagent.parent_session_id) {
+                bail!("sub-agent {child_id:?} cannot belong to another sub-agent");
+            }
+            if subagent.task_name.trim().is_empty()
+                || subagent.profile_id.trim().is_empty()
+                || subagent.request_key.trim().is_empty()
+            {
+                bail!("sub-agent {child_id:?} has incomplete relationship metadata");
+            }
+            if subagent.working_directory.is_absolute()
+                || subagent
+                    .working_directory
+                    .components()
+                    .any(|component| component == Component::ParentDir)
+            {
+                bail!("sub-agent {child_id:?} has an unsafe working directory");
+            }
         }
         for (host, sources) in &self.mount_history {
             if host.trim().is_empty() {
@@ -1593,6 +1637,8 @@ mod tests {
             materialized: session,
             window,
             worker_build: None,
+            subagent_requests: Vec::new(),
+            subagent_results: Vec::new(),
             operational: serde_json::from_value(serde_json::json!({
                 "session_id": "session-1",
                 "execution": "idle",
@@ -1719,6 +1765,7 @@ mod tests {
         State {
             version: STATE_VERSION,
             sessions: BTreeMap::from([(session.id.clone(), session)]),
+            subagents: BTreeMap::new(),
             mount_history: BTreeMap::from([(
                 "local".into(),
                 vec![PathBuf::from("/home/test/cache")],
@@ -1738,6 +1785,7 @@ mod tests {
             theme: Default::default(),
             phone: Default::default(),
             review: Default::default(),
+            subagents: Default::default(),
             legacy_startup: (),
             profiles: BTreeMap::from([(
                 "codex-1".into(),

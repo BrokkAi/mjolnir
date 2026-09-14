@@ -116,6 +116,8 @@ pub struct LaunchSpec {
     /// turn review's reviewing agents get Bifrost this way; the primary
     /// session gets none.
     pub extra_mcp_servers: Vec<mj_core::worker_launch::ReviewMcpServer>,
+    /// Private Mjolnir delegation socket for supported parent sessions.
+    pub subagent_mcp_socket: Option<PathBuf>,
     pub resume_session: Option<String>,
     /// Accepted selectors for this logical session, shared across native
     /// bridge replacements. Workers seed this from their durable relay.
@@ -157,10 +159,15 @@ fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, ser
             .lock()
             .expect("goal lock poisoned")
             .asking();
-        return Some(serde_json::Map::from_iter([(
+        let mut meta = serde_json::Map::from_iter([(
             "goal".into(),
             serde_json::json!({"resumePolicy": if asking {"pause"} else {"preserve"}}),
-        )]));
+        )]);
+        meta.insert(
+            "codex".into(),
+            serde_json::json!({"options":{"disallowedTools":["spawn_agent"]}}),
+        );
+        return Some(meta);
     }
     if spec.harness != HarnessKind::Claude {
         return None;
@@ -192,6 +199,10 @@ fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, ser
             serde_json::json!({ "enabled": false }),
         );
     }
+    options.insert(
+        "disallowedTools".to_owned(),
+        serde_json::json!(["Agent", "Task", "TaskOutput", "TaskStop"]),
+    );
     claude_code.insert("options".to_owned(), serde_json::Value::Object(options));
     Some(serde_json::Map::from_iter([(
         "claudeCode".to_owned(),
@@ -339,20 +350,35 @@ fn claude_background_tasks(
 /// over ACP. Claude and Kimi read their staged profile instead, which the
 /// controller writes while staging the reviewer.
 fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
-    if mj_core::worker_launch::ReviewMcpDelivery::for_harness(spec.harness)
-        != mj_core::worker_launch::ReviewMcpDelivery::Acp
+    let mut servers = if mj_core::worker_launch::ReviewMcpDelivery::for_harness(spec.harness)
+        == mj_core::worker_launch::ReviewMcpDelivery::Acp
     {
-        return Vec::new();
+        spec.extra_mcp_servers
+            .iter()
+            .map(|server| {
+                McpServer::Stdio(
+                    McpServerStdio::new(server.name.clone(), server.command.clone())
+                        .args(server.args.clone()),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if spec.harness != HarnessKind::Claude
+        && let Some(socket) = &spec.subagent_mcp_socket
+    {
+        let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
+        servers.push(McpServer::Stdio(
+            McpServerStdio::new("mj-subagents", worker).args(vec![
+                "worker".into(),
+                "subagent-mcp".into(),
+                "--socket".into(),
+                socket.to_string_lossy().into_owned(),
+            ]),
+        ));
     }
-    spec.extra_mcp_servers
-        .iter()
-        .map(|server| {
-            McpServer::Stdio(
-                McpServerStdio::new(server.name.clone(), server.command.clone())
-                    .args(server.args.clone()),
-            )
-        })
-        .collect()
+    servers
 }
 
 fn new_session_request(spec: &LaunchSpec, include_project_memory: bool) -> NewSessionRequest {
@@ -2329,6 +2355,7 @@ async fn serve_session(
             &session_id,
             &mut config_options,
             &mut grok_models,
+            spec.harness,
             key,
             &value,
         )
@@ -2941,6 +2968,7 @@ async fn serve_session(
                     &session_id,
                     &mut config_options,
                     &mut grok_models,
+                    spec.harness,
                     &key,
                     &value,
                 )
@@ -3296,6 +3324,7 @@ async fn resolve_session_config_recovery(
             session_id,
             config_options,
             grok_models,
+            spec.harness,
             key,
             &value,
         )
@@ -3342,9 +3371,17 @@ async fn apply_session_selector(
     session_id: &SessionId,
     options: &mut Vec<SessionConfigOption>,
     grok_models: &mut Option<grok::GrokModelState>,
+    harness: HarnessKind,
     key: &str,
     value: &str,
 ) -> Result<()> {
+    // Muse advertises its default model as the first choice while reporting an
+    // empty current value. Sending that same choice back through its legacy
+    // `session/setModel` path is rejected as `invalid_target`; leaving it alone
+    // is the only operation needed to select the advertised default.
+    if harness == HarnessKind::Muse && key == "model" && muse_implicit_default(options, value) {
+        return Ok(());
+    }
     match grok_models.as_mut() {
         Some(state) if grok::handles_config_key(key) => {
             grok::apply_model_change(connection, session_id, state, key, value)
@@ -3353,6 +3390,19 @@ async fn apply_session_selector(
         }
         _ => set_session_config(connection, session_id, options, key, value).await,
     }
+}
+
+fn muse_implicit_default(options: &[SessionConfigOption], value: &str) -> bool {
+    let Some(option) = find_session_config_option(options, "model") else {
+        return false;
+    };
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return false;
+    };
+    select.current_value.to_string().trim().is_empty()
+        && session_config_choices(options, "model")
+            .first()
+            .is_some_and(|choice| choice.value == value)
 }
 
 async fn set_session_config(

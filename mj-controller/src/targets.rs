@@ -1766,7 +1766,7 @@ exit "$status""#;
             )
             .purpose("terminate exact EC2 session instance")
         }
-        TargetLocator::SshBare { ssh, workspace } => {
+        TargetLocator::SshBare { ssh, workspace, .. } => {
             // Same ordering constraint as the local bare target: stop the
             // daemon before deleting the root it keeps writing to.
             let script = format!(
@@ -1784,6 +1784,35 @@ exit "$status""#;
     };
     Ok(CommandPlan {
         description: format!("close Mjolnir session {session_id}"),
+        commands: vec![command],
+    })
+}
+
+/// Stop and remove only a child session's private worker state from a target
+/// owned by its parent. This never removes the target or project workspace.
+pub fn borrowed_worker_cleanup_plan(
+    locator: &TargetLocator,
+    child_session_id: &str,
+) -> Result<CommandPlan> {
+    verify_locator(locator, child_session_id)?;
+    let worker_root = worker_root(locator, child_session_id)?;
+    let mut script = stop_worker_daemon_script(&worker_root);
+    script.push_str(&format!("rm -rf -- {}\n", posix_quote(&worker_root)));
+    if !matches!(locator, TargetLocator::LocalBare { .. }) {
+        script.push_str(&format!(
+            "rm -rf -- {} {}\n",
+            posix_quote(&format!("/var/lib/hel/profiles/{child_session_id}")),
+            posix_quote(&format!(".local/share/hel/profiles/{child_session_id}")),
+        ));
+    }
+    let command = command_on_locator(
+        locator,
+        child_session_id,
+        vec!["sh".into(), "-c".into(), script],
+        "stop a borrowed-target sub-agent and remove its private worker state",
+    )?;
+    Ok(CommandPlan {
+        description: format!("clean up sub-agent worker {child_session_id}"),
         commands: vec![command],
     })
 }

@@ -45,7 +45,7 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// Current durable ACP relay protocol. Peers that only speak an older
 /// version in [`RELAY_MIN_PROTOCOL_VERSION`]..=this range still connect.
 /// Protocol 0 is the retired pre-relay worker protocol and is rejected.
-pub const RELAY_PROTOCOL_VERSION: u32 = 11;
+pub const RELAY_PROTOCOL_VERSION: u32 = 12;
 /// New writers require readers that understand durable goal-control events.
 /// Controllers still read older workers using RELAY_MIN_PROTOCOL_VERSION.
 pub const RELAY_WRITER_MIN_PROTOCOL_VERSION: u32 = 11;

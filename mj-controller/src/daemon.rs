@@ -993,6 +993,42 @@ impl RuntimeState {
             .await
     }
 
+    /// Register and start a child worker on its parent's existing target.
+    pub async fn start_subagent_session(
+        self: &Arc<Self>,
+        request: crate::controller::RegisterSubagentRequest,
+    ) -> Result<mj_core::subagent::SubagentRecord> {
+        let relation = blocking(move || {
+            let mut controller = Controller::load()?;
+            controller.register_subagent(request)
+        })
+        .await?;
+        let session_id = relation.child_session_id.clone();
+        self.start_or_join_lifecycle_controlled(
+            session_id.clone(),
+            LifecycleKind::Create,
+            None,
+            Some(relation.request_key.clone()),
+            None,
+            move |state, session_id, cancelled| async move {
+                let mut controller = tokio::task::spawn_blocking(Controller::load)
+                    .await
+                    .context("load controller for sub-agent startup")??;
+                let executor = DaemonStageReportingExecutor::new(
+                    CancellableProcessExecutor::new(cancelled),
+                    state,
+                    session_id.clone(),
+                );
+                controller
+                    .provision_subagent_session_controlled(&session_id, &executor)
+                    .await?;
+                Ok(DaemonLifecycleResult::Done)
+            },
+        )?;
+        self.reload_controller().await?;
+        Ok(relation)
+    }
+
     pub async fn start_create_session_controlled(
         self: &Arc<Self>,
         request: CreateSessionRequest,
@@ -1175,6 +1211,33 @@ impl RuntimeState {
     }
 
     pub async fn close_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        let children = blocking({
+            let session_id = session_id.clone();
+            move || {
+                let controller = Controller::load()?;
+                Ok(controller
+                    .state
+                    .subagents
+                    .values()
+                    .filter(|child| child.parent_session_id == session_id)
+                    .filter(|child| {
+                        controller
+                            .state
+                            .sessions
+                            .get(&child.child_session_id)
+                            .is_some_and(|session| session.state.is_active())
+                    })
+                    .map(|child| child.child_session_id.clone())
+                    .collect::<Vec<_>>())
+            }
+        })
+        .await?;
+        for child_id in children {
+            self.request_close(&child_id);
+            let result = self.close_requested_session(child_id.clone()).await;
+            self.clear_close_request(&child_id);
+            result.with_context(|| format!("stop sub-agent {child_id} before its parent"))?;
+        }
         self.request_close(&session_id);
         let result = self.close_requested_session(session_id.clone()).await;
         self.clear_close_request(&session_id);
@@ -1509,6 +1572,21 @@ impl RuntimeState {
     }
 
     async fn force_stop_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        let children = blocking({
+            let session_id = session_id.clone();
+            move || {
+                Ok(crate::database::list_subagents(&session_id)?
+                    .into_iter()
+                    .map(|child| child.child_session_id)
+                    .collect::<Vec<_>>())
+            }
+        })
+        .await?;
+        for child_id in children {
+            Box::pin(self.force_stop_session(child_id.clone()))
+                .await
+                .with_context(|| format!("force-stop sub-agent {child_id} before its parent"))?;
+        }
         let operation_session_id = session_id.clone();
         let result = self
             .run_lifecycle(
@@ -1538,6 +1616,21 @@ impl RuntimeState {
     }
 
     async fn destroy_stopped_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        let children = blocking({
+            let session_id = session_id.clone();
+            move || {
+                Ok(crate::database::list_subagents(&session_id)?
+                    .into_iter()
+                    .map(|child| child.child_session_id)
+                    .collect::<Vec<_>>())
+            }
+        })
+        .await?;
+        for child_id in children {
+            Box::pin(self.force_destroy_session(child_id.clone()))
+                .await
+                .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
+        }
         self.wait_for_deferred_cleanup(&session_id).await?;
         let exists = blocking({
             let session_id = session_id.clone();
@@ -1621,6 +1714,21 @@ impl RuntimeState {
     /// lifecycle operation holds it first. Data loss is the caller's confirmed
     /// decision; see [`Controller::force_destroy_session`].
     pub async fn force_destroy_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        let children = blocking({
+            let session_id = session_id.clone();
+            move || {
+                Ok(crate::database::list_subagents(&session_id)?
+                    .into_iter()
+                    .map(|child| child.child_session_id)
+                    .collect::<Vec<_>>())
+            }
+        })
+        .await?;
+        for child_id in children {
+            Box::pin(self.force_destroy_session(child_id.clone()))
+                .await
+                .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
+        }
         self.preempt_active_lifecycle(&session_id).await?;
         let exists = blocking({
             let session_id = session_id.clone();

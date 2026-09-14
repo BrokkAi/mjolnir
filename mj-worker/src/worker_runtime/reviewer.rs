@@ -815,6 +815,7 @@ impl ReviewerRole {
             // which belongs to the primary session alone.
             project_memory: None,
             extra_mcp_servers: config.mcp_servers.clone(),
+            subagent_mcp_socket: None,
             resume_session,
             accepted_config,
             harness: config.harness,

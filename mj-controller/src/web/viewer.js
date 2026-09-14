@@ -73,6 +73,7 @@ const login = document.querySelector('#login'),
   elicitations = document.querySelector('#elicitations'),
   reviewHost = document.querySelector('#turn-review'),
   promptSettings = document.querySelector('#prompt-settings'),
+  subagentsButton = document.querySelector('#subagents-button'),
   promptText = document.querySelector('#prompt-text'),
   attachments = document.querySelector('#attachments'),
   attachImage = document.querySelector('#attach-image'),
@@ -181,6 +182,8 @@ function announce(message) {
 
 const ID = '[A-Za-z0-9_-]+';
 const ROUTE_PATTERNS = [
+  [new RegExp(`^#subagents/(${ID})/(${ID})$`), ([parentId, sessionId]) => ({ name: 'conversation', sessionId, subagentParentId: parentId })],
+  [new RegExp(`^#subagents/(${ID})$`), ([parentId]) => ({ name: 'dashboard', subagentParentId: parentId })],
   [new RegExp(`^#workspace/(${ID})/new$`), ([id]) => ({ name: 'new', workspaceId: id })],
   [new RegExp(`^#workspace/(${ID})/resume/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'resume', workspaceId, sessionId })],
   [new RegExp(`^#workspace/(${ID})/resume$`), ([id]) => ({ name: 'resume', workspaceId: id })],
@@ -200,6 +203,11 @@ function parseRoute(hash) {
 }
 
 function routeHash(next) {
+  if (next.subagentParentId) {
+    return next.name === 'conversation'
+      ? `#subagents/${next.subagentParentId}/${next.sessionId}`
+      : `#subagents/${next.subagentParentId}`;
+  }
   switch (next.name) {
     case 'new':
       return `#workspace/${next.workspaceId}/new`;
@@ -235,6 +243,9 @@ function navigate(next) {
 /// The workspace the route names, or the one to fall back to.
 function selectedWorkspaceId() {
   const workspaces = snapshot?.workspaces || [];
+  if (route.subagentParentId) {
+    return snapshot?.sessions.find(session => session.id === route.subagentParentId)?.workspace_id;
+  }
   if (route.workspaceId && workspaces.some(w => w.id === route.workspaceId)) {
     return route.workspaceId;
   }
@@ -262,7 +273,7 @@ function applyRoute() {
   // and a shared link all return to the same one. An empty hash is the state
   // a first visit is in, and canonicalising it here is what gives every later
   // navigation something to go back to.
-  if (route.name === 'dashboard' && !route.workspaceId) {
+  if (route.name === 'dashboard' && !route.workspaceId && !route.subagentParentId) {
     const workspaceId = selectedWorkspaceId();
     if (workspaceId) {
       navigate({ name: 'dashboard', workspaceId });
@@ -274,11 +285,17 @@ function applyRoute() {
   // has one. Otherwise it is a stale link, and the dashboard is the answer.
   if (route.name === 'conversation') {
     const session = snapshot.sessions.find(s => s.id === route.sessionId);
+    const virtualParent = route.subagentParentId
+      ? snapshot.sessions.find(s => s.id === route.subagentParentId)
+      : null;
     if (!session
+      || (route.subagentParentId && !virtualParent?.subagent_session_ids?.includes(session.id))
       || (!session.capabilities?.open
         && !isTransitioningSession(session)
         && !isLoadingConversationSession(session))) {
-      navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
+      navigate(route.subagentParentId
+        ? { name: 'dashboard', subagentParentId: route.subagentParentId }
+        : { name: 'dashboard', workspaceId: selectedWorkspaceId() });
       return;
     }
   }
@@ -295,7 +312,7 @@ function applyRoute() {
 
   const name = PAGES[route.name] ? route.name : 'dashboard';
   for (const [key, page] of Object.entries(PAGES)) page.classList.toggle('hidden', key !== name);
-  workspaceStrip.classList.toggle('hidden', name === 'conversation');
+  workspaceStrip.classList.toggle('hidden', name === 'conversation' && !route.subagentParentId);
   backButton.classList.toggle('hidden', name === 'dashboard');
   shellTitle.textContent =
     {
@@ -395,6 +412,24 @@ function renderLaunchFailures() {
 
 function renderWorkspaces() {
   const selected = selectedWorkspaceId();
+  if (route.subagentParentId) {
+    const parent = snapshot.sessions.find(session => session.id === route.subagentParentId);
+    const tab = el('div', 'tab virtual-workspace');
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', 'true');
+    tab.setAttribute('aria-current', 'page');
+    tab.append(el('span', '', parent?.title || route.subagentParentId));
+    const close = el('button', 'virtual-workspace-close', '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', `Close ${parent?.title || 'session'} sub-agent workspace`);
+    close.onclick = event => {
+      event.stopPropagation();
+      navigate({ name: 'conversation', sessionId: route.subagentParentId });
+    };
+    tab.append(close);
+    workspaceStrip.replaceChildren(tab);
+    return;
+  }
   workspaceStrip.replaceChildren(
     ...(snapshot.workspaces || []).map(workspace => {
       const tab = el('button', 'tab', workspace.name);
@@ -561,10 +596,19 @@ function orderedSessions(live) {
 }
 
 function liveSessions() {
+  if (route.subagentParentId) {
+    const parent = snapshot.sessions.find(session => session.id === route.subagentParentId);
+    const children = new Set(parent?.subagent_session_ids || []);
+    return (snapshot.sessions || []).filter(session => children.has(session.id));
+  }
   const workspaceId = selectedWorkspaceId();
+  const childIds = new Set(
+    (snapshot.sessions || []).flatMap(session => session.subagent_session_ids || []),
+  );
   return (snapshot.sessions || []).filter(
     session =>
       session.workspace_id === workspaceId &&
+      !childIds.has(session.id) &&
       isDashboardSession(session),
   );
 }
@@ -585,7 +629,7 @@ function byProject(list) {
     if (!groups.has(key)) groups.set(key, { key, label: session.project_label || key, sessions: [] });
     groups.get(key).sessions.push(session);
   }
-  const state = orderState(selectedWorkspaceId() || '', list);
+  const state = orderState(route.subagentParentId || selectedWorkspaceId() || '', list);
   return [...groups.values()].sort((left, right) =>
     state.groups.get(left.key) - state.groups.get(right.key) || left.key.localeCompare(right.key),
   );
@@ -597,7 +641,13 @@ function renderSessions() {
     closeSessionMenu();
   }
   if (!groups.length) {
-    sessions.replaceChildren(el('p', 'dim', 'No live sessions or operations in this workspace.'));
+    sessions.replaceChildren(el(
+      'p',
+      'dim',
+      route.subagentParentId
+        ? 'No sub-agents have been started for this session.'
+        : 'No live sessions or operations in this workspace.',
+    ));
     return;
   }
   const renderedGroups = groups.map(group => {
@@ -1031,7 +1081,11 @@ function openSessionCard(event) {
     return false;
   }
   closeSessionMenu(false);
-  navigate({ name: 'conversation', sessionId: card.dataset.sessionId });
+  navigate({
+    name: 'conversation',
+    sessionId: card.dataset.sessionId,
+    subagentParentId: typeof route === 'undefined' ? undefined : route.subagentParentId,
+  });
   return true;
 }
 
@@ -4524,6 +4578,12 @@ function renderConversationHeader(session) {
   syncConversationMode(session);
   renderSessionTitle(document.querySelector('#conversation-title'), session);
   renderPromptSettings(session);
+  const children = session?.subagent_session_ids || [];
+  subagentsButton.textContent = `Sub-agents${children.length ? ` ${children.length}` : ''}`;
+  subagentsButton.classList.toggle(
+    'hidden',
+    children.length === 0 || Boolean(route.subagentParentId),
+  );
   const state = document.querySelector('#conversation-state');
   state.textContent = sessionLifecycleLabel(session);
   state.className = `pill state-${session.lifecycle}`;
@@ -4567,6 +4627,12 @@ function renderConversationHeader(session) {
     state.textContent = `${sessionLifecycleLabel(session)} · plan`;
   }
 }
+
+subagentsButton.onclick = () => {
+  const session = activeSession();
+  if (!session?.subagent_session_ids?.length) return;
+  navigate({ name: 'dashboard', subagentParentId: session.id });
+};
 
 /// Drop everything the conversation view was holding.
 ///
@@ -4648,6 +4714,10 @@ logout.onclick = async () => {
 backButton.onclick = () => {
   if (route.name === 'resume' && route.sessionId) {
     navigate({ name: 'resume', workspaceId: route.workspaceId });
+    return;
+  }
+  if (route.subagentParentId) {
+    navigate({ name: 'dashboard', subagentParentId: route.subagentParentId });
     return;
   }
   navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
@@ -4766,9 +4836,15 @@ async function runSessionAction(dataset, errorNode, extra) {
   if (dataset.action === 'close') {
     const session = snapshot.sessions.find(item => item.id === dataset.id);
     const active = session?.chat_phase === 'running';
-    const question = active
+    const activeChildren = (session?.subagent_session_ids || [])
+      .map(id => snapshot.sessions.find(item => item.id === id))
+      .filter(child => child && !['stopped', 'lost', 'error', 'destroyed-with-data-loss'].includes(child.state));
+    const childWarning = activeChildren.length
+      ? `\n\nThis also stops ${activeChildren.length} active sub-agent${activeChildren.length === 1 ? '' : 's'} first.`
+      : '';
+    const question = (active
       ? 'Stop active session?\n\nThe current turn will be interrupted. Mjolnir will then save a recovery copy and destroy the target.'
-      : 'Stop session?\n\nMjolnir will save a recovery copy and destroy the target.';
+      : 'Stop session?\n\nMjolnir will save a recovery copy and destroy the target.') + childWarning;
     if (!confirm(question)) return;
   }
   const body = { action: dataset.action, session_id: dataset.id, ...extra };

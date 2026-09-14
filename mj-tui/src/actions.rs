@@ -880,6 +880,27 @@ impl DashboardState {
                 else {
                     return DashboardAction::None;
                 };
+                let active_children = self
+                    .state
+                    .subagents
+                    .values()
+                    .filter(|relation| relation.parent_session_id == session_id)
+                    .filter(|relation| {
+                        self.state
+                            .sessions
+                            .get(&relation.child_session_id)
+                            .is_some_and(|session| session.state.is_active())
+                    })
+                    .count();
+                if active_children > 0 {
+                    self.mode =
+                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::StopWithSubagents {
+                            session_id,
+                            count: active_children,
+                        }));
+                    self.mark_render_changed();
+                    return DashboardAction::None;
+                }
                 DashboardAction::Close { session_id }
             }
             CommandId::ForceDestroySession => {

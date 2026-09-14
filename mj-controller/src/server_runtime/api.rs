@@ -59,6 +59,17 @@ pub trait ExportRuntime: Send + Sync {
         &self,
         session_id: String,
     ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>>;
+
+    fn spawn_subagent(
+        self: Arc<Self>,
+        _request: crate::controller::RegisterSubagentRequest,
+    ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
+        Box::pin(async { anyhow::bail!("sub-agent creation is unavailable") })
+    }
+
+    fn close_subagent(self: Arc<Self>, _session_id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { anyhow::bail!("sub-agent close is unavailable") })
+    }
 }
 
 impl ExportRuntime for RuntimeState {
@@ -78,6 +89,17 @@ impl ExportRuntime for RuntimeState {
         session_id: String,
     ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
         Box::pin(async move { self.checkpoint_session_now(&session_id).await })
+    }
+
+    fn spawn_subagent(
+        self: Arc<Self>,
+        request: crate::controller::RegisterSubagentRequest,
+    ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
+        Box::pin(async move { self.start_subagent_session(request).await })
+    }
+
+    fn close_subagent(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move { self.close_session(session_id).await })
     }
 }
 
@@ -129,6 +151,335 @@ impl ApiBackend {
             exports,
             starts: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    pub async fn execute_subagent_tool(
+        self: &Arc<Self>,
+        parent_session_id: String,
+        request: mj_core::subagent::SubagentToolRequest,
+    ) -> mj_core::subagent::SubagentToolResult {
+        let outcome = self
+            .execute_subagent_tool_inner(&parent_session_id, &request)
+            .await;
+        let (is_error, message) = match outcome {
+            Ok(value) => (
+                false,
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+            ),
+            Err(error) => (true, format!("{error:#}")),
+        };
+        mj_core::subagent::SubagentToolResult {
+            request_id: request.request_id,
+            completed_at_ms: mj_core::clock::epoch_millis(),
+            is_error,
+            message,
+        }
+    }
+
+    async fn execute_subagent_tool_inner(
+        self: &Arc<Self>,
+        parent_session_id: &str,
+        request: &mj_core::subagent::SubagentToolRequest,
+    ) -> Result<serde_json::Value> {
+        use mj_core::subagent::SubagentToolAction;
+        match &request.action {
+            SubagentToolAction::ListProfiles => {
+                let parent = self
+                    .exports
+                    .session_record(parent_session_id)
+                    .context("parent session disappeared")?;
+                let config = tokio::task::spawn_blocking(mj_core::config::Config::load).await??;
+                let ids = config
+                    .enabled_profiles()
+                    .filter(|(id, _)| {
+                        config
+                            .subagents
+                            .profile_is_eligible(&parent.last_profile, id)
+                    })
+                    .map(|(id, profile)| (id.to_owned(), profile.kind.id().to_owned()))
+                    .collect::<Vec<_>>();
+                let mut profiles = Vec::with_capacity(ids.len());
+                for (id, harness) in ids {
+                    let choices = self.profile_config(id.clone(), None, false).await?;
+                    profiles.push(serde_json::json!({
+                        "profile_id":id,
+                        "harness":harness,
+                        "default_model":choices.model,
+                        "models":choices.models,
+                        "efforts":choices.efforts,
+                    }));
+                }
+                Ok(serde_json::json!({"profiles":profiles}))
+            }
+            SubagentToolAction::Spawn {
+                task_name,
+                instructions,
+                profile_id,
+                model,
+                effort,
+                working_directory,
+                context,
+                files,
+            } => {
+                let parent = self
+                    .exports
+                    .session_record(parent_session_id)
+                    .context("parent session disappeared")?;
+                let profile_id = profile_id.clone().unwrap_or(parent.last_profile.clone());
+                let mut selected_model = model.clone();
+                let mut selected_effort = effort.clone();
+                if profile_id == parent.last_profile
+                    && (selected_model.is_none() || selected_effort.is_none())
+                    && let Some(handle) = self.session_handle(parent_session_id.to_owned()).await?
+                    && let Some(snapshot) = handle.view().snapshot
+                {
+                    selected_model = selected_model
+                        .or_else(|| snapshot.operational.config.get("model").cloned());
+                    selected_effort = selected_effort
+                        .or_else(|| snapshot.operational.config.get("effort").cloned());
+                }
+                if selected_model.is_some() || selected_effort.is_some() {
+                    let choices = self
+                        .profile_config(profile_id.clone(), selected_model.clone(), false)
+                        .await?;
+                    crate::server::api::validate_selectors(
+                        &choices,
+                        selected_model.as_deref(),
+                        selected_effort.as_deref(),
+                    )
+                    .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                }
+                let ranges = files
+                    .iter()
+                    .map(|range| crate::server::api::SubagentSourceRange {
+                        file: range.file.clone(),
+                        start: range.start,
+                        end: range.end,
+                    })
+                    .collect::<Vec<_>>();
+                let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
+                let prompt = crate::server::api::build_subagent_prompt(
+                    &backend,
+                    parent_session_id,
+                    instructions,
+                    context.as_deref(),
+                    &ranges,
+                )
+                .await
+                .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                let relation = self
+                    .start_subagent(crate::controller::RegisterSubagentRequest {
+                        parent_session_id: parent_session_id.to_owned(),
+                        task_name: task_name.clone(),
+                        profile_id,
+                        model: selected_model.clone(),
+                        effort: selected_effort.clone(),
+                        working_directory: working_directory.clone(),
+                        initial_prompt: prompt.clone(),
+                        request_key: request.request_id.clone(),
+                    })
+                    .await?;
+                self.start_followup(
+                    relation.child_session_id.clone(),
+                    crate::server::api::StartFollowup {
+                        model: selected_model,
+                        effort: selected_effort,
+                        prompt: Some(prompt),
+                    },
+                )
+                .await?;
+                Ok(serde_json::json!({
+                    "child_session_id":relation.child_session_id,
+                    "task_name":relation.task_name,
+                    "profile_id":relation.profile_id,
+                }))
+            }
+            SubagentToolAction::ListAgents => {
+                let relations = self.list_subagents(parent_session_id.to_owned()).await?;
+                let child_ids = relations
+                    .iter()
+                    .map(|relation| relation.child_session_id.clone())
+                    .collect::<Vec<_>>();
+                let summaries = tokio::task::spawn_blocking(move || {
+                    child_ids
+                        .into_iter()
+                        .map(|id| {
+                            crate::database::load_materialized_session_summary(&id)
+                                .map(|summary| (id, summary))
+                        })
+                        .collect::<Result<std::collections::BTreeMap<_, _>>>()
+                })
+                .await??;
+                let mut starts = std::collections::BTreeMap::new();
+                for relation in &relations {
+                    if let Some(status) =
+                        self.start_status(relation.child_session_id.clone()).await?
+                    {
+                        starts.insert(relation.child_session_id.clone(), status);
+                    }
+                }
+                let agents = relations
+                    .into_iter()
+                    .map(|relation| {
+                        let record = self.exports.session_record(&relation.child_session_id);
+                        let (state, _, _) = subagent_status(
+                            record.as_ref(),
+                            summaries
+                                .get(&relation.child_session_id)
+                                .and_then(Option::as_ref),
+                            starts.get(&relation.child_session_id),
+                        );
+                        serde_json::json!({
+                            "child_session_id":relation.child_session_id,
+                            "task_name":relation.task_name,
+                            "profile_id":relation.profile_id,
+                            "state":state,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(serde_json::json!({"agents":agents}))
+            }
+            SubagentToolAction::SendInput {
+                child_session_id,
+                message,
+            } => {
+                self.require_owned_child(parent_session_id, child_session_id)
+                    .await?;
+                let parent_id = parent_session_id.to_owned();
+                let child_id = child_session_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    Controller::load()?.ensure_subagent_slot_available(&parent_id, &child_id)
+                })
+                .await??;
+                let turn_id = self
+                    .prompt(child_session_id.clone(), message.clone())
+                    .await?;
+                Ok(serde_json::json!({"child_session_id":child_session_id,"turn_id":turn_id}))
+            }
+            SubagentToolAction::WaitAgents {
+                child_session_ids,
+                timeout_seconds,
+            } => {
+                for child_id in child_session_ids {
+                    self.require_owned_child(parent_session_id, child_id)
+                        .await?;
+                }
+                let deadline = tokio::time::Instant::now()
+                    + Duration::from_secs(timeout_seconds.unwrap_or(30).clamp(1, 600));
+                loop {
+                    let ids = child_session_ids.clone();
+                    let summaries = tokio::task::spawn_blocking(move || {
+                        ids.into_iter()
+                            .map(|id| {
+                                crate::database::load_materialized_session_summary(&id)
+                                    .map(|summary| (id, summary))
+                            })
+                            .collect::<Result<Vec<_>>>()
+                    })
+                    .await??;
+                    let mut starts = std::collections::BTreeMap::new();
+                    for (id, _) in &summaries {
+                        if let Some(status) = self.start_status(id.clone()).await? {
+                            starts.insert(id.clone(), status);
+                        }
+                    }
+                    let complete = summaries.iter().all(|(id, summary)| {
+                        let record = self.exports.session_record(id);
+                        subagent_status(record.as_ref(), summary.as_ref(), starts.get(id)).2
+                    });
+                    if complete || tokio::time::Instant::now() >= deadline {
+                        let agents = summaries
+                            .into_iter()
+                            .map(|(id, summary)| {
+                                let record = self.exports.session_record(&id);
+                                let (state, output, _) = subagent_status(
+                                    record.as_ref(),
+                                    summary.as_ref(),
+                                    starts.get(&id),
+                                );
+                                serde_json::json!({"child_session_id":id,"state":state,"output":output})
+                            })
+                            .collect::<Vec<_>>();
+                        return Ok(serde_json::json!({"agents":agents,"timed_out":!complete}));
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+            SubagentToolAction::InterruptAgent { child_session_id } => {
+                self.require_owned_child(parent_session_id, child_session_id)
+                    .await?;
+                let handle = self
+                    .session_handle(child_session_id.clone())
+                    .await?
+                    .context("child session has no live actor")?;
+                handle
+                    .submit(
+                        crate::session_manager::new_command_id("subagent-interrupt")?,
+                        mj_core::relay::RelayCommand::CancelTurn,
+                    )
+                    .await?;
+                Ok(serde_json::json!({"child_session_id":child_session_id,"interrupted":true}))
+            }
+            SubagentToolAction::CloseAgent { child_session_id } => {
+                self.require_owned_child(parent_session_id, child_session_id)
+                    .await?;
+                Arc::clone(&self.exports)
+                    .close_subagent(child_session_id.clone())
+                    .await?;
+                Ok(serde_json::json!({"child_session_id":child_session_id,"closed":true}))
+            }
+        }
+    }
+
+    async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.list_subagents(parent_id.to_owned())
+                .await?
+                .iter()
+                .any(|child| child.child_session_id == child_id),
+            "session {child_id} does not belong to parent {parent_id}"
+        );
+        Ok(())
+    }
+
+    pub async fn deliver_subagent_result(
+        &self,
+        parent_session_id: String,
+        result: &mj_core::subagent::SubagentToolResult,
+    ) -> Result<()> {
+        let status = if result.is_error {
+            "error"
+        } else {
+            "completed"
+        };
+        self.prompt(
+            parent_session_id,
+            format!(
+                "<subagent_tool_result request_id={:?} status={status}>\n{}\n</subagent_tool_result>",
+                result.request_id, result.message
+            ),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn deliver_subagent_completion(
+        &self,
+        parent_session_id: String,
+        child_session_id: &str,
+        task_name: &str,
+        turn: u64,
+        outcome: &str,
+        output: &str,
+    ) -> Result<()> {
+        self.prompt(
+            parent_session_id,
+            format!(
+                "<subagent_completion child_session_id={child_session_id:?} task_name={task_name:?} turn={turn} outcome={outcome:?}>\n{output}\n</subagent_completion>"
+            ),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Forget sessions the daemon no longer holds a record for, so a
@@ -185,6 +536,41 @@ impl ApiBackend {
             ));
         }
         Ok(())
+    }
+}
+
+fn subagent_status(
+    record: Option<&mj_core::state::SessionRecord>,
+    summary: Option<&mj_core::state::MaterializedSessionSummary>,
+    start: Option<&StartStatus>,
+) -> (String, Option<String>, bool) {
+    if let Some(StartStatus::Failed { message }) = start {
+        return ("error".into(), Some(message.clone()), true);
+    }
+    let start_pending = matches!(start, Some(StartStatus::Pending));
+    let lifecycle = record.map(|record| record.state);
+    match lifecycle {
+        Some(SessionState::Error) => (
+            "error".into(),
+            record.and_then(|record| record.last_error.clone()),
+            true,
+        ),
+        Some(SessionState::Lost) => ("lost".into(), None, true),
+        Some(SessionState::Stopped | SessionState::DestroyedWithDataLoss) | None => {
+            ("stopped".into(), None, true)
+        }
+        Some(SessionState::Closing | SessionState::Destroying) => ("stopping".into(), None, false),
+        Some(SessionState::Provisioning) if summary.is_none() || start_pending => {
+            ("preparing".into(), None, false)
+        }
+        _ if start_pending => ("running".into(), None, false),
+        _ => match summary {
+            Some(summary) if matches!(summary.execution, MaterializedExecutionState::Idle) => {
+                ("completed".into(), summary.last_agent_message.clone(), true)
+            }
+            Some(summary) => ("running".into(), summary.last_agent_message.clone(), false),
+            None => ("preparing".into(), None, false),
+        },
     }
 }
 
@@ -500,6 +886,14 @@ fn refusal_reason(stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn start_subagent(
+        &self,
+        request: crate::controller::RegisterSubagentRequest,
+    ) -> BoxFuture<'_, Result<mj_core::subagent::SubagentRecord>> {
+        let runtime = Arc::clone(&self.exports);
+        Box::pin(async move { runtime.spawn_subagent(request).await })
+    }
+
     fn cancel_start(&self, session_id: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             if let Some(start) = self
@@ -780,6 +1174,26 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
+    fn read_context_file(
+        &self,
+        session_id: String,
+        path: PathBuf,
+    ) -> BoxFuture<'_, std::result::Result<Vec<u8>, ExportError>> {
+        Box::pin(async move {
+            self.require_live_target(&session_id)?;
+            let layout = export_layout(session_id.clone()).await?;
+            let root = primary_repository_path(&layout)?;
+            let arguments = vec![
+                "read-file".to_owned(),
+                "--root".to_owned(),
+                root,
+                "--path".to_owned(),
+                target_join("", &path).trim_start_matches('/').to_owned(),
+            ];
+            worker_command(layout, session_id, arguments, "sub-agent context file read").await
+        })
+    }
+
     fn write_file(
         &self,
         session_id: String,
@@ -914,6 +1328,17 @@ impl SubagentBackend for ApiBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_subagent_followup_is_terminal_error_with_its_cause() {
+        let status = StartStatus::Failed {
+            message: "model is unavailable".into(),
+        };
+        assert_eq!(
+            subagent_status(None, None, Some(&status)),
+            ("error".into(), Some("model is unavailable".into()), true)
+        );
+    }
     use mj_client::session::{
         ManagedSessionView, PendingRelaySubmit, PendingRelaySync, SessionControlBackend,
         SessionHandleBackend,
@@ -1098,6 +1523,8 @@ mod tests {
         };
         ManagedSessionView {
             snapshot: Some(mj_core::state::ManagedSessionSnapshot {
+                subagent_requests: Vec::new(),
+                subagent_results: Vec::new(),
                 window: mj_core::state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational,

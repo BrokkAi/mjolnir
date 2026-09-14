@@ -68,6 +68,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     plan_mode_active: false,
     turn_review: null,
     available_commands: [],
+    subagent_session_ids: options.subagentSessionIds || [],
     capabilities,
   };
 }
@@ -806,4 +807,36 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(openMenu).toBeVisible();
   await page.mouse.up();
   await expect(page).toHaveURL(/#workspace\/workspace-1$/);
+});
+
+test('sub-agent workspace hides children from the normal list and closes back to its named parent', async ({ page }) => {
+  await mount(page, [
+    session('parent', 'project-parent', 'Parent project', {
+      title: 'Parent session',
+      subagentSessionIds: ['child-one', 'child-two'],
+    }),
+    session('child-one', 'project-parent', 'Parent project', { title: 'Grok helper' }),
+    session('child-two', 'project-parent', 'Parent project', { title: 'Muse helper' }),
+  ]);
+
+  await expect(card(page, 'parent')).toBeVisible();
+  await expect(card(page, 'child-one')).toHaveCount(0);
+  await card(page, 'parent').click();
+  await expect(page).toHaveURL(/#conversation\/parent$/);
+  await expect(page.locator('#subagents-button')).toHaveText('Sub-agents 2');
+  await page.locator('#subagents-button').click();
+
+  await expect(page).toHaveURL(/#subagents\/parent$/);
+  await expect(page.locator('#workspaces .virtual-workspace')).toContainText('Parent session');
+  await expect(page.getByRole('button', { name: 'Close Parent session sub-agent workspace' })).toBeVisible();
+  await expect(card(page, 'parent')).toHaveCount(0);
+  await expect(card(page, 'child-one')).toBeVisible();
+  await expect(card(page, 'child-two')).toBeVisible();
+
+  await card(page, 'child-one').click();
+  await expect(page).toHaveURL(/#subagents\/parent\/child-one$/);
+  await page.locator('#back').click();
+  await expect(page).toHaveURL(/#subagents\/parent$/);
+  await page.getByRole('button', { name: 'Close Parent session sub-agent workspace' }).click();
+  await expect(page).toHaveURL(/#conversation\/parent$/);
 });

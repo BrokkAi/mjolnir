@@ -97,6 +97,10 @@ pub struct WorkerLaunchConfig {
     #[serde(default)]
     pub run_mode: WorkerRunMode,
     pub session_id: String,
+    /// Whether this is a supported parent session that receives Mjolnir's
+    /// delegation MCP tools and native-subagent suppression.
+    #[serde(default)]
+    pub subagent_tools: bool,
     /// Explicit target settings shared by primary and reviewer processes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub target_environment: std::collections::BTreeMap<String, String>,

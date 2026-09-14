@@ -122,6 +122,33 @@ fn pointer(path: &[String]) -> String {
         .collect()
 }
 
+fn populate_subagent_profile_choices(draft: &mut Value) {
+    let selected = draft["subagents"]["eligible_profiles"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let profiles = draft["profiles"]
+        .as_object()
+        .map(|profiles| profiles.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let choices = draft["subagents"]["eligible_profiles"]
+        .as_object_mut()
+        .expect("expanded sub-agent profile choices are an object");
+    for profile_id in profiles {
+        choices.entry(profile_id).or_insert(Value::Bool(false));
+    }
+    for (profile_id, value) in selected {
+        choices.insert(profile_id, value);
+    }
+}
+
+fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
+    if let Some(choices) = draft["subagents"]["eligible_profiles"].as_object_mut() {
+        choices.retain(|_, eligible| eligible.as_bool().unwrap_or(false));
+    }
+    serde_json::from_value(draft)
+}
+
 fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
     if path.is_empty() {
         let mut keys = vec!["interface".to_owned(), "advanced".to_owned()];
@@ -355,6 +382,7 @@ impl SetupDialog {
         let mut draft = serde_json::to_value(config).expect("configuration serializes");
         let original = draft.to_string();
         schema::expand(&mut draft, &mut Vec::new());
+        populate_subagent_profile_choices(&mut draft);
         static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let preferred = preferred_size(&draft);
         let mut dialog = Self {
@@ -736,7 +764,7 @@ impl SetupDialog {
         if self.saving || self.read_only.is_some() {
             return DashboardAction::None;
         }
-        let result = serde_json::from_value::<Config>(self.draft.clone())
+        let result = config_from_draft(self.draft.clone())
             .map_err(|error| error.to_string())
             .and_then(|config| {
                 if let Some(snapshot) = &self.review_validation
@@ -772,7 +800,7 @@ impl SetupDialog {
     /// state and must not make a freshly opened Setup dialog dirty.
     pub(crate) fn is_dirty(&self) -> bool {
         let original = serde_json::from_str::<Config>(&self.original);
-        let current = serde_json::from_value::<Config>(self.draft.clone());
+        let current = config_from_draft(self.draft.clone());
         match (original, current) {
             (Ok(original), Ok(current)) => original != current,
             (Err(_), _) => true,
@@ -785,7 +813,7 @@ impl SetupDialog {
     }
 
     fn open_review(&mut self, dashboard: &mut DashboardState) -> DashboardAction {
-        let config = match serde_json::from_value::<Config>(self.draft.clone()) {
+        let config = match config_from_draft(self.draft.clone()) {
             Ok(config) => config,
             Err(error) => {
                 self.notice = Some(format!(
@@ -1189,7 +1217,7 @@ impl DashboardState {
             Ok(config) => {
                 // Reconcile against the current draft, including edits made
                 // while discovery was running, rather than dropping collisions.
-                let current: Config = match serde_json::from_value(dialog.draft.clone()) {
+                let current: Config = match config_from_draft(dialog.draft.clone()) {
                     Ok(current) => current,
                     Err(error) => {
                         dialog.notice = Some(format!(
@@ -1218,6 +1246,7 @@ impl DashboardState {
                     }
                 }
                 schema::expand(&mut dialog.draft, &mut Vec::new());
+                populate_subagent_profile_choices(&mut dialog.draft);
                 dialog.notice =
                     Some("New discoveries added to the draft; conflicting settings have separate names. Review them, then Save.".into());
             }
@@ -1539,6 +1568,27 @@ mod tests {
     use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend};
 
+    #[test]
+    fn subagent_profile_choices_are_checkboxes_and_false_entries_are_not_persisted() {
+        let config = config();
+        let dialog = SetupDialog::new(&config);
+        let choices = dialog.draft["subagents"]["eligible_profiles"]
+            .as_object()
+            .unwrap();
+        assert_eq!(choices.len(), config.profiles.len());
+        assert!(choices.values().all(|value| value == &Value::Bool(false)));
+
+        let mut draft = dialog.draft;
+        let profile_id = config.profiles.keys().next().unwrap();
+        draft["subagents"]["eligible_profiles"][profile_id] = Value::Bool(true);
+        let parsed = config_from_draft(draft).unwrap();
+        assert_eq!(parsed.subagents.eligible_profiles.len(), 1);
+        assert_eq!(
+            parsed.subagents.eligible_profiles.get(profile_id),
+            Some(&true)
+        );
+    }
+
     fn choose(dashboard: &mut DashboardState, name: &str) {
         let Mode::Setup(dialog) = &mut dashboard.mode else {
             panic!("setup");
@@ -1605,7 +1655,7 @@ mod tests {
             panic!("setup");
         };
         assert!(dialog.editor.is_none(), "{:?}", dialog.notice);
-        let config: Config = serde_json::from_value(dialog.draft.clone()).unwrap();
+        let config: Config = config_from_draft(dialog.draft.clone()).unwrap();
         let expected =
             mj_core::path_input::expand_local(std::path::Path::new("~/.codex4")).unwrap();
         let profile = &config.profiles["codex-1"];
@@ -2008,7 +2058,7 @@ mod tests {
         for _ in 0..2 {
             dashboard.setup_discovered(generation, Ok(discovered.clone()));
             let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-            let draft: Config = serde_json::from_value(dialog.draft.clone()).unwrap();
+            let draft: Config = config_from_draft(dialog.draft.clone()).unwrap();
             assert_eq!(draft.profiles["codex-1"], original.profiles["codex-1"]);
             assert_eq!(
                 draft.profiles["codex-1-2"].home,
@@ -2387,7 +2437,7 @@ mod tests {
             .unwrap()
             .context_window_bytes = Some(250000);
         let dialog = SetupDialog::new(&original);
-        let decoded: Config = serde_json::from_value(dialog.draft).unwrap();
+        let decoded: Config = config_from_draft(dialog.draft).unwrap();
         assert_eq!(decoded, original);
     }
 }

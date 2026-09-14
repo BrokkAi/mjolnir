@@ -403,11 +403,21 @@ impl ViewerSnapshot {
                     .collect::<Vec<_>>();
                 let lifecycle = ViewerLifecycleCategory::of(session.state);
                 let source = session.project_source(config);
+                let subagent = state.subagents.get(&session.id);
+                let subagent_session_ids = state
+                    .subagents
+                    .values()
+                    .filter(|child| child.parent_session_id == session.id)
+                    .map(|child| child.child_session_id.clone())
+                    .collect();
                 ViewerSession {
                     capacity_retry: None,
                     id: session.id.clone(),
                     workspace_id: session.workspace_id.clone(),
                     title: session.display_title().to_owned(),
+                    subagent_parent_id: subagent.map(|child| child.parent_session_id.clone()),
+                    subagent_task_name: subagent.map(|child| child.task_name.clone()),
+                    subagent_session_ids,
                     harness_kind: session.harness_kind.id().into(),
                     profile_id: session.last_profile.clone(),
                     bundle_id: session.bundle_id.clone(),
@@ -558,6 +568,15 @@ pub struct ViewerSession {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,
     pub title: String,
+    /// Parent ownership for a borrowed-target child session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_parent_id: Option<String>,
+    /// The stable task label chosen by the parent when it spawned this child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_task_name: Option<String>,
+    /// Direct children of this parent. Children are deliberately never nested.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagent_session_ids: Vec<String>,
     pub harness_kind: String,
     pub profile_id: String,
     pub bundle_id: String,
@@ -3792,6 +3811,7 @@ mod tests {
 
     pub(super) fn sample_config_state() -> (Config, AppState) {
         let config = Config {
+            subagents: Default::default(),
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
             advanced: Default::default(),
@@ -3844,6 +3864,7 @@ mod tests {
             ]),
         };
         let state = AppState {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(
                 "session-1".into(),

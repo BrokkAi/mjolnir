@@ -801,11 +801,12 @@ pub async fn run_server(
         &crate::server::api_token_path(),
     )?);
     let api_runtime = daemon_runtime.clone();
-    options.set_subagent_backend(Arc::new(api::ApiBackend::new(
+    let api_backend = Arc::new(api::ApiBackend::new(
         worker_commands_tx.client(),
         Arc::new(move |session_id: &str| api_runtime.session_state(session_id)),
         daemon_runtime.clone(),
-    )));
+    ));
+    options.set_subagent_backend(api_backend.clone());
     let renewal_cancellation = termination.child_token();
     let mut renewal_task = None;
     if let Some((cert, key)) = resolved.tls_files {
@@ -887,6 +888,9 @@ pub async fn run_server(
         let mut action_sessions = std::collections::BTreeMap::<u64, String>::new();
         let mut action_replies = PendingActionReplies::default();
         let mut launch_workspaces = std::collections::BTreeMap::new();
+        let mut subagent_jobs = tokio::task::JoinSet::new();
+        let mut subagent_completion_jobs = tokio::task::JoinSet::new();
+        let mut active_subagent_requests = std::collections::BTreeSet::new();
         let (conversation_projection_tx, mut conversation_projection_rx) =
             tokio::sync::mpsc::channel(CONVERSATION_PROJECTION_CHANNEL_CAPACITY);
         let mut conversation_projections = ConversationProjectionDispatcher::new(
@@ -1158,6 +1162,86 @@ pub async fn run_server(
                     );
                     apply_worker_record_update(&mut controller, &update);
                     if let Some(snapshot) = update.view.snapshot {
+                        for request in snapshot.subagent_requests.iter().cloned() {
+                            let identity = (update.session_id.clone(), request.request_id.clone());
+                            if !active_subagent_requests.insert(identity.clone()) {
+                                continue;
+                            }
+                            let backend = api_backend.clone();
+                            let runtime = daemon_runtime.clone();
+                            let parent_session_id = update.session_id.clone();
+                            subagent_jobs.spawn(async move {
+                                let result = backend
+                                    .execute_subagent_tool(parent_session_id.clone(), request)
+                                    .await;
+                                let outcome = async {
+                                    backend
+                                        .deliver_subagent_result(parent_session_id.clone(), &result)
+                                        .await?;
+                                    let handle = runtime
+                                        .workspace_session_handle(&parent_session_id)
+                                        .await?;
+                                    let mut lease = handle.lease_connection().await?;
+                                    lease
+                                        .connection_mut()
+                                        .complete_subagent_request(result)
+                                        .await?;
+                                    lease.release();
+                                    anyhow::Ok(())
+                                }
+                                .await;
+                                (identity, outcome)
+                            });
+                        }
+                        if let Some(relation) = controller.state.subagents.get_mut(&update.session_id)
+                            && matches!(snapshot.materialized.execution, mj_core::state::MaterializedExecutionState::Idle)
+                            && let Some(outcome) = snapshot.materialized.last_turn_outcome.as_ref()
+                            && relation.delivered_turn != Some(outcome.completed_ordinal)
+                        {
+                            let turn = outcome.completed_ordinal;
+                            let output = snapshot
+                                .materialized
+                                .transcript
+                                .iter()
+                                .rev()
+                                .find_map(|item| match &item.body {
+                                    mj_core::transcript::TranscriptBody::Agent { chunks, .. }
+                                        if item.position >= outcome.turn_start_position.unwrap_or(0) =>
+                                    {
+                                        Some(mj_core::transcript::materialized_chunks_text(chunks))
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| "The sub-agent completed without a final text response.".to_owned());
+                            let child_id = relation.child_session_id.clone();
+                            let parent_id = relation.parent_session_id.clone();
+                            let task_name = relation.task_name.clone();
+                            let outcome_name = format!("{:?}", outcome.outcome).to_lowercase();
+                            relation.delivered_turn = Some(turn);
+                            let backend = api_backend.clone();
+                            subagent_completion_jobs.spawn(async move {
+                                let result = async {
+                                    backend
+                                        .deliver_subagent_completion(
+                                            parent_id,
+                                            &child_id,
+                                            &task_name,
+                                            turn,
+                                            &outcome_name,
+                                            &output,
+                                        )
+                                        .await?;
+                                    tokio::task::spawn_blocking({
+                                        let child_id = child_id.clone();
+                                        move || crate::database::mark_subagent_turn_delivered(&child_id, turn)
+                                    })
+                                    .await??;
+                                    anyhow::Ok(())
+                                }
+                                .await;
+                                (child_id, turn, result)
+                            });
+                        }
                         if snapshot.operational.native_session_is_ready()
                             && operational.get(&update.session_id).is_none_or(|old: &mj_core::relay::RelayOperationalState| old.config_options != snapshot.operational.config_options)
                             && let Some(session) = controller.state.sessions.get(&update.session_id)
@@ -1214,6 +1298,39 @@ pub async fn run_server(
                     // Give HTTP/TLS tasks a scheduling opportunity after each
                     // update even when the worker is publishing continuously.
                     tokio::task::yield_now().await;
+                }
+                completed = subagent_jobs.join_next(), if !subagent_jobs.is_empty() => {
+                    match completed {
+                        Some(Ok((identity, Ok(())))) => {
+                            active_subagent_requests.remove(&identity);
+                        }
+                        Some(Ok((identity, Err(error)))) => {
+                            active_subagent_requests.remove(&identity);
+                            tracing::warn!(
+                                parent_session_id = %identity.0,
+                                request_id = %identity.1,
+                                error = %format!("{error:#}"),
+                                "sub-agent tool request failed"
+                            );
+                        }
+                        Some(Err(error)) => tracing::warn!(%error, "sub-agent tool task panicked"),
+                        None => {}
+                    }
+                }
+                completed = subagent_completion_jobs.join_next(), if !subagent_completion_jobs.is_empty() => {
+                    match completed {
+                        Some(Ok((_, _, Ok(())))) => {}
+                        Some(Ok((child_id, turn, Err(error)))) => {
+                            if let Some(relation) = controller.state.subagents.get_mut(&child_id)
+                                && relation.delivered_turn == Some(turn)
+                            {
+                                relation.delivered_turn = None;
+                            }
+                            tracing::warn!(%child_id, turn, error = %format!("{error:#}"), "could not deliver sub-agent completion");
+                        }
+                        Some(Err(error)) => tracing::warn!(%error, "sub-agent completion task panicked"),
+                        None => {}
+                    }
                 }
                 _ = prune_tick.tick() => {
                     // Only rows whose client id names a phone are considered:
@@ -3979,6 +4096,7 @@ mod tests {
     fn controller_with_profiles(ids: &[&str]) -> Controller {
         Controller {
             config: Config {
+                subagents: Default::default(),
                 version: CONFIG_VERSION,
                 sessions_side: Default::default(),
                 advanced: Default::default(),

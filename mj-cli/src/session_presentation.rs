@@ -240,6 +240,8 @@ mod tests {
                 operational,
                 latest_credential_sync_signal: None,
                 worker_build: None,
+                subagent_requests: Vec::new(),
+                subagent_results: Vec::new(),
             }),
             connected,
             error: None,

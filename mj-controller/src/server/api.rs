@@ -306,6 +306,47 @@ pub struct StartSessionResponse {
     pub turn_id: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentSourceRange {
+    pub file: PathBuf,
+    pub start: u64,
+    pub end: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnSubagentRequest {
+    pub task_name: String,
+    pub instructions: String,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub working_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub files: Vec<SubagentSourceRange>,
+    pub request_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentView {
+    pub parent_session_id: String,
+    pub task_name: String,
+    pub request_key: String,
+    pub session: ApiSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentListResponse {
+    pub subagents: Vec<SubagentView>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptRequest {
@@ -632,6 +673,28 @@ pub trait SubagentBackend: Send + Sync {
             profile, model, refresh,
         ))
     }
+    fn start_subagent(
+        &self,
+        _request: crate::controller::RegisterSubagentRequest,
+    ) -> BoxFuture<'_, AnyResult<mj_core::subagent::SubagentRecord>> {
+        Box::pin(async { anyhow::bail!("sub-agent creation is unavailable") })
+    }
+    fn list_subagents(
+        &self,
+        parent_session_id: String,
+    ) -> BoxFuture<'_, AnyResult<Vec<mj_core::subagent::SubagentRecord>>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::database::list_subagents(&parent_session_id))
+                .await?
+        })
+    }
+    fn read_context_file(
+        &self,
+        session_id: String,
+        path: PathBuf,
+    ) -> BoxFuture<'_, std::result::Result<Vec<u8>, ExportError>> {
+        self.read_file(session_id, path)
+    }
     fn set_config(
         &self,
         session_id: String,
@@ -649,7 +712,6 @@ pub trait SubagentBackend: Send + Sync {
     fn cancel_start(&self, _session_id: String) -> BoxFuture<'_, AnyResult<()>> {
         Box::pin(async { Ok(()) })
     }
-
     /// The live actor for a session, or `None` when none holds it.
     fn session_handle(&self, session_id: String)
     -> BoxFuture<'_, AnyResult<Option<SessionHandle>>>;
@@ -971,6 +1033,10 @@ pub(super) fn router(state: ServerState) -> Router<ServerState> {
         )
         .route("/sessions", get(list_sessions).post(start_session))
         .route("/sessions/{session_id}", get(get_session))
+        .route(
+            "/sessions/{session_id}/subagents",
+            get(list_subagents).post(spawn_subagent),
+        )
         .route("/sessions/{session_id}/prompt", post(prompt))
         .route("/sessions/{session_id}/transcript", get(transcript))
         .route("/sessions/{session_id}/usage", get(usage))
@@ -1082,7 +1148,7 @@ async fn profile_config(
     Ok(Json(choices))
 }
 
-fn validate_selectors(
+pub(crate) fn validate_selectors(
     choices: &mj_core::worker_launch::ProfileConfig,
     model: Option<&str>,
     effort: Option<&str>,
@@ -1328,6 +1394,218 @@ async fn start_session(
     ))
 }
 
+const MAX_SUBAGENT_CONTEXT_BYTES: usize = 256 * 1024;
+
+async fn spawn_subagent(
+    State(state): State<ServerState>,
+    Path(parent_session_id): Path<String>,
+    Json(request): Json<SpawnSubagentRequest>,
+) -> Result<(StatusCode, Json<SubagentView>), ApiFailure> {
+    let backend = backend(&state)?.clone();
+    let parent = {
+        let snapshot = state.snapshot_rx.borrow();
+        require_session_record(&snapshot, &parent_session_id)?.clone()
+    };
+    if !matches!(parent.harness_kind.as_str(), "claude" | "codex") {
+        return Err(ApiFailure::conflict(
+            "only Claude and Codex sessions can spawn sub-agents",
+        ));
+    }
+    validate_prompt_text(&request.instructions, false)?;
+    if request.task_name.trim().is_empty() {
+        return Err(ApiFailure::bad_request("task_name cannot be empty"));
+    }
+    if request.request_key.trim().is_empty() {
+        return Err(ApiFailure::bad_request("request_key cannot be empty"));
+    }
+    let profile_id = request
+        .profile_id
+        .clone()
+        .unwrap_or_else(|| parent.profile_id.clone());
+    let mut selected_model = request.model.clone();
+    let mut selected_effort = request.effort.clone();
+    if profile_id == parent.profile_id
+        && (selected_model.is_none() || selected_effort.is_none())
+        && let Some(handle) = backend.session_handle(parent_session_id.clone()).await?
+        && let Some(snapshot) = handle.view().snapshot
+    {
+        selected_model =
+            selected_model.or_else(|| snapshot.operational.config.get("model").cloned());
+        selected_effort =
+            selected_effort.or_else(|| snapshot.operational.config.get("effort").cloned());
+    }
+    if selected_model.is_some() || selected_effort.is_some() {
+        let choices = backend
+            .profile_config(profile_id.clone(), selected_model.clone(), false)
+            .await
+            .map_err(|error| {
+                ApiFailure::unavailable(format!("profile discovery failed: {error:#}"))
+            })?;
+        validate_selectors(
+            &choices,
+            selected_model.as_deref(),
+            selected_effort.as_deref(),
+        )?;
+    }
+
+    let initial_prompt = build_subagent_prompt(
+        &backend,
+        &parent_session_id,
+        &request.instructions,
+        request.context.as_deref(),
+        &request.files,
+    )
+    .await?;
+    let relation = backend
+        .start_subagent(crate::controller::RegisterSubagentRequest {
+            parent_session_id: parent_session_id.clone(),
+            task_name: request.task_name,
+            profile_id,
+            model: selected_model.clone(),
+            effort: selected_effort.clone(),
+            working_directory: request.working_directory.unwrap_or_default(),
+            initial_prompt: initial_prompt.clone(),
+            request_key: request.request_key,
+        })
+        .await
+        .map_err(|error| ApiFailure::conflict(format!("sub-agent creation failed: {error:#}")))?;
+    backend
+        .start_followup(
+            relation.child_session_id.clone(),
+            StartFollowup {
+                model: selected_model,
+                effort: selected_effort,
+                prompt: Some(initial_prompt),
+            },
+        )
+        .await?;
+    let session = {
+        let snapshot = state.snapshot_rx.borrow();
+        ApiSession::from(require_session_record(
+            &snapshot,
+            &relation.child_session_id,
+        )?)
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(SubagentView {
+            parent_session_id,
+            task_name: relation.task_name,
+            request_key: relation.request_key,
+            session,
+        }),
+    ))
+}
+
+async fn list_subagents(
+    State(state): State<ServerState>,
+    Path(parent_session_id): Path<String>,
+) -> Result<Json<SubagentListResponse>, ApiFailure> {
+    {
+        let snapshot = state.snapshot_rx.borrow();
+        require_session_record(&snapshot, &parent_session_id)?;
+    }
+    let records = backend(&state)?
+        .list_subagents(parent_session_id.clone())
+        .await?;
+    let snapshot = state.snapshot_rx.borrow();
+    let subagents = records
+        .into_iter()
+        .map(|record| {
+            let session = require_session_record(&snapshot, &record.child_session_id)?;
+            Ok(SubagentView {
+                parent_session_id: parent_session_id.clone(),
+                task_name: record.task_name,
+                request_key: record.request_key,
+                session: ApiSession::from(session),
+            })
+        })
+        .collect::<Result<Vec<_>, ApiFailure>>()?;
+    Ok(Json(SubagentListResponse { subagents }))
+}
+
+pub(crate) async fn build_subagent_prompt(
+    backend: &Arc<dyn SubagentBackend>,
+    parent_session_id: &str,
+    instructions: &str,
+    context: Option<&str>,
+    ranges: &[SubagentSourceRange],
+) -> Result<String, ApiFailure> {
+    let mut prompt = String::new();
+    prompt.push_str(instructions.trim());
+    if let Some(context) = context.map(str::trim).filter(|context| !context.is_empty()) {
+        prompt.push_str("\n\n<parent_context>\n");
+        prompt.push_str(context);
+        prompt.push_str("\n</parent_context>");
+    }
+    for range in ranges {
+        if range.file.as_os_str().is_empty()
+            || range.file.is_absolute()
+            || range
+                .file
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        {
+            return Err(ApiFailure::bad_request(format!(
+                "source path {} must be relative and must not contain '..'",
+                range.file.display()
+            )));
+        }
+        if range.start == 0 || range.end < range.start {
+            return Err(ApiFailure::bad_request(format!(
+                "invalid source range {}:{}-{}; lines are one-based and inclusive",
+                range.file.display(),
+                range.start,
+                range.end
+            )));
+        }
+        let bytes = backend
+            .read_context_file(parent_session_id.to_owned(), range.file.clone())
+            .await
+            .map_err(ApiFailure::from)?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| {
+            ApiFailure::bad_request(format!(
+                "source file {} is not UTF-8 text",
+                range.file.display()
+            ))
+        })?;
+        let lines = text.lines().collect::<Vec<_>>();
+        if range.end > lines.len() as u64 {
+            return Err(ApiFailure::bad_request(format!(
+                "source range {}:{}-{} exceeds its {} lines",
+                range.file.display(),
+                range.start,
+                range.end,
+                lines.len()
+            )));
+        }
+        prompt.push_str(&format!(
+            "\n\n--- source {:?}, lines {}-{} (one-based, inclusive) ---\n",
+            range.file.to_string_lossy(),
+            range.start,
+            range.end
+        ));
+        for (offset, line) in lines[(range.start - 1) as usize..range.end as usize]
+            .iter()
+            .enumerate()
+        {
+            prompt.push_str(&format!("{:>6}  {line}\n", range.start as usize + offset));
+        }
+        prompt.push_str("--- end source ---");
+        if prompt.len() > MAX_SUBAGENT_CONTEXT_BYTES {
+            return Err(ApiFailure::bad_request(format!(
+                "sub-agent handoff exceeds the {MAX_SUBAGENT_CONTEXT_BYTES}-byte limit"
+            )));
+        }
+    }
+    if prompt.len() > MAX_SUBAGENT_CONTEXT_BYTES {
+        return Err(ApiFailure::bad_request(format!(
+            "sub-agent handoff exceeds the {MAX_SUBAGENT_CONTEXT_BYTES}-byte limit"
+        )));
+    }
+    Ok(prompt)
+}
+
 async fn prompt(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -1423,9 +1701,44 @@ async fn transcript(
 async fn close(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
+    request: Option<Json<CloseRequest>>,
 ) -> Result<StatusCode, ApiFailure> {
+    let active_children = {
+        let snapshot = state.snapshot_rx.borrow();
+        let session = require_session_record(&snapshot, &session_id)?;
+        session
+            .subagent_session_ids
+            .iter()
+            .filter(|child_id| {
+                snapshot.sessions.iter().any(|child| {
+                    child.id == child_id.as_str()
+                        && !matches!(
+                            child.state.as_str(),
+                            "stopped" | "lost" | "error" | "destroyed-with-data-loss"
+                        )
+                })
+            })
+            .count()
+    };
+    if active_children > 0
+        && !request
+            .as_ref()
+            .is_some_and(|request| request.acknowledge_active_subagents)
+    {
+        return Err(ApiFailure::conflict(format!(
+            "session has {} sub-agent(s); retry with acknowledge_active_subagents=true to stop children first",
+            active_children
+        )));
+    }
     backend(&state)?.cancel_start(session_id.clone()).await?;
     send_action(&state, ControllerAction::Close { session_id }).await
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseRequest {
+    #[serde(default)]
+    acknowledge_active_subagents: bool,
 }
 
 async fn cancel_turn(
@@ -1917,6 +2230,8 @@ mod tests {
             connected: true,
             error: None,
             snapshot: Some(mj_core::state::ManagedSessionSnapshot {
+                subagent_requests: Vec::new(),
+                subagent_results: Vec::new(),
                 window: mj_core::state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational: relay.operational_state(),

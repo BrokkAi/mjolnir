@@ -937,13 +937,18 @@ pub(super) fn backend_locator(
         TargetLocator::AppleContainer { container_id } => targets::TargetLocator::AppleContainer {
             container_id: container_id.clone(),
         },
-        TargetLocator::SshBare { workspace, .. } => {
+        TargetLocator::SshBare {
+            workspace,
+            worker_id,
+            ..
+        } => {
             let TargetTemplate::SshBare { ssh, .. } = template else {
                 bail!("session locator/template mismatch")
             };
             targets::TargetLocator::SshBare {
                 ssh: backend_ssh(ssh),
                 workspace: workspace.to_string_lossy().into_owned(),
+                worker_id: worker_id.clone(),
             }
         }
         TargetLocator::SshPodman {
@@ -1204,6 +1209,7 @@ mod tests {
             checkpoint: None,
         };
         let state = State {
+            subagents: Default::default(),
             version: mj_core::state::STATE_VERSION,
             sessions: BTreeMap::from([(session_id.into(), record)]),
             mount_history: BTreeMap::new(),
@@ -1622,6 +1628,7 @@ mod tests {
             extra_args: Vec::new(),
         };
         let config = Config {
+            subagents: Default::default(),
             version: mj_core::config::CONFIG_VERSION,
             sessions_side: Default::default(),
             advanced: Default::default(),

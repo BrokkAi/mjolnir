@@ -794,6 +794,9 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 30 {
         migrate_compatibility_metadata(connection)?;
     }
+    if version < 31 {
+        migrate_subagent_sessions(connection)?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -829,6 +832,31 @@ fn migrate_compatibility_metadata(connection: &Connection) -> Result<()> {
          INSERT INTO schema_migrations(version, applied_at)
              VALUES (30, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
          PRAGMA user_version = 30;",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Breaking migration: older controllers do not understand that a child
+/// borrows its parent's target and could destroy shared resources.
+fn migrate_subagent_sessions(connection: &Connection) -> Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS subagent_sessions (
+             child_session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+             parent_session_id TEXT NOT NULL REFERENCES sessions(session_id),
+             request_key TEXT NOT NULL,
+             record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+             CHECK(child_session_id <> parent_session_id),
+             UNIQUE(parent_session_id, request_key)
+         ) STRICT;
+         CREATE INDEX IF NOT EXISTS subagent_sessions_parent
+             ON subagent_sessions(parent_session_id, child_session_id);
+         UPDATE schema_compatibility SET minimum_compatible_version = 31
+             WHERE singleton = 1;
+         INSERT INTO schema_migrations(version, applied_at)
+             VALUES (31, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+         PRAGMA user_version = 31;",
     )?;
     transaction.commit()?;
     Ok(())
@@ -1528,6 +1556,20 @@ mod reader_tests {
         connection
             .execute_batch(&format!("PRAGMA user_version = {version};"))
             .unwrap();
+        connection
+            .execute(
+                "DELETE FROM schema_migrations WHERE version > ?1",
+                [version],
+            )
+            .unwrap();
+        if version == 30 {
+            connection
+                .execute(
+                    "UPDATE schema_compatibility SET minimum_compatible_version = 30 WHERE singleton = 1",
+                    [],
+                )
+                .unwrap();
+        }
         drop(connection);
         forget_verified_schema(path);
     }
@@ -1632,10 +1674,7 @@ mod reader_tests {
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(
-            state.minimum_compatible,
-            Some(COMPATIBILITY_METADATA_VERSION)
-        );
+        assert_eq!(state.minimum_compatible, Some(SCHEMA_VERSION));
         connection
             .execute_batch(
                 "DROP TABLE schema_compatibility;
@@ -1670,10 +1709,7 @@ mod reader_tests {
         let writer = open_writer(&path).unwrap();
         let state = read_schema_state(&writer).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(
-            state.minimum_compatible,
-            Some(COMPATIBILITY_METADATA_VERSION)
-        );
+        assert_eq!(state.minimum_compatible, Some(SCHEMA_VERSION));
     }
 
     /// A store ahead of this build cannot be fixed by starting a daemon of

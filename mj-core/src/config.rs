@@ -161,7 +161,79 @@ impl ReviewConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 8;
+fn default_subagent_limit() -> usize {
+    6
+}
+
+fn is_default_subagent_limit(value: &usize) -> bool {
+    *value == default_subagent_limit()
+}
+
+/// Global policy for Mjolnir-managed child agents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SubagentConfig {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(
+        default = "default_subagent_limit",
+        skip_serializing_if = "is_default_subagent_limit"
+    )]
+    pub max_concurrent: usize,
+    /// Profiles available in addition to the parent's own enabled profile.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub eligible_profiles: BTreeMap<String, bool>,
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_concurrent: default_subagent_limit(),
+            eligible_profiles: BTreeMap::new(),
+        }
+    }
+}
+
+impl SubagentConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
+        if !(1..=64).contains(&self.max_concurrent) {
+            bail!("[subagents] `max_concurrent` must be between 1 and 64");
+        }
+        for profile_id in self
+            .eligible_profiles
+            .iter()
+            .filter_map(|(profile_id, eligible)| eligible.then_some(profile_id))
+        {
+            validate_id("sub-agent profile", profile_id)?;
+            match profiles.get(profile_id) {
+                Some(profile) if profile.enabled => {}
+                Some(_) => bail!("[subagents] eligible profile {profile_id:?} is disabled"),
+                None => bail!(
+                    "[subagents] eligible profile {profile_id:?} is not defined in this config"
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn profile_is_eligible(&self, parent: &str, candidate: &str) -> bool {
+        self.enabled
+            && (parent == candidate
+                || self
+                    .eligible_profiles
+                    .get(candidate)
+                    .copied()
+                    .unwrap_or(false))
+    }
+}
+
+pub const CONFIG_VERSION: u32 = 9;
 pub const PRODUCT_DIR: &str = "mjolnir";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1182,6 +1254,8 @@ pub struct Config {
     pub phone: PhoneConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
     pub review: ReviewConfig,
+    #[serde(default, skip_serializing_if = "SubagentConfig::is_default")]
+    pub subagents: SubagentConfig,
     #[serde(
         default,
         rename = "startup",
@@ -1209,6 +1283,7 @@ impl Default for Config {
             theme: Default::default(),
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
+            subagents: SubagentConfig::default(),
             legacy_startup: (),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
@@ -1293,6 +1368,7 @@ impl Config {
         // Checked after the profiles, so a review pointing at a malformed
         // profile reports the profile's own error first.
         self.review.validate(&self.profiles)?;
+        self.subagents.validate(&self.profiles)?;
         for (id, bundle) in &self.bundles {
             bundle.validate(id)?;
         }
@@ -1342,9 +1418,10 @@ impl Config {
         // version 5 adds the terminal theme preference; version 6 adds
         // optional advanced settings; version 7 restores stopped-session
         // visibility as an advanced setting; version 8 lets profiles be
-        // disabled. Earlier configs acquire defaults in memory and upgrade on
+        // disabled; version 9 adds sub-agent policy. Earlier configs acquire
+        // defaults in memory and upgrade on
         // the next ordinary save.
-        if matches!(config.version, 1..=7) {
+        if matches!(config.version, 1..=8) {
             config.version = CONFIG_VERSION;
         }
         config.validate()?;
@@ -1398,6 +1475,11 @@ impl Config {
             && review.validate(&config.profiles).is_ok()
         {
             config.review = review;
+        }
+        if let Some(subagents) = salvage_section::<SubagentConfig>(document, "subagents")
+            && subagents.validate(&config.profiles).is_ok()
+        {
+            config.subagents = subagents;
         }
         config.bundles = salvage_map(document, "bundles", ProjectBundle::validate);
         config.targets = salvage_map(document, "targets", TargetTemplate::validate);
@@ -1987,6 +2069,7 @@ mod tests {
             theme: Default::default(),
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
+            subagents: SubagentConfig::default(),
             legacy_startup: (),
             profiles: BTreeMap::from([(
                 "codex-1".into(),
@@ -2923,7 +3006,10 @@ mod tests {
 
         config.save_to(&path).unwrap();
         let enabled = fs::read_to_string(&path).unwrap();
-        assert!(enabled.starts_with("version = 8"), "{enabled}");
+        assert!(
+            enabled.starts_with(&format!("version = {CONFIG_VERSION}")),
+            "{enabled}"
+        );
         assert!(!enabled.contains("enabled = true"), "{enabled}");
 
         config.profiles.get_mut("work").unwrap().enabled = false;
@@ -2945,6 +3031,51 @@ mod tests {
                 .unwrap_err()
                 .to_string();
         assert!(error.contains("disabled"), "{error}");
+    }
+
+    #[test]
+    fn version_eight_enables_parent_only_subagents_by_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "version = 8\n[profiles.work]\nkind = \"codex\"\nhome = \"/profiles/work\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from(&path).unwrap();
+
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert!(config.subagents.enabled);
+        assert_eq!(config.subagents.max_concurrent, 6);
+        assert!(config.subagents.eligible_profiles.is_empty());
+        assert!(config.subagents.profile_is_eligible("work", "work"));
+        assert!(!config.subagents.profile_is_eligible("work", "other"));
+    }
+
+    #[test]
+    fn subagents_reject_invalid_limits_and_unavailable_profiles() {
+        let profile =
+            "[profiles.work]\nenabled = false\nkind = \"grok\"\nhome = \"/profiles/work\"\n";
+        for section in [
+            "[subagents]\nmax_concurrent = 0\n",
+            "[subagents.eligible_profiles]\nmissing = true\n",
+            "[subagents.eligible_profiles]\nwork = true\n",
+        ] {
+            let error = toml::from_str::<Config>(&format!(
+                "version = {CONFIG_VERSION}\n{section}{profile}"
+            ))
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("max_concurrent")
+                    || error.contains("not defined")
+                    || error.contains("disabled"),
+                "{error}"
+            );
+        }
     }
 
     /// A profile that exists, so a `[review]` section has something to name.

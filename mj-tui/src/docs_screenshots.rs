@@ -195,6 +195,7 @@ fn documentation_dashboard() -> DashboardState {
     let mut dashboard = DashboardState::new(
         config,
         State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
             mount_history: BTreeMap::new(),

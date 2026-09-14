@@ -274,6 +274,10 @@ pub(crate) enum Confirmation {
         session_id: String,
         error: String,
     },
+    StopWithSubagents {
+        session_id: String,
+        count: usize,
+    },
     ForceDestroy {
         session_id: String,
     },
@@ -447,6 +451,7 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::DirtyLocal { .. } => &["Cancel", "Continue"],
         Confirmation::DestroyStopped { .. } => &["No", "Yes"],
         Confirmation::CloseFailed { .. } => &["Cancel", "Force stop", "Retry stop"],
+        Confirmation::StopWithSubagents { .. } => &["Cancel", "Stop children and parent"],
         Confirmation::RecoverFailed {
             recoverable: true, ..
         } => &["Cancel", "Open transcript", "Recover"],
@@ -480,6 +485,7 @@ fn initial_confirmation_button(confirmation: &Confirmation, labels: &[&str]) -> 
             | Confirmation::ForceDestroy { .. }
             | Confirmation::DestroyStopped { .. }
             | Confirmation::CloseFailed { .. }
+            | Confirmation::StopWithSubagents { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
     ) {
         0
@@ -1328,6 +1334,18 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 ),
             ],
         ),
+        Confirmation::StopWithSubagents { session_id, count } => (
+            " Stop parent and sub-agents? ",
+            vec![
+                Line::raw(format!("Session: {session_id}")),
+                Line::raw(""),
+                Line::styled(
+                    format!("This session has {count} active sub-agent(s)."),
+                    Style::default().fg(theme::palette().warning),
+                ),
+                Line::raw("Mjolnir will stop the children first, then save and stop the parent."),
+            ],
+        ),
         Confirmation::RecoverFailed {
             session_id,
             error,
@@ -1439,6 +1457,7 @@ pub(crate) fn render_confirmation(
         Confirmation::Dismiss { .. } => 8,
         Confirmation::DirtyLocal { .. } => 11,
         Confirmation::CloseFailed { .. } => 12,
+        Confirmation::StopWithSubagents { .. } => 10,
         Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,
         Confirmation::RecoverMove { .. } => 14,
@@ -2471,6 +2490,10 @@ impl DashboardState {
                 self.cancel_modal();
                 DashboardAction::Close { session_id }
             }
+            (Confirmation::StopWithSubagents { session_id, .. }, 1) => {
+                self.cancel_modal();
+                DashboardAction::Close { session_id }
+            }
             (Confirmation::RecoverFailed { session_id, .. }, 1) => {
                 self.cancel_modal();
                 self.focus = crate::Focus::Prompt;
@@ -3005,6 +3028,7 @@ mod tests {
     fn setup_opens_in_place_and_container_settings_remain_available() {
         let mut empty = DashboardState::new(
             mj_core::config::Config {
+                subagents: Default::default(),
                 version: mj_core::config::CONFIG_VERSION,
                 sessions_side: Default::default(),
                 advanced: Default::default(),

@@ -2730,6 +2730,8 @@ mod tests {
         materialized.applied_event_ordinal = cursor.ordinal;
         materialized.applied_event_digest = cursor.digest.clone();
         ManagedSessionSnapshot {
+            subagent_requests: Vec::new(),
+            subagent_results: Vec::new(),
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             latest_credential_sync_signal: None,

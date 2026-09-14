@@ -23,6 +23,7 @@ use mj_core::state::{
     SessionState, State, TargetLocator, TranscriptBody, TranscriptItem,
     validate_relay_event_digest, validate_relay_event_frontier,
 };
+use mj_core::subagent::SubagentRecord;
 
 use crate::targets::AdditionalMount;
 use mj_core::relay::RELAY_EVENT_GENESIS_DIGEST;
@@ -31,7 +32,7 @@ use mj_core::workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 30;
+const SCHEMA_VERSION: i64 = 31;
 
 mod session_move;
 pub use session_move::*;
@@ -1380,6 +1381,21 @@ pub fn load_state_from(path: &Path) -> Result<State> {
         let session = row?;
         state.sessions.insert(session.id.clone(), session);
     }
+    let mut statement = connection.prepare(
+        "SELECT child_session_id, record_json FROM subagent_sessions ORDER BY child_session_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let child_id = row.get::<_, String>(0)?;
+        let json = row.get::<_, String>(1)?;
+        let record = serde_json::from_str::<SubagentRecord>(&json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+        })?;
+        Ok((child_id, record))
+    })?;
+    for row in rows {
+        let (child_id, record) = row?;
+        state.subagents.insert(child_id, record);
+    }
     load_targets(&connection, &mut state)?;
     load_mounts(&connection, &mut state)?;
     load_checkpoints(&connection, &mut state)?;
@@ -1429,6 +1445,92 @@ pub fn save_session(session: &SessionRecord) -> Result<()> {
     submit_database_write("save_session", move |_| {
         save_session_to(&database_path(), &session)
     })
+}
+
+/// Persist a borrowed-target child and its parent relationship atomically.
+pub fn save_subagent_session(
+    session: &SessionRecord,
+    subagent: &mj_core::subagent::SubagentRecord,
+) -> Result<()> {
+    let session = session.clone();
+    let subagent = subagent.clone();
+    submit_database_write("save_subagent_session", move |_| {
+        let mut connection = open(&database_path())?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        insert_session(&tx, &session)?;
+        tx.execute(
+            "INSERT INTO subagent_sessions(
+                 child_session_id, parent_session_id, request_key, record_json
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                subagent.child_session_id,
+                subagent.parent_session_id,
+                subagent.request_key,
+                serde_json::to_string(&subagent)?,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+/// Record the child turn already reported to its parent.
+pub fn mark_subagent_turn_delivered(child_session_id: &str, turn: u64) -> Result<()> {
+    let child_session_id = child_session_id.to_owned();
+    submit_database_write("mark_subagent_turn_delivered", move |_| {
+        let mut relation = load_subagent(&child_session_id)?
+            .with_context(|| format!("unknown sub-agent session {child_session_id}"))?;
+        relation.delivered_turn = Some(turn);
+        let json = serde_json::to_string(&relation)?;
+        let connection = open(&database_path())?;
+        connection.execute(
+            "UPDATE subagent_sessions SET record_json = ?2 WHERE child_session_id = ?1",
+            params![child_session_id, json],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn load_subagent(child_session_id: &str) -> Result<Option<mj_core::subagent::SubagentRecord>> {
+    let connection = open_reader(&database_path())?;
+    connection
+        .query_row(
+            "SELECT record_json FROM subagent_sessions WHERE child_session_id = ?1",
+            [child_session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|json| serde_json::from_str(&json).context("decode sub-agent record"))
+        .transpose()
+}
+
+pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::SubagentRecord>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT record_json FROM subagent_sessions
+         WHERE parent_session_id = ?1 ORDER BY rowid",
+    )?;
+    statement
+        .query_map([parent_session_id], |row| row.get::<_, String>(0))?
+        .map(|row| serde_json::from_str(&row?).context("decode sub-agent record"))
+        .collect()
+}
+
+pub fn lookup_subagent_request(
+    parent_session_id: &str,
+    request_key: &str,
+) -> Result<Option<mj_core::subagent::SubagentRecord>> {
+    let connection = open_reader(&database_path())?;
+    connection
+        .query_row(
+            "SELECT record_json FROM subagent_sessions
+             WHERE parent_session_id = ?1 AND request_key = ?2",
+            params![parent_session_id, request_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|json| serde_json::from_str(&json).context("decode sub-agent record"))
+        .transpose()
 }
 
 /// Persist a session and the container size it most recently launched on its
@@ -4008,6 +4110,32 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
+    tx.execute(
+        "DELETE FROM subagent_sessions
+         WHERE child_session_id NOT IN (SELECT session_id FROM sessions)
+            OR parent_session_id NOT IN (SELECT session_id FROM sessions)",
+        [],
+    )?;
+    let existing_subagents = {
+        let mut statement =
+            tx.prepare("SELECT child_session_id, parent_session_id FROM subagent_sessions")?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (child_id, parent_id) in existing_subagents {
+        if !state.subagents.contains_key(&child_id)
+            || !state.sessions.contains_key(&child_id)
+            || !state.sessions.contains_key(&parent_id)
+        {
+            tx.execute(
+                "DELETE FROM subagent_sessions WHERE child_session_id = ?1",
+                [child_id],
+            )?;
+        }
+    }
     for session_id in existing_sessions {
         if !state.sessions.contains_key(&session_id) {
             tx.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
@@ -4033,6 +4161,24 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
             );
         }
         insert_session(&tx, session)?;
+    }
+    for subagent in state.subagents.values() {
+        let record_json = serde_json::to_string(subagent)?;
+        tx.execute(
+            "INSERT INTO subagent_sessions(
+                 child_session_id, parent_session_id, request_key, record_json
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(child_session_id) DO UPDATE SET
+                 parent_session_id = excluded.parent_session_id,
+                 request_key = excluded.request_key,
+                 record_json = excluded.record_json",
+            params![
+                subagent.child_session_id,
+                subagent.parent_session_id,
+                subagent.request_key,
+                record_json
+            ],
+        )?;
     }
     for (host, sources) in &state.mount_history {
         for (ordinal, source) in sources.iter().enumerate() {

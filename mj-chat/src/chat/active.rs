@@ -700,6 +700,7 @@ impl ActiveChat {
             (state, pending)
         };
         state.set_history_context(&bundle_id);
+        state.set_subagent_count(header.subagent_count);
         state.set_header_summary(header.target, header.profile, header.title);
         state.restore_draft(draft);
         state.notices = notices;
@@ -1605,6 +1606,7 @@ impl ActiveChat {
     fn dispatch(&mut self, action: ChatAction) -> ChatEventOutcome {
         match action {
             ChatAction::None => return ChatEventOutcome::None,
+            ChatAction::OpenSubagents => return ChatEventOutcome::OpenSubagents,
             ChatAction::Prompt(text) => {
                 let images = self.state.take_submitting_images();
                 let Some(command_id) = self.command_id("prompt") else {
@@ -1830,6 +1832,11 @@ impl ActiveChat {
             ChatAction::QuitDetach => return self.detach(),
         }
         ChatEventOutcome::Handled
+    }
+
+    /// Refreshes the parent session's direct-child count without reopening chat.
+    pub fn set_subagent_count(&mut self, count: usize) {
+        self.state.set_subagent_count(count);
     }
 
     /// Leaves the conversation: stops any dictation and reports how far the
@@ -2737,6 +2744,7 @@ pub(super) fn render_in(
 
         chat.voice_button_area = None;
         chat.task_control_area = None;
+        chat.subagent_control_area = None;
         chat.task_dialog_area = None;
         chat.reviewer_area = None;
         chat.split_action_areas.clear();
@@ -2780,6 +2788,7 @@ pub(super) fn render_in(
     // view or modal may replace the composer for this frame.
     chat.voice_button_area = None;
     chat.task_control_area = None;
+    chat.subagent_control_area = None;
     chat.task_dialog_area = None;
     let (primary_area, reviewer_area) = if split {
         let halves = Layout::default()
@@ -2863,10 +2872,13 @@ pub(super) fn render_in(
             prompt_block = prompt_block.title(activity_title.right_aligned());
         }
         chat.task_control_area = None;
+        chat.subagent_control_area = None;
         let bottom_width = prompt_area.width.saturating_sub(2);
         let queue_control = prompt_bottom_queue_control(chat);
         let task_label = (chat.background_task_count() > 0)
             .then(|| format!(" View tasks ({}) ", chat.background_task_count()));
+        let subagent_label = (chat.subagent_count() > 0)
+            .then(|| format!(" Sub-agents ({}) ", chat.subagent_count()));
         let command_hints = (prompt_focused && prompt_area.width >= 56).then(|| {
             Line::from(vec![
                 Span::styled(" Enter ", theme::selection(false)),
@@ -2878,16 +2890,25 @@ pub(super) fn render_in(
         });
         let queue_width = queue_control.as_ref().map_or(0, Line::width);
         let task_width = task_label.as_ref().map_or(0, |label| display_width(label));
+        let subagent_width = subagent_label
+            .as_ref()
+            .map_or(0, |label| display_width(label));
         let command_width = command_hints.as_ref().map_or(0, Line::width);
         let task_separator_width = usize::from(queue_control.is_some() && task_label.is_some()) * 2;
         // Fit queue/control text first, then a complete task button, then hints.
         let left_with_task = queue_width + task_separator_width + task_width;
         let show_task = task_label.is_some() && left_with_task <= usize::from(bottom_width);
-        let left_width = if show_task {
+        let mut left_width = if show_task {
             left_with_task
         } else {
             queue_width
         };
+        let subagent_separator_width = usize::from(left_width > 0) * 2;
+        let show_subagents = subagent_label.is_some()
+            && left_width + subagent_separator_width + subagent_width <= usize::from(bottom_width);
+        if show_subagents {
+            left_width += subagent_separator_width + subagent_width;
+        }
         let show_command_hints = command_hints.is_some()
             && left_width + usize::from(left_width > 0) + command_width
                 <= usize::from(bottom_width);
@@ -2916,6 +2937,33 @@ pub(super) fn render_in(
             bottom_spans.push(Span::styled(
                 task_label,
                 if chat.task_control_focused() {
+                    theme::selection(false)
+                } else {
+                    theme::muted()
+                },
+            ));
+            bottom_left_width = task_start + usize::from(task_width);
+        }
+        if show_subagents {
+            let separator_width = usize::from(bottom_left_width > 0) * 2;
+            let subagent_start = bottom_left_width + separator_width;
+            if bottom_left_width > 0 {
+                bottom_spans.push(Span::raw(" ·"));
+            }
+            let label = subagent_label.expect("show_subagents implies a label");
+            let width = u16::try_from(subagent_width).expect("subagent label fits in u16");
+            chat.subagent_control_area = Some(Rect::new(
+                prompt_area
+                    .x
+                    .saturating_add(1)
+                    .saturating_add(u16::try_from(subagent_start).unwrap_or(u16::MAX)),
+                prompt_area.bottom().saturating_sub(1),
+                width,
+                1,
+            ));
+            bottom_spans.push(Span::styled(
+                label,
+                if chat.subagent_control_focused() {
                     theme::selection(false)
                 } else {
                     theme::muted()
@@ -3819,6 +3867,8 @@ mod tests {
                 materialized: session,
                 latest_credential_sync_signal: None,
                 worker_build: None,
+                subagent_requests: Vec::new(),
+                subagent_results: Vec::new(),
                 operational: mj_core::relay::RelayOperationalState {
                     goal: Default::default(),
                     capacity_retry: None,
@@ -4815,6 +4865,7 @@ mod tests {
                 profile: "codex-1".into(),
                 title: "Original session title".into(),
                 harness_kind: Some(HarnessKind::Codex),
+                subagent_count: 0,
             },
             "keep this draft".into(),
             Notices::default(),

@@ -1092,6 +1092,39 @@ impl RelayClient {
         }
     }
 
+    pub async fn subagent_requests(
+        &mut self,
+    ) -> Result<(
+        Vec<mj_core::subagent::SubagentToolRequest>,
+        Vec<mj_core::subagent::SubagentToolResult>,
+    )> {
+        let request = RelayRequest::SubagentRequests;
+        if !request.supported_at(self.protocol_version) {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        match self.call(request).await? {
+            RelayResponsePayload::SubagentRequests { requests, results } => Ok((requests, results)),
+            _ => bail!("relay returned an unexpected sub-agent request response"),
+        }
+    }
+
+    pub async fn complete_subagent_request(
+        &mut self,
+        result: mj_core::subagent::SubagentToolResult,
+    ) -> Result<()> {
+        let request = RelayRequest::CompleteSubagentRequest { result };
+        if !request.supported_at(self.protocol_version) {
+            bail!(
+                "sub-agent tools require relay protocol {}",
+                request.minimum_protocol()
+            );
+        }
+        match self.call(request).await? {
+            RelayResponsePayload::SubagentRequestCompleted => Ok(()),
+            _ => bail!("relay returned an unexpected sub-agent completion response"),
+        }
+    }
+
     pub async fn detach(mut self) -> Result<()> {
         self.input
             .take()

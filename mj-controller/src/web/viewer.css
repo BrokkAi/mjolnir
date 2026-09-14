@@ -1344,6 +1344,28 @@ article > h3 {
   line-height: 1.35;
 }
 
+.composer-lower-border {
+  display: flex;
+  min-height: 0;
+  margin-top: -0.35rem;
+}
+
+.composer-lower-border:has(.hidden) {
+  display: none;
+}
+
+.virtual-workspace {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.virtual-workspace-close {
+  min-width: 1.6rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+}
+
 .prompt-setting {
   display: inline-flex;
   gap: 4px;

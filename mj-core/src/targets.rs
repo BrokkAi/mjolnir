@@ -1323,6 +1323,9 @@ pub enum TargetLocator {
     SshBare {
         ssh: SshTarget,
         workspace: String,
+        /// A borrowed-target child has its own worker identity in the parent's workspace.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_id: Option<String>,
     },
     SshPodman {
         ssh: SshTarget,
@@ -1502,9 +1505,11 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
         | TargetLocator::AppleContainer { .. }
         | TargetLocator::SshPodman { .. }
         | TargetLocator::SshDocker { .. } => format!("/var/lib/hel/workers/{session_id}"),
-        TargetLocator::AwsEc2 { .. } | TargetLocator::SshBare { .. } => {
-            format!(".local/share/hel/workers/{session_id}")
-        }
+        TargetLocator::AwsEc2 { .. } => format!(".local/share/hel/workers/{session_id}"),
+        TargetLocator::SshBare { worker_id, .. } => format!(
+            ".local/share/hel/workers/{}",
+            worker_id.as_deref().unwrap_or(session_id)
+        ),
     })
 }
 mod ssh;

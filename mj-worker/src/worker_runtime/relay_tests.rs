@@ -42,6 +42,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 
 fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
+        subagent_tools: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         run_mode: Default::default(),

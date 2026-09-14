@@ -1236,7 +1236,8 @@ impl DurableRelay {
             | RelayRequest::InstallGithubToken { .. }
             | RelayRequest::RemoveGithubToken
             | RelayRequest::ProjectMemorySnapshot
-            | RelayRequest::InstallProjectMemorySnapshot { .. } => {
+            | RelayRequest::InstallProjectMemorySnapshot { .. }
+            | RelayRequest::CompleteSubagentRequest { .. } => {
                 return Ok(relay_error(
                     RelayErrorCode::InvalidState,
                     "connection-only requests must be handled by the live relay transport",
@@ -1244,6 +1245,10 @@ impl DurableRelay {
                     None,
                 ));
             }
+            RelayRequest::SubagentRequests => RelayResponsePayload::SubagentRequests {
+                requests: Vec::new(),
+                results: Vec::new(),
+            },
             RelayRequest::RespondElicitation { .. } => {
                 return Ok(relay_error(
                     RelayErrorCode::InvalidState,

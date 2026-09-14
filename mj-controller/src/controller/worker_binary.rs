@@ -84,8 +84,68 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("session target template is missing")?;
-        let (mut launch, project_memory, target_profile_home) =
-            worker_launch_config(session, profile, bundle, backend, session_id, target)?;
+        let subagent = crate::database::load_subagent(session_id)?;
+        let workspace_session_id = subagent.as_ref().map_or_else(
+            || session_id.to_owned(),
+            |child| child.parent_session_id.clone(),
+        );
+        let (mut launch, project_memory, target_profile_home) = worker_launch_config(
+            session,
+            profile,
+            bundle,
+            backend,
+            session_id,
+            &workspace_session_id,
+            target,
+        )?;
+        launch.subagent_tools = self.config.subagents.enabled
+            && subagent.is_none()
+            && matches!(
+                session.harness_kind,
+                mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Codex
+            );
+        if let Some(subagent) = &subagent {
+            let parent = self
+                .state
+                .sessions
+                .get(&subagent.parent_session_id)
+                .context("sub-agent parent session is missing")?;
+            let parent_profile = self
+                .config
+                .profiles
+                .get(&parent.last_profile)
+                .context("sub-agent parent profile is missing")?;
+            let parent_target = self
+                .config
+                .targets
+                .get(&parent.target_template_id)
+                .context("sub-agent parent target template is missing")?;
+            let parent_locator = parent
+                .target
+                .as_ref()
+                .context("sub-agent parent has no live target")?;
+            let parent_backend = backend_locator(parent_locator, parent, &self.config)?;
+            let parent_bundle = parent
+                .project_directory
+                .is_none()
+                .then(|| self.config.bundles.get(&parent.bundle_id))
+                .flatten();
+            let (parent_launch, _, _) = worker_launch_config(
+                parent,
+                parent_profile,
+                parent_bundle,
+                &parent_backend,
+                &parent.id,
+                &parent.id,
+                parent_target,
+            )?;
+            launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
+                parent_launch.cwd
+            } else {
+                parent_launch.cwd.join(&subagent.working_directory)
+            };
+            launch.additional_directories = parent_launch.additional_directories;
+        }
 
         if session.native_session_id.is_some()
             && profile.kind == mj_core::config::HarnessKind::Codex
@@ -107,7 +167,10 @@ impl Controller {
         .write(&ownership_path)?;
         let profile_stage = staging.path().join("profile");
         if !matches!(backend, targets::TargetLocator::LocalBare { .. })
-            || profile.kind == mj_core::config::HarnessKind::Muse
+            || matches!(
+                profile.kind,
+                mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Muse
+            )
         {
             let started = Instant::now();
             let result = stage_profile(profile, &profile_stage);
@@ -118,6 +181,9 @@ impl Controller {
             );
             result?;
             append_hel_target_environment(profile.kind, &profile_stage, backend)?;
+            if launch.subagent_tools && profile.kind == mj_core::config::HarnessKind::Claude {
+                configure_claude_subagent_mcp(&profile_stage, worker_root)?;
+            }
             stage_memory_replica(
                 &project_memory,
                 Path::new(&target_profile_home),
@@ -245,8 +311,9 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("session target template is missing")?;
-        let (mut launch, _, _) =
-            worker_launch_config(session, profile, bundle, backend, session_id, target)?;
+        let (mut launch, _, _) = worker_launch_config(
+            session, profile, bundle, backend, session_id, session_id, target,
+        )?;
         if crate::database::load_move_operation(session_id)?.is_some_and(|operation| {
             operation.source_checkpoint_only
                 && operation.destination_target.is_none()
@@ -339,6 +406,7 @@ fn worker_launch_config(
     bundle: Option<&ProjectBundle>,
     backend: &targets::TargetLocator,
     session_id: &str,
+    workspace_session_id: &str,
     target: &mj_core::config::TargetTemplate,
 ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
     let execution_policy = target.execution_policy();
@@ -349,7 +417,7 @@ fn worker_launch_config(
         workspace_paths(
             backend,
             bundle.context("session bundle is missing")?,
-            session_id,
+            workspace_session_id,
         )?
     };
     let mut additional_directories = workspace.1.iter().map(PathBuf::from).collect::<Vec<_>>();
@@ -408,6 +476,7 @@ fn worker_launch_config(
             target_environment,
             run_mode: Default::default(),
             session_id: session_id.to_string(),
+            subagent_tools: false,
             harness: profile.kind,
             bridge_command: PathBuf::from(bridge_command),
             bridge_args,
@@ -676,6 +745,61 @@ fn configure_kimi_project_memory_mcp(
     body.push(b'\n');
     atomic_write(&path, &body)
         .with_context(|| format!("write staged Kimi MCP configuration {}", path.display()))
+}
+
+/// Claude reads MCP servers from its private profile rather than ACP. Parent
+/// sessions always use an isolated staged profile, including on local bare
+/// targets, so this never modifies the user's source profile.
+fn configure_claude_subagent_mcp(profile_stage: &Path, worker_root: &str) -> Result<()> {
+    let path = profile_stage.join(".claude.json");
+    let mut document = match std::fs::read(&path) {
+        Ok(body) => serde_json::from_slice::<serde_json::Value>(&body)
+            .with_context(|| format!("parse staged Claude configuration {}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::Value::Object(serde_json::Map::new())
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read staged Claude configuration {}", path.display()));
+        }
+    };
+    let root = document.as_object_mut().with_context(|| {
+        format!(
+            "staged Claude configuration {} must contain a JSON object",
+            path.display()
+        )
+    })?;
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .with_context(|| {
+            format!(
+                "mcpServers in staged Claude configuration {} must be a JSON object",
+                path.display()
+            )
+        })?;
+    servers.insert(
+        "mj-subagents".into(),
+        serde_json::json!({
+            "type":"stdio",
+            "command":Path::new(worker_root).join("hel"),
+            "args":[
+                "worker",
+                "subagent-mcp",
+                "--socket",
+                Path::new(worker_root).join(mj_worker_socket_name())
+            ]
+        }),
+    );
+    let mut body = serde_json::to_vec_pretty(&document)?;
+    body.push(b'\n');
+    atomic_write(&path, &body)
+        .with_context(|| format!("write staged Claude configuration {}", path.display()))
+}
+
+fn mj_worker_socket_name() -> &'static str {
+    "subagents.sock"
 }
 
 fn directory_has_files(path: &Path) -> Result<bool> {
@@ -3259,6 +3383,7 @@ mod tests {
 
         let remote = worker_workspace_for_recovery(
             &targets::TargetLocator::SshBare {
+                worker_id: None,
                 ssh: SshTarget {
                     destination: "dev@builder".into(),
                     ssh_args: vec!["-oBatchMode=yes".into()],
@@ -3659,6 +3784,7 @@ mod tests {
         }
 
         let locator = targets::TargetLocator::SshBare {
+            worker_id: None,
             ssh: SshTarget {
                 destination: "user@example.test".into(),
                 ssh_args: Vec::new(),
@@ -4218,6 +4344,7 @@ mod tests {
             ),
             (
                 targets::TargetLocator::SshBare {
+                    worker_id: None,
                     ssh: ssh.clone(),
                     workspace: "/workspace/session".into(),
                 },
@@ -4689,6 +4816,7 @@ mod tests {
             mj_core::config::HarnessKind::Codex,
             ssh_bare.path(),
             &targets::TargetLocator::SshBare {
+                worker_id: None,
                 ssh: targets::SshTarget {
                     destination: "host".into(),
                     ssh_args: Vec::new(),
@@ -4735,6 +4863,7 @@ mod tests {
     // session ID, so build the locator around the session under test.
     fn ssh_bare_locator(session_id: &str) -> targets::TargetLocator {
         targets::TargetLocator::SshBare {
+            worker_id: None,
             ssh: SshTarget {
                 destination: "user@host.test".into(),
                 ssh_args: Vec::new(),
@@ -4751,6 +4880,7 @@ mod tests {
             commands: RefCell::new(Vec::new()),
         };
         let launch = WorkerLaunchConfig {
+            subagent_tools: false,
             goal_resume_request: Default::default(),
             target_environment: Default::default(),
             run_mode: Default::default(),
@@ -4847,6 +4977,7 @@ mod tests {
             launch: RefCell::new(None),
         };
         let launch = WorkerLaunchConfig {
+            subagent_tools: false,
             goal_resume_request: Default::default(),
             target_environment: Default::default(),
             run_mode: Default::default(),
@@ -4928,6 +5059,7 @@ mod tests {
             commands: RefCell::new(Vec::new()),
         };
         let mut launch = WorkerLaunchConfig {
+            subagent_tools: false,
             goal_resume_request: Default::default(),
             target_environment: Default::default(),
             run_mode: Default::default(),

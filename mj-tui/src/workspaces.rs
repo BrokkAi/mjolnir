@@ -381,6 +381,12 @@ impl DashboardState {
         {
             return None;
         }
+        if self.subagent_parent_id().is_some()
+            && matches!(key.code, KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Esc)
+        {
+            self.record_event_handled();
+            return Some(DashboardAction::ExitSubagentWorkspace);
+        }
         let back_tab = key.code == KeyCode::BackTab
             || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
         match (self.workspace_control_focus, key.code, back_tab) {
@@ -856,6 +862,12 @@ pub(crate) fn workspace_tab_click(
     column: u16,
     row: u16,
 ) -> Option<DashboardAction> {
+    if dashboard
+        .subagent_workspace_close_area
+        .is_some_and(|area| area.contains(ratatui::layout::Position::new(column, row)))
+    {
+        return Some(DashboardAction::ExitSubagentWorkspace);
+    }
     let workspace_id = dashboard
         .workspace_tab_areas
         .iter()
@@ -902,6 +914,32 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if let Some(parent_id) = dashboard.subagent_parent_id().map(str::to_owned) {
+        let title = dashboard
+            .state
+            .sessions
+            .get(&parent_id)
+            .map(|session| session.display_title())
+            .unwrap_or(&parent_id);
+        let close_width = 3u16.min(inner.width);
+        let close_area = Rect::new(
+            inner.right().saturating_sub(close_width),
+            inner.y,
+            close_width,
+            1,
+        );
+        dashboard.subagent_workspace_close_area = Some(close_area);
+        let label_area = Rect::new(inner.x, inner.y, inner.width.saturating_sub(close_width), 1);
+        frame.render_widget(
+            Paragraph::new(workspace_label(title, label_area.width)).style(theme::selection(true)),
+            label_area,
+        );
+        frame.render_widget(
+            Paragraph::new(" X ").style(theme::selection(false)),
+            close_area,
+        );
         return;
     }
     let menu_width = 3u16.min(inner.width);

@@ -100,6 +100,11 @@ enum WorkerCommand {
         #[arg(long)]
         socket: PathBuf,
     },
+    /// Serve Mjolnir-owned delegation tools over MCP stdio.
+    SubagentMcp {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// Print a unified diff of the session's work in one repository.
     Diff {
         #[arg(long)]
@@ -345,6 +350,7 @@ async fn run_command(command: Command) -> Result<()> {
         }
         WorkerCommand::MemoryMcp { root } => mj_worker::memory_mcp::run_mcp_stdio(&root),
         WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
+        WorkerCommand::SubagentMcp { socket } => mj_worker::subagent_mcp::run_mcp_stdio(&socket),
         WorkerCommand::Diff {
             repository,
             base,

@@ -232,9 +232,20 @@ pub fn verify_locator(locator: &TargetLocator, session_id: &str) -> Result<()> {
             }
             verify_session_workspace(workspace, session_id)?;
         }
-        TargetLocator::SshBare { workspace, .. } => {
-            verify_session_workspace(workspace, session_id)?
-        }
+        TargetLocator::SshBare {
+            workspace,
+            worker_id,
+            ..
+        } => match worker_id {
+            Some(worker_id) => {
+                validate_session_id(worker_id)?;
+                if worker_id != session_id {
+                    bail!("refusing cleanup: SSH worker identity does not match session ID");
+                }
+                validate_workspace_prefix(workspace)?;
+            }
+            None => verify_session_workspace(workspace, session_id)?,
+        },
     }
     Ok(())
 }

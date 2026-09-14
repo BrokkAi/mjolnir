@@ -13,6 +13,7 @@ pub mod checkpoint;
 
 pub mod memory_mcp;
 pub mod review;
+pub mod subagent_mcp;
 
 #[cfg(all(test, unix))]
 mod checkpoint_tests;

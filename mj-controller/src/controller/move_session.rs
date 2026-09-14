@@ -298,6 +298,21 @@ impl Controller {
             .sessions
             .get(&selection.session_id)
             .context("unknown session")?;
+        ensure!(
+            !self.state.subagents.contains_key(&source.id),
+            "sub-agent sessions cannot move independently of their parent"
+        );
+        ensure!(
+            !self.state.subagents.values().any(|child| {
+                child.parent_session_id == source.id
+                    && self
+                        .state
+                        .sessions
+                        .get(&child.child_session_id)
+                        .is_some_and(|session| session.state.is_active())
+            }),
+            "stop active sub-agents before moving their parent session"
+        );
         let previous = crate::database::load_move_operation(&source.id)?;
         let retry = previous.as_ref().is_some_and(|op| {
             !matches!(op.phase, MovePhase::Completed) && source.checkpoint.is_some()

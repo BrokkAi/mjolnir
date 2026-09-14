@@ -3789,6 +3789,7 @@ mod tests {
             cwd: spec.workspace_root.join("app"),
             additional_directories: Vec::new(),
             native_session_id: Some(NATIVE.into()),
+            subagent_tools: false,
             project_memory: Some(mj_core::worker_launch::ProjectMemoryLaunchConfig {
                 project_key: "project".into(),
                 root: memory_root,

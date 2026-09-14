@@ -55,6 +55,13 @@ pub(crate) async fn apply_dashboard_action(
                 context.select_workspace(Some(workspace_id));
             }
         }
+        DashboardAction::ExitSubagentWorkspace => {
+            let parent_id = context.dashboard.subagent_parent_id().map(str::to_owned);
+            context.dashboard.close_subagent_workspace();
+            if let Some(parent_id) = parent_id {
+                context.open_chat_session(&parent_id);
+            }
+        }
         DashboardAction::LoadWorkspaceManagement { generation } => {
             spawn_workspace_management_load(generation, context.dashboard_io_tx.clone());
         }

@@ -50,7 +50,7 @@ impl Default for ProjectMemoryEndpoint {
     }
 }
 
-pub(super) struct SocketGuard(PathBuf);
+pub(super) struct SocketGuard(pub(super) PathBuf);
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
@@ -296,6 +296,12 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // socket inside the reviewer directory: an MCP server started by a harness
     // has no relay connection, and the dispatch is not session history.
     let dispatch_socket = serve_review_dispatch(&root, reviewer.clone())?;
+    let (subagents, _subagent_socket_guard) = if config.subagent_tools {
+        let (endpoint, guard) = super::subagents::serve(&root)?;
+        (Some(endpoint), Some(guard))
+    } else {
+        (None, None)
+    };
     // Everything that can start a reviewer runs inside this block, so every
     // way out of it — including an error — passes through the pause below.
     // Stopping the reviewer's process group before this worker exits is what
@@ -346,6 +352,9 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             cwd: config.cwd,
             additional_directories: config.additional_directories,
             extra_mcp_servers: Vec::new(),
+            subagent_mcp_socket: subagents
+                .as_ref()
+                .map(|_| root.join(super::subagents::SUBAGENT_SOCKET)),
             project_memory: config.project_memory,
             resume_session,
             accepted_config,
@@ -377,6 +386,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
                     let client_commands = acp_commands_tx.clone();
                     let client_project_memory = project_memory.clone();
                     let client_reviewer = reviewer.clone();
+                    let client_subagents = subagents.clone();
                     tokio::spawn(async move {
                         if let Err(error) = serve_client_with_memory(
                             stream,
@@ -387,6 +397,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
                                 project_memory: client_project_memory,
                                 commands: Some(client_commands),
                                 reviewer: Some(client_reviewer),
+                                subagents: client_subagents,
                             },
                             client_fatal,
                         ).await {
@@ -1583,6 +1594,7 @@ pub(super) struct ConnectionRuntime {
     /// The second-opinion reviewer, when this worker has an ACP runtime to run
     /// one beside. A sealed session has none.
     pub(super) reviewer: Option<Arc<ReviewerSidecar>>,
+    pub(super) subagents: Option<super::subagents::SubagentEndpoint>,
 }
 
 #[cfg(test)]
@@ -1649,6 +1661,7 @@ pub(super) async fn serve_client_with_memory(
         project_memory,
         commands,
         reviewer,
+        subagents,
     } = runtime;
     let relay_root = relay
         .lock()
@@ -1798,6 +1811,56 @@ pub(super) async fn serve_client_with_memory(
                 let operation = envelope.request.method_name();
                 let response = reviewer_response(envelope, reviewer.as_ref(), &mut reader).await;
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
+                continue;
+            }
+            if matches!(
+                &envelope.request,
+                RelayRequest::SubagentRequests | RelayRequest::CompleteSubagentRequest { .. }
+            ) {
+                let operation = envelope.request.method_name();
+                let request_id = envelope.request_id.clone();
+                let protocol_version = envelope.protocol_version;
+                let body = match (&subagents, envelope.request) {
+                    (Some(endpoint), RelayRequest::SubagentRequests) => {
+                        let (requests, results) = endpoint.snapshot();
+                        RelayResponseBody::Ok {
+                            payload: RelayResponsePayload::SubagentRequests { requests, results },
+                        }
+                    }
+                    (Some(endpoint), RelayRequest::CompleteSubagentRequest { result }) => {
+                        match endpoint.complete(result) {
+                            Ok(()) => RelayResponseBody::Ok {
+                                payload: RelayResponsePayload::SubagentRequestCompleted,
+                            },
+                            Err(error) => compaction_error(
+                                RelayErrorCode::Internal,
+                                &format!("persist sub-agent result: {error:#}"),
+                            ),
+                        }
+                    }
+                    (None, RelayRequest::SubagentRequests) => RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::SubagentRequests {
+                            requests: Vec::new(),
+                            results: Vec::new(),
+                        },
+                    },
+                    (None, RelayRequest::CompleteSubagentRequest { .. }) => compaction_error(
+                        RelayErrorCode::InvalidRequest,
+                        "this session has no Mjolnir sub-agent tools",
+                    ),
+                    _ => unreachable!(),
+                };
+                write_logged_response(
+                    &mut writer,
+                    &RelayResponseEnvelope {
+                        request_id,
+                        protocol_version,
+                        body,
+                    },
+                    &session_id,
+                    operation,
+                )
+                .await?;
                 continue;
             }
             if let RelayRequest::RespondElicitation { .. } = &envelope.request {

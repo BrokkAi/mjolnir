@@ -1184,6 +1184,7 @@ mod tests {
 
     fn state_with(sessions: Vec<SessionRecord>) -> State {
         State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: sessions
                 .into_iter()

@@ -362,7 +362,10 @@ impl Controller {
             .as_ref()
             .context("session has no target")?;
         let backend = backend_locator(locator, &destroying, &self.config)?;
-        let deferred = if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
+        let deferred = if self.state.subagents.contains_key(session_id) {
+            targets::borrowed_worker_cleanup_plan(&backend, session_id)?.execute(executor)?;
+            false
+        } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
             plan.execute(executor)?;
             true
         } else {
@@ -574,6 +577,7 @@ impl Controller {
             .context("remove session image attachments")?;
         crate::database::delete_session(session_id)
             .context("destroy stopped session in database")?;
+        self.state.subagents.remove(session_id);
         self.state.destroy_stopped_session(session_id)?;
         Ok(())
     }
@@ -612,7 +616,11 @@ impl Controller {
         // writer from recreating files under the teardown below.
         if let Some(locator) = &session.target {
             let backend = backend_locator(locator, &session, &self.config)?;
-            execute_target_cleanup(&backend, session_id, executor)?;
+            if self.state.subagents.contains_key(session_id) {
+                targets::borrowed_worker_cleanup_plan(&backend, session_id)?.execute(executor)?;
+            } else {
+                execute_target_cleanup(&backend, session_id, executor)?;
+            }
         }
         if let Some(worktree) = &session.managed_worktree {
             cleanup_managed_worktree(executor, worktree)
@@ -633,6 +641,7 @@ impl Controller {
             .remove_session_data()
             .context("remove session image attachments")?;
         delete(session_id).context("force destroy session in database")?;
+        self.state.subagents.remove(session_id);
         self.state.destroy_session_force(session_id)?;
         Ok(())
     }

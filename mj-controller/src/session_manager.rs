@@ -2789,6 +2789,8 @@ pub struct StandaloneSession {
     operational: RelayOperationalState,
     latest_credential_sync_signal: Option<CredentialSyncSignal>,
     project_memory: Option<ProjectMemorySyncTarget>,
+    subagent_requests: Vec<mj_core::subagent::SubagentToolRequest>,
+    subagent_results: Vec<mj_core::subagent::SubagentToolResult>,
 }
 
 impl StandaloneSession {
@@ -2809,6 +2811,8 @@ impl StandaloneSession {
             operational,
             latest_credential_sync_signal: None,
             project_memory: target.project_memory.clone(),
+            subagent_requests: Vec::new(),
+            subagent_results: Vec::new(),
         };
         connection.sync_in_place().await?;
         Ok(connection)
@@ -2888,10 +2892,15 @@ impl StandaloneSession {
                 Err(error) => return Err(error),
             }
         }
+        let previous_requests = self.subagent_requests.clone();
+        let previous_results = self.subagent_results.clone();
+        (self.subagent_requests, self.subagent_results) = self.client.subagent_requests().await?;
         let changed = repaired
             || self.materialized.applied_event_ordinal != original_ordinal
             || self.materialized.applied_event_digest != original_digest
-            || self.operational != original_operational;
+            || self.operational != original_operational
+            || self.subagent_requests != previous_requests
+            || self.subagent_results != previous_results;
         Ok(changed)
     }
 
@@ -3016,7 +3025,18 @@ impl StandaloneSession {
             operational: self.operational.clone(),
             latest_credential_sync_signal: self.latest_credential_sync_signal.clone(),
             worker_build: self.client.worker_build().map(str::to_owned),
+            subagent_requests: self.subagent_requests.clone(),
+            subagent_results: self.subagent_results.clone(),
         }
+    }
+
+    pub async fn complete_subagent_request(
+        &mut self,
+        result: mj_core::subagent::SubagentToolResult,
+    ) -> Result<()> {
+        self.client.complete_subagent_request(result).await?;
+        (self.subagent_requests, self.subagent_results) = self.client.subagent_requests().await?;
+        Ok(())
     }
 
     /// Hands one command to the relay and returns the ordinal it accepted it
@@ -4154,6 +4174,8 @@ mod tests {
             .collect();
         ManagedSessionView {
             snapshot: Some(ManagedSessionSnapshot {
+                subagent_requests: Vec::new(),
+                subagent_results: Vec::new(),
                 window: mj_core::state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational: RelayOperationalState {

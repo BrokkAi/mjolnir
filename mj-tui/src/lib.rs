@@ -302,6 +302,7 @@ pub enum DashboardAction {
     SelectWorkspace {
         workspace_id: String,
     },
+    ExitSubagentWorkspace,
     /// Load the workspace list and detached drafts for the workspace manager.
     LoadWorkspaceManagement {
         generation: u64,
@@ -622,12 +623,15 @@ pub struct DashboardState {
     pub(crate) workspace_order: Vec<String>,
     /// The local filter applied to the one global live session feed.
     active_workspace_id: Option<String>,
+    /// Parent whose direct children temporarily replace the ordinary workspace tabs.
+    subagent_parent_id: Option<String>,
     /// Dashboard-only state retained while the user switches tabs.
     workspace_views: BTreeMap<String, WorkspaceViewState>,
     /// A pane-size update from the controller may not overwrite a local edit
     /// made in this client, even when it arrives after the edit.
     workspace_pane_sizes_modified: BTreeSet<String>,
     workspace_tab_areas: Vec<(String, Rect)>,
+    pub(crate) subagent_workspace_close_area: Option<Rect>,
     pub(crate) workspace_pane_area: Option<Rect>,
     /// The hamburger's exact three-cell rectangle from the last frame.
     /// Rebuilt with the tabs so stale geometry cannot activate an invisible
@@ -736,9 +740,11 @@ impl DashboardState {
             workspace_names: BTreeMap::new(),
             workspace_order: vec![mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()],
             active_workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()),
+            subagent_parent_id: None,
             workspace_views: BTreeMap::new(),
             workspace_pane_sizes_modified: BTreeSet::new(),
             workspace_tab_areas: Vec::new(),
+            subagent_workspace_close_area: None,
             workspace_pane_area: None,
             workspace_hamburger_area: None,
             workspace_control_focus: WorkspaceControlFocus::Tabs,
@@ -761,6 +767,37 @@ impl DashboardState {
     /// The workspace currently used as the Sessions-pane filter.
     pub fn active_workspace_id(&self) -> Option<&str> {
         self.active_workspace_id.as_deref()
+    }
+
+    pub fn subagent_parent_id(&self) -> Option<&str> {
+        self.subagent_parent_id.as_deref()
+    }
+
+    pub fn open_subagent_workspace(&mut self, parent_id: String) {
+        if !self.state.sessions.contains_key(&parent_id) {
+            return;
+        }
+        self.subagent_parent_id = Some(parent_id.clone());
+        self.selected_session_id = self
+            .state
+            .subagents
+            .values()
+            .find(|record| record.parent_session_id == parent_id)
+            .map(|record| record.child_session_id.clone());
+        self.current_session_id = None;
+        self.focus = Focus::Sessions;
+        self.clamp_selections();
+        self.mark_render_changed();
+    }
+
+    pub fn close_subagent_workspace(&mut self) {
+        let Some(parent_id) = self.subagent_parent_id.take() else {
+            return;
+        };
+        self.selected_session_id = Some(parent_id);
+        self.current_session_id = None;
+        self.clamp_selections();
+        self.mark_render_changed();
     }
 
     /// Records a visible mutation for the controller's dirty gate.
@@ -921,6 +958,7 @@ impl DashboardState {
     pub(crate) fn clear_workspace_tab_areas(&mut self) {
         self.workspace_tab_areas.clear();
         self.workspace_hamburger_area = None;
+        self.subagent_workspace_close_area = None;
     }
 
     /// Moves the Sessions selection onto `session_id` without changing focus.
@@ -1932,6 +1970,17 @@ impl DashboardState {
     /// visible regardless. The controller may feed all workspaces into one
     /// state snapshot; the tab is the local view filter.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
+        if let Some(parent_id) = self.subagent_parent_id.as_deref() {
+            let mut children = self
+                .state
+                .subagents
+                .values()
+                .filter(|record| record.parent_session_id == parent_id)
+                .filter_map(|record| self.state.sessions.get(&record.child_session_id))
+                .collect::<Vec<_>>();
+            children.sort_by_cached_key(|session| session.creation_order_key());
+            return children;
+        }
         let Some(active_workspace_id) = self.active_workspace_id.as_deref() else {
             return Vec::new();
         };
@@ -1941,6 +1990,7 @@ impl DashboardState {
             .values()
             .filter(|session| {
                 session.workspace_id == active_workspace_id
+                    && !self.state.subagents.contains_key(&session.id)
                     && (session.state.is_active()
                         || self.transition_kind(&session.id).is_some()
                         || (self.config.advanced.show_stopped_sessions
@@ -2973,6 +3023,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -3017,6 +3068,7 @@ mod tests {
         DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -3131,6 +3183,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -3462,6 +3515,82 @@ mod tests {
     }
 
     #[test]
+    fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
+        let mut parent = stopped_session();
+        parent.id = "parent-session".into();
+        parent.title = "Parent planning session".into();
+        parent.session_title_override = Some("Parent planning session".into());
+        parent.state = SessionState::Running;
+        let mut child = stopped_session();
+        child.id = "child-session".into();
+        child.title = "Inspect parser".into();
+        child.state = SessionState::Running;
+        let relation = mj_core::subagent::SubagentRecord {
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Inspect parser".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "Inspect the parser".into(),
+            request_key: "request-1".into(),
+            created_at: child.created_at.clone(),
+            delivered_turn: None,
+        };
+        let mut dashboard = DashboardState::new(
+            config(),
+            State {
+                subagents: BTreeMap::from([(child.id.clone(), relation)]),
+                version: STATE_VERSION,
+                sessions: BTreeMap::from([
+                    (parent.id.clone(), parent.clone()),
+                    (child.id.clone(), child.clone()),
+                ]),
+                mount_history: BTreeMap::new(),
+                container_sizes: BTreeMap::new(),
+            },
+            BTreeMap::new(),
+        );
+
+        assert_eq!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![parent.id.as_str()],
+            "child sessions belong only to the virtual workspace"
+        );
+
+        dashboard.open_subagent_workspace(parent.id.clone());
+        assert_eq!(dashboard.subagent_parent_id(), Some(parent.id.as_str()));
+        assert_eq!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![child.id.as_str()]
+        );
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 3)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::workspaces::render_workspace_tabs(frame, frame.area(), &mut dashboard);
+            })
+            .unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("Parent planning session"), "{screen}");
+        assert!(screen.contains("X"), "{screen}");
+
+        dashboard.close_subagent_workspace();
+        assert_eq!(dashboard.subagent_parent_id(), None);
+        assert_eq!(dashboard.selected_session_id(), Some(parent.id.as_str()));
+    }
+
+    #[test]
     fn advanced_setting_reveals_only_stopped_sessions_in_the_selected_workspace() {
         let mut dashboard = dashboard_with_session(stopped_session());
         let mut live = running_session();
@@ -3593,6 +3722,7 @@ mod tests {
         second.state = SessionState::Running;
         second.project_directory = Some("/home/dev/bifrost-fuzz".into());
         let state = State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: [first, second]
                 .into_iter()
@@ -3641,6 +3771,7 @@ mod tests {
         let single = DashboardState::new(
             dashboard_config.clone(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions: [(bundle_session.id.clone(), bundle_session.clone())]
                     .into_iter()
@@ -3666,6 +3797,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             dashboard_config,
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions: [bundle_session, raw_source]
                     .into_iter()
@@ -3791,6 +3923,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions: BTreeMap::from([(active.id.clone(), active), (other.id.clone(), other)]),
                 mount_history: BTreeMap::new(),
@@ -3846,6 +3979,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -3902,6 +4036,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -3941,6 +4076,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -4114,6 +4250,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -4143,6 +4280,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions: BTreeMap::from([(other.id.clone(), other)]),
                 mount_history: BTreeMap::new(),

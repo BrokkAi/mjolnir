@@ -456,6 +456,7 @@ mod tests {
                 workspace: format!("~/hel/{SESSION}"),
             },
             TargetLocator::SshBare {
+                worker_id: None,
                 ssh: ssh(),
                 workspace: format!("~/hel/{SESSION}"),
             },

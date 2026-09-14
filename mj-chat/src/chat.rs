@@ -217,6 +217,7 @@ pub enum ChatEventOutcome {
     CycleFocus {
         reverse: bool,
     },
+    OpenSubagents,
     QuitDetach {
         last_seen_event_ordinal: u64,
     },
@@ -225,6 +226,7 @@ pub enum ChatEventOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatAction {
     None,
+    OpenSubagents,
     Prompt(String),
     RunShell(String),
     RemoveQueuedPrompt {
@@ -449,6 +451,8 @@ pub struct SessionHeaderIdentity {
     /// questions (like whether Codex exposes plan mode) without a recovery
     /// context, which the daemon now owns.
     pub harness_kind: Option<HarnessKind>,
+    /// Direct children owned by this parent session.
+    pub subagent_count: usize,
 }
 
 /// The session facts the chat needs to run reviewers and keep per-workspace
@@ -601,6 +605,9 @@ pub struct ChatState {
     task_dialog_max_scroll: usize,
     task_dialog_form: Form<BackgroundTaskControl>,
     task_control_area: Option<Rect>,
+    subagent_count: usize,
+    subagent_control_focused: bool,
+    subagent_control_area: Option<Rect>,
     task_dialog_area: Option<Rect>,
     /// The opaque ids represented by the last frame's visible Stop controls.
     /// Keeping this separate from row indices prevents a snapshot reorder
@@ -745,6 +752,9 @@ impl ChatState {
             task_dialog_max_scroll: 0,
             task_dialog_form: Form::new(),
             task_control_area: None,
+            subagent_count: 0,
+            subagent_control_focused: false,
+            subagent_control_area: None,
             task_dialog_area: None,
             task_dialog_control_ids: Vec::new(),
             pending_background_stops: BTreeSet::new(),
@@ -1452,6 +1462,34 @@ impl ChatState {
     #[must_use]
     pub(super) fn background_task_count(&self) -> usize {
         self.session_activity.background_commands.len()
+    }
+
+    #[must_use]
+    pub(super) fn subagent_count(&self) -> usize {
+        self.subagent_count
+    }
+
+    pub(super) fn set_subagent_count(&mut self, count: usize) {
+        if self.subagent_count != count {
+            self.subagent_count = count;
+            if count == 0 {
+                self.subagent_control_focused = false;
+            }
+            self.mark_visible_changed();
+        }
+    }
+
+    #[must_use]
+    pub(super) fn subagent_control_focused(&self) -> bool {
+        self.subagent_control_focused
+    }
+
+    fn focus_subagent_control(&mut self) {
+        if self.subagent_count > 0 && !self.subagent_control_focused {
+            self.task_control_focused = false;
+            self.subagent_control_focused = true;
+            self.mark_visible_changed();
+        }
     }
 
     #[must_use]
@@ -2635,9 +2673,36 @@ impl ChatState {
                     self.open_task_dialog();
                     return ChatAction::None;
                 }
+                KeyCode::Right if self.subagent_count > 0 => {
+                    self.focus_subagent_control();
+                    return ChatAction::None;
+                }
                 KeyCode::Down => return ChatAction::None,
                 _ => {
                     self.task_control_focused = false;
+                    self.mark_visible_changed();
+                }
+            }
+            if code == KeyCode::Esc || code == KeyCode::Up {
+                return ChatAction::None;
+            }
+        }
+
+        if self.subagent_control_focused {
+            match code {
+                KeyCode::Esc | KeyCode::Up => {
+                    self.subagent_control_focused = false;
+                    self.mark_visible_changed();
+                }
+                KeyCode::Enter => return ChatAction::OpenSubagents,
+                KeyCode::Left if self.background_task_count() > 0 => {
+                    self.subagent_control_focused = false;
+                    self.focus_task_control();
+                    return ChatAction::None;
+                }
+                KeyCode::Down => return ChatAction::None,
+                _ => {
+                    self.subagent_control_focused = false;
                     self.mark_visible_changed();
                 }
             }
@@ -2862,8 +2927,14 @@ impl ChatState {
             KeyCode::Down => {
                 if self.history_index.is_some() {
                     self.move_history(1);
-                } else if self.background_task_count() > 0 && self.cursor_is_on_last_prompt_line() {
-                    self.focus_task_control();
+                } else if self.cursor_is_on_last_prompt_line()
+                    && (self.background_task_count() > 0 || self.subagent_count > 0)
+                {
+                    if self.background_task_count() > 0 {
+                        self.focus_task_control();
+                    } else {
+                        self.focus_subagent_control();
+                    }
                 } else {
                     self.move_vertical(1);
                 }
@@ -2995,6 +3066,12 @@ impl ChatState {
         {
             return true;
         }
+        if self
+            .subagent_control_area
+            .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
+        {
+            return true;
+        }
         if self.voice_form.captures_pointer()
             || self
                 .voice_button_area
@@ -3048,6 +3125,7 @@ impl ChatState {
         self.voice_form.reset_geometry();
         self.voice_button_area = None;
         self.task_control_area = None;
+        self.subagent_control_area = None;
         self.task_dialog_area = None;
         self.task_dialog_control_ids.clear();
         self.reset_config_picker_geometry();
@@ -3200,6 +3278,13 @@ impl ChatState {
         {
             self.open_task_dialog();
             return ChatAction::None;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self
+                .subagent_control_area
+                .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
+        {
+            return ChatAction::OpenSubagents;
         }
         if self.config_picker_active() {
             return self.handle_config_picker_mouse(mouse).1;
@@ -4487,6 +4572,35 @@ mod tests {
         chat.set_session_activity(mj_client::usage_format::SessionActivity::default());
         let empty = drawn_transcript(&mut chat, 80, 12).join("\n");
         assert!(empty.contains("No background tasks remain."), "{empty}");
+    }
+
+    #[test]
+    fn subagents_use_the_prompt_border_and_activate_by_keyboard_or_mouse() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("keep this draft".into());
+        chat.set_subagent_count(2);
+
+        let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+        assert!(screen.contains("Sub-agents (2)"), "{screen}");
+        let area = chat
+            .subagent_control_area
+            .expect("sub-agent control hitbox");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(chat.component_handles_mouse(click));
+        assert_eq!(chat.handle_mouse(click), ChatAction::OpenSubagents);
+
+        assert_eq!(chat.handle_key(key(KeyCode::Down)), ChatAction::None);
+        assert!(chat.subagent_control_focused());
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::OpenSubagents
+        );
+        assert_eq!(chat.input, "keep this draft");
     }
 
     #[test]

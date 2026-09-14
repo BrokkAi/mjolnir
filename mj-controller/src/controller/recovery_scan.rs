@@ -839,6 +839,7 @@ fn recovery_backend_locator(
             targets::TargetLocator::SshBare {
                 ssh: backend_ssh(ssh),
                 workspace: workspace.to_string_lossy().into_owned(),
+                worker_id: None,
             }
         }
         (

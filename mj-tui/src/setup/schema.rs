@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "profiles":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "subagents":{}, "profiles":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -15,6 +15,9 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
         }
         "review" => {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
+        }
+        "subagents" if path.len() == 1 => {
+            json!({"enabled":true,"max_concurrent":6,"eligible_profiles":{}})
         }
         "profiles" if path.len() == 2 => {
             json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null})
@@ -104,6 +107,9 @@ pub(super) fn label(key: &str) -> String {
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
+        "subagents" => "Sub-agents",
+        "max_concurrent" => "Maximum concurrent children",
+        "eligible_profiles" => "Additional eligible profiles",
         "profiles" => "Agent Profiles",
         "targets" => "Machines and Runtimes",
         "bundles" => "Projects",
@@ -267,6 +273,12 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "review" => {
             "Choose an agent profile for reviews. Model and effort can use the profile defaults."
+        }
+        "subagents" => {
+            "Enable Mjolnir-owned child agents and choose their concurrency limit and additional profiles. A parent profile is always eligible for its own children."
+        }
+        "eligible_profiles" => {
+            "Check profiles that Claude and Codex parents may use in addition to their own profile."
         }
         "memory" => "Examples: 8g or 4096m. Leave blank for no limit.",
         "context_window_bytes" => {

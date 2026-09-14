@@ -3401,6 +3401,7 @@ mod tests {
         second.session_title_override = Some("Second session".into());
         second.created_at = "2026-08-10T00:00:00Z".into();
         let state = State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
             mount_history: BTreeMap::new(),
@@ -3522,6 +3523,7 @@ mod tests {
         second.project_directory = Some("/projects/beta".into());
         second.created_at = "2026-08-10T00:00:00Z".into();
         let state = State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
             mount_history: BTreeMap::new(),
@@ -3563,6 +3565,7 @@ mod tests {
         second.project_directory = Some("/projects/beta".into());
         second.created_at = "2026-08-10T00:00:00Z".into();
         let state = State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
             mount_history: BTreeMap::new(),
@@ -3644,6 +3647,7 @@ mod tests {
         beta_second.id = "session-beta-second".into();
         beta_second.created_at = "2026-08-11T00:00:00Z".into();
         let state = State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: [alpha, beta_first, beta_second]
                 .into_iter()
@@ -4625,6 +4629,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: mj_core::state::STATE_VERSION,
                 sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
                 mount_history: BTreeMap::new(),
@@ -4703,6 +4708,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,
                 mount_history: BTreeMap::new(),
@@ -5585,6 +5591,7 @@ mod tests {
         session.target_template_id = "precision-3260".into();
         session.project_directory = Some("/home/dev/hel".into());
         let state = State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(session.id.clone(), session)]),
             mount_history: BTreeMap::new(),
@@ -5736,6 +5743,7 @@ mod tests {
             sessions.insert(session.id.clone(), session);
         }
         let state = State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
             mount_history: BTreeMap::new(),
@@ -6056,6 +6064,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
                 mount_history: BTreeMap::new(),

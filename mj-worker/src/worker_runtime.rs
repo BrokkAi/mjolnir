@@ -87,6 +87,8 @@ pub async fn discover_profile_config(
 #[cfg(unix)]
 pub(crate) mod reviewer;
 #[cfg(unix)]
+pub(crate) mod subagents;
+#[cfg(unix)]
 mod unix;
 
 #[cfg(not(unix))]

@@ -131,6 +131,14 @@ pub enum RelayRequest {
     StopBackgroundTask {
         background_task_id: String,
     },
+    /// Fetch controller work queued by the parent session's private MCP
+    /// socket. Connection-only: request payloads do not enter chat history.
+    SubagentRequests,
+    /// Acknowledge a completed MCP request and cache its bounded answer for
+    /// subsequent tool calls and restart recovery.
+    CompleteSubagentRequest {
+        result: crate::subagent::SubagentToolResult,
+    },
     /// Drive the second-opinion reviewer that runs beside this session.
     ///
     /// The reviewer is a sidecar, not a session: it shares this worker's
@@ -283,6 +291,8 @@ impl RelayRequest {
             Self::RemoveGithubToken => "remove_github_token",
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::StopBackgroundTask { .. } => "stop_background_task",
+            Self::SubagentRequests => "subagent_requests",
+            Self::CompleteSubagentRequest { .. } => "complete_subagent_request",
             Self::Reviewer { request, .. } => request.action_name(),
         }
     }
@@ -297,6 +307,7 @@ impl RelayRequest {
             | Self::InstallAttachment { .. }
             | Self::ReadAttachment { .. } => 8,
             Self::StopBackgroundTask { .. } => 9,
+            Self::SubagentRequests | Self::CompleteSubagentRequest { .. } => 12,
             Self::RespondElicitation { .. } => 2,
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
@@ -431,6 +442,11 @@ pub enum RelayResponsePayload {
     BackgroundTaskStopRequested {
         background_task_id: String,
     },
+    SubagentRequests {
+        requests: Vec<crate::subagent::SubagentToolRequest>,
+        results: Vec<crate::subagent::SubagentToolResult>,
+    },
+    SubagentRequestCompleted,
     /// The reviewer sidecar is running under the requested configuration.
     ReviewerStarted {
         #[serde(default, skip_serializing_if = "Option::is_none")]

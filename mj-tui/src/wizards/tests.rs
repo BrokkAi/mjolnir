@@ -286,6 +286,7 @@ fn opening_session_wizards_prefetches_all_aws_sizes() {
     let mut dashboard = DashboardState::new(
         config,
         State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([("session-1".into(), stopped_session())]),
             mount_history: BTreeMap::new(),
@@ -315,6 +316,7 @@ fn persisted_import_opens_resume_wizard_for_its_id_and_keeps_defaults() {
 
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     let state = State {
+        subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(imported.id.clone(), imported)]),
         mount_history: BTreeMap::new(),
@@ -825,6 +827,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
     recent.bundle_id = "zebra-recent".into();
     recent.created_at = "2026-08-11T12:00:00Z".into();
     let state = State {
+        subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(older.id.clone(), older), (recent.id.clone(), recent)]),
         mount_history: BTreeMap::new(),
@@ -876,6 +879,7 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
     recent.target_template_id = "recent-target".into();
     recent.created_at = "2026-08-12T12:00:00Z".into();
     let state = State {
+        subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(recent.id.clone(), recent)]),
         mount_history: BTreeMap::new(),
@@ -1945,6 +1949,7 @@ fn raw_resume_review_names_the_exact_reused_project_directory() {
     let mut dashboard = DashboardState::new(
         config,
         State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(session.id.clone(), session)]),
             mount_history: BTreeMap::new(),
@@ -1995,6 +2000,7 @@ fn resume_target_step_minus_halves_container_size_through_the_key_path() {
     let mut dashboard = DashboardState::new(
         config,
         State {
+            subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([("session-1".into(), stopped_session())]),
             mount_history: BTreeMap::new(),

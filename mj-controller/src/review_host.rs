@@ -2795,6 +2795,8 @@ mod tests {
         }
         ManagedSessionView {
             snapshot: Some(ManagedSessionSnapshot {
+                subagent_requests: Vec::new(),
+                subagent_results: Vec::new(),
                 window: mj_core::state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational,

@@ -81,7 +81,7 @@ impl Controller {
         );
         let result = match setup {
             Ok(((), (backend, worker_root))) => {
-                self.connect_and_start_worker(session_id, executor, &backend, &worker_root)
+                self.connect_and_start_worker(session_id, executor, &backend, &worker_root, true)
                     .await
             }
             Err(error) => Err(error),
@@ -94,6 +94,49 @@ impl Controller {
                 self.mark_worker_connected(session_id, native_session_id)
             }
             Err(error) => Err(self.rollback_failed_new_session(session_id, error, executor)?),
+        }
+    }
+
+    /// Start a child worker inside an already-provisioned parent target.
+    /// Repository, target, and mount setup belong exclusively to the parent.
+    pub async fn provision_subagent_session_controlled(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        let (backend, worker_root) = self.worker_placement(session_id)?;
+        let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+        let result = self.prepare_worker_files(session_id, &backend, &worker_root, syncing);
+        let result = match result {
+            Ok(()) => {
+                self.connect_and_start_worker(session_id, executor, &backend, &worker_root, false)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(native_session_id) => self.mark_worker_connected(session_id, native_session_id),
+            Err(error) => {
+                if let Err(stop_error) =
+                    super::worker_binary::stop_worker(executor, &backend, &worker_root)
+                {
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{stop_error:#}"),
+                        "failed sub-agent worker could not be stopped cleanly"
+                    );
+                }
+                let record = self
+                    .state
+                    .sessions
+                    .get_mut(session_id)
+                    .context("failed sub-agent session disappeared")?;
+                record.state = SessionState::Error;
+                record.updated_at = super::now();
+                record.last_error = Some(format!("sub-agent startup failed: {error:#}"));
+                crate::database::save_lifecycle_session(record)?;
+                Err(error)
+            }
         }
     }
 
@@ -503,10 +546,13 @@ impl Controller {
         executor: &impl CommandExecutor,
         backend: &targets::TargetLocator,
         worker_root: &str,
+        initialize_workspace: bool,
     ) -> Result<Option<String>> {
         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-        install_inherited_git_settings(executor, backend, session_id)?;
-        self.initialize_network_workspaces(session_id, backend, syncing)?;
+        if initialize_workspace {
+            install_inherited_git_settings(executor, backend, session_id)?;
+            self.initialize_network_workspaces(session_id, backend, syncing)?;
+        }
         let session = self
             .state
             .sessions
@@ -904,6 +950,7 @@ fn provisioned_locator(
         targets::TargetTemplate::SshBare { ssh, .. } => targets::TargetLocator::SshBare {
             ssh: ssh.clone(),
             workspace: targets::workspace_for(target, session_id).ok()?,
+            worker_id: None,
         },
         targets::TargetTemplate::AwsEc2(aws) => targets::TargetLocator::AwsEc2 {
             profile: aws.profile.clone(),
@@ -1804,6 +1851,7 @@ mod tests {
         }
 
         let persistent = targets::TargetLocator::SshBare {
+            worker_id: None,
             ssh,
             workspace: "/srv/hel/018f9dd2-a3b4-7c8d-9000-123456789abc".into(),
         };

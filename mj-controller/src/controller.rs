@@ -12,6 +12,7 @@ mod readiness;
 mod recovery_scan;
 mod resume;
 mod reviewer;
+mod subagents;
 #[cfg(test)]
 mod test_support;
 pub mod update;
@@ -78,6 +79,7 @@ pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
 };
 pub use reviewer::reviewer_stager;
+pub use subagents::RegisterSubagentRequest;
 pub use worker_binary::{
     WorkerBinaryAvailability, pin_worker_binary_sources, worker_binary_prerequisite_for_arch,
 };
@@ -1180,6 +1182,14 @@ fn target_profile_home(
     profile: &mj_core::config::HarnessProfile,
 ) -> String {
     let home = match locator {
+        targets::TargetLocator::LocalBare { worker_root }
+            if profile.kind == mj_core::config::HarnessKind::Claude =>
+        {
+            Path::new(worker_root)
+                .join("profile")
+                .to_string_lossy()
+                .into_owned()
+        }
         targets::TargetLocator::LocalBare { .. } => profile.home.to_string_lossy().into_owned(),
         targets::TargetLocator::LocalPodman { .. }
         | targets::TargetLocator::LocalDocker { .. }
