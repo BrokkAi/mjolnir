@@ -41,6 +41,7 @@ fn new_session_wizard_returns_all_three_choices() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
+                mjolnir_subagents: Some(true),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -678,6 +679,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            mjolnir_subagents: Some(true),
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "claude-1".into(),
@@ -799,6 +801,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CreateSession {
+            mjolnir_subagents: None,
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "kimi".into(),
@@ -847,6 +850,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
+                mjolnir_subagents: Some(true),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -1098,6 +1102,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                 read_only: false,
             }],
             launch: Box::new(DashboardAction::CreateSession {
+                mjolnir_subagents: Some(true),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -2596,6 +2601,136 @@ fn raw_review_waits_for_worktree_inspection_and_preserves_explicit_selection() {
         create_managed_worktree: Some(false), project_directory: Some(directory), ..
     } if directory == std::path::Path::new("/work/main"))
     );
+}
+
+/// Only Claude and Codex can receive Mjolnir's delegation tools, so only they
+/// show the choice. The box follows the global `[subagents] enabled` setting.
+#[test]
+fn new_session_wizard_shows_subagent_checkbox_only_for_claude_and_codex() {
+    for (profile, visible) in [(0_usize, true), (1, true), (3, false)] {
+        let mut configuration = subagent_wizard_config();
+        configuration.subagents.enabled = true;
+        let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+        dashboard.begin_new();
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new wizard")
+        };
+        wizard.profile = profile;
+        wizard.step = WizardStep::Review;
+        wizard.project_directory = "/work/main".into();
+        assert!(
+            wizard.mjolnir_subagents,
+            "the global setting is the default"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+        let text = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert_eq!(
+            text.contains("Use Mjolnir sub-agents"),
+            visible,
+            "profile {profile}:\n{text}"
+        );
+    }
+}
+
+/// The wizard sends the box's value for Claude and Codex, and `None` for a
+/// harness that cannot receive the tools at all.
+#[test]
+fn new_session_wizard_sends_subagent_choice() {
+    let submit = |profile: usize, toggle: bool| {
+        let mut dashboard =
+            DashboardState::new(subagent_wizard_config(), State::default(), BTreeMap::new());
+        dashboard.begin_new();
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new wizard")
+        };
+        wizard.profile = profile;
+        wizard.step = WizardStep::Review;
+        wizard.project_directory = "/work/main".into();
+        dashboard.apply_resolved_project_directory(
+            &dashboard.path_input_context(),
+            "/work/main",
+            Ok((
+                PathBuf::from("/work/main"),
+                mj_core::state::ManagedWorktreeOptions {
+                    available: true,
+                    default_create: false,
+                },
+            )),
+        );
+        // Draw the review step so its controls are declared, as the terminal
+        // does before any key reaches them.
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+        if toggle {
+            let Mode::New(wizard) = &mut dashboard.mode else {
+                panic!("new wizard")
+            };
+            wizard.form.get_mut().focus(WizardControl::MjolnirSubagents);
+            dashboard.handle_key(key(KeyCode::Char(' ')));
+        }
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new wizard")
+        };
+        wizard.form.get_mut().focus(WizardControl::Submit);
+        dashboard.handle_key(key(KeyCode::Enter))
+    };
+
+    assert!(matches!(
+        submit(0, false),
+        DashboardAction::CreateSession {
+            mjolnir_subagents: Some(true),
+            ..
+        }
+    ));
+    assert!(matches!(
+        submit(0, true),
+        DashboardAction::CreateSession {
+            mjolnir_subagents: Some(false),
+            ..
+        }
+    ));
+    assert!(matches!(
+        submit(1, true),
+        DashboardAction::CreateSession {
+            mjolnir_subagents: Some(false),
+            ..
+        }
+    ));
+    // Grok never receives the tools, so the wizard expresses no opinion.
+    assert!(matches!(
+        submit(3, false),
+        DashboardAction::CreateSession {
+            mjolnir_subagents: None,
+            ..
+        }
+    ));
+}
+
+/// A bare local target plus a Grok profile, so the sub-agent checkbox can be
+/// exercised against a harness that never receives the tools.
+fn subagent_wizard_config() -> mj_core::config::Config {
+    let mut configuration = config();
+    configuration.targets.clear();
+    configuration
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    configuration.profiles.insert(
+        "grok-1".into(),
+        HarnessProfile {
+            enabled: true,
+            context_window_bytes: None,
+            kind: HarnessKind::Grok,
+            home: PathBuf::from("/profiles/grok"),
+            environment: BTreeMap::new(),
+        },
+    );
+    configuration
 }
 
 #[test]

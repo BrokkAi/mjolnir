@@ -1,6 +1,6 @@
 {
   "private": true,
   "dependencies": {
-    "zcode-acp-server": "0.37.1"
+    "@brokkai/zcode-acp": "0.37.4"
   }
 }

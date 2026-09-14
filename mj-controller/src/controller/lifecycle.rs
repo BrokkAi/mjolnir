@@ -15,12 +15,15 @@ use super::checkpoint::{
     CheckpointExportPolicy, LatchExclusivity, prune_replaced_checkpoint,
     release_projection_behind_checkpoint, verify_installed_checkpoint_gate, wait_for_relay_closed,
 };
+use super::worker_restart::WorkerRestartLeftNoWorker;
 use super::worktree::{cleanup_managed_worktree, retire_managed_worktree};
 use super::{Controller, now, persist_session_record_transition_or_restore};
 
 impl Controller {
     /// Checkpoint, ask the harness to close, and only then tear down the exact
-    /// provisioned target. Checkpoint failure is deliberately non-destructive.
+    /// provisioned target. Checkpoint failure is deliberately non-destructive,
+    /// except when the checkpoint's worker restart left no live worker: that
+    /// records `Error` and keeps the target for a later resume or forced close.
     pub async fn close_session(&mut self, session_id: &str) -> Result<()> {
         self.close_session_controlled(session_id, &ProcessExecutor)
             .await
@@ -111,9 +114,10 @@ impl Controller {
             Ok(latched) => latched,
             Err(error) => {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
-                record.state = previous.state;
-                record.updated_at = now();
-                record.last_checkpoint_error = Some(format!("{error:#}"));
+                // The target is kept even when the restart left no worker: a
+                // forced destroy and a resume's pre-clean both use it to tear
+                // down the dead container.
+                apply_close_checkpoint_failure(record, &previous, &error, now());
                 return Err(
                     self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error)
                 );
@@ -691,6 +695,31 @@ fn apply_close_checkpoint_started(record: &mut SessionRecord, updated_at: String
     record.last_checkpoint_error = None;
 }
 
+/// Record a close whose checkpoint failed.
+///
+/// An ordinary failure is non-destructive: the session returns to the state it
+/// had. A restart that left no live worker cannot return to Running, because
+/// nothing is listening there any more; it records `Error` so the session stops
+/// being polled, and keeps its target for a later resume or forced close.
+fn apply_close_checkpoint_failure(
+    record: &mut SessionRecord,
+    previous: &SessionRecord,
+    error: &anyhow::Error,
+    updated_at: String,
+) {
+    if WorkerRestartLeftNoWorker::marks(error) {
+        record.state = SessionState::Error;
+        record.last_error = Some(format!(
+            "close failed and left the session without a live worker; retry the close, \
+             resume from its checkpoint, or close it with --force: {error:#}"
+        ));
+    } else {
+        record.state = previous.state;
+    }
+    record.last_checkpoint_error = Some(format!("{error:#}"));
+    record.updated_at = updated_at;
+}
+
 fn apply_interrupted_close_error(
     record: &mut SessionRecord,
     error: &anyhow::Error,
@@ -738,6 +767,58 @@ mod tests {
         assert_eq!(session.state, SessionState::Closing);
         assert_eq!(session.updated_at, "2026-08-14T12:00:00Z");
         assert!(session.last_checkpoint_error.is_none());
+    }
+
+    #[test]
+    fn a_close_whose_restart_left_no_worker_records_error_and_keeps_the_target() {
+        let mut session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
+        session.state = SessionState::Running;
+        session.target = Some(TargetLocator::LocalBare {
+            worker_root: "/tmp/mjolnir-close-test".into(),
+        });
+        let previous = session.clone();
+        let error =
+            anyhow::anyhow!("connect to Mjolnir worker").context(super::WorkerRestartLeftNoWorker);
+
+        apply_close_checkpoint_failure(
+            &mut session,
+            &previous,
+            &error,
+            "2026-08-14T12:00:00Z".into(),
+        );
+
+        assert_eq!(session.state, SessionState::Error);
+        assert!(session.last_error.is_some(), "{:?}", session.last_error);
+        assert!(session.last_checkpoint_error.is_some());
+        assert!(
+            session.target.is_some(),
+            "a forced destroy still needs the target"
+        );
+        assert_eq!(session.updated_at, "2026-08-14T12:00:00Z");
+    }
+
+    #[test]
+    fn a_close_whose_checkpoint_failed_with_a_live_worker_returns_to_its_previous_state() {
+        let mut session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
+        session.state = SessionState::Running;
+        session.last_error = None;
+        let previous = session.clone();
+        session.state = SessionState::Closing;
+        let error = anyhow::anyhow!("the session was busy");
+
+        apply_close_checkpoint_failure(
+            &mut session,
+            &previous,
+            &error,
+            "2026-08-14T12:00:00Z".into(),
+        );
+
+        assert_eq!(session.state, SessionState::Running);
+        assert!(session.last_error.is_none());
+        assert_eq!(
+            session.last_checkpoint_error.as_deref(),
+            Some("the session was busy")
+        );
     }
 
     struct DeferredCleanupExecutor {

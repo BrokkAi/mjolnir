@@ -57,10 +57,6 @@ pub const API_VERSION: &str = "1";
 pub const DEFAULT_WAIT_SECS: u64 = 600;
 pub use mj_core::subagent::MAX_WAIT_SECONDS as MAX_WAIT_SECS;
 
-/// Longest idempotency key accepted on session creation, matching the column
-/// the daemon stores it in.
-pub const MAX_IDEMPOTENCY_KEY_CHARS: usize = 128;
-
 /// How often a wait re-reads durable state for a session with no live actor.
 const STOPPED_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -277,6 +273,9 @@ pub struct SessionListResponse {
 pub struct StartSessionRequest {
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
+    /// None follows the global `[subagents] enabled` setting.
+    #[serde(default)]
+    pub mjolnir_subagents: Option<bool>,
     #[serde(default)]
     pub workspace_id: Option<String>,
     pub profile_id: String,
@@ -293,8 +292,6 @@ pub struct StartSessionRequest {
     pub effort: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
-    #[serde(default)]
-    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -738,12 +735,6 @@ pub trait SubagentBackend: Send + Sync {
 
     /// How far a created session's follow-up has got.
     fn start_status(&self, session_id: String) -> BoxFuture<'_, AnyResult<Option<StartStatus>>>;
-
-    /// The session a previous creation call recorded under this key.
-    fn lookup_idempotency(&self, key: String) -> BoxFuture<'_, AnyResult<Option<String>>>;
-
-    /// Remember that this key created this session.
-    fn record_idempotency(&self, key: String, session_id: String) -> BoxFuture<'_, AnyResult<()>>;
 
     /// A page of transcript items after `after_seq`.
     fn transcript(
@@ -1269,35 +1260,6 @@ async fn start_session(
     if let Some(prompt) = &request.prompt {
         validate_prompt_text(prompt, false)?;
     }
-    let key = match request.idempotency_key.as_deref().map(str::trim) {
-        Some(key) if key.is_empty() || key.chars().count() > MAX_IDEMPOTENCY_KEY_CHARS => {
-            return Err(ApiFailure::bad_request(format!(
-                "idempotency_key must contain 1-{MAX_IDEMPOTENCY_KEY_CHARS} characters"
-            )));
-        }
-        Some(key) => Some(key.to_owned()),
-        None => None,
-    };
-    // A retry with a key that already created a session returns that session
-    // rather than starting a second one, which is the whole point of the key:
-    // a caller whose connection dropped cannot tell whether the first call
-    // reached the controller.
-    if let Some(key) = &key
-        && let Some(session_id) = backend.lookup_idempotency(key.clone()).await?
-    {
-        let turn_id = match backend.start_status(session_id.clone()).await? {
-            Some(StartStatus::Submitted { turn_id }) => Some(turn_id),
-            _ => None,
-        };
-        return Ok((
-            StatusCode::OK,
-            Json(StartSessionResponse {
-                session_id,
-                turn_id,
-            }),
-        ));
-    }
-
     super::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
     super::require_target(&state.snapshot_rx.borrow(), &request.target_id)?;
     if request.model.is_some() || request.effort.is_some() {
@@ -1342,6 +1304,7 @@ async fn start_session(
     };
     let action = ControllerAction::New {
         create_managed_worktree: request.create_managed_worktree,
+        mjolnir_subagents: request.mjolnir_subagents,
         workspace_id: request.workspace_id.clone().unwrap_or_default(),
         profile_id: request.profile_id.clone(),
         bundle_id,
@@ -1374,9 +1337,6 @@ async fn start_session(
         ));
     };
 
-    if let Some(key) = key {
-        backend.record_idempotency(key, session_id.clone()).await?;
-    }
     backend
         .start_followup(
             session_id.clone(),
@@ -1705,7 +1665,12 @@ async fn close(
     Path(session_id): Path<String>,
     request: Option<Json<CloseRequest>>,
 ) -> Result<StatusCode, ApiFailure> {
-    let active_children = {
+    let force = request.as_ref().is_some_and(|request| request.force);
+    let active_children = if force {
+        // A force close destroys the children with the parent, so an active
+        // child is not a reason to refuse it.
+        0
+    } else {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
         session
@@ -1733,6 +1698,9 @@ async fn close(
         )));
     }
     backend(&state)?.cancel_start(session_id.clone()).await?;
+    if force {
+        return send_action(&state, ControllerAction::ForceClose { session_id }).await;
+    }
     send_action(&state, ControllerAction::Close { session_id }).await
 }
 
@@ -1741,6 +1709,9 @@ async fn close(
 struct CloseRequest {
     #[serde(default)]
     acknowledge_active_subagents: bool,
+    /// Destroy the session instead of checkpointing it. Irreversible.
+    #[serde(default)]
+    force: bool,
 }
 
 async fn cancel_turn(
@@ -2472,9 +2443,8 @@ mod tests {
         prompt_ordinal: u64,
         prompts: Mutex<Vec<(String, String)>>,
         summary: Option<TurnSummary>,
-        /// Follow-ups the start handler asked for, and the keys it recorded.
+        /// Follow-ups the start handler asked for.
         followups: Mutex<Vec<(String, StartFollowup)>>,
-        idempotency: Mutex<BTreeMap<String, String>>,
         start_status: Option<StartStatus>,
         /// The page and the limit the transcript handler asked for.
         transcript: Mutex<Option<TranscriptPage>>,
@@ -2606,19 +2576,6 @@ mod tests {
             _session_id: String,
         ) -> BoxFuture<'_, AnyResult<Option<StartStatus>>> {
             Box::pin(async { Ok(self.start_status.clone()) })
-        }
-        fn lookup_idempotency(&self, key: String) -> BoxFuture<'_, AnyResult<Option<String>>> {
-            Box::pin(async move { Ok(self.idempotency.lock().unwrap().get(&key).cloned()) })
-        }
-        fn record_idempotency(
-            &self,
-            key: String,
-            session_id: String,
-        ) -> BoxFuture<'_, AnyResult<()>> {
-            Box::pin(async move {
-                self.idempotency.lock().unwrap().insert(key, session_id);
-                Ok(())
-            })
         }
         fn transcript(
             &self,
@@ -2993,17 +2950,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_returns_the_created_session_and_remembers_its_idempotency_key() {
+    async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup() {
         let backend = Arc::new(FakeBackend::default());
         let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
 
         let response = tokio::spawn(app.oneshot(start_request(start_body(
-            r#","prompt":"add a README line","idempotency_key":"key-1""#,
+            r#","prompt":"add a README line""#,
         ))));
         let request = actions.recv().await.unwrap();
         assert_eq!(
             request.action,
             ControllerAction::New {
+                mjolnir_subagents: None,
                 create_managed_worktree: None,
                 workspace_id: String::new(),
                 profile_id: "codex-1".into(),
@@ -3024,11 +2982,6 @@ mod tests {
         let response = response.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(json_body(response).await["session_id"], "session-2");
-        assert_eq!(
-            backend.idempotency.lock().unwrap().get("key-1").cloned(),
-            Some("session-2".to_owned()),
-            "a retry with this key must find the session it created"
-        );
         let followups = backend.followups.lock().unwrap();
         assert_eq!(followups.len(), 1);
         assert_eq!(followups[0].0, "session-2");
@@ -3040,32 +2993,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_repeated_idempotency_key_returns_the_first_session_without_creating_another() {
-        let backend = Arc::new(FakeBackend {
-            idempotency: Mutex::new(BTreeMap::from([(
-                "key-1".to_owned(),
-                "session-1".to_owned(),
-            )])),
-            start_status: Some(StartStatus::Submitted { turn_id: 7 }),
-            ..FakeBackend::default()
-        });
-        let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+    async fn start_rejects_a_request_that_still_sends_an_idempotency_key() {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
 
         let response = app
             .oneshot(start_request(start_body(r#","idempotency_key":"key-1""#)))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert_eq!(body["session_id"], "session-1");
         assert_eq!(
-            body["turn_id"], 7,
-            "a retry must learn which turn the first call's prompt became"
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the field is gone, so the body no longer parses"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("idempotency_key"),
+            "the refusal must name the field it did not expect: {body}"
         );
         assert!(
             actions.try_recv().is_err(),
-            "the controller must not be asked to create a second session"
+            "a request that does not parse must not reach the controller"
         );
+        assert!(backend.followups.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3102,6 +3053,7 @@ mod tests {
         assert_eq!(
             request.action,
             ControllerAction::New {
+                mjolnir_subagents: None,
                 create_managed_worktree: None,
                 workspace_id: String::new(),
                 profile_id: "codex-1".into(),
@@ -3229,6 +3181,94 @@ mod tests {
             let response = response.await.unwrap().unwrap();
             assert_eq!(response.status(), StatusCode::ACCEPTED);
         }
+    }
+
+    #[tokio::test]
+    async fn a_forced_close_reaches_the_controller_as_a_force_close_action() {
+        let (app, mut actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
+
+        let response = tokio::spawn(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/close"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"force":true}"#))
+                    .unwrap(),
+            ),
+        );
+        let request = actions.recv().await.unwrap();
+        assert_eq!(
+            request.action,
+            ControllerAction::ForceClose {
+                session_id: "session-1".into(),
+            }
+        );
+        request
+            .reply
+            .send(super::super::ActionOutcome::accepted())
+            .unwrap();
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn a_forced_close_ignores_active_subagents_that_refuse_a_plain_close() {
+        let adjust = |snapshot: &mut ViewerSnapshot| {
+            let mut child = snapshot.sessions[0].clone();
+            child.id = "child-1".into();
+            child.state = "running".into();
+            child.subagent_session_ids.clear();
+            snapshot.sessions[0].subagent_session_ids = vec!["child-1".into()];
+            snapshot.sessions.push(child);
+        };
+
+        let (app, _actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), adjust);
+        let response = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/close"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let (app, mut actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), adjust);
+        let response = tokio::spawn(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/close"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"force":true}"#))
+                    .unwrap(),
+            ),
+        );
+        let request = actions.recv().await.unwrap();
+        assert_eq!(
+            request.action,
+            ControllerAction::ForceClose {
+                session_id: "session-1".into(),
+            }
+        );
+        request
+            .reply
+            .send(super::super::ActionOutcome::accepted())
+            .unwrap();
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[test]
+    fn a_force_close_is_not_wire_representable() {
+        // The browser viewer posts this enum to `/actions`, so a wire request
+        // must not be able to ask for the destructive variant.
+        assert!(
+            serde_json::from_str::<ControllerAction>(
+                r#"{"action":"force-close","session_id":"s"}"#
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

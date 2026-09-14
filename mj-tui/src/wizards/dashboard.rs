@@ -120,6 +120,11 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
                             [&nth_key(&dashboard.config.targets, wizard.target)],
                     ),
             );
+            form.declare_with_enabled(
+                WizardControl::MjolnirSubagents,
+                ControlKind::Checkbox,
+                wizard.subagent_choice_applies(&dashboard.config),
+            );
             let ready = !is_bare_project_target(
                 &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target)],
             ) || wizard
@@ -486,6 +491,14 @@ impl DashboardState {
                     .is_some_and(|options| options.available)
                 {
                     wizard.create_managed_worktree = !wizard.create_managed_worktree;
+                    self.record_visible_event_change();
+                }
+                self.mode = Mode::New(wizard);
+                DashboardAction::None
+            }
+            Interaction::Toggle(WizardControl::MjolnirSubagents) => {
+                if wizard.subagent_choice_applies(&self.config) {
+                    wizard.mjolnir_subagents = !wizard.mjolnir_subagents;
                     self.record_visible_event_change();
                 }
                 self.mode = Mode::New(wizard);
@@ -905,6 +918,7 @@ impl DashboardState {
             | WizardControl::MountReadOnly
             | WizardControl::ReviewAttachments
             | WizardControl::CreateManagedWorktree
+            | WizardControl::MjolnirSubagents
             | WizardControl::DiscardQueue
             | WizardControl::Submit => {
                 self.mode = Mode::New(wizard);
@@ -1367,6 +1381,9 @@ impl DashboardState {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
+            mjolnir_subagents: wizard
+                .subagent_choice_applies(&self.config)
+                .then_some(wizard.mjolnir_subagents),
             create_managed_worktree: Some(
                 raw_project
                     && wizard.create_managed_worktree
@@ -2516,6 +2533,7 @@ impl DashboardState {
         self.mode = Mode::New(NewWizard {
             worktree_options: None,
             create_managed_worktree: false,
+            mjolnir_subagents: self.config.subagents.enabled,
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             step: WizardStep::Profile,
 

@@ -334,6 +334,15 @@ pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf 
     })
 }
 
+/// The Muse permission profile staged for unconstrained targets.
+///
+/// Muse 1.2.1 composes a session's permission profile from
+/// `permissions.default_profile` in its settings file, and nothing on the ACP
+/// wire overrides that choice. A container target must therefore have the
+/// profile written into the staged settings, or Muse refuses the session when
+/// the configured profile needs a facility the container does not have.
+pub const MUSE_UNCONSTRAINED_PERMISSION_PROFILE: &str = ":unrestricted";
+
 impl HarnessKind {
     /// Translate a harness home into its process environment. Muse's config
     /// directory must be named `muse`, as required by the XDG directory layout.
@@ -525,6 +534,15 @@ impl HarnessKind {
             environment.insert(key.to_owned(), value.to_owned());
         }
         Ok(())
+    }
+
+    /// Whether a checkpoint can capture per-session harness files for this
+    /// harness. ZCode keeps all conversations in one shared live SQLite
+    /// database, so its checkpoints carry repository state only; other
+    /// harnesses have per-session files that the checkpoint captures and
+    /// restores.
+    pub const fn captures_native_session(self) -> bool {
+        !matches!(self, Self::Zcode)
     }
 
     pub const fn supports_guardian_approvals(self) -> bool {

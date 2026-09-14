@@ -362,6 +362,10 @@ pub struct ViewerSnapshot {
     /// armed. Reviewer model and effort remain controller-private.
     #[serde(default)]
     pub review_config: ViewerReviewConfig,
+    /// The global `[subagents] enabled` setting. The new-session form uses it
+    /// as the default for its per-session sub-agent checkbox.
+    #[serde(default)]
+    pub subagents_enabled: bool,
     /// One entry per host or fleet that can be probed. Empty until the phone
     /// server's capacity poller has published a reading.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -538,6 +542,7 @@ impl ViewerSnapshot {
                 tier: config.review.tier.label().to_owned(),
                 profile: config.review.profile.clone(),
             },
+            subagents_enabled: config.subagents.enabled,
             capacity: Vec::new(),
             launch_failures: Vec::new(),
         }
@@ -1222,14 +1227,19 @@ pub struct ViewerConfigOption {
 }
 
 /// The complete set of operations a phone may ask the controller to perform.
-/// Destructive force-cleanup and secret/config editing are intentionally not
-/// representable here.
+/// Secret/config editing is intentionally not representable here, and the one
+/// destructive variant, `ForceClose`, is not representable on the wire: it is
+/// `#[serde(skip)]` so only in-process callers such as the HTTP API can build
+/// it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ControllerAction {
     New {
         #[serde(default)]
         create_managed_worktree: Option<bool>,
+        /// None follows the global `[subagents] enabled` setting.
+        #[serde(default)]
+        mjolnir_subagents: Option<bool>,
         /// Which workspace the session belongs to. Optional on the wire so a
         /// viewer cached from before workspaces reached the phone still parses,
         /// but a controller holding more than one workspace refuses an empty
@@ -1322,6 +1332,17 @@ pub enum ControllerAction {
         shell_command_id: String,
     },
     Close {
+        session_id: String,
+    },
+    /// Destroy a session without checkpointing it: the live target is torn
+    /// down, the recovery archive is removed, and sub-agent children are
+    /// destroyed first. This is irreversible.
+    ///
+    /// Skipped by serde on purpose. The browser viewer posts this enum to
+    /// `/actions`, so a wire request must never be able to name this variant;
+    /// it is reachable only from the HTTP API, which builds it in process.
+    #[serde(skip)]
+    ForceClose {
         session_id: String,
     },
     Cancel {
@@ -2237,6 +2258,7 @@ async fn preflight_new(
 ) -> Result<Json<PreflightNew>, ApiError> {
     let project_validation = request.project_directory.is_some();
     let action = ControllerAction::New {
+        mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: request.workspace_id,
         profile_id: request.profile_id,
@@ -2953,6 +2975,7 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
             project_directory,
             dirty_ack,
             create_managed_worktree,
+            mjolnir_subagents: _,
         } => {
             if !workspace_id.is_empty() {
                 validate_public_id(workspace_id)?;
@@ -3030,6 +3053,7 @@ fn validate_action(action: &ControllerAction, snapshot: &ViewerSnapshot) -> Resu
         ControllerAction::Move { request } => validate_move_request(request, snapshot)?,
         ControllerAction::Open { session_id }
         | ControllerAction::Close { session_id }
+        | ControllerAction::ForceClose { session_id }
         | ControllerAction::Cancel { session_id }
         | ControllerAction::StartReview { session_id } => {
             validate_public_id(session_id)?;
@@ -3869,6 +3893,7 @@ mod tests {
             sessions: BTreeMap::from([(
                 "session-1".into(),
                 SessionRecord {
+                    mjolnir_subagents: None,
                     create_managed_worktree: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                     archived: false,
@@ -6654,6 +6679,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         assert_eq!(
             action.action,
             ControllerAction::New {
+                mjolnir_subagents: None,
                 create_managed_worktree: None,
                 workspace_id: String::new(),
                 profile_id: "codex-1".into(),
@@ -6676,6 +6702,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         let (config, state) = sample_config_state();
         let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
         let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
             profile_id: "codex-1".into(),

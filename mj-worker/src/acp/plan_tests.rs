@@ -648,3 +648,61 @@ async fn config_mode_restoration_checks_the_mode_returned_by_claude() {
         probe.close().await;
     }
 }
+
+#[tokio::test]
+async fn close_is_applied_when_the_harness_lacks_session_close() {
+    for (code, applied) in [(-32601, true), (-32603, false)] {
+        let mut probe = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
+        probe
+            .commands
+            .send(CommandRequest::Close {
+                request_id: "close".into(),
+            })
+            .await
+            .unwrap();
+        let mut close = probe.message().await;
+        if close["method"] == "session/cancel" {
+            close = probe.message().await;
+        }
+        assert_eq!(close["method"], "session/close");
+        probe
+            .send(json!({
+                "jsonrpc": "2.0", "id": close["id"],
+                "error": {"code": code, "message": "Method not found"}
+            }))
+            .await;
+
+        let mut warned = false;
+        let mut outcome = None;
+        while outcome.is_none() {
+            match probe.event().await {
+                RuntimeEvent::Warning { message } if message.contains("session/close") => {
+                    warned = true;
+                }
+                event @ (RuntimeEvent::CloseApplied { .. }
+                | RuntimeEvent::CommandRejected { .. }) => outcome = Some(event),
+                _ => {}
+            }
+        }
+        match outcome.unwrap() {
+            RuntimeEvent::CloseApplied { request_id } => {
+                assert!(applied, "error {code} must not report the close as applied");
+                assert_eq!(request_id, "close");
+                assert!(warned, "an unimplemented session/close must be reported");
+            }
+            RuntimeEvent::CommandRejected { request_id, .. } => {
+                assert!(!applied, "method not found must apply the close");
+                assert_eq!(request_id, "close");
+            }
+            event => panic!("unexpected close outcome: {event:?}"),
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), &mut probe.driver)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+    }
+}

@@ -98,12 +98,8 @@ impl Controller {
             &workspace_session_id,
             target,
         )?;
-        launch.subagent_tools = self.config.subagents.enabled
-            && subagent.is_none()
-            && matches!(
-                session.harness_kind,
-                mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Codex
-            );
+        launch.subagent_tools =
+            subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
         if let Some(subagent) = &subagent {
             let parent = self
                 .state
@@ -181,6 +177,9 @@ impl Controller {
             );
             result?;
             append_hel_target_environment(profile.kind, &profile_stage, backend)?;
+            if profile.kind == mj_core::config::HarnessKind::Muse {
+                configure_muse_execution_settings(&profile_stage, target.execution_policy())?;
+            }
             if launch.subagent_tools && profile.kind == mj_core::config::HarnessKind::Claude {
                 configure_claude_subagent_mcp(&profile_stage, worker_root)?;
             }
@@ -375,6 +374,24 @@ impl Controller {
             canonical_root: canonical_memory_root(&launch.project_key),
         })
     }
+}
+
+/// Whether this session gets Mjolnir's delegation tools in place of its
+/// harness's own. The session's stored choice governs and `None` follows the
+/// global `[subagents] enabled` setting, so a session created before the
+/// per-session choice existed behaves as it always did. A child never gets
+/// them, and only Claude and Codex can receive them at all.
+fn subagent_tools_enabled(
+    session: &mj_core::state::SessionRecord,
+    global_enabled: bool,
+    is_child: bool,
+) -> bool {
+    session.mjolnir_subagents.unwrap_or(global_enabled)
+        && !is_child
+        && matches!(
+            session.harness_kind,
+            mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Codex
+        )
 }
 
 fn worker_workspace_for_recovery(
@@ -688,63 +705,45 @@ fn configure_kimi_project_memory_mcp(
     memory: &ProjectMemoryLaunchConfig,
 ) -> Result<()> {
     let path = profile_stage.join("mcp.json");
-    let mut document = match std::fs::read(&path) {
-        Ok(body) => serde_json::from_slice::<serde_json::Value>(&body)
-            .with_context(|| format!("parse staged Kimi MCP configuration {}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            serde_json::Value::Object(serde_json::Map::new())
-        }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read staged Kimi MCP configuration {}", path.display()));
-        }
-    };
-    let root = document.as_object_mut().with_context(|| {
-        format!(
-            "staged Kimi MCP configuration {} must contain a JSON object",
-            path.display()
-        )
-    })?;
-    let servers = root
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
-        .as_object_mut()
-        .with_context(|| {
-            format!(
-                "mcpServers in staged Kimi MCP configuration {} must be a JSON object",
-                path.display()
-            )
-        })?;
+    edit_staged_json_object(&path, "staged Kimi MCP configuration", |root| {
+        let servers = root
+            .entry("mcpServers")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| {
+                format!(
+                    "mcpServers in staged Kimi MCP configuration {} must be a JSON object",
+                    path.display()
+                )
+            })?;
 
-    let worker = Path::new(worker_root).join("hel");
-    let server = if worker.is_absolute() && memory.root.is_absolute() {
-        serde_json::json!({
-            "transport": "stdio",
-            "command": worker,
-            "args": ["worker", "memory-mcp", "--root", memory.root],
-            "runtime_id": "local"
-        })
-    } else {
-        let worker = worker.to_string_lossy();
-        let memory_root = memory.root.to_string_lossy();
-        serde_json::json!({
-            "transport": "stdio",
-            "command": "sh",
-            "args": [
-                "-c",
-                "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\"",
-                "mj-project-memory",
-                worker,
-                memory_root
-            ],
-            "runtime_id": "local"
-        })
-    };
-    servers.insert("mj-project-memory".into(), server);
-    let mut body = serde_json::to_vec_pretty(&document)?;
-    body.push(b'\n');
-    atomic_write(&path, &body)
-        .with_context(|| format!("write staged Kimi MCP configuration {}", path.display()))
+        let worker = Path::new(worker_root).join("hel");
+        let server = if worker.is_absolute() && memory.root.is_absolute() {
+            serde_json::json!({
+                "transport": "stdio",
+                "command": worker,
+                "args": ["worker", "memory-mcp", "--root", memory.root],
+                "runtime_id": "local"
+            })
+        } else {
+            let worker = worker.to_string_lossy();
+            let memory_root = memory.root.to_string_lossy();
+            serde_json::json!({
+                "transport": "stdio",
+                "command": "sh",
+                "args": [
+                    "-c",
+                    "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\"",
+                    "mj-project-memory",
+                    worker,
+                    memory_root
+                ],
+                "runtime_id": "local"
+            })
+        };
+        servers.insert("mj-project-memory".into(), server);
+        Ok(())
+    })
 }
 
 /// Claude reads MCP servers from its private profile rather than ACP. Parent
@@ -752,50 +751,94 @@ fn configure_kimi_project_memory_mcp(
 /// targets, so this never modifies the user's source profile.
 fn configure_claude_subagent_mcp(profile_stage: &Path, worker_root: &str) -> Result<()> {
     let path = profile_stage.join(".claude.json");
-    let mut document = match std::fs::read(&path) {
+    edit_staged_json_object(&path, "staged Claude configuration", |root| {
+        let servers = root
+            .entry("mcpServers")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| {
+                format!(
+                    "mcpServers in staged Claude configuration {} must be a JSON object",
+                    path.display()
+                )
+            })?;
+        servers.insert(
+            "mj-subagents".into(),
+            serde_json::json!({
+                "type":"stdio",
+                "command":Path::new(worker_root).join("hel"),
+                "args":[
+                    "worker",
+                    "subagent-mcp",
+                    "--socket",
+                    Path::new(worker_root).join(mj_worker_socket_name())
+                ]
+            }),
+        );
+        Ok(())
+    })
+}
+
+/// Muse composes a session's permission profile from its settings file, so an
+/// unconstrained target has to have the profile staged rather than requested
+/// over the wire. Guardian targets keep the profile the user configured.
+fn configure_muse_execution_settings(
+    profile_stage: &Path,
+    policy: mj_core::config::ExecutionPolicy,
+) -> Result<()> {
+    if !policy.is_unconstrained() {
+        return Ok(());
+    }
+    let path = profile_stage.join("settings.json");
+    edit_staged_json_object(&path, "staged Muse settings", |root| {
+        root.entry("schema_version")
+            .or_insert_with(|| serde_json::Value::from(1));
+        let permissions = root
+            .entry("permissions")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| {
+                format!(
+                    "permissions in staged Muse settings {} must be a JSON object",
+                    path.display()
+                )
+            })?;
+        permissions
+            .entry("schema_version")
+            .or_insert_with(|| serde_json::Value::from(1));
+        permissions.insert(
+            "default_profile".into(),
+            serde_json::Value::from(mj_core::config::MUSE_UNCONSTRAINED_PERMISSION_PROFILE),
+        );
+        Ok(())
+    })
+}
+
+/// Read a staged JSON settings file (treating a missing file as an empty
+/// object), let `edit` change its root object, and write it back atomically.
+/// `label` names the file in every error message.
+fn edit_staged_json_object(
+    path: &Path,
+    label: &str,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<()>,
+) -> Result<()> {
+    let mut document = match std::fs::read(path) {
         Ok(body) => serde_json::from_slice::<serde_json::Value>(&body)
-            .with_context(|| format!("parse staged Claude configuration {}", path.display()))?,
+            .with_context(|| format!("parse {label} {}", path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             serde_json::Value::Object(serde_json::Map::new())
         }
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read staged Claude configuration {}", path.display()));
+            return Err(error).with_context(|| format!("read {label} {}", path.display()));
         }
     };
-    let root = document.as_object_mut().with_context(|| {
-        format!(
-            "staged Claude configuration {} must contain a JSON object",
-            path.display()
-        )
-    })?;
-    let servers = root
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+    let root = document
         .as_object_mut()
-        .with_context(|| {
-            format!(
-                "mcpServers in staged Claude configuration {} must be a JSON object",
-                path.display()
-            )
-        })?;
-    servers.insert(
-        "mj-subagents".into(),
-        serde_json::json!({
-            "type":"stdio",
-            "command":Path::new(worker_root).join("hel"),
-            "args":[
-                "worker",
-                "subagent-mcp",
-                "--socket",
-                Path::new(worker_root).join(mj_worker_socket_name())
-            ]
-        }),
-    );
+        .with_context(|| format!("{label} {} must contain a JSON object", path.display()))?;
+    edit(root)?;
     let mut body = serde_json::to_vec_pretty(&document)?;
     body.push(b'\n');
-    atomic_write(&path, &body)
-        .with_context(|| format!("write staged Claude configuration {}", path.display()))
+    atomic_write(path, &body).with_context(|| format!("write {label} {}", path.display()))
 }
 
 fn mj_worker_socket_name() -> &'static str {
@@ -1549,7 +1592,7 @@ pub(super) fn bridge_launch(
             vec![
                 "-c".into(),
                 format!(
-                    "if [ -z \"${{ZCODE_BIN:-}}\" ] || [ ! -f \"$ZCODE_BIN\" ]; then echo 'Mjolnir target image lacks the ZCode backend; rebuild it from containers/Containerfile.agent-dev or set ZCODE_BIN to the headless zcode.cjs runtime' >&2; exit 127; fi; if command -v zcode-acp-server >/dev/null 2>&1; then exec zcode-acp-server; fi; {}; exec npx -y zcode-acp-server@{}",
+                    "if [ -z \"${{ZCODE_BIN:-}}\" ] || [ ! -f \"$ZCODE_BIN\" ]; then echo 'Mjolnir target image lacks the ZCode backend; rebuild it from containers/Containerfile.agent-dev or set ZCODE_BIN to the headless zcode.cjs runtime' >&2; exit 127; fi; if command -v zcode-acp-server >/dev/null 2>&1; then exec zcode-acp-server; fi; {}; exec npx -y @brokkai/zcode-acp@{}",
                     ensure_node_22_script(),
                     mj_core::harness_runtime::ZCODE_ACP_VERSION,
                 ),
@@ -3033,6 +3076,34 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
+    /// The session's stored choice decides, with the global setting as the
+    /// fallback, and a child never gets the tools whatever either says.
+    #[test]
+    fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
+        let claude = |choice| {
+            let mut session = crate::controller::test_support::checkpoint_test_session("s-1");
+            session.harness_kind = HarnessKind::Claude;
+            session.mjolnir_subagents = choice;
+            session
+        };
+
+        assert!(!subagent_tools_enabled(&claude(Some(false)), true, false));
+        assert!(subagent_tools_enabled(&claude(Some(true)), false, false));
+        assert!(subagent_tools_enabled(&claude(None), true, false));
+        assert!(!subagent_tools_enabled(&claude(None), false, false));
+        assert!(!subagent_tools_enabled(&claude(Some(true)), true, true));
+
+        let mut grok = claude(Some(true));
+        grok.harness_kind = HarnessKind::Grok;
+        assert!(!subagent_tools_enabled(&grok, true, false));
+
+        let mut codex = claude(None);
+        codex.harness_kind = HarnessKind::Codex;
+        assert!(subagent_tools_enabled(&codex, true, false));
+        codex.mjolnir_subagents = Some(false);
+        assert!(!subagent_tools_enabled(&codex, true, false));
+    }
+
     #[cfg(unix)]
     #[test]
     fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
@@ -4500,7 +4571,7 @@ mod tests {
         assert!(!CONTAINERFILE.contains("dsh-acp-server"));
 
         let zcode = format!(
-            "zcode-acp-server@{}",
+            "@brokkai/zcode-acp@{}",
             mj_core::harness_runtime::ZCODE_ACP_VERSION
         );
         assert!(
@@ -4648,6 +4719,93 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(staged.path().join(".claude.json")).unwrap(),
             identity
+        );
+    }
+
+    fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let staged = tempfile::tempdir().unwrap();
+        let path = staged.path().join("settings.json");
+        std::fs::write(&path, body).unwrap();
+        (staged, path)
+    }
+
+    #[test]
+    fn muse_unconstrained_settings_select_the_unrestricted_profile() {
+        let (staged, path) = staged_muse_settings(
+            r#"{
+                "schema_version": 1,
+                "provider": "anthropic",
+                "model": "muse-1",
+                "tui": {"theme": "dark"},
+                "permissions": {"schema_version": 1, "default_profile": ":auto-review"}
+            }"#,
+        );
+
+        configure_muse_execution_settings(staged.path(), ExecutionPolicy::Unconstrained).unwrap();
+
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["provider"], "anthropic");
+        assert_eq!(document["model"], "muse-1");
+        assert_eq!(document["tui"]["theme"], "dark");
+        assert_eq!(document["schema_version"], 1);
+        assert_eq!(document["permissions"]["schema_version"], 1);
+        assert_eq!(document["permissions"]["default_profile"], ":unrestricted");
+    }
+
+    #[test]
+    fn muse_unconstrained_settings_are_created_when_absent() {
+        let staged = tempfile::tempdir().unwrap();
+
+        configure_muse_execution_settings(staged.path(), ExecutionPolicy::Unconstrained).unwrap();
+
+        let body = std::fs::read_to_string(staged.path().join("settings.json")).unwrap();
+        assert!(body.ends_with('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "schema_version": 1,
+                "permissions": {"schema_version": 1, "default_profile": ":unrestricted"}
+            })
+        );
+    }
+
+    #[test]
+    fn muse_unconstrained_settings_add_a_missing_permissions_object() {
+        let (staged, path) =
+            staged_muse_settings("{\"schema_version\": 1, \"provider\": \"anthropic\"}");
+
+        configure_muse_execution_settings(staged.path(), ExecutionPolicy::Unconstrained).unwrap();
+
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["provider"], "anthropic");
+        assert_eq!(document["permissions"]["schema_version"], 1);
+        assert_eq!(document["permissions"]["default_profile"], ":unrestricted");
+    }
+
+    #[test]
+    fn muse_configured_approvals_leave_settings_untouched() {
+        let source = r#"{"schema_version": 1, "permissions": {"default_profile": ":ask-me"}}"#;
+        let (staged, path) = staged_muse_settings(source);
+
+        configure_muse_execution_settings(staged.path(), ExecutionPolicy::ConfiguredApprovals)
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn muse_settings_that_are_not_an_object_report_the_staged_file() {
+        let (staged, path) = staged_muse_settings("[]");
+
+        let error =
+            configure_muse_execution_settings(staged.path(), ExecutionPolicy::Unconstrained)
+                .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains(&path.display().to_string()),
+            "error should name the staged file: {error:#}"
         );
     }
     #[test]

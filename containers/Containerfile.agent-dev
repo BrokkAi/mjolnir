@@ -64,6 +64,7 @@ RUN apt-get update \
         python3-venv \
         ripgrep \
         sudo \
+        tmux \
         unzip \
         zip \
     && rm -rf /var/lib/apt/lists/*
@@ -76,11 +77,12 @@ RUN npm install --global --no-audit --no-fund \
         @agentclientprotocol/claude-agent-acp@0.73.0 \
         @deepseek-ai/dsh@0.1.2-rc.1 \
         @openai/codex@0.153.4 \
-        zcode-acp-server@0.37.1 \
+        @brokkai/zcode-acp@0.37.4 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version \
-    && dsh --version
+    && dsh --version \
+    && zcode-acp-server --version
 
 # The bridge prefers CODEX_PATH over its bundled Codex binary. Select the
 # separately pinned global CLI so containers and managed bare workers use
@@ -88,10 +90,8 @@ RUN npm install --global --no-audit --no-fund \
 ENV CODEX_PATH=/usr/local/lib/node_modules/@openai/codex/bin/codex.js
 
 COPY mj-worker/assets/zcode/runtime.json /opt/mjolnir/zcode-runtime.json
-COPY mj-worker/assets/zcode/patch-adapter.mjs /opt/mjolnir/patch-zcode-adapter.mjs
 ARG TARGETARCH
-RUN node /opt/mjolnir/patch-zcode-adapter.mjs /usr/local/lib/node_modules/zcode-acp-server \
-    && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
     && case "$ARCH" in \
         amd64) ZCODE_ARCH=linux-x64; ZCODE_SHA256=fc4cc851286a40ea8090cebfaac1a9f9bdc44eab349e36eef0d3b3219f39303f ;; \
         arm64) ZCODE_ARCH=linux-arm64; ZCODE_SHA256=6b4e9af5a943caea4bccb384ed1e2731b77db9fec9fe9973769a1015544fe619 ;; \

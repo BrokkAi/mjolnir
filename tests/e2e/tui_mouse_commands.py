@@ -44,6 +44,17 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         tmux.wait_for("New workspace")
         tmux.wait_for("Current", "workspace manager finishes loading")
 
+    def dismiss_modal(title: str) -> None:
+        # No dialog carries a Close button any more; the title bar's × is the
+        # mouse-driven way out of every one of them.
+        screen = tmux.wait_for(f"× {title}")
+        x, y = locate_text(screen, f"× {title}")
+        tmux.mouse_click(x, y)
+
+    def close_workspace_manager() -> None:
+        dismiss_modal("Workspaces")
+        absent("New workspace")
+
     def workspace_name(value: str) -> None:
         name(value)
 
@@ -72,15 +83,13 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         "workspace rename persisted",
     )
     tmux.wait_until(lambda: "Working:" not in tmux.capture(), "workspace rename completes in manager")
-    click("Close")
-    absent("New workspace")
+    close_workspace_manager()
 
     workspace_manager()
     if "Drafts" in tmux.capture():
         raise ScenarioFailure("workspace with no drafts exposed a Drafts action")
     record("workspace-recover-guard", "open workspace menu", "draft actions stay hidden when no detached drafts exist")
-    click("Close")
-    absent("New workspace")
+    close_workspace_manager()
 
     workspace_manager()
     click("New workspace")
@@ -104,8 +113,7 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         click(label, last=False)
         workspace_manager()
         tmux.wait_for(f"{label}  Current", "workspace manager follows the clicked tab")
-        click("Close")
-        absent("New workspace")
+        close_workspace_manager()
     record("workspace-tab-selection", "click both workspace tabs", "the workspace manager confirms each selected tab")
 
     # Resume remains a top sidebar control even when there are no stopped rows.
@@ -144,10 +152,10 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
     click(" ⋯ ", last=False)
     tmux.wait_for("Rename session")
     tmux.wait_until(lambda: "a session transition is in progress" not in tmux.capture(), "session commands become available after creation")
+    # A palette row runs its command on a single click; there is no separate
+    # select-then-Run step.
     click("Rename session")
-    tmux.wait_for("› Rename session", "Rename selected in the palette")
-    click("  Run  ")
-    tmux.wait_for("╭ Rename session", "rename editor")
+    tmux.wait_for("╭ × Rename session", "rename editor")
     name("Mouse session")
     click("  Save  ")
     lab.wait_snapshot(lambda value: any(row.get("title") == "Mouse session" for row in value["sessions"]), "session renamed")
@@ -172,9 +180,8 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         tmux.wait_for("Sessions", f"dashboard at {width}x{height}")
         tmux.send_key("F2")
         tmux.wait_for("Commands")
-        tmux.wait_for("  Close  ")
-        click("  Close  ")
-        absent("  Close  ")
+        dismiss_modal("✦ Commands")
+        absent("Search commands…")
         record(f"commands-{width}x{height}", "Commands stays clickable and closes at this terminal size")
 
     tmux.send_key("F2")
@@ -186,19 +193,21 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
     tmux.wait_for("Keyboard shortcuts")
     x, y = locate_text(tmux.capture(), "Keyboard shortcuts")
     tmux.mouse_event(65, x + 2, y + 2)
-    click("  Close  ")
+    dismiss_modal("Keyboard shortcuts")
     absent("Keyboard shortcuts")
     record("help-mouse", "Help opens, scrolls, and closes without shortcuts")
 
     # Notices have a four-second minimum reading period before input dismisses them.
     time.sleep(4.1)
-    screen = tmux.wait_for("Prompt")
-    x, y = locate_text(screen, "Prompt", last=True)
-    tmux.mouse_click(x + 2, y + 1)
+    # The composer pane is titled with the voice glyph rather than a word;
+    # click just inside its left border to give it focus.
+    screen = tmux.wait_for("\U0001f399")
+    row, line = next((row, line) for row, line in enumerate(screen.splitlines())
+                     if "\U0001f399" in line)
+    tmux.mouse_click(line.rindex("╭") + 3, row + 1)
     click("F4 web")
-    tmux.wait_for("  Close  ")
-    click("  Close  ")
-    absent("  Close  ")
+    dismiss_modal("Web viewer")
+    absent("Web viewer")
     record("composer-shortcut", "F4 web is clickable while the composer has focus")
 
     # The active secondary workspace owns a live session, so its first Delete
@@ -222,9 +231,8 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         lambda: "Working:" not in tmux.capture(),
         "workspace delete completes in manager",
     )
-    click("Close")
-    absent("New workspace")
-    record("workspace-force-delete", "☰; Delete; type exact name; Force delete; Close", "the active workspace and its session are removed and the remaining tab stays open")
+    close_workspace_manager()
+    record("workspace-force-delete", "☰; Delete; type exact name; Force delete; ×", "the active workspace and its session are removed and the remaining tab stays open")
 
 
 

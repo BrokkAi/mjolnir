@@ -30,6 +30,42 @@ const WORKER_RESTART_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long a quiet session's upgrade waits for its actor and its lease.
 const UPGRADE_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The worker was stopped so it could be replaced, and no worker came back:
+/// the binary swap, start, connect, or ACP readiness after it failed. The
+/// session has no live worker until something restarts one.
+#[derive(Debug)]
+pub struct WorkerRestartLeftNoWorker;
+
+impl WorkerRestartLeftNoWorker {
+    /// Whether a failed operation left the session without a live worker.
+    ///
+    /// The marker is carried by the error, not by its text. Callers wrap
+    /// restart errors in further context, and `anyhow`'s downcast walks those
+    /// layers, so added context does not hide it.
+    #[must_use]
+    pub fn marks(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<Self>().is_some()
+    }
+}
+
+impl std::fmt::Display for WorkerRestartLeftNoWorker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the worker restart left the session without a live worker")
+    }
+}
+
+impl std::error::Error for WorkerRestartLeftNoWorker {}
+
+/// After a restarted worker has answered once, only a dead transport proves
+/// the worker is gone again; any other failure leaves a live worker behind.
+fn mark_if_transport_died(error: anyhow::Error) -> anyhow::Error {
+    if crate::worker_client::RelayTransportDead::marks(&error) {
+        error.context(WorkerRestartLeftNoWorker)
+    } else {
+        error
+    }
+}
+
 /// What one restart tells the operator at each step. The steps are identical;
 /// only the reason differs, and a diagnostic that named the wrong reason would
 /// send someone looking in the wrong place.
@@ -219,39 +255,46 @@ impl Controller {
             launch,
             messages,
         } = restart;
+        // A failed stop may leave the old worker alive, so it stays outside the
+        // marker below: only steps after a successful stop can leave the
+        // session with no worker at all.
         stop_worker_after_target_recovery(executor, backend, session_id, worker_root)
             .context(messages.stop)?;
-        // Copy through hel.next and rename. scp/cp onto a still-mapped hel
-        // fails with ETXTBSY ("dest open ... Failure") even after SIGKILL,
-        // and prepare_worker_files writes that path in place.
-        let binary = worker_binary_for(backend, executor)?;
-        replace_installed_worker_binary(executor, backend, session_id, &binary)
-            .context(messages.replace)?;
-        if let Some(launch) = launch {
-            replace_installed_worker_launch_config(executor, backend, session_id, launch)
-                .context("install the current Mjolnir worker launch configuration")?;
-        }
-        start_worker(executor, backend, worker_root).context(messages.start)?;
-        // Journal recovery runs before the daemon binds control.sock. A long
-        // kimi session can take well over the ordinary 30s startup window.
-        let mut connection = match connect_started_worker_with_timeout(
-            reconnect,
-            session_id,
-            executor,
-            backend,
-            worker_root,
-            WORKER_RESTART_TIMEOUT,
-        )
-        .await
-        {
-            Ok(connection) => connection,
-            Err(error) => {
-                return Err(
+        // Everything up to the first successful connection either fails with no
+        // worker running or cannot tell: the marker covers all of it.
+        let mut connection = async {
+            // Copy through hel.next and rename. scp/cp onto a still-mapped hel
+            // fails with ETXTBSY ("dest open ... Failure") even after SIGKILL,
+            // and prepare_worker_files writes that path in place.
+            let binary = worker_binary_for(backend, executor)?;
+            replace_installed_worker_binary(executor, backend, session_id, &binary)
+                .context(messages.replace)?;
+            if let Some(launch) = launch {
+                replace_installed_worker_launch_config(executor, backend, session_id, launch)
+                    .context("install the current Mjolnir worker launch configuration")?;
+            }
+            start_worker(executor, backend, worker_root).context(messages.start)?;
+            // Journal recovery runs before the daemon binds control.sock. A long
+            // kimi session can take well over the ordinary 30s startup window.
+            match connect_started_worker_with_timeout(
+                reconnect,
+                session_id,
+                executor,
+                backend,
+                worker_root,
+                WORKER_RESTART_TIMEOUT,
+            )
+            .await
+            {
+                Ok(connection) => Ok(connection),
+                Err(error) => Err(
                     worker_probe_diagnosis(executor, backend, worker_root, error)
                         .context(messages.connect),
-                );
+                ),
             }
-        };
+        }
+        .await
+        .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
         let project_memory = match self.project_memory_sync_target(session_id) {
             Ok(target) => Some(target),
             Err(error) => {
@@ -265,23 +308,30 @@ impl Controller {
             }
         };
         connection.set_project_memory_target(project_memory);
-        let checkpoint_only = connection.sync().await?.operational.checkpoint_only;
-        if let Some(launch) = launch {
-            anyhow::ensure!(
-                checkpoint_only
-                    == (launch.run_mode == mj_core::worker_launch::WorkerRunMode::CheckpointOnly),
-                "restarted worker did not enter the requested execution mode"
-            );
+        // A worker answered, so a failure from here on only means "no worker"
+        // when the transport to it died again.
+        async {
+            let checkpoint_only = connection.sync().await?.operational.checkpoint_only;
+            if let Some(launch) = launch {
+                anyhow::ensure!(
+                    checkpoint_only
+                        == (launch.run_mode
+                            == mj_core::worker_launch::WorkerRunMode::CheckpointOnly),
+                    "restarted worker did not enter the requested execution mode"
+                );
+            }
+            if checkpoint_only {
+                return Ok(());
+            }
+            wait_for_native_session(&mut connection, executor)
+                .await
+                .context(messages.native_session)?;
+            wait_for_idle_projection(&mut connection, WORKER_RESTART_TIMEOUT)
+                .await
+                .context("wait for ACP to go idle after worker restart")
         }
-        if checkpoint_only {
-            return Ok(connection);
-        }
-        wait_for_native_session(&mut connection, executor)
-            .await
-            .context(messages.native_session)?;
-        wait_for_idle_projection(&mut connection, WORKER_RESTART_TIMEOUT)
-            .await
-            .context("wait for ACP to go idle after worker restart")?;
+        .await
+        .map_err(mark_if_transport_died)?;
         Ok(connection)
     }
 }
@@ -325,7 +375,129 @@ async fn wait_for_idle_projection(relay: &mut StandaloneSession, timeout: Durati
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dead_transport_after_reconnect_marks_the_restart_as_leaving_no_worker() {
+        let died = anyhow::Error::new(crate::worker_client::RelayTransportDead::new(
+            "relay proxy disconnected during attach",
+        ))
+        .context("wait for ACP session after restarting the worker for checkpoint");
+        assert!(super::WorkerRestartLeftNoWorker::marks(
+            &super::mark_if_transport_died(died)
+        ));
+
+        let slow = anyhow::anyhow!("timed out waiting for the ACP session")
+            .context("wait for ACP session after restarting the worker for checkpoint");
+        let slow = super::mark_if_transport_died(slow);
+        assert!(!super::WorkerRestartLeftNoWorker::marks(&slow), "{slow:#}");
+    }
+
     use super::*;
+
+    use std::sync::Mutex;
+
+    use crate::targets::CommandOutput;
+
+    /// Fails every command after the first, so a restart gets past its stop and
+    /// then loses the worker it was replacing.
+    struct StopSucceedsThenFails {
+        executed: Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for StopSucceedsThenFails {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let mut executed = self.executed.lock().expect("executed commands");
+            executed.push(command.program.clone());
+            if executed.len() == 1 {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            Ok(CommandOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: b"no such target".to_vec(),
+            })
+        }
+    }
+
+    struct FailingStop;
+
+    impl CommandExecutor for FailingStop {
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            Ok(CommandOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: b"permission denied".to_vec(),
+            })
+        }
+    }
+
+    fn bare_restart_controller() -> Controller {
+        Controller {
+            config: mj_core::config::Config::default(),
+            state: mj_core::state::State::default(),
+        }
+    }
+
+    async fn restart_error(
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> anyhow::Error {
+        let worker_root = format!("/tmp/mjolnir-restart-test/{session_id}");
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        };
+        let reconnect = CommandSpec::new("unused", std::iter::empty::<&str>());
+        let result = bare_restart_controller()
+            .restart_worker_with_installed_binary(
+                session_id,
+                executor,
+                InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &worker_root,
+                    reconnect: &reconnect,
+                    launch: None,
+                    messages: &RESTART_FOR_CHECKPOINT,
+                },
+            )
+            .await;
+        match result {
+            Ok(_) => panic!("a failing executor unexpectedly restarted the worker"),
+            Err(error) => error,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_restart_that_could_not_stop_the_worker_leaves_it_running() {
+        let error = restart_error("0123456789abcdef0123456789abcdef", &FailingStop).await;
+
+        assert!(
+            !WorkerRestartLeftNoWorker::marks(&error),
+            "a failed stop may leave the old worker alive: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_restart_that_stopped_the_worker_and_then_failed_is_marked() {
+        let executor = StopSucceedsThenFails {
+            executed: Mutex::new(Vec::new()),
+        };
+
+        let error = restart_error("0123456789abcdef0123456789abcdef", &executor).await;
+
+        assert!(
+            WorkerRestartLeftNoWorker::marks(&error),
+            "the worker was stopped and nothing replaced it: {error:#}"
+        );
+        assert!(
+            executor.executed.lock().expect("executed commands").len() > 1,
+            "the restart should have failed after its stop, not during it"
+        );
+    }
 
     /// The three answers hello can produce, and what each means for the
     /// worker's binary.

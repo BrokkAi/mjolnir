@@ -436,6 +436,7 @@ fn event_digest(value: u64) -> String {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
@@ -728,6 +729,7 @@ fn migration_twenty_two_preserves_existing_podman_targets_as_container_layers() 
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
+             ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > 21;
@@ -1180,7 +1182,8 @@ fn rewind_schema_to(connection: &Connection, version: i64) {
     }
     connection
         .execute_batch(&format!(
-            "ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+            "ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
+             ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > {version};
              PRAGMA user_version = {version};"
@@ -2276,7 +2279,8 @@ fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
         UPDATE sqlite_schema SET sql=replace(replace(sql, ',''zcode''', ''), ',''muse''', '') WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
         PRAGMA writable_schema=OFF;
         PRAGMA schema_version=1000;
-        ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+        ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
+             ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DROP TABLE schema_compatibility;
         DELETE FROM schema_migrations WHERE version>=27;
         PRAGMA user_version=26;").unwrap();
@@ -2356,6 +2360,8 @@ fn zcode_migration_preserves_revision_31_rows_indexes_and_foreign_keys() {
              PRAGMA schema_version=2000;
              UPDATE schema_compatibility SET minimum_compatible_version=31;
              DELETE FROM schema_migrations WHERE version=32;
+             ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
+             DELETE FROM schema_migrations WHERE version=33;
              PRAGMA user_version=31;",
         )
         .unwrap();
@@ -4063,6 +4069,7 @@ fn migration_twenty_five_adds_pane_sizes_without_losing_workspaces() {
         .execute_batch(
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
+             ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > 24;
@@ -4611,6 +4618,7 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
         .execute_batch(
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
+             ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > 20;
@@ -4734,7 +4742,8 @@ fn migration_twenty_four_preserves_targets_and_accepts_ssh_docker() {
         PRAGMA writable_schema = OFF;
         DROP TABLE session_moves;
         DROP TABLE workspace_pane_sizes;
-        ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+        ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
+             ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > 23;
         PRAGMA user_version = 23;").unwrap();
@@ -4972,6 +4981,7 @@ fn a_version_twenty_seven_database_migrates_and_reports_no_turn_history() {
                  WHERE name = 'materialized_sessions';
              PRAGMA writable_schema = OFF;
              DROP TABLE api_idempotency;
+             ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DROP TABLE schema_compatibility;
              DELETE FROM schema_migrations WHERE version > 27;
@@ -4999,21 +5009,10 @@ fn a_version_twenty_seven_database_migrates_and_reports_no_turn_history() {
         None
     );
 
-    // The idempotency table the migration created is usable straight away.
-    assert_eq!(
-        lookup_api_idempotency_from(&database, "key-1").unwrap(),
-        None
-    );
-    record_api_idempotency_in(&database, "key-1", "session-1").unwrap();
-    assert_eq!(
-        lookup_api_idempotency_from(&database, "key-1").unwrap(),
-        Some("session-1".to_owned())
-    );
-    // A repeated key keeps the session it first named.
-    record_api_idempotency_in(&database, "key-1", "session-2").unwrap();
-    assert_eq!(
-        lookup_api_idempotency_from(&database, "key-1").unwrap(),
-        Some("session-1".to_owned())
+    // The migration still recreates the table it dropped above.
+    assert!(
+        table_has_column(&open(&database).unwrap(), "api_idempotency", "key").unwrap(),
+        "migration 28 must create api_idempotency"
     );
 }
 
@@ -5202,6 +5201,47 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
 }
 
 #[test]
+fn subagent_choice_migrates_as_automatic_and_survives_both_session_writers() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("mj.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.mjolnir_subagents = Some(false);
+    save_session_to(&database, &record).unwrap();
+    let connection = open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
+             DELETE FROM schema_migrations WHERE version >= 33;
+             PRAGMA user_version = 32;",
+        )
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&database);
+    // Migration 33 runs on open and leaves the pre-existing row automatic.
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].mjolnir_subagents,
+        None
+    );
+    assert_eq!(
+        open(&database)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+    for choice in [Some(false), Some(true), None] {
+        record.mjolnir_subagents = choice;
+        save_session_to(&database, &record).unwrap();
+        record.state = SessionState::Stopped;
+        save_lifecycle_session_to(&database, &record).unwrap();
+        assert_eq!(
+            load_state_from(&database).unwrap().sessions[&record.id].mjolnir_subagents,
+            choice
+        );
+    }
+}
+
+#[test]
 fn worktree_choice_migrates_as_automatic_and_survives_both_session_writers() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("mj.sqlite3");
@@ -5210,7 +5250,8 @@ fn worktree_choice_migrates_as_automatic_and_survives_both_session_writers() {
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE sessions DROP COLUMN create_managed_worktree;
+            "ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
+             ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DROP TABLE schema_compatibility;
          DELETE FROM schema_migrations WHERE version >= 29;
          PRAGMA user_version = 28;",

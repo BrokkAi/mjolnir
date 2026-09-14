@@ -32,7 +32,7 @@ use mj_core::workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 32;
+const SCHEMA_VERSION: i64 = 33;
 
 mod session_move;
 pub use session_move::*;
@@ -1313,13 +1313,14 @@ pub fn load_state_from(path: &Path) -> Result<State> {
                 s.viewed_through_event_ordinal, s.last_error, s.resource_allocation,
                 s.last_checkpoint_error, s.project_directory, s.managed_worktree,
                 s.draft_input, s.container_cpus, s.container_memory, s.archived
-                , c.workspace_id, s.create_managed_worktree
+                , c.workspace_id, s.create_managed_worktree, s.mjolnir_subagents
          FROM sessions s JOIN session_contexts c USING(session_id)
          ORDER BY s.session_id",
     )?;
     let rows = statement.query_map([], |row| {
         Ok(SessionRecord {
             create_managed_worktree: row.get(23)?,
+            mjolnir_subagents: row.get(24)?,
             workspace_id: row.get(22)?,
             archived: row.get(21)?,
             container_cpus: row.get(19)?,
@@ -2578,42 +2579,6 @@ fn load_materialized_transcript_filtered_from(
         latest_seq,
         execution: fields.execution,
     }))
-}
-
-/// Remember that an API session-creation key produced this session, so a retry
-/// with the same key returns the same session instead of starting another.
-pub fn record_api_idempotency(key: &str, session_id: &str) -> Result<()> {
-    let key = key.to_owned();
-    let session_id = session_id.to_owned();
-    submit_database_write("record_api_idempotency", move |_| {
-        record_api_idempotency_in(&database_path(), &key, &session_id)
-    })
-}
-
-fn record_api_idempotency_in(path: &Path, key: &str, session_id: &str) -> Result<()> {
-    let connection = open(path)?;
-    connection.execute(
-        "INSERT INTO api_idempotency(key, session_id, created_at_ms)
-             VALUES (?1, ?2, ?3)
-         ON CONFLICT(key) DO NOTHING",
-        params![key, session_id, mj_core::clock::epoch_millis()],
-    )?;
-    Ok(())
-}
-
-/// The session a previous API creation call recorded under this key.
-pub fn lookup_api_idempotency(key: &str) -> Result<Option<String>> {
-    lookup_api_idempotency_from(&database_path(), key)
-}
-
-fn lookup_api_idempotency_from(path: &Path, key: &str) -> Result<Option<String>> {
-    Ok(open_reader(path)?
-        .query_row(
-            "SELECT session_id FROM api_idempotency WHERE key = ?1",
-            [key],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?)
 }
 
 /// Read the newest `limit` transcript items for a session, oldest first.
@@ -4455,8 +4420,9 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
              native_session_id, acp_session_title, session_title_override, updated_at,
              viewed_through_event_ordinal, last_error, resource_allocation,
              last_checkpoint_error, project_directory, managed_worktree,
-             container_cpus, container_memory, archived, draft_input, create_managed_worktree
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
+             container_cpus, container_memory, archived, draft_input, create_managed_worktree,
+             mjolnir_subagents
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -4479,7 +4445,8 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
              container_cpus = excluded.container_cpus,
              container_memory = excluded.container_memory,
              archived = excluded.archived,
-             create_managed_worktree = excluded.create_managed_worktree",
+             create_managed_worktree = excluded.create_managed_worktree,
+             mjolnir_subagents = excluded.mjolnir_subagents",
         params![
             session.id,
             session.title,
@@ -4513,6 +4480,7 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
             session.archived,
             session.draft_input,
             session.create_managed_worktree,
+            session.mjolnir_subagents,
         ],
     )?;
     tx.execute(

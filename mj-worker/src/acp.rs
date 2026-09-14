@@ -17,6 +17,7 @@ pub use kimi_tasks::*;
 mod plan_tests;
 #[cfg(test)]
 mod session_config_tests;
+mod zcode_usage;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
@@ -163,10 +164,15 @@ fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, ser
             "goal".into(),
             serde_json::json!({"resumePolicy": if asking {"pause"} else {"preserve"}}),
         )]);
-        meta.insert(
-            "codex".into(),
-            serde_json::json!({"options":{"disallowedTools":["spawn_agent"]}}),
-        );
+        // Hide the harness's own delegation tool only when Mjolnir replaced
+        // it. The socket exists exactly when the controller asked for Mjolnir
+        // sub-agents, so the two halves cannot disagree.
+        if spec.subagent_mcp_socket.is_some() {
+            meta.insert(
+                "codex".into(),
+                serde_json::json!({"options":{"disallowedTools":["spawn_agent"]}}),
+            );
+        }
         return Some(meta);
     }
     if spec.harness != HarnessKind::Claude {
@@ -199,10 +205,14 @@ fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, ser
             serde_json::json!({ "enabled": false }),
         );
     }
-    options.insert(
-        "disallowedTools".to_owned(),
-        serde_json::json!(["Agent", "Task", "TaskOutput", "TaskStop"]),
-    );
+    // Same rule as Codex above: without the Mjolnir delegation socket the
+    // session keeps Claude's own Agent and Task tools.
+    if spec.subagent_mcp_socket.is_some() {
+        options.insert(
+            "disallowedTools".to_owned(),
+            serde_json::json!(["Agent", "Task", "TaskOutput", "TaskStop"]),
+        );
+    }
     claude_code.insert("options".to_owned(), serde_json::Value::Object(options));
     Some(serde_json::Map::from_iter([(
         "claudeCode".to_owned(),
@@ -1019,6 +1029,43 @@ async fn emit_runtime_event(
         .send(event)
         .await
         .map_err(|_| anyhow!("relay event coordinator stopped"))
+}
+
+/// Emit the runtime events for a finished `session/close` request.
+///
+/// A harness that answers "method not found" does not implement
+/// `session/close`, so it has no session state to release and the worker tears
+/// its runtime down after this either way. Treat that answer as applied;
+/// rejecting it leaves the session stuck in "closing" forever.
+async fn emit_close_outcome<T>(
+    events: &mpsc::Sender<RuntimeEvent>,
+    request_id: String,
+    outcome: std::result::Result<T, agent_client_protocol::Error>,
+) -> Result<()> {
+    match outcome {
+        Ok(_) => emit_runtime_event(events, RuntimeEvent::CloseApplied { request_id }).await,
+        Err(error) if error.code == agent_client_protocol::ErrorCode::MethodNotFound => {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::Warning {
+                    message: "the harness has no session/close method; closing its runtime instead"
+                        .into(),
+                },
+            )
+            .await?;
+            emit_runtime_event(events, RuntimeEvent::CloseApplied { request_id }).await
+        }
+        Err(error) => {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::CommandRejected {
+                    request_id,
+                    message: format!("close ACP session: {error}"),
+                },
+            )
+            .await
+        }
+    }
 }
 
 /// Answer for a `terminal/*` request naming a terminal this connection does
@@ -2661,6 +2708,9 @@ async fn serve_session(
                             let stop_reason = match response {
                                 Ok(response) => {
                                     usage = response.usage.map(|usage| mj_core::usage::TokenUsage::from_acp(spec.harness, usage));
+                                    if spec.harness == HarnessKind::Zcode {
+                                        usage = usage.map(|usage| zcode_usage::attach_provider_details(usage, response.meta.as_ref()));
+                                    }
                                     if spec.harness == HarnessKind::Grok {
                                         match grok_usage.complete(response.meta.as_ref(), usage.clone()).await {
                                             Ok(reported) => usage = reported,
@@ -2834,31 +2884,11 @@ async fn serve_session(
                                     },
                                 )
                                 .await?;
-                                match connection
+                                let outcome = connection
                                     .send_request(CloseSessionRequest::new(session_id.clone()))
                                     .block_task()
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        emit_runtime_event(
-                                            events,
-                                            RuntimeEvent::CloseApplied {
-                                                request_id: close_id,
-                                            },
-                                        )
-                                        .await?;
-                                    }
-                                    Err(error) => {
-                                        emit_runtime_event(
-                                            events,
-                                            RuntimeEvent::CommandRejected {
-                                                request_id: close_id,
-                                                message: format!("close ACP session: {error}"),
-                                            },
-                                        )
-                                        .await?;
-                                    }
-                                }
+                                    .await;
+                                emit_close_outcome(events, close_id, outcome).await?;
                                 return Ok(None);
                             }
                             None => {
@@ -3163,26 +3193,11 @@ async fn serve_session(
                     .await;
             }
             CommandRequest::Close { request_id } => {
-                match connection
+                let outcome = connection
                     .send_request(CloseSessionRequest::new(session_id.clone()))
                     .block_task()
-                    .await
-                {
-                    Ok(_) => {
-                        emit_runtime_event(events, RuntimeEvent::CloseApplied { request_id })
-                            .await?;
-                    }
-                    Err(error) => {
-                        emit_runtime_event(
-                            events,
-                            RuntimeEvent::CommandRejected {
-                                request_id,
-                                message: format!("close ACP session: {error}"),
-                            },
-                        )
-                        .await?;
-                    }
-                }
+                    .await;
+                emit_close_outcome(events, request_id, outcome).await?;
                 break;
             }
         }

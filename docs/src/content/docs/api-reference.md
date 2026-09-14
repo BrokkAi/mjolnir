@@ -81,7 +81,7 @@ A failure is a JSON object with one field:
 
 | Status | Meaning |
 | --- | --- |
-| `400` | The request was malformed: an empty prompt, an over-long idempotency key, a timeout outside 1–3600 seconds, a file path that is absolute or contains `..`. |
+| `400` | The request was malformed: an empty prompt, a timeout outside 1–3600 seconds, a file path that is absolute or contains `..`. |
 | `401` | No bearer token and no valid viewer cookie. |
 | `404` | No such session, or no transcript recorded for it. |
 | `409` | The session cannot do this now: no prompt capability, no live target, a turn still running, no commits to bundle, no recorded base for a diff, no push remote configured. |
@@ -183,14 +183,15 @@ POST /api/v1/sessions
   "title": "add a README line",
   "model": "gpt-5",
   "effort": "high",
-  "prompt": "add a README line",
-  "idempotency_key": "run-2026-09-11-a"
+  "prompt": "add a README line"
 }
 ```
 
 `profile_id` and `target_id` are required. Supply `bundle_id`, or
 `project_directory`, or both: a directory with no bundle is bundled the way the
-viewer's own form does it. Everything else is optional.
+viewer's own form does it. Everything else is optional. `idempotency_key` is no
+longer accepted: a request that still carries it is rejected as an unknown
+field.
 
 ```json
 { "session_id": "session-1", "turn_id": null }
@@ -201,10 +202,6 @@ The reply is `201` as soon as the controller has published an id.
 first prompt is submitted in the background once the harness is ready, after
 `model` and `effort` are applied. Wait on the session without a `turn_id` and
 the wait picks up that first turn by itself.
-
-`idempotency_key` (1–128 characters) makes a retry safe. A second call with a
-key that already created a session answers `200` with the same `session_id`,
-and with its `turn_id` once the first prompt has been accepted.
 
 ### Send a prompt
 
@@ -364,6 +361,14 @@ POST /api/v1/sessions/{session_id}/cancel-turn
 Both take no body and answer `202` with no content: the action was accepted, and
 the session's own state is where you see it take effect.
 
+`close` also takes an optional body, `{"force": true}`. A forced close destroys
+the session instead of checkpointing it: there is no checkpoint, the live target
+is torn down, the recovery archive is removed, and sub-agent children are
+destroyed first. This cannot be undone. Afterwards `GET /sessions/{id}` and
+`mj sessions --session <id>` answer `404`, because the session row is deleted. A
+forced close also takes over a graceful close that is stuck, so it is the way
+out when a close failed and left the session in `error`.
+
 ### Get the work out
 
 ```text
@@ -404,7 +409,7 @@ Preconditions, all answering `409` with the reason:
 | `diff`, `files`, `branch` | A live target. A stopped session has none; use the bundle. |
 | `branch` | An idle session — a push mid-turn would publish a tree the agent is still changing — a valid branch name, and a configured push remote. |
 | `diff` | A recorded base commit, or a session branch whose reflog still names where it started. |
-| `bundle` | Commits beyond the session base. A live session is checkpointed first; a stopped one is read from its last checkpoint, so this is the one export that still works after the target is gone. |
+| `bundle` | Commits beyond the session base. For a session on a bare target, the base is the commit the session's worktree branch was created from. A live session is checkpointed first; a stopped one is read from its last checkpoint, so this is the one export that still works after the target is gone. |
 
 ## CLI equivalents
 
@@ -421,7 +426,7 @@ Preconditions, all answering `409` with the reason:
 | `mj diff --session <id>` | `GET /sessions/{id}/diff` |
 | `mj export --session <id> --kind patch\|branch\|bundle` | `POST /sessions/{id}/export` |
 | `mj export --session <id> --kind file --path <path>` | `GET /sessions/{id}/files?path=` |
-| `mj close --session <id>` | `POST /sessions/{id}/close` |
+| `mj close --session <id> [--force]` | `POST /sessions/{id}/close` |
 | `mj cancel-turn --session <id>` | `POST /sessions/{id}/cancel-turn` |
 
 Every one of them takes `--json` and then prints the route's response unchanged,
@@ -431,7 +436,7 @@ which is the quickest way to see a shape before you write a client for it.
 
 ```console
 mj new --profile codex --target local --project-directory . \
-  --idempotency-key run-a "add a README line"
+  "add a README line"
 mj wait --session <id>
 mj prompt --session <id> --wait "now add a test"
 mj diff --session <id>
@@ -502,7 +507,9 @@ list includes all workspaces.
 flight. It cancels cancellable work, prevents the initial prompt, waits for the
 old operation to release ownership, and then cleans up. Repeated closes join the
 same operation. A stopping session's `wait` returns `stopped`, including when an
-earlier initialization failed. Cleanup errors remain visible in session state.
+earlier initialization failed. Cleanup errors remain visible in session state. A
+close whose worker restart fails leaves the session in `error` with the failure
+recorded in its state, and `mj close --session <id> --force` is the way out.
 
 The CLI and `mj api-info` probe API support before reading the token file. A
 daemon predating this API produces an explicit `mj daemon restart` instruction;
@@ -525,15 +532,18 @@ across a prompt’s model requests, including cancellation. Unknown resumed base
 missing reports, or counter resets retain incomplete (`unspecified`) coverage. Older
 Codex adapters and historical reports retain `last_request` scope. Grok's native
 prompt-ledger metadata and matching completion notifications report whole-turn
-consumption; explicitly incomplete reports retain `unspecified` scope. Other
-adapters' reports retain unspecified scope. Only known
-whole-turn reports contribute to `totals`. Each counter includes `tokens` and
-`reported_turns`; `coverage` counts recorded turns, full reports, partial
+consumption; explicitly incomplete reports retain `unspecified` scope. The
+managed ZCode adapter reports the backend's merged whole-turn usage on the
+prompt response and omits the report when the backend reported none. Kimi and
+Deepseek reports retain `unspecified` scope; Muse produces no token reports.
+Only known whole-turn reports contribute to `totals`. Each counter includes
+`tokens` and `reported_turns`; `coverage` counts recorded turns, full reports, partial
 last-request reports, unspecified reports, and missing reports. An absent counter
 stays absent. These are reported totals for covered turns, not a billing estimate.
-Grok usage may also carry `provider_details`: optional `model_calls`,
+Grok and ZCode usage may also carry `provider_details`: optional `model_calls`,
 `api_duration_ms`, provider `elapsed_ms`, `cost`, and a `model_usage` map keyed by
-the provider's exact model IDs (for example, `grok-4.6-build`). Each model row uses
+the provider's exact model IDs (for example, `grok-4.6-build`). ZCode reports only
+`model_calls`. Each model row uses
 the same normalized token fields. Full input already includes cache reads and
 cache creation; output already includes reasoning. Do not add those subsets to
 input/output again, or add model rows to the top-level turn total.

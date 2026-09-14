@@ -708,6 +708,23 @@ const GLOBAL_CHORDS: &[CommandId] = &[
     CommandId::CancelOperation,
 ];
 
+/// The commands the palette omits because a visible control already runs them.
+///
+/// Each of these is one click away on the dashboard itself, so listing them
+/// again in the palette only lengthens the search. The keyboard chords, footer
+/// hints, and onboarding buttons that run them are unaffected.
+const PALETTE_HIDDEN: &[CommandId] = &[
+    CommandId::Palette,          // already open when the list is drawn
+    CommandId::Workspaces,       // the pinned ☰ in the Workspaces pane
+    CommandId::NewSessionWizard, // the Create button in the Sessions pane
+    CommandId::ResumeDialog,     // the Resume button in the Sessions pane
+];
+
+/// Whether [`palette_entries`](crate::palette::palette_entries) skips `id`.
+pub(crate) fn hidden_from_palette(id: CommandId) -> bool {
+    PALETTE_HIDDEN.contains(&id)
+}
+
 /// The command this key press runs from anywhere, or `None` if it is not a
 /// global chord.
 ///
@@ -1006,11 +1023,34 @@ mod tests {
     use crate::test_support::{dashboard_with_session, key, operation, running_session};
 
     #[test]
-    fn workspace_manager_stays_in_palette_without_a_function_key() {
+    fn workspace_manager_runs_from_its_button_without_a_key_or_palette_row() {
         let dashboard = dashboard_with_session(running_session());
         assert!(global_chord(&key(KeyCode::F(3))).is_none());
-        assert!(available(&dashboard, None).contains(&CommandId::Workspaces));
         assert!(spec(CommandId::Workspaces).keys.is_empty());
+        // Still dispatchable: the pinned hamburger runs it through
+        // `run_available_command`, which needs the command to stay available.
+        assert!(available(&dashboard, None).contains(&CommandId::Workspaces));
+        assert!(hidden_from_palette(CommandId::Workspaces));
+    }
+
+    #[test]
+    fn the_palette_omits_only_commands_with_a_pinned_button() {
+        for id in [
+            CommandId::Workspaces,
+            CommandId::NewSessionWizard,
+            CommandId::ResumeDialog,
+            CommandId::Palette,
+        ] {
+            assert!(hidden_from_palette(id), "{id:?}");
+        }
+        for id in [
+            CommandId::RestartSession,
+            CommandId::OpenConfig,
+            CommandId::WebViewer,
+            CommandId::Help,
+        ] {
+            assert!(!hidden_from_palette(id), "{id:?}");
+        }
     }
 
     #[test]

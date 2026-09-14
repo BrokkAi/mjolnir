@@ -653,21 +653,18 @@ impl Controller {
                         relative_destination: PathBuf::from(destination),
                         // Managed worktrees are retired on Stop, so their
                         // dirty/untracked state must travel in the archive.
-                        // Their branch and objects remain in the owning Git
-                        // repository; no remote origin is required. Unmanaged
-                        // raw checkouts remain in place.
-                        capture: if session.managed_worktree.is_some() {
-                            CheckpointRepositoryCapture::DeltaFrom {
-                                base_commit: super::worktree::raw_checkout_position(
-                                    &session,
-                                    &self.config,
-                                    project_directory,
-                                    executor,
-                                )?
-                                .head_commit,
-                            }
-                        } else {
-                            CheckpointRepositoryCapture::MetadataOnly
+                        // Capturing from the branch's creation point means the
+                        // bundle also carries the session's own commits. The
+                        // branch and objects remain in the owning Git
+                        // repository as well; no remote origin is required.
+                        // Unmanaged raw checkouts remain in place.
+                        capture: match &session.managed_worktree {
+                            Some(worktree) => CheckpointRepositoryCapture::DeltaFrom {
+                                base_commit: super::worktree::managed_worktree_base_commit(
+                                    worktree, executor,
+                                )?,
+                            },
+                            None => CheckpointRepositoryCapture::MetadataOnly,
                         },
                         origin_override: None,
                     }],
@@ -1131,6 +1128,13 @@ impl Controller {
                     reused_native = captured.reused_native,
                     "checkpoint target state captured; releasing ACP dispatch"
                 );
+                if !session.harness_kind.captures_native_session() {
+                    tracing::info!(
+                        session_id,
+                        harness = %session.harness_kind.display_name(),
+                        "checkpoint holds repository state only; this harness keeps no per-session native files"
+                    );
+                }
                 completion = release_checkpoint_after_capture(
                     &mut relay,
                     session_id,
@@ -1825,12 +1829,12 @@ impl std::error::Error for CheckpointDeferred {}
 
 /// Whether a failed checkpoint only means the session was busy.
 ///
-/// The marker is carried by the error, not by its text, and callers wrap
-/// checkpoint errors in context, so the whole chain is searched.
+/// The marker is carried by the error, not by its text. It may be the root
+/// error or attached with `context`, and callers wrap checkpoint errors in
+/// further context. `anyhow`'s own downcast walks every context layer;
+/// `chain()` does not expose a context value, so it must not be used here.
 pub fn checkpoint_was_deferred(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<CheckpointDeferred>().is_some())
+    error.downcast_ref::<CheckpointDeferred>().is_some()
 }
 
 /// An idle workspace operation holds the managed connection and a worker
@@ -2667,6 +2671,79 @@ mod tests {
         ));
     }
 
+    /// Build the layout for a managed-worktree session whose worktree holds one
+    /// commit of its own, and return the capture along with the commits it has
+    /// to distinguish.
+    fn managed_worktree_export_capture(
+        clear_recorded_base: bool,
+    ) -> (CheckpointRepositoryCapture, String, String) {
+        let session_id = "2123456789abcdef0123456789abcdef";
+        let repository = crate::controller::test_support::committed_repository();
+        let mut session = crate::controller::test_support::managed_worktree_session(
+            repository.path(),
+            session_id,
+        );
+        let creation_commit =
+            crate::controller::test_support::test_git(repository.path(), &["rev-parse", "HEAD"]);
+        if clear_recorded_base {
+            session.managed_worktree.as_mut().unwrap().base_commit = None;
+        }
+
+        let worktree_root = session
+            .managed_worktree
+            .as_ref()
+            .unwrap()
+            .worktree_root
+            .clone();
+        std::fs::write(worktree_root.join("session.txt"), "work\n").unwrap();
+        crate::controller::test_support::test_git(&worktree_root, &["add", "."]);
+        crate::controller::test_support::test_git(
+            &worktree_root,
+            &["commit", "-m", "session work"],
+        );
+        let worktree_head =
+            crate::controller::test_support::test_git(&worktree_root, &["rev-parse", "HEAD"]);
+
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: PathBuf::from("/home/dev/.local/share/hel/workers/session"),
+        });
+        let mut state = State::default();
+        state.sessions.insert(session_id.into(), session);
+        let controller = Controller {
+            config: crate::controller::test_support::resume_compatibility_config(),
+            state,
+        };
+
+        let mut layout = controller
+            .session_export_layout(session_id, &targets::ProcessExecutor)
+            .unwrap();
+        (
+            layout.repositories.remove(0).capture,
+            creation_commit,
+            worktree_head,
+        )
+    }
+
+    #[test]
+    fn a_managed_worktree_checkpoint_bundles_from_the_recorded_base() {
+        let (capture, creation_commit, worktree_head) = managed_worktree_export_capture(false);
+        let CheckpointRepositoryCapture::DeltaFrom { base_commit } = capture else {
+            panic!("a managed worktree must be captured as a delta, got {capture:?}");
+        };
+        assert_eq!(base_commit, creation_commit);
+        assert_ne!(base_commit, worktree_head);
+    }
+
+    #[test]
+    fn a_managed_worktree_without_a_recorded_base_uses_its_branch_creation_commit() {
+        let (capture, creation_commit, worktree_head) = managed_worktree_export_capture(true);
+        let CheckpointRepositoryCapture::DeltaFrom { base_commit } = capture else {
+            panic!("a managed worktree must be captured as a delta, got {capture:?}");
+        };
+        assert_eq!(base_commit, creation_commit);
+        assert_ne!(base_commit, worktree_head);
+    }
+
     #[test]
     fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
         let directory = tempfile::tempdir().unwrap();
@@ -3255,6 +3332,18 @@ mod tests {
     /// A session that is working is busy, not wedged. A copy that can run
     /// again later leaves at once instead of waiting out the deadline, which
     /// would restart the worker and kill the turn in flight.
+    #[test]
+    fn a_deferral_attached_as_context_under_more_context_is_still_a_deferral() {
+        let deferred = anyhow::anyhow!("relay proxy disconnected during hello")
+            .context(CheckpointDeferred::background_work())
+            .context("connect to the session worker for checkpoint");
+        assert!(checkpoint_was_deferred(&deferred), "{deferred:#}");
+
+        let plain = anyhow::anyhow!("relay proxy disconnected during hello")
+            .context("connect to the session worker for checkpoint");
+        assert!(!checkpoint_was_deferred(&plain), "{plain:#}");
+    }
+
     #[test]
     fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         let cursor = RelayCursor {

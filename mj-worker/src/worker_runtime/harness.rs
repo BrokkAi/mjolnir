@@ -26,7 +26,6 @@ const DEEPSEEK_PACKAGE_LOCK: &[u8] =
     include_bytes!("../../assets/harnesses/deepseek/package-lock.json");
 const ZCODE_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/zcode/package.json");
 const ZCODE_PACKAGE_LOCK: &[u8] = include_bytes!("../../assets/harnesses/zcode/package-lock.json");
-const ZCODE_ADAPTER_PATCH: &[u8] = include_bytes!("../../assets/zcode/patch-adapter.mjs");
 
 #[derive(Debug)]
 pub(crate) struct ManagedHarness {
@@ -393,14 +392,6 @@ fn install_zcode(staging: &Path, environment: &BTreeMap<String, String>) -> Resu
     use mj_core::harness_runtime::{ZCODE_CLI_VERSION, ZCODE_VERSION};
 
     install_npm(staging, ZCODE_PACKAGE_JSON, ZCODE_PACKAGE_LOCK, environment)?;
-    let patch = staging.join("patch-zcode-adapter.mjs");
-    std::fs::write(&patch, ZCODE_ADAPTER_PATCH).context("write ZCode adapter patch")?;
-    let mut node = Command::new("node");
-    node.arg(&patch)
-        .arg(staging.join("node_modules/zcode-acp-server"));
-    apply_environment(&mut node, environment);
-    run_checked(&mut node, "apply pinned ZCode ACP compatibility patch")?;
-    std::fs::remove_file(&patch)?;
 
     let metadata: serde_json::Value =
         serde_json::from_str(include_str!("../../assets/zcode/runtime.json"))?;
@@ -1205,7 +1196,7 @@ INSTALLER
 
     #[test]
     #[ignore = "downloads the pinned ZCode adapter and official backend AppImage"]
-    fn zcode_managed_install_has_patched_adapter_and_backend() {
+    fn zcode_managed_install_has_brokkai_adapter_and_backend() {
         let temp = tempfile::tempdir().unwrap();
         let mut environment = mj_core::login_environment::discover().unwrap();
         HarnessKind::Zcode
@@ -1239,9 +1230,10 @@ INSTALLER
                 .command
                 .parent()
                 .unwrap()
-                .join("../zcode-acp-server/dist/handlers/session.js"),
+                .join("../@brokkai/zcode-acp/dist/handlers/session.js"),
         )
         .unwrap();
+        // The BrokkAi adapter honors the initial-mode variable in its source.
         assert!(patched.contains("process.env.ZCODE_ACP_MODE"));
     }
 }

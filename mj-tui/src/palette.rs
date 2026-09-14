@@ -25,7 +25,7 @@ use ratatui::widgets::Paragraph;
 use mj_chat::selection::FrameSurfaces;
 use mj_chat::text_input::TextInput;
 
-use crate::actions::{Availability, COMMANDS, CommandId, Scope, spec};
+use crate::actions::{Availability, COMMANDS, CommandId, Scope, hidden_from_palette, spec};
 use crate::render::render_session_scrollbar;
 use crate::widgets::{centered_modal, dismissible_modal_title};
 use crate::{DashboardAction, DashboardState, Focus, Mode};
@@ -163,13 +163,14 @@ fn rank(entries: Vec<PaletteEntry>, query: &str) -> Vec<PaletteEntry> {
 
 /// Every command the palette would list for `query`, in drawing order.
 ///
-/// `Hidden` commands are left out entirely; the palette itself is left out
-/// because it is already open.
+/// `Hidden` commands are left out entirely, as are the commands
+/// [`hidden_from_palette`] names because a visible dashboard control already
+/// runs them.
 pub(crate) fn palette_entries(dashboard: &DashboardState, query: &str) -> Vec<PaletteEntry> {
     let mut entries = Vec::new();
     for scope in scope_order(dashboard) {
         for spec in COMMANDS.iter().filter(|spec| spec.scope == scope) {
-            if spec.id == CommandId::Palette {
+            if hidden_from_palette(spec.id) {
                 continue;
             }
             let availability = (spec.available)(dashboard);
@@ -635,19 +636,25 @@ mod tests {
         let setup = row_of(&lines, "Open setup").expect("Open setup");
         assert!(row_of(&lines, "Review settings").is_none(), "{lines:#?}");
         let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");
-        let workspaces = lines
-            .iter()
-            .enumerate()
-            .skip(anywhere + 1)
-            .find(|(_, line)| line.contains("Workspaces"))
-            .map(|(row, _)| row)
-            .expect("Workspaces command");
+        let global = row_of(&lines, "Web viewer").expect("Web viewer");
         assert!(heading < rename, "{lines:#?}");
         assert!(rename < settings, "{lines:#?}");
         assert!(settings < setup && setup < anywhere, "{lines:#?}");
-        assert!(anywhere < workspaces, "{lines:#?}");
-        // The palette never lists itself.
+        assert!(anywhere < global, "{lines:#?}");
+        // The palette never lists itself, nor the commands a pinned button
+        // already runs. "Workspaces" is searched only below the Anywhere
+        // heading, because the workspace pane's own title is drawn behind the
+        // palette.
         assert!(row_of(&lines, "Command palette").is_none(), "{lines:#?}");
+        assert!(row_of(&lines, "Create session").is_none(), "{lines:#?}");
+        assert!(row_of(&lines, "Resume a session").is_none(), "{lines:#?}");
+        assert!(
+            !lines
+                .iter()
+                .skip(anywhere + 1)
+                .any(|line| line.contains("Workspaces")),
+            "{lines:#?}"
+        );
     }
 
     #[test]

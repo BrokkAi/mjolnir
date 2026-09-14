@@ -1427,6 +1427,7 @@ pub(crate) fn spawn_dashboard_create_session(
         let retry_launch = action.clone();
         let DashboardAction::CreateSession {
             create_managed_worktree,
+            mjolnir_subagents,
             workspace_id,
             profile_id,
             bundle_id,
@@ -1483,6 +1484,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
+                        mjolnir_subagents,
                         create_managed_worktree,
                         initial_prompt: None,
                         workspace_id,
@@ -2821,6 +2823,7 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: workspace_id.to_owned(),
             archived: false,

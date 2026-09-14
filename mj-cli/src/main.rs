@@ -117,7 +117,7 @@ enum Command {
     /// List the sessions the daemon holds.
     Sessions(api_commands::SessionsArgs),
     /// Close a session.
-    Close(api_commands::SessionArgs),
+    Close(api_commands::CloseArgs),
     /// Cancel the turn a session is running.
     CancelTurn(api_commands::SessionArgs),
     /// Print the API base URL and where its bearer token lives.
@@ -1584,6 +1584,7 @@ mod tests {
         state.sessions.insert(
             session_id.into(),
             SessionRecord {
+                mjolnir_subagents: None,
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 archived: false,
