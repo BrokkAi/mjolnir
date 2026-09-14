@@ -92,11 +92,7 @@ pub(crate) fn grapheme_offset_for_wrapped_row(line: &str, width: usize, row: usi
     )
 }
 
-pub fn input_cursor_visual_position(
-    input: &str,
-    cursor: usize,
-    width: usize,
-) -> (usize, usize) {
+pub fn input_cursor_visual_position(input: &str, cursor: usize, width: usize) -> (usize, usize) {
     let width = width.max(1);
     let cursor = cursor.min(input.len());
     let mut line_offset = 0;

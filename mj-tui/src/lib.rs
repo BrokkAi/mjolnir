@@ -1306,9 +1306,12 @@ impl DashboardState {
     /// the status panel instead: there is no conversation to type toward.
     pub(crate) fn type_ahead_session(&self) -> Option<(&str, SessionTransitionKind)> {
         let session_id = self.selected_session_id()?;
-        let kind = self
-            .transition_kind(session_id)
-            .filter(|kind| matches!(kind, SessionTransitionKind::Starting | SessionTransitionKind::Resuming))?;
+        let kind = self.transition_kind(session_id).filter(|kind| {
+            matches!(
+                kind,
+                SessionTransitionKind::Starting | SessionTransitionKind::Resuming
+            )
+        })?;
         Some((session_id, kind))
     }
 
@@ -1324,7 +1327,8 @@ impl DashboardState {
         if !text.is_empty() {
             let mut input = TextInput::multiline();
             input.set_value(text);
-            self.transition_composers.insert(session_id.to_owned(), input);
+            self.transition_composers
+                .insert(session_id.to_owned(), input);
         }
     }
 
@@ -1788,9 +1792,7 @@ impl DashboardState {
         }
         // The type-ahead composer answers the same keys the focused prompt
         // would, before list navigation can claim the arrows.
-        if plain
-            && let Some(action) = self.handle_type_ahead_key(key)
-        {
+        if plain && let Some(action) = self.handle_type_ahead_key(key) {
             return action;
         }
         if plain
@@ -3382,7 +3384,9 @@ mod tests {
             Some("helll")
         );
         assert_eq!(
-            dashboard.take_transition_composer_draft("session-1").as_deref(),
+            dashboard
+                .take_transition_composer_draft("session-1")
+                .as_deref(),
             Some("helll")
         );
         assert_eq!(dashboard.take_transition_composer_draft("session-1"), None);
@@ -3423,11 +3427,7 @@ mod tests {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
-        dashboard.begin_session_operation(
-            "session-1".into(),
-            SessionOperationKind::Stopping,
-            None,
-        );
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
         dashboard.focus_prompt();
 
         assert_eq!(
@@ -3444,11 +3444,7 @@ mod tests {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
-        dashboard.begin_session_operation(
-            "session-1".into(),
-            SessionOperationKind::Resuming,
-            None,
-        );
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
         dashboard.focus_prompt();
 
         dashboard.handle_paste("first\r\nsecond\rthird");

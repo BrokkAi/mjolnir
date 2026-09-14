@@ -927,7 +927,9 @@ fn render_type_ahead_composer(
             theme::muted(),
         )]
     } else {
-        text.split('\n').map(|line| Line::raw(line.to_owned())).collect()
+        text.split('\n')
+            .map(|line| Line::raw(line.to_owned()))
+            .collect()
     };
     let cursor_row = input_cursor_visual_position(text, cursor, content_width).1;
     let content_height = usize::from(prompt_inner.height).max(1);
@@ -943,12 +945,7 @@ fn render_type_ahead_composer(
     if input_scroll == 0 {
         frame.render_widget(
             Line::styled(">", theme::title(focused)),
-            Rect::new(
-                prompt_inner.x.saturating_sub(2),
-                prompt_inner.y,
-                1,
-                1,
-            ),
+            Rect::new(prompt_inner.x.saturating_sub(2), prompt_inner.y, 1, 1),
         );
     }
     // The cursor belongs to whatever has focus, so the pane only shows one
@@ -965,7 +962,9 @@ fn transition_prompt_height(dashboard: &DashboardState, width: u16) -> Option<u1
     let (session_id, _) = dashboard.type_ahead_session()?;
     let rows = dashboard
         .transition_composer(session_id)
-        .map_or(1, |input| input_visual_rows(input.value(), prompt_content_width(width)));
+        .map_or(1, |input| {
+            input_visual_rows(input.value(), prompt_content_width(width))
+        });
     Some(
         u16::try_from(rows)
             .unwrap_or(u16::MAX)
@@ -1142,7 +1141,9 @@ mod tests {
             lines
         );
         assert_eq!(
-            dashboard.take_transition_composer_draft("session-1").as_deref(),
+            dashboard
+                .take_transition_composer_draft("session-1")
+                .as_deref(),
             Some("first message ahead")
         );
         // The keystrokes were input, not actions.
@@ -1157,11 +1158,7 @@ mod tests {
     #[test]
     fn an_empty_type_ahead_composer_shows_the_placeholder() {
         let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_session_operation(
-            "session-1".into(),
-            SessionOperationKind::Resuming,
-            None,
-        );
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
         dashboard.focus_prompt();
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
@@ -1184,11 +1181,7 @@ mod tests {
     #[test]
     fn a_stopping_transition_keeps_the_status_panel() {
         let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_session_operation(
-            "session-1".into(),
-            SessionOperationKind::Stopping,
-            None,
-        );
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
             .draw(|frame| render_combined(frame, &mut dashboard, None, false))
@@ -1232,11 +1225,7 @@ mod tests {
         assert_eq!(transition_prompt_height(&dashboard, 100), Some(9));
 
         dashboard.finish_session_operation("session-1");
-        dashboard.begin_session_operation(
-            "session-1".into(),
-            SessionOperationKind::Stopping,
-            None,
-        );
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
         assert_eq!(transition_prompt_height(&dashboard, 100), None);
     }
 
