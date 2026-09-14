@@ -31,7 +31,7 @@ controls:
 | Kimi Code | `auto` |
 | Grok Build | always approve with its sandbox disabled |
 | DeepSeek Harness | `danger-full-access` |
-| Muse Code | `auto` approvals and `--disable-sandbox` |
+| Muse Code | the `:unrestricted` permission profile in its staged settings, `allowAll` approvals, and `--disable-sandbox` |
 
 Kimi's mode is named `auto`, but in this context it approves every call. It is
 not a low-risk guardian policy.

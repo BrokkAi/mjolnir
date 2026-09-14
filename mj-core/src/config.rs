@@ -334,6 +334,15 @@ pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf 
     })
 }
 
+/// The Muse permission profile staged for unconstrained targets.
+///
+/// Muse 1.2.1 composes a session's permission profile from
+/// `permissions.default_profile` in its settings file, and nothing on the ACP
+/// wire overrides that choice. A container target must therefore have the
+/// profile written into the staged settings, or Muse refuses the session when
+/// the configured profile needs a facility the container does not have.
+pub const MUSE_UNCONSTRAINED_PERMISSION_PROFILE: &str = ":unrestricted";
+
 impl HarnessKind {
     /// Translate a harness home into its process environment. Muse's config
     /// directory must be named `muse`, as required by the XDG directory layout.
