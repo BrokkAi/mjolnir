@@ -13,6 +13,7 @@ pub mod elicitation;
 pub mod goal;
 pub mod harness_runtime;
 pub mod local_git;
+pub mod local_sockets;
 pub mod login_environment;
 pub mod path_input;
 pub mod project_memory;

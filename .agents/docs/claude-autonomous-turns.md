@@ -122,6 +122,31 @@ evidence differently, and `BackgroundWorkPolicy` picks which one a relay reads
   not correlated with this level: their ordering is unspecified, and starts
   include foreground tasks. This fixes idle being displayed while Claude's
   own background agents are still running.
+
+  A stop Hel requests for one of these tasks is acknowledged by the
+  adapter with a plain `agent_message_chunk` whose text is
+  `**Task stopped by user:** <name>.` and no origin marker: the SDK injects
+  nothing into the model for a user-stopped shell task, so no turn runs.
+  Only the prefix is stable. `<name>` is whatever the adapter calls the task
+  at that moment, and a later `task_started` or level replaces it (a live
+  check saw the level say `Sleep for the live check` and the acknowledgement
+  quote the command `sleep 900`). The relay therefore records the task id as
+  a pending stop when `background_task_stop_target` resolves a
+  `ClaudeAsyncTask`, treats the next prefixed single-text chunk as its
+  acknowledgement while any stop is pending, and does not open a harness turn
+  for it; the chunk still enters the transcript. A stop that never reaches
+  the adapter drops its pending entry (`claude_stop_not_sent`), and restart or
+  close clears them all. Checked against claude-agent-acp 0.73.0
+  `dist/async-tasks.js` (`taskStopped`, `mergeLevel`, `mergeStarted`) and
+  live on 2026-09-14. Tasks that end on their own still re-invoke the model
+  and open a turn as before.
+
+  A task list that stays populated for hours is not by itself a relay bug.
+  On 2026-09-14 a session reported six tasks alive for over five hours; each
+  was a `until ! pgrep -f "<pattern>"; do sleep 10; done` loop whose pattern
+  matched the loop's own command line, so it could never exit. The relay
+  reported the SDK level accurately. The remedy is agent guidance, not a relay
+  change.
 - `CodexExecCards` (Codex). codex-acp runs its own shells and never calls
   `terminal/create`, so the only evidence is the tool card. An `exec_command`
   card carries its result under `rawOutput`, with `exit_code` parsed from
@@ -182,7 +207,10 @@ Running clocks read `43m36s`, not `00:43:36` (`format_clock`).
   that arrives at idle and is never followed by a settling `usage_update` holds
   the turn open until a prompt result or a restart clears it. That is visible in
   the UI as a running session, and no recovery copies happen meanwhile — the
-  same exposure as a prompt that never returns.
+  same exposure as a prompt that never returns. The one such chunk Hel
+  itself provokes, the `**Task stopped by user:** <name>.` acknowledgement of a
+  stop it requested, is paired with the pending stop and handled (see
+  `ClaudeTasks` above). Other unmarked chunks still hold the turn open.
 - **Grok goal mode has no marker.** It streams a whole autonomous turn as
   trailing chunks after a prompt completes and never settles it, so it keeps
   today's behaviour: the policy stays `Disabled` and the projection's idle-time

@@ -145,8 +145,13 @@ pub(super) fn serve(root: &Path) -> Result<(SubagentEndpoint, super::unix::Socke
     let endpoint = SubagentEndpoint::open(root)?;
     let path = root.join(SUBAGENT_SOCKET);
     let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path)
+    let listener = mj_core::local_sockets::bind_unix_listener(&path)
         .with_context(|| format!("bind sub-agent socket {}", path.display()))?;
+    listener
+        .set_nonblocking(true)
+        .with_context(|| format!("set sub-agent socket {} nonblocking", path.display()))?;
+    let listener = UnixListener::from_std(listener)
+        .with_context(|| format!("register sub-agent socket {}", path.display()))?;
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
