@@ -320,7 +320,7 @@ fn profile_quota(
                 remaining_percent: Some(five_hour_remaining),
                 used: None,
                 limit: None,
-                resets: Some("2h14m".into()),
+                resets: Some("2h 14m".into()),
                 resets_at_epoch_seconds: None,
             },
         ],

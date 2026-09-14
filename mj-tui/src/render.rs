@@ -2173,12 +2173,12 @@ fn quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> String {
     if remaining >= DAY {
         let days = remaining / DAY;
         let hours = remaining % DAY / HOUR;
-        format!("{days}d{hours}h")
+        format!("{days}d {hours}h")
     } else if remaining >= HOUR {
         let hours = remaining / HOUR;
         let minutes = remaining % HOUR / MINUTE;
         if hours == 1 && minutes > 0 {
-            format!("{hours}h{minutes}m")
+            format!("{hours}h {minutes}m")
         } else {
             format!("{hours}h")
         }
@@ -2203,7 +2203,7 @@ fn five_hour_quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> Str
     } else {
         let hours = remaining / (60 * 60);
         let minutes = remaining % (60 * 60) / 60;
-        format!("{hours}h{minutes}m")
+        format!("{hours}h {minutes}m")
     }
 }
 
@@ -6377,12 +6377,12 @@ mod tests {
 
         assert_eq!(
             quota_reset_countdown(now, (now + 2 * DAY + 5 * HOUR) as i64),
-            "2d5h"
+            "2d 5h"
         );
-        assert_eq!(quota_reset_countdown(now, (now + 2 * DAY) as i64), "2d0h");
+        assert_eq!(quota_reset_countdown(now, (now + 2 * DAY) as i64), "2d 0h");
         assert_eq!(
             quota_reset_countdown(now, (now + DAY + 5 * HOUR) as i64),
-            "1d5h"
+            "1d 5h"
         );
         assert_eq!(
             quota_reset_countdown(now, (now + 2 * HOUR + 5 * MINUTE) as i64),
@@ -6390,7 +6390,7 @@ mod tests {
         );
         assert_eq!(
             quota_reset_countdown(now, (now + HOUR + 5 * MINUTE) as i64),
-            "1h5m"
+            "1h 5m"
         );
         assert_eq!(
             quota_reset_countdown(now, (now + 35 * MINUTE) as i64),
@@ -6428,7 +6428,10 @@ mod tests {
             refreshed_at_epoch_seconds: 0,
         };
 
-        assert_eq!(quota_reset_cells(&quota, 0), ("7d0h".into(), "4h0m".into()));
+        assert_eq!(
+            quota_reset_cells(&quota, 0),
+            ("7d 0h".into(), "4h 0m".into())
+        );
     }
 
     #[test]
@@ -6438,15 +6441,15 @@ mod tests {
 
         assert_eq!(
             five_hour_quota_reset_countdown(100, 100 + 4 * HOUR + 50 * MINUTE),
-            "4h50m"
+            "4h 50m"
         );
         assert_eq!(
             five_hour_quota_reset_countdown(100, 100 + 4 * HOUR + 5 * MINUTE),
-            "4h5m"
+            "4h 5m"
         );
         assert_eq!(
             five_hour_quota_reset_countdown(100, 100 + HOUR + 5 * MINUTE),
-            "1h5m"
+            "1h 5m"
         );
         assert_eq!(five_hour_quota_reset_countdown(100, 130), "<1m");
     }
@@ -6501,7 +6504,7 @@ mod tests {
         assert!(rendered.contains("73%"));
         assert!(rendered.contains("70%"));
         assert!(rendered.contains("2d"));
-        assert!(rendered.contains("1h5m"));
+        assert!(rendered.contains("1h 5m"));
         assert!(!rendered.contains("09:00 Aug 20"));
 
         let row = lines
@@ -6513,7 +6516,7 @@ mod tests {
         let weekly_percent = cell_column(row, "73%");
         let weekly_reset = cell_column(row, "2d");
         let five_hour_percent = cell_column(row, "70%");
-        let five_hour_reset = cell_column(row, "1h5m");
+        let five_hour_reset = cell_column(row, "1h 5m");
         assert_eq!(weekly_reset, weekly_percent + 3 + 1);
         assert_eq!(five_hour_percent - 12, weekly_reset + 6 + 2);
         assert_eq!(five_hour_reset, five_hour_percent + 3 + 1);
@@ -6567,6 +6570,6 @@ mod tests {
         assert!(row.contains("73%"), "{row:?}");
         assert!(row.contains("70%"), "{row:?}");
         assert!(row.contains("2d"), "{row:?}");
-        assert!(row.contains("1h5m"), "{row:?}");
+        assert!(row.contains("1h 5m"), "{row:?}");
     }
 }
