@@ -2,8 +2,6 @@
 //! visual wrapping the terminal cursor follows.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::Frame;
-use ratatui::layout::Rect;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::rendering::sanitize_terminal_text;
@@ -354,34 +352,9 @@ fn word_class(character: char) -> bool {
     SEPARATORS.contains(character)
 }
 
-pub(super) fn set_input_cursor(
-    frame: &mut Frame,
-    area: Rect,
-    input: &str,
-    cursor: usize,
-    queue_rows: usize,
-    scroll: usize,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let width = usize::from(area.width);
-    let (column, input_row) = input_cursor_visual_position(input, cursor, width);
-    let row = queue_rows.saturating_add(input_row).saturating_sub(scroll);
-    if row < usize::from(area.height) {
-        frame.set_cursor_position((
-            area.x + column.min(width.saturating_sub(1)) as u16,
-            area.y + row as u16,
-        ));
-    }
-}
-
-pub(super) fn input_visual_rows(input: &str, width: usize) -> usize {
-    input_cursor_visual_position(input, input.len(), width).1 + 1
-}
-
 pub(super) use crate::components::text_layout::{
-    grapheme_offset_for_wrapped_row, input_cursor_visual_position, wrapped_row_for_grapheme_offset,
+    grapheme_offset_for_wrapped_row, input_cursor_visual_position, input_visual_rows,
+    set_input_cursor, wrapped_row_for_grapheme_offset,
 };
 
 #[cfg(test)]

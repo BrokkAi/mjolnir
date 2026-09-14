@@ -1701,6 +1701,12 @@ impl DashboardContext {
         let updates = self.dashboard_io_tx.clone();
         let session_id = session_id.to_owned();
         let bundle_id = session_record.bundle_id.clone();
+        // A draft typed while the session's transition ran belongs to this
+        // composer now; it wins over the warm chat's older captured text.
+        if let Some(text) = self.dashboard.take_transition_composer_draft(&session_id) {
+            self.composer_drafts
+                .capture(&session_id, text, &session_record.draft_input);
+        }
         let draft = self
             .composer_drafts
             .open(&session_id, &session_record.draft_input)

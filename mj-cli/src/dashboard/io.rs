@@ -2291,6 +2291,10 @@ impl DashboardContext {
                     SessionOperationKind::Launching,
                     None,
                 );
+                // The next thing the person does with a launching session is
+                // write its first message, so the keyboard starts where the
+                // type-ahead composer is.
+                self.dashboard.focus_prompt();
                 self.dashboard
                     .set_notice(format!("Launching {}…", short_id(&session_id)));
                 self.lifecycle_operations.insert(

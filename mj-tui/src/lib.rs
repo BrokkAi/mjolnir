@@ -26,6 +26,7 @@ use mj_core::state::{
 use mj_chat::chat::Notices;
 use mj_chat::components::{EventResult, Outcome};
 use mj_chat::selection::FrameSurfaces;
+use mj_chat::text_input::{EditOutcome, TextInput};
 use mj_client::quota::ProfileQuota;
 use mj_client::review::RuntimeReviewView;
 use mj_core::targets::AdditionalMount;
@@ -537,6 +538,11 @@ pub struct DashboardState {
     pub(crate) project_sources: BTreeMap<String, ProjectSourceIdentity>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
     pub(crate) session_operations: BTreeMap<String, SessionOperationDisplay>,
+    /// Composer text typed while a Starting/Resuming transition parks the
+    /// selected session's conversation. Keyed per session so each draft stays
+    /// with its row; the controller hands it to the real composer when the
+    /// chat opens.
+    pub(crate) transition_composers: BTreeMap<String, TextInput>,
     /// Durable move intents retained by the daemon, including failed and
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: BTreeMap<String, MoveOperation>,
@@ -707,6 +713,7 @@ impl DashboardState {
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             session_operations: BTreeMap::new(),
+            transition_composers: BTreeMap::new(),
             move_operations: BTreeMap::new(),
             capacity_details: BTreeMap::new(),
             selected_session_id: None,
@@ -1293,6 +1300,76 @@ impl DashboardState {
         }
     }
 
+    /// The selected session whose conversation is parked behind a Starting or
+    /// Resuming transition, and therefore offers the type-ahead composer.
+    /// Retiring transitions (Moving/Stopping/Destroying) and failed ones keep
+    /// the status panel instead: there is no conversation to type toward.
+    pub(crate) fn type_ahead_session(&self) -> Option<(&str, SessionTransitionKind)> {
+        let session_id = self.selected_session_id()?;
+        let kind = self
+            .transition_kind(session_id)
+            .filter(|kind| matches!(kind, SessionTransitionKind::Starting | SessionTransitionKind::Resuming))?;
+        Some((session_id, kind))
+    }
+
+    /// The type-ahead draft a session's prompt pane is editing.
+    pub fn transition_composer(&self, session_id: &str) -> Option<&TextInput> {
+        self.transition_composers.get(session_id)
+    }
+
+    /// Seeds the type-ahead composer from a warm chat's input, so a restart
+    /// carries the text on screen through the transition instead of blanking
+    /// it.
+    pub fn seed_transition_composer(&mut self, session_id: &str, text: String) {
+        if !text.is_empty() {
+            let mut input = TextInput::multiline();
+            input.set_value(text);
+            self.transition_composers.insert(session_id.to_owned(), input);
+        }
+    }
+
+    /// Removes and returns the type-ahead draft, for the chat open that
+    /// adopts it as the composer's starting input.
+    pub fn take_transition_composer_draft(&mut self, session_id: &str) -> Option<String> {
+        self.transition_composers
+            .remove(session_id)
+            .map(TextInput::into_value)
+    }
+
+    /// Keys for the type-ahead composer shown while a Starting/Resuming
+    /// transition owns the selected session. Editing keys land in the draft;
+    /// `Enter` deliberately does not send, because the session is not live
+    /// yet. `Some` means the key was consumed, including as a no-op.
+    fn handle_type_ahead_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
+        if self.focus != Focus::Prompt {
+            return None;
+        }
+        let (session_id, kind) = self.type_ahead_session()?;
+        if key.code == KeyCode::Enter {
+            self.set_notice(match kind {
+                SessionTransitionKind::Resuming => {
+                    "Sending opens when the session has resumed; the draft is kept."
+                }
+                _ => "Sending opens when the session is live; the draft is kept.",
+            });
+            self.record_event_handled();
+            return Some(DashboardAction::None);
+        }
+        let composer = self
+            .transition_composers
+            .entry(session_id.to_owned())
+            .or_insert_with(TextInput::multiline);
+        match composer.handle_key(key) {
+            EditOutcome::Changed => self.mark_render_changed(),
+            EditOutcome::Handled => {}
+            // Tab, F-keys, and anything the field does not edit still belong
+            // to the ordinary dashboard handling.
+            EditOutcome::Unhandled => return None,
+        }
+        self.record_event_handled();
+        Some(DashboardAction::None)
+    }
+
     /// Whether the pointer is over the conversation the surface is drawing.
     /// A click there belongs to the chat, whatever has focus.
     pub fn chat_region_contains(&self, column: u16, row: u16) -> bool {
@@ -1459,6 +1536,19 @@ impl DashboardState {
     pub fn handle_paste(&mut self, pasted: &str) {
         if self.component_modal_open() {
             self.handle_component_event(crossterm::event::Event::Paste(pasted.to_owned()));
+            return;
+        }
+        if self.focus == Focus::Prompt
+            && let Some((session_id, _)) = self.type_ahead_session()
+        {
+            let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
+            let composer = self
+                .transition_composers
+                .entry(session_id.to_owned())
+                .or_insert_with(TextInput::multiline);
+            if composer.insert_str(&normalized) {
+                self.mark_render_changed();
+            }
         }
     }
 
@@ -1695,6 +1785,13 @@ impl DashboardState {
                 return DashboardAction::None;
             }
             _ => {}
+        }
+        // The type-ahead composer answers the same keys the focused prompt
+        // would, before list navigation can claim the arrows.
+        if plain
+            && let Some(action) = self.handle_type_ahead_key(key)
+        {
+            return action;
         }
         if plain
             && self.focus == Focus::Sessions
@@ -3252,6 +3349,115 @@ mod tests {
                 session_id,
                 kind: SessionOperationKind::Launching,
             }
+        );
+    }
+
+    /// A launching session parks its conversation behind a composer the user
+    /// can type into; the draft survives to be taken by the chat that opens.
+    #[test]
+    fn typing_during_a_launching_transition_edits_the_type_ahead_draft() {
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Launching,
+            None,
+        );
+        dashboard.focus_prompt();
+
+        for character in "hello".chars() {
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Char(character))),
+                DashboardAction::None
+            );
+        }
+        dashboard.handle_key(key(KeyCode::Backspace));
+        dashboard.handle_key(key(KeyCode::Char('l')));
+
+        assert_eq!(
+            dashboard
+                .transition_composer("session-1")
+                .map(|input| input.value()),
+            Some("helll")
+        );
+        assert_eq!(
+            dashboard.take_transition_composer_draft("session-1").as_deref(),
+            Some("helll")
+        );
+        assert_eq!(dashboard.take_transition_composer_draft("session-1"), None);
+    }
+
+    /// Enter must not send while the session is not live: it is consumed with
+    /// an explanation and the draft stays editable.
+    #[test]
+    fn enter_during_a_starting_transition_does_not_send_or_clear_the_draft() {
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Launching,
+            None,
+        );
+        dashboard.focus_prompt();
+        dashboard.handle_key(key(KeyCode::Char('h')));
+
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(dashboard.notice().is_some());
+        assert_eq!(
+            dashboard
+                .transition_composer("session-1")
+                .map(|input| input.value()),
+            Some("h")
+        );
+    }
+
+    /// Retiring transitions have no conversation to type toward, so their
+    /// keys keep falling through to the ordinary dashboard handling.
+    #[test]
+    fn a_stopping_transition_offers_no_type_ahead_composer() {
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Stopping,
+            None,
+        );
+        dashboard.focus_prompt();
+
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('h'))),
+            DashboardAction::None
+        );
+        assert!(dashboard.transition_composer("session-1").is_none());
+    }
+
+    /// A paste into the parked composer lands in the draft with terminal line
+    /// endings normalized, the way the chat composer normalizes them.
+    #[test]
+    fn a_paste_during_a_starting_transition_joins_the_type_ahead_draft() {
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Resuming,
+            None,
+        );
+        dashboard.focus_prompt();
+
+        dashboard.handle_paste("first\r\nsecond\rthird");
+
+        assert_eq!(
+            dashboard
+                .transition_composer("session-1")
+                .map(|input| input.value()),
+            Some("first\nsecond\nthird")
         );
     }
 
