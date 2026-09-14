@@ -1563,7 +1563,7 @@ pub(super) fn bridge_launch(
             vec![
                 "-c".into(),
                 format!(
-                    "if [ -z \"${{ZCODE_BIN:-}}\" ] || [ ! -f \"$ZCODE_BIN\" ]; then echo 'Mjolnir target image lacks the ZCode backend; rebuild it from containers/Containerfile.agent-dev or set ZCODE_BIN to the headless zcode.cjs runtime' >&2; exit 127; fi; if command -v zcode-acp-server >/dev/null 2>&1; then exec zcode-acp-server; fi; {}; exec npx -y zcode-acp-server@{}",
+                    "if [ -z \"${{ZCODE_BIN:-}}\" ] || [ ! -f \"$ZCODE_BIN\" ]; then echo 'Mjolnir target image lacks the ZCode backend; rebuild it from containers/Containerfile.agent-dev or set ZCODE_BIN to the headless zcode.cjs runtime' >&2; exit 127; fi; if command -v zcode-acp-server >/dev/null 2>&1; then exec zcode-acp-server; fi; {}; exec npx -y @brokkai/zcode-acp@{}",
                     ensure_node_22_script(),
                     mj_core::harness_runtime::ZCODE_ACP_VERSION,
                 ),
@@ -4542,7 +4542,7 @@ mod tests {
         assert!(!CONTAINERFILE.contains("dsh-acp-server"));
 
         let zcode = format!(
-            "zcode-acp-server@{}",
+            "@brokkai/zcode-acp@{}",
             mj_core::harness_runtime::ZCODE_ACP_VERSION
         );
         assert!(

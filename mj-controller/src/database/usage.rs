@@ -109,6 +109,7 @@ mod tests {
             Some(UsageScope::Turn),
             Some(UsageScope::LastRequest),
             None,
+            Some(UsageScope::Unspecified),
         ]
         .into_iter()
         .enumerate()
@@ -191,17 +192,29 @@ mod tests {
             Some(403)
         );
         assert_eq!(first.provider_session_cost.as_ref().unwrap().amount, 1.25);
-        assert_eq!(first.coverage.recorded_turns, 4);
+        assert_eq!(first.coverage.recorded_turns, 5);
         assert_eq!(first.coverage.full_turn_reports, 2);
         assert_eq!(first.coverage.last_request_reports, 1);
+        assert_eq!(first.coverage.unspecified_reports, 1);
         assert_eq!(first.coverage.missing_reports, 1);
+        // Only the two whole-turn reports are summed: the last-request and
+        // unspecified turns stay out of the totals.
         assert_eq!(first.totals["total_tokens"].tokens, 60);
+        assert_eq!(first.totals["total_tokens"].reported_turns, 2);
         assert_eq!(first.totals["cached_read_tokens"].tokens, 0);
         assert!(!first.totals.contains_key("thought_tokens"));
         let next = load_session_usage_from(&path, "usage", first.next_after_seq, 2)?.unwrap();
         assert_eq!(next.turns.len(), 2);
-        assert_eq!(next.next_after_seq, next.latest_seq);
+        assert_eq!(next.latest_seq, 5);
         assert_eq!(next.totals, first.totals);
+        let last = load_session_usage_from(&path, "usage", next.next_after_seq, 2)?.unwrap();
+        assert_eq!(last.turns.len(), 1);
+        assert_eq!(
+            last.turns[0].usage.as_ref().unwrap().scope,
+            UsageScope::Unspecified
+        );
+        assert_eq!(last.next_after_seq, last.latest_seq);
+        assert_eq!(last.totals, first.totals);
         Ok(())
     }
 }

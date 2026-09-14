@@ -2173,11 +2173,7 @@ fn quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> String {
     if remaining >= DAY {
         let days = remaining / DAY;
         let hours = remaining % DAY / HOUR;
-        if days == 1 && hours > 0 {
-            format!("{days}d{hours}h")
-        } else {
-            format!("{days}d")
-        }
+        format!("{days}d{hours}h")
     } else if remaining >= HOUR {
         let hours = remaining / HOUR;
         let minutes = remaining % HOUR / MINUTE;
@@ -6373,7 +6369,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_reset_countdowns_use_a_second_unit_only_after_one_first_unit() {
+    fn quota_reset_countdown_always_shows_hours() {
         const MINUTE: u64 = 60;
         const HOUR: u64 = 60 * MINUTE;
         const DAY: u64 = 24 * HOUR;
@@ -6381,8 +6377,9 @@ mod tests {
 
         assert_eq!(
             quota_reset_countdown(now, (now + 2 * DAY + 5 * HOUR) as i64),
-            "2d"
+            "2d5h"
         );
+        assert_eq!(quota_reset_countdown(now, (now + 2 * DAY) as i64), "2d0h");
         assert_eq!(
             quota_reset_countdown(now, (now + DAY + 5 * HOUR) as i64),
             "1d5h"
@@ -6431,7 +6428,7 @@ mod tests {
             refreshed_at_epoch_seconds: 0,
         };
 
-        assert_eq!(quota_reset_cells(&quota, 0), ("7d".into(), "4h0m".into()));
+        assert_eq!(quota_reset_cells(&quota, 0), ("7d0h".into(), "4h0m".into()));
     }
 
     #[test]

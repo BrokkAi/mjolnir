@@ -532,15 +532,18 @@ across a prompt’s model requests, including cancellation. Unknown resumed base
 missing reports, or counter resets retain incomplete (`unspecified`) coverage. Older
 Codex adapters and historical reports retain `last_request` scope. Grok's native
 prompt-ledger metadata and matching completion notifications report whole-turn
-consumption; explicitly incomplete reports retain `unspecified` scope. Other
-adapters' reports retain unspecified scope. Only known
-whole-turn reports contribute to `totals`. Each counter includes `tokens` and
-`reported_turns`; `coverage` counts recorded turns, full reports, partial
+consumption; explicitly incomplete reports retain `unspecified` scope. The
+managed ZCode adapter reports the backend's merged whole-turn usage on the
+prompt response and omits the report when the backend reported none. Kimi and
+Deepseek reports retain `unspecified` scope; Muse produces no token reports.
+Only known whole-turn reports contribute to `totals`. Each counter includes
+`tokens` and `reported_turns`; `coverage` counts recorded turns, full reports, partial
 last-request reports, unspecified reports, and missing reports. An absent counter
 stays absent. These are reported totals for covered turns, not a billing estimate.
-Grok usage may also carry `provider_details`: optional `model_calls`,
+Grok and ZCode usage may also carry `provider_details`: optional `model_calls`,
 `api_duration_ms`, provider `elapsed_ms`, `cost`, and a `model_usage` map keyed by
-the provider's exact model IDs (for example, `grok-4.6-build`). Each model row uses
+the provider's exact model IDs (for example, `grok-4.6-build`). ZCode reports only
+`model_calls`. Each model row uses
 the same normalized token fields. Full input already includes cache reads and
 cache creation; output already includes reasoning. Do not add those subsets to
 input/output again, or add model rows to the top-level turn total.

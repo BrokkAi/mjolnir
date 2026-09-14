@@ -86,6 +86,12 @@ artifacts. They are supplied again from the selected controller-side profile
 when a target is resumed. Repository origins containing embedded credentials
 are also rejected or redacted at the archive boundary.
 
+ZCode checkpoints and bundles carry repository work only. ZCode keeps its
+conversation state in one shared live database rather than in per-session
+files, so Mjolnir does not capture or restore that state. Resuming a ZCode
+session restores the repositories and the canonical transcript Mjolnir holds,
+but not the harness's own conversation history.
+
 Checkpointing protects project workspaces. Installed packages, the rest of the
 target user's home, `/tmp`, container layers, and other files outside the
 declared project workspace are ephemeral. Directory attachments are not a

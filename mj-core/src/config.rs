@@ -527,6 +527,15 @@ impl HarnessKind {
         Ok(())
     }
 
+    /// Whether a checkpoint can capture per-session harness files for this
+    /// harness. ZCode keeps all conversations in one shared live SQLite
+    /// database, so its checkpoints carry repository state only; other
+    /// harnesses have per-session files that the checkpoint captures and
+    /// restores.
+    pub const fn captures_native_session(self) -> bool {
+        !matches!(self, Self::Zcode)
+    }
+
     pub const fn supports_guardian_approvals(self) -> bool {
         matches!(
             self,
