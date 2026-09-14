@@ -2573,6 +2573,7 @@ mod tests {
             push_urls: vec!["ssh://git@example.com/repo.git".into()],
         };
         let retry = DashboardAction::CreateSession {
+            mjolnir_subagents: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "codex".into(),
             target_template_id: "docker".into(),
@@ -2653,6 +2654,7 @@ mod tests {
     fn launch_failure_survives_notices_and_retries_original_settings_once() {
         let mut dashboard = dashboard_with_session(stopped_session());
         let retry = DashboardAction::CreateSession {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: "original-workspace".into(),
             profile_id: "codex".into(),
@@ -3851,6 +3853,7 @@ mod tests {
     #[test]
     fn dirty_local_confirmation_continues_or_cancels_from_its_buttons() {
         let create = |allow_dirty_local| DashboardAction::CreateSession {
+            mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "codex-1".into(),

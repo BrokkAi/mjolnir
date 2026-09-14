@@ -16,13 +16,15 @@ This change also fixes a defect in the current code: the worker hides the native
 
 - [x] (2026-09-14) Milestone 1: session record, create request, API request, database column and migration 33.
 - [x] (2026-09-14) Milestone 2: controller resolves the per-session value; worker keys native suppression on the MCP socket.
-- [ ] Milestone 3: terminal new-session wizard checkbox.
+- [x] (2026-09-14) Milestone 3: terminal new-session wizard checkbox.
 - [ ] Milestone 4: web new-session wizard checkbox.
 - [ ] Validation: `cargo fmt --all -- --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `git diff --check`, web unit and Playwright tests; commit.
 
 ## Surprises & Discoveries
 
 
+- Observation: `mj-tui/src/dialogs.rs` has no second new-session creation path. The `create_managed_worktree` references there belong to `ImportBundleConfirmation`, the dialog that confirms importing an existing native session, plus three `DashboardAction::CreateSession` literals inside that file's own tests. The wizard in `mj-tui/src/wizards/` is the only surface that builds a new-session request in the terminal, so the checkbox lives there alone.
+  Evidence: `mj-tui/src/dialogs.rs:346` is `ImportBundleConfirmation::create_managed_worktree`; `dialogs.rs:2575`, `:2655`, and `:3853` are all inside `#[cfg(test)] mod tests`.
 - Observation: resume does not build its launch configuration on a different path. `mj-controller/src/controller/worker_binary.rs::prepare_worker_files` has three callers -- `controller/provisioning.rs:109`, `controller/provisioning.rs:538`, and `controller/resume.rs:1165` -- so the one expression covers first launch, worker payload install, and resume.
   Evidence: `grep -rn prepare_worker_files mj-controller/src`.
 - Observation: the compatibility floor is already 32, not 30, because migration 32 (ZCode harness constraints) was breaking. Three tests in `mj-controller/src/database/schema.rs` asserted `minimum_compatible == Some(SCHEMA_VERSION)`, which held only by coincidence while the newest migration was the breaking one. Milestone 1 introduced a `MINIMUM_COMPATIBLE_VERSION` constant in that file's `reader_tests` module and pinned the two real assertions to it, so a future compatible migration no longer breaks the test.
@@ -47,6 +49,9 @@ This change also fixes a defect in the current code: the worker hides the native
   Date/Author: 2026-09-14, Fable.
 - Decision: database migration 33 is compatible. It adds one nullable column `mjolnir_subagents INTEGER CHECK(mjolnir_subagents IN (0, 1))` to `sessions` and does not raise the minimum compatible revision.
   Rationale: older readers ignore the column. The older writer's session upsert in `mj-controller/src/database.rs` lists columns explicitly and its `ON CONFLICT ... DO UPDATE SET` touches only those columns, so an older binary updating a session preserves the new column's value. An older executable launching such a session falls back to the global setting, which is a behaviour difference, not data loss or corruption. This matches the classification used for revision 29 (`create_managed_worktree`).
+  Date/Author: 2026-09-14, Fable.
+- Decision: imported sessions keep `mjolnir_subagents: None` and no import-dialog checkbox. The plan expected a second creation path in `mj-tui/src/dialogs.rs`, but that file's dialog confirms a session *import*, not a creation. `None` there preserves today's behaviour exactly, and adding a control to the import dialog was not requested.
+  Rationale: match the existing behaviour rather than invent a new control the user did not ask for.
   Date/Author: 2026-09-14, Fable.
 - Decision: the checkbox appears only when the selected profile's harness kind is Claude or Codex. For any other kind the wizard sends `None`.
   Rationale: only those two harnesses receive Mjolnir sub-agent tools, so the checkbox would be meaningless elsewhere.
