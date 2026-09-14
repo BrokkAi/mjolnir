@@ -90,3 +90,5 @@ Revision 2026-09-14: recorded and fixed the macOS PTY portability failures disco
 Revision 2026-09-14: incorporated the upstream daemon startup error-reporting fix into the release candidate and public notes.
 
 Revision 2026-09-14: completed the local validation matrix, fixed macOS Codex goal checkpoint paths and workspace license exceptions, and produced all twelve package archives.
+
+Revision 2026-09-14: resumed after incorporating the global `--instance` / `-i` isolation flag from commit `1cbe5778`; restarted exact-candidate validation before tagging.

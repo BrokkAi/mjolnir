@@ -6,6 +6,7 @@
 
 ## Improvements
 
+- Run fully isolated Mjolnir worlds with the new global `--instance` / `-i` flag, separating configuration, databases, daemons, and logs.
 - Session creation now makes configuration and managed-worktree choices explicit, while discovery and provisioning remain cancellable.
 - Turn diagnostics record provider usage and quota exhaustion more accurately across Codex, Claude, Grok, and Kimi integrations.
 - Checkpoint exports are isolated, checksum evidence is reported, and compatible newer database schemas remain usable by older builds.
