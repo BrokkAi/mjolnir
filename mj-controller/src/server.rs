@@ -362,6 +362,10 @@ pub struct ViewerSnapshot {
     /// armed. Reviewer model and effort remain controller-private.
     #[serde(default)]
     pub review_config: ViewerReviewConfig,
+    /// The global `[subagents] enabled` setting. The new-session form uses it
+    /// as the default for its per-session sub-agent checkbox.
+    #[serde(default)]
+    pub subagents_enabled: bool,
     /// One entry per host or fleet that can be probed. Empty until the phone
     /// server's capacity poller has published a reading.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -538,6 +542,7 @@ impl ViewerSnapshot {
                 tier: config.review.tier.label().to_owned(),
                 profile: config.review.profile.clone(),
             },
+            subagents_enabled: config.subagents.enabled,
             capacity: Vec::new(),
             launch_failures: Vec::new(),
         }

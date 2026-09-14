@@ -17,12 +17,18 @@ This change also fixes a defect in the current code: the worker hides the native
 - [x] (2026-09-14) Milestone 1: session record, create request, API request, database column and migration 33.
 - [x] (2026-09-14) Milestone 2: controller resolves the per-session value; worker keys native suppression on the MCP socket.
 - [x] (2026-09-14) Milestone 3: terminal new-session wizard checkbox.
-- [ ] Milestone 4: web new-session wizard checkbox.
-- [ ] Validation: `cargo fmt --all -- --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `git diff --check`, web unit and Playwright tests; commit.
+- [x] (2026-09-14) Milestone 4: web new-session wizard checkbox.
+- [x] (2026-09-14) Validation: `cargo fmt --all -- --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `git diff --check`, web unit and Playwright tests; committed per milestone.
 
 ## Surprises & Discoveries
 
 
+- Observation: the viewer snapshot did not expose the global `[subagents] enabled` setting, so `ViewerSnapshot` gained `subagents_enabled: bool` with `#[serde(default)]`. It sits beside `review_config`, which exposes the bounded part of `[review]` the same way.
+  Evidence: `mj-controller/src/server.rs` `ViewerSnapshot`; the profiles projection already carried `harness_kind`, so no change was needed for the per-profile half.
+- Observation: `npm --prefix tests/e2e/web test` cannot pass on a host without the live lab. `tests/e2e/web/playwright.config.js` defaults `testMatch` to `reliability.spec.js`, which fails immediately with `missing MJ_BROWSER_BASE_URL`. Every fixture-backed spec runs with `MJ_BROWSER_SPEC=<spec> npx playwright test`, and all of them pass.
+  Evidence: `Error: missing MJ_BROWSER_BASE_URL at tests/e2e/web/reliability.spec.js:10`.
+- Observation: two unrelated tests fail intermittently only under the full parallel suite and pass on their own and on a clean rerun: `controller::update::tests::npm_upgrade_restarts_after_the_running_package_is_removed` and `worker_runtime::relay_tests::a_worker_binds_its_sockets_under_a_root_longer_than_sun_path` (`BrokenPipe`).
+  Evidence: a second full `cargo test` reported no failures at all.
 - Observation: `mj-tui/src/dialogs.rs` has no second new-session creation path. The `create_managed_worktree` references there belong to `ImportBundleConfirmation`, the dialog that confirms importing an existing native session, plus three `DashboardAction::CreateSession` literals inside that file's own tests. The wizard in `mj-tui/src/wizards/` is the only surface that builds a new-session request in the terminal, so the checkbox lives there alone.
   Evidence: `mj-tui/src/dialogs.rs:346` is `ImportBundleConfirmation::create_managed_worktree`; `dialogs.rs:2575`, `:2655`, and `:3853` are all inside `#[cfg(test)] mod tests`.
 - Observation: resume does not build its launch configuration on a different path. `mj-controller/src/controller/worker_binary.rs::prepare_worker_files` has three callers -- `controller/provisioning.rs:109`, `controller/provisioning.rs:538`, and `controller/resume.rs:1165` -- so the one expression covers first launch, worker payload install, and resume.
@@ -63,7 +69,43 @@ This change also fixes a defect in the current code: the worker hides the native
 ## Outcomes & Retrospective
 
 
-To be written when the work is complete.
+All four milestones are complete and committed on branch `hel3`.
+
+A session now records its own `mjolnir_subagents` choice. `None` keeps today's
+behaviour by following the global `[subagents] enabled` setting at launch time,
+so nothing changes for sessions created before this work or by callers that do
+not set the field. `Some(true)` and `Some(false)` are explicit and survive
+resume, reconnect, and daemon restart because the value lives in the session
+row, written by compatible migration 33.
+
+The defect the plan set out to fix is fixed. The worker previously inserted
+`disallowedTools` for Claude and Codex on every session, so turning sub-agents
+off produced a session with neither native nor Mjolnir delegation. It now keys
+that suppression on `LaunchSpec.subagent_mcp_socket`, which exists exactly when
+the controller asked for Mjolnir sub-agents, so the two halves cannot disagree.
+
+Both wizards show `Use Mjolnir sub-agents` on their review step for Claude and
+Codex profiles only, defaulting to the global setting, and send `None` for every
+other harness kind. Children are created with `Some(false)`, and a parent that
+uses native delegation is refused when it tries to register a child.
+
+Three small pure functions were extracted so the decisions could be tested
+without a live controller or database: `subagent_tools_enabled` in
+`mj-controller/src/controller/worker_binary.rs`, `ensure_parent_may_delegate` in
+`mj-controller/src/controller/subagents.rs`, and `subagentChoiceApplies` in
+`mj-controller/src/web/viewer.js`.
+
+What remains: the manual acceptance walk-through in this plan has not been run.
+Automated coverage proves the wiring at every layer, but nobody has yet started
+a real Claude session with the box unchecked and asked it to list its tools.
+
+Lessons. First, the plan's claim that `mj-tui/src/dialogs.rs` held a second
+creation path was wrong; that file's dialog confirms a session import. Second,
+adding a column forces every migration-downgrade fixture that rewinds below the
+new revision to drop it, and this repository has ten such fixtures. Third, the
+schema tests asserted the compatibility floor equals `SCHEMA_VERSION`, which was
+true only because the previous migration happened to be breaking; that
+assumption is now a named constant.
 
 ## Context and Orientation
 
@@ -130,3 +172,7 @@ Migration 33 is additive and guarded by `if version < 33`. Re-running it is a no
 No new crates. New field `mjolnir_subagents: Option<bool>` on `SessionRecord`, `CreateSessionRequest`, and the HTTP create request. No change to `LaunchSpec`; the worker keys on `subagent_mcp_socket`. Schema revision 33, compatible.
 
 Revision 2026-09-14: created from the confirmed design after finding that the 2026-09-13 implementation added only a global toggle and that native suppression was unconditional.
+
+Revision 2026-09-14 (implementation): recorded the four completed milestones, the
+discoveries listed above, the decision to leave session import alone, and the
+retrospective. No design change was needed; the plan's shape held throughout.
