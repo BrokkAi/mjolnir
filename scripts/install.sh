@@ -6,18 +6,23 @@
 # `cargo install --path mj-cli` installs only the controller. Managed targets
 # then fail with "no Linux worker", because the controller looks for a static
 # musl worker named `mj-worker-<target-triple>` beside its own binary, the
-# layout the release archives use. This wrapper builds that worker first, so a
+# layout the release archives use. This script builds the workers first, so a
 # failed worker build leaves the existing installation alone, then installs
 # `mj` and places the helpers beside it. Both hosts get a native worker for
 # local sessions. On macOS, Docker or Podman builds the portable Linux worker.
 #
-# Cargo's install root receives the binaries: CARGO_INSTALL_ROOT, else
-# CARGO_HOME, else ~/.cargo, with executables in its bin directory. Choose a
-# destination with CARGO_INSTALL_ROOT rather than --root. Any arguments are
-# passed through to `cargo install`, e.g.
+# The binaries are built exactly as scripts/run.sh builds them, so the two
+# scripts reuse each other's artifacts: `mj` and the dictation helper in the
+# default `target/`, the workers in `target/worker`, all under one profile.
+# The profile is release unless the arguments select another one. Arguments
+# are passed to the `cargo build` for `mj`; only the profile reaches the
+# worker builds, as in scripts/run.sh. For example:
 #   scripts/install.sh
+#   scripts/install.sh --profile dev
 #   CARGO_INSTALL_ROOT="$HOME/.local" scripts/install.sh
-#   scripts/install.sh --force
+#
+# Cargo's install root receives the binaries: CARGO_INSTALL_ROOT, else
+# CARGO_HOME, else ~/.cargo, with executables in its bin directory.
 #
 # Only the Linux worker for the host (or the container engine's) architecture
 # is built. Targets on another architecture need the release installer, which
@@ -30,9 +35,55 @@ cd "$repo_root"
 install_root=${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}
 bin_dir="$install_root/bin"
 
-# Built workers and the file names they take beside `mj`.
-worker_sources=()
-worker_names=()
+# Match the profile across every binary, so the daemon finds workers built
+# the same way as the controller. Release is the default for an install.
+cargo_args=("$@")
+profile_args=(--release)
+profile_chosen=0
+for ((index=0; index<${#cargo_args[@]}; index++)); do
+  case "${cargo_args[index]}" in
+    --release|-r) profile_args=(--release); profile_chosen=1 ;;
+    --profile)
+      if ((index+1 >= ${#cargo_args[@]})); then echo "--profile needs a value" >&2; exit 2; fi
+      index=$((index+1))
+      profile_args=(--profile "${cargo_args[index]}"); profile_chosen=1 ;;
+    --profile=*) profile_args=(--profile "${cargo_args[index]#--profile=}"); profile_chosen=1 ;;
+  esac
+done
+# The caller's own profile flag already sits in cargo_args; Cargo rejects it twice.
+if [ "$profile_chosen" = 0 ]; then
+  cargo_args+=("${profile_args[@]}")
+fi
+# Cargo names the dev profile's directory `debug`.
+case "${profile_args[*]}" in
+  --release) profile_dir=release ;;
+  "--profile dev") profile_dir=debug ;;
+  *) profile_dir=${profile_args[1]} ;;
+esac
+
+# Build one binary and print the path Cargo reports for it, so the caller
+# does not have to reconstruct profile and target directory names.
+build_executable() {
+  local package=$1 binary=$2
+  shift 2
+  cargo build --locked -p "$package" --bin "$binary" "$@" --message-format=json-render-diagnostics |
+  node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    const artifacts = readFileSync(0, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
+    const paths = new Set(artifacts.filter(item => item.reason === "compiler-artifact" &&
+      item.target?.name === process.argv[1] && item.target.kind.includes("bin") && item.executable).map(item => item.executable));
+    if (paths.size !== 1) throw new Error(`Cargo did not report exactly one ${process.argv[1]} executable`);
+    process.stdout.write([...paths][0]);
+  ' "$binary"
+}
+
+build_worker() {
+  build_executable brokk-mj-worker mj-worker --target-dir target/worker "$@" ${profile_args[@]+"${profile_args[@]}"}
+}
+
+# Built binaries and the file names they take in the install directory.
+sources=()
+names=()
 
 case "$(uname -s)" in
   Linux)
@@ -49,17 +100,14 @@ case "$(uname -s)" in
       echo "The $triple target is not installed. Run: rustup target add $triple" >&2
       exit 1
     fi
-    cargo build --release --locked --target-dir target/worker -p brokk-mj-worker --bin mj-worker
-    worker_sources+=("target/worker/release/mj-worker")
-    worker_names+=("mj-worker")
-    cargo build --release --locked --target-dir target/worker --target "$triple" -p brokk-mj-worker --bin mj-worker
-    worker_sources+=("target/worker/$triple/release/mj-worker")
-    worker_names+=("mj-worker-$triple")
+    sources+=("$(build_worker)")
+    names+=("mj-worker")
+    sources+=("$(build_worker --target "$triple")")
+    names+=("mj-worker-$triple")
     ;;
   Darwin)
-    cargo build --release --locked --target-dir target/worker -p brokk-mj-worker --bin mj-worker
-    worker_sources+=("target/worker/release/mj-worker")
-    worker_names+=("mj-worker")
+    sources+=("$(build_worker)")
+    names+=("mj-worker")
     # The native macOS worker cannot run in a Linux container, so container
     # targets need a worker built through the available engine.
     engine=""
@@ -70,9 +118,9 @@ case "$(uname -s)" in
       fi
     done
     if [ -n "$engine" ]; then
-      triple=$("$repo_root/scripts/build-linux-worker.sh" "$engine" --release)
-      worker_sources+=("target/worker/$triple/release/mj-worker")
-      worker_names+=("mj-worker-$triple")
+      triple=$("$repo_root/scripts/build-linux-worker.sh" "$engine" ${profile_args[@]+"${profile_args[@]}"})
+      sources+=("target/worker/$triple/$profile_dir/mj-worker")
+      names+=("mj-worker-$triple")
     else
       echo "No running Docker or Podman engine; installing the native worker for local sessions only." >&2
     fi
@@ -84,17 +132,18 @@ case "$(uname -s)" in
 esac
 
 # Dictation runs on the host, including when the session worker is remote.
-cargo build --release --locked --target-dir target/worker -p brokk-mj-voice-worker --bin mj-voice-worker
-worker_sources+=("target/worker/release/mj-voice-worker")
-worker_names+=("mj-voice-worker")
+sources+=("$(build_executable brokk-mj-voice-worker mj-voice-worker ${profile_args[@]+"${profile_args[@]}"})")
+names+=("mj-voice-worker")
 
-cargo install --locked --path mj-cli --root "$install_root" "$@"
+sources+=("$(build_executable brokk-mjolnir mj "${cargo_args[@]}")")
+names+=("mj")
 
-# Replace each worker by rename, so the copy never writes into an executable
+# Replace each binary by rename, so the copy never writes into an executable
 # that a running session still uses.
-for index in "${!worker_sources[@]}"; do
-  destination="$bin_dir/${worker_names[$index]}"
-  cp "${worker_sources[$index]}" "$destination.next"
+mkdir -p "$bin_dir"
+for index in "${!sources[@]}"; do
+  destination="$bin_dir/${names[$index]}"
+  cp "${sources[$index]}" "$destination.next"
   chmod 755 "$destination.next"
   mv -f "$destination.next" "$destination"
   echo "Installed $destination" >&2
