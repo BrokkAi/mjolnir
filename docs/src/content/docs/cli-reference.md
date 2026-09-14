@@ -166,7 +166,7 @@ mj diff --session <id> [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
 mj sessions [--session <id>] [--json]
-mj close --session <id>
+mj close --session <id> [--force]
 mj cancel-turn --session <id>
 mj api-info [--json]
 ```

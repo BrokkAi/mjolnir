@@ -325,6 +325,18 @@ pub(crate) struct SessionArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct CloseArgs {
+    #[arg(long)]
+    session: String,
+    /// Destroy the session without a checkpoint: the target is torn down, the
+    /// recovery archive removed, sub-agents destroyed first; irreversible.
+    #[arg(long)]
+    force: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct ApiInfoArgs {
     #[arg(long)]
     json: bool,
@@ -600,13 +612,20 @@ pub(crate) async fn sessions(
     Ok(())
 }
 
-pub(crate) async fn close(args: SessionArgs) -> Result<()> {
+pub(crate) async fn close(args: CloseArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
-    client.close(&args.session).await?;
+    client.close(&args.session, args.force).await?;
     match args.json {
-        true => print_json(&serde_json::json!({ "session_id": args.session, "accepted": true })),
+        true => print_json(&serde_json::json!({
+            "session_id": args.session,
+            "accepted": true,
+            "forced": args.force,
+        })),
         false => {
-            println!("closing {}", args.session);
+            match args.force {
+                true => println!("destroying {}", args.session),
+                false => println!("closing {}", args.session),
+            }
             Ok(())
         }
     }
@@ -929,6 +948,18 @@ mod tests {
             panic!("expected the export subcommand");
         };
         assert_eq!(args.kind, ExportKindArg::Patch);
+
+        let cli = Cli::try_parse_from(["mj", "close", "--session", "s1", "--force"]).unwrap();
+        let Some(Command::Close(args)) = cli.command else {
+            panic!("expected the close subcommand");
+        };
+        assert!(args.force);
+
+        let cli = Cli::try_parse_from(["mj", "close", "--session", "s1"]).unwrap();
+        let Some(Command::Close(args)) = cli.command else {
+            panic!("expected the close subcommand");
+        };
+        assert!(!args.force);
 
         for (argv, matched) in [
             (vec!["mj", "diff", "--session", "s1"], "diff"),

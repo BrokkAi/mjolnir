@@ -361,6 +361,14 @@ POST /api/v1/sessions/{session_id}/cancel-turn
 Both take no body and answer `202` with no content: the action was accepted, and
 the session's own state is where you see it take effect.
 
+`close` also takes an optional body, `{"force": true}`. A forced close destroys
+the session instead of checkpointing it: there is no checkpoint, the live target
+is torn down, the recovery archive is removed, and sub-agent children are
+destroyed first. This cannot be undone. Afterwards `GET /sessions/{id}` and
+`mj sessions --session <id>` answer `404`, because the session row is deleted. A
+forced close also takes over a graceful close that is stuck, so it is the way
+out when a close failed and left the session in `error`.
+
 ### Get the work out
 
 ```text
@@ -418,7 +426,7 @@ Preconditions, all answering `409` with the reason:
 | `mj diff --session <id>` | `GET /sessions/{id}/diff` |
 | `mj export --session <id> --kind patch\|branch\|bundle` | `POST /sessions/{id}/export` |
 | `mj export --session <id> --kind file --path <path>` | `GET /sessions/{id}/files?path=` |
-| `mj close --session <id>` | `POST /sessions/{id}/close` |
+| `mj close --session <id> [--force]` | `POST /sessions/{id}/close` |
 | `mj cancel-turn --session <id>` | `POST /sessions/{id}/cancel-turn` |
 
 Every one of them takes `--json` and then prints the route's response unchanged,
@@ -499,7 +507,9 @@ list includes all workspaces.
 flight. It cancels cancellable work, prevents the initial prompt, waits for the
 old operation to release ownership, and then cleans up. Repeated closes join the
 same operation. A stopping session's `wait` returns `stopped`, including when an
-earlier initialization failed. Cleanup errors remain visible in session state.
+earlier initialization failed. Cleanup errors remain visible in session state. A
+close whose worker restart fails leaves the session in `error` with the failure
+recorded in its state, and `mj close --session <id> --force` is the way out.
 
 The CLI and `mj api-info` probe API support before reading the token file. A
 daemon predating this API produces an explicit `mj daemon restart` instruction;

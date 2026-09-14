@@ -1661,7 +1661,12 @@ async fn close(
     Path(session_id): Path<String>,
     request: Option<Json<CloseRequest>>,
 ) -> Result<StatusCode, ApiFailure> {
-    let active_children = {
+    let force = request.as_ref().is_some_and(|request| request.force);
+    let active_children = if force {
+        // A force close destroys the children with the parent, so an active
+        // child is not a reason to refuse it.
+        0
+    } else {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
         session
@@ -1689,6 +1694,9 @@ async fn close(
         )));
     }
     backend(&state)?.cancel_start(session_id.clone()).await?;
+    if force {
+        return send_action(&state, ControllerAction::ForceClose { session_id }).await;
+    }
     send_action(&state, ControllerAction::Close { session_id }).await
 }
 
@@ -1697,6 +1705,9 @@ async fn close(
 struct CloseRequest {
     #[serde(default)]
     acknowledge_active_subagents: bool,
+    /// Destroy the session instead of checkpointing it. Irreversible.
+    #[serde(default)]
+    force: bool,
 }
 
 async fn cancel_turn(
@@ -3164,6 +3175,94 @@ mod tests {
             let response = response.await.unwrap().unwrap();
             assert_eq!(response.status(), StatusCode::ACCEPTED);
         }
+    }
+
+    #[tokio::test]
+    async fn a_forced_close_reaches_the_controller_as_a_force_close_action() {
+        let (app, mut actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), |_| {});
+
+        let response = tokio::spawn(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/close"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"force":true}"#))
+                    .unwrap(),
+            ),
+        );
+        let request = actions.recv().await.unwrap();
+        assert_eq!(
+            request.action,
+            ControllerAction::ForceClose {
+                session_id: "session-1".into(),
+            }
+        );
+        request
+            .reply
+            .send(super::super::ActionOutcome::accepted())
+            .unwrap();
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn a_forced_close_ignores_active_subagents_that_refuse_a_plain_close() {
+        let adjust = |snapshot: &mut ViewerSnapshot| {
+            let mut child = snapshot.sessions[0].clone();
+            child.id = "child-1".into();
+            child.state = "running".into();
+            child.subagent_session_ids.clear();
+            snapshot.sessions[0].subagent_session_ids = vec!["child-1".into()];
+            snapshot.sessions.push(child);
+        };
+
+        let (app, _actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), adjust);
+        let response = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/close"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let (app, mut actions, _snapshot_tx, _bundles) =
+            api_app(Arc::new(FakeBackend::default()), adjust);
+        let response = tokio::spawn(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/close"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"force":true}"#))
+                    .unwrap(),
+            ),
+        );
+        let request = actions.recv().await.unwrap();
+        assert_eq!(
+            request.action,
+            ControllerAction::ForceClose {
+                session_id: "session-1".into(),
+            }
+        );
+        request
+            .reply
+            .send(super::super::ActionOutcome::accepted())
+            .unwrap();
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[test]
+    fn a_force_close_is_not_wire_representable() {
+        // The browser viewer posts this enum to `/actions`, so a wire request
+        // must not be able to ask for the destructive variant.
+        assert!(
+            serde_json::from_str::<ControllerAction>(
+                r#"{"action":"force-close","session_id":"s"}"#
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

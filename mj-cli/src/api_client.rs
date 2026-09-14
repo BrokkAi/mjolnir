@@ -399,14 +399,18 @@ impl ApiClient {
         Ok(ExportResult::Bytes(bytes))
     }
 
-    pub(crate) async fn close(&self, session_id: &str) -> Result<()> {
-        self.send(
-            self.http
-                .post(self.url(&format!("/sessions/{session_id}/close")))
-                .timeout(REQUEST_TIMEOUT),
-        )
-        .await
-        .map(|_| ())
+    pub(crate) async fn close(&self, session_id: &str, force: bool) -> Result<()> {
+        let request = self
+            .http
+            .post(self.url(&format!("/sessions/{session_id}/close")))
+            .timeout(REQUEST_TIMEOUT);
+        // A plain close stays a bodiless POST; only a forced close carries a
+        // body, so older controllers see exactly the request they saw before.
+        let request = match force {
+            true => request.json(&serde_json::json!({ "force": true })),
+            false => request,
+        };
+        self.send(request).await.map(|_| ())
     }
 
     pub(crate) async fn cancel_turn(&self, session_id: &str) -> Result<()> {
