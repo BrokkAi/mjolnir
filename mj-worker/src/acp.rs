@@ -251,6 +251,40 @@ struct GrokUsageNotification {
     update: serde_json::Value,
 }
 
+/// zcode-acp's pull-only account quota method. It needs no session and is
+/// callable any time after `initialize`.
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcRequest)]
+#[request(method = "account/usage_stats", response = AccountUsageStatsResponse)]
+struct AccountUsageStatsRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcResponse)]
+#[serde(transparent)]
+struct AccountUsageStatsResponse(serde_json::Value);
+
+/// The quota endpoint is an accounting nicety reached over the network. A turn
+/// waits this long for it and no longer.
+const ZCODE_QUOTA_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Read the account's GLM credit counter. Every failure mode reports as an
+/// error string the caller can drop or warn about; none of them fails a turn.
+async fn read_zcode_credits(
+    connection: &ConnectionTo<Agent>,
+) -> std::result::Result<zcode_usage::CreditReading, String> {
+    match tokio::time::timeout(
+        ZCODE_QUOTA_TIMEOUT,
+        connection
+            .send_request(AccountUsageStatsRequest {})
+            .block_task(),
+    )
+    .await
+    {
+        Ok(Ok(response)) => zcode_usage::credit_reading(&response.0)
+            .ok_or_else(|| "the plan reported no usable credit window".to_owned()),
+        Ok(Err(error)) => Err(format!("{error}")),
+        Err(_) => Err("the quota request timed out".to_owned()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcNotification)]
 #[notification(method = "session/update")]
 struct RawSessionNotification {
@@ -2627,6 +2661,19 @@ async fn serve_session(
                 if spec.harness == HarnessKind::Grok {
                     grok_usage.begin(session_id.to_string());
                 }
+                // Credits are counted per account, so the turn's consumption is a
+                // before/after delta taken around the prompt. A missing baseline
+                // simply measures nothing.
+                let mut credits_before = None;
+                if spec.harness == HarnessKind::Zcode {
+                    match read_zcode_credits(connection).await {
+                        Ok(reading) => credits_before = Some(reading),
+                        Err(error) => tracing::debug!(
+                            %error,
+                            "ZCode credit baseline unavailable; this turn records no credits"
+                        ),
+                    }
+                }
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
                         .send_request(PromptRequest::new(session_id.clone(), prompt))
@@ -2718,7 +2765,23 @@ async fn serve_session(
                                         usage = usage.map(|usage| muse_usage::attach_provider_details(usage, usage_meta.as_ref()));
                                     }
                                     if spec.harness == HarnessKind::Zcode {
-                                        usage = usage.map(|usage| zcode_usage::attach_provider_details(usage, response.meta.as_ref()));
+                                        let mut credits = None;
+                                        match (&credits_before, usage.is_some()) {
+                                            (Some(before), true) => match read_zcode_credits(connection).await {
+                                                Ok(after) => credits = zcode_usage::credit_delta(before, &after, mj_core::clock::epoch_millis()),
+                                                Err(error) => emit_runtime_event(events, RuntimeEvent::Warning {
+                                                    message: format!("ZCode credit usage was not recorded: {error}"),
+                                                }).await?,
+                                            },
+                                            // Without a token report there is nothing to
+                                            // hang the credits on, and inventing one would
+                                            // put an unreported turn into the totals.
+                                            (Some(_), false) => tracing::debug!(
+                                                "ZCode reported no usage for this turn; the credit delta is dropped"
+                                            ),
+                                            (None, _) => {}
+                                        }
+                                        usage = usage.map(|usage| zcode_usage::attach_provider_details(usage, response.meta.as_ref(), credits));
                                     }
                                     if spec.harness == HarnessKind::Grok {
                                         match grok_usage.complete(response.meta.as_ref(), usage.clone()).await {

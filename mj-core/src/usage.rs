@@ -159,6 +159,27 @@ pub struct ProviderTurnUsage {
     pub elapsed_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub model_usage: std::collections::BTreeMap<String, TokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<ProviderTurnCredits>,
+}
+
+/// Plan credits a turn consumed, measured as an account-level before/after
+/// delta around the prompt. The provider counts credits per account, not per
+/// session, so the delta is only as clean as the account is idle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderTurnCredits {
+    /// `after - before`. Negative when the window reset between the reads.
+    pub used: i64,
+    /// Which quota window was measured, as the provider names it.
+    pub window: String,
+    pub before: i64,
+    pub after: i64,
+    /// The window's reset time fell between the two reads, so `used` counts
+    /// against two different windows and is unreliable.
+    pub window_reset_crossed: bool,
+    /// The counter is per account: concurrent sessions on the same key land in
+    /// the same delta.
+    pub account_shared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
