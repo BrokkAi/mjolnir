@@ -1549,7 +1549,7 @@ pub(super) fn bridge_launch(
             vec![
                 "-c".into(),
                 format!(
-                    "if command -v zcode-acp-server >/dev/null 2>&1; then exec zcode-acp-server; fi; {}; exec npx -y zcode-acp-server@{}",
+                    "if [ -z \"${{ZCODE_BIN:-}}\" ] || [ ! -f \"$ZCODE_BIN\" ]; then echo 'Mjolnir target image lacks the ZCode backend; rebuild it from containers/Containerfile.agent-dev or set ZCODE_BIN to the headless zcode.cjs runtime' >&2; exit 127; fi; if command -v zcode-acp-server >/dev/null 2>&1; then exec zcode-acp-server; fi; {}; exec npx -y zcode-acp-server@{}",
                     ensure_node_22_script(),
                     mj_core::harness_runtime::ZCODE_ACP_VERSION,
                 ),
@@ -4446,6 +4446,13 @@ mod tests {
         );
         assert!(CONTAINERFILE.contains(mj_core::harness_runtime::ZCODE_VERSION));
         assert!(CONTAINERFILE.contains(mj_core::harness_runtime::ZCODE_CLI_VERSION));
+        let (command, arguments) = bridge_launch(
+            mj_core::config::HarnessKind::Zcode,
+            ExecutionPolicy::Unconstrained,
+        );
+        assert_eq!(command, "sh");
+        assert!(arguments[1].contains("target image lacks the ZCode backend"));
+        assert!(arguments[1].contains("[ ! -f \"$ZCODE_BIN\" ]"));
     }
     #[test]
     fn kimi_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {

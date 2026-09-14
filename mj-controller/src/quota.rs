@@ -291,7 +291,7 @@ async fn refresh_profile(
                         resets_at_epoch_seconds: window.resets_at,
                     })
                     .collect(),
-                extra: Some("GLM Coding Plan".to_owned()),
+                extra: None,
                 error: None,
                 refreshed_at_epoch_seconds,
             }),

@@ -38,6 +38,9 @@ pub(super) async fn events(
         session_id: query.session_id,
         workspace_id: query.workspace_id,
     };
+    if let Some(session_id) = filter.session_id.as_deref() {
+        require_session_record(&state.snapshot_rx.borrow(), session_id)?;
+    }
     let after_seq = query.after_seq.or(header_cursor);
     if after_seq.is_some_and(|cursor| cursor > i64::MAX as u64) {
         return Err(ApiFailure::bad_request(
