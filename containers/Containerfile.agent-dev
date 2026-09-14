@@ -35,6 +35,12 @@ COPY --from=node /usr/local/ /usr/local/
 # or should change it. `lcov` comes along for `genhtml`, which renders the lcov
 # files from optional local coverage runs; on Debian it only pulls a handful
 # of small pure-Perl modules.
+#
+# `libasound2-dev` is the ALSA header package that `alsa-sys` (via `cpal` in
+# voice-worker) needs to compile; without it any build that includes
+# `brokk-mj-voice-worker` fails in the `alsa-sys` build script. This matches
+# the `libasound2-dev` install in the voice-worker CI job and the Linux
+# release builds.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash \
@@ -51,6 +57,7 @@ RUN apt-get update \
         jq \
         lcov \
         less \
+        libasound2-dev \
         libssl-dev \
         linux-perf \
         musl-tools \
