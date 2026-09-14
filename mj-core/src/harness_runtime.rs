@@ -13,8 +13,8 @@ pub const CLAUDE_ACP_VERSION: &str = "0.73.0";
 pub const KIMI_VERSION: &str = "0.41.0";
 pub const GROK_VERSION: &str = "1.0.13";
 pub const DEEPSEEK_DSH_VERSION: &str = "0.1.2-rc.1";
-pub const MUSE_ACP_VERSION: &str = "0.2.4";
-pub const MUSE_VERSION: &str = "1.0.3-R2198.1";
+pub const MUSE_ACP_VERSION: &str = "0.3.3";
+pub const MUSE_VERSION: &str = "1.2.1-R2847.1";
 pub const ZCODE_ACP_VERSION: &str = "0.37.1";
 pub const ZCODE_VERSION: &str = "3.11.2";
 pub const ZCODE_CLI_VERSION: &str = "0.16.5";
@@ -29,8 +29,8 @@ pub struct HarnessPin {
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
         HarnessKind::Muse => HarnessPin {
-            install_id: "muse-acp-0.2.4_muse-1.0.3-R2198.1",
-            display_version: "muse-acp 0.2.4 + Muse Code 1.0.3-R2198.1",
+            install_id: "muse-acp-0.3.3_muse-1.2.1-R2847.1",
+            display_version: "muse-acp 0.3.3 + Muse Code 1.2.1-R2847.1",
             entrypoint: "bin/muse-acp",
         },
         HarnessKind::Codex => HarnessPin {

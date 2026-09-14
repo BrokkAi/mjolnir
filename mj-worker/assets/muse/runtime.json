@@ -1,10 +1,10 @@
 {
-  "adapter_version": "0.2.4",
-  "muse_version": "1.0.3-R2198.1",
+  "adapter_version": "0.3.3",
+  "muse_version": "1.2.1-R2847.1",
   "platforms": {
-    "linux-x86_64": {"adapter_target":"x86_64-unknown-linux-gnu","adapter_sha256":"62080fad67d3dc37e6e296b445f2c74579dbafc720c96b66f373ccbe87d669b9","muse_target":"x86-linux","muse_sha256":"75a68f98c437dfd17d264730c5bc72d57e5f1e18d10472a9f53261ffcc091352"},
-    "linux-aarch64": {"adapter_target":"aarch64-unknown-linux-gnu","adapter_sha256":"aa025a9e9a47e4af2cb3944432c0854c128a8e2f35822002089d807aca6933ec","muse_target":"aarch64-linux","muse_sha256":"4ffcf55f5eb0668643f30c5febd90d188b9a2da65858918444d31f6046940120"},
-    "macos-x86_64": {"adapter_target":"x86_64-apple-darwin","adapter_sha256":"6599db14dee639ed47220244bae7bb20c7c133fabe8dd992cdbf6b5bd19b69d9","muse_target":"x86-macos","muse_sha256":"dbcee07bd234fc19805d5d6a358c591b79cc7d781311d10219f856d934843ac2"},
-    "macos-aarch64": {"adapter_target":"aarch64-apple-darwin","adapter_sha256":"f391bc1619f38bff1a4af33ba98fbfc7f3d257d6dcfb500b263342b6066c91fe","muse_target":"aarch64-macos","muse_sha256":"4c0f960028b603174af7df7bd5051d8c35d6c1aa372a37d18bc770926a0577a7"}
+    "linux-x86_64": {"adapter_target":"x86_64-unknown-linux-gnu","adapter_sha256":"acdacbeae61e479c8c460f74a205a96746433879613e043016e4fa395275379a","muse_target":"x86-linux","muse_sha256":"3961a7cc405c83609a6a6dc36bf719671288b412740535c4b8ea7442ba801b49"},
+    "linux-aarch64": {"adapter_target":"aarch64-unknown-linux-gnu","adapter_sha256":"83ad8692399ee13b3334bf75eeefea7af169c30db3c7e9cc699d953c2db4c3f4","muse_target":"aarch64-linux","muse_sha256":"0b5ae115424b6eda596f9bfdc8eedc6391bc1504e0d95f2275f90c713f3dea1c"},
+    "macos-x86_64": {"adapter_target":"x86_64-apple-darwin","adapter_sha256":"ad416088930338cdb3023468982f60691908b5eb7b7a260a15dada7d6301a943","muse_target":"x86-macos","muse_sha256":"006b2c3b9c2dd40aa7b0d25fb2d53c8d208abed535f24a6378b7a49ff10ebb6b"},
+    "macos-aarch64": {"adapter_target":"aarch64-apple-darwin","adapter_sha256":"05c6ea2aff85f8ef4df91fedfe18f3da089f60f398d5817adeea070b98842b25","muse_target":"aarch64-macos","muse_sha256":"020ebed5248767450413a7972a5cbc12c228ad82d4bdcf221e5d6350df39604c"}
   }
 }
