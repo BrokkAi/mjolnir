@@ -2197,6 +2197,13 @@ impl DashboardContext {
                                     self, *launch, receipt,
                                 );
                             }
+                            ResumeRepositorySourcePreflight::ConvertingRawCheckout {
+                                receipt,
+                                preview,
+                            } => {
+                                self.dashboard
+                                    .show_raw_conversion_confirmation(*launch, receipt, *preview);
+                            }
                             ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) => {
                                 if submitted_repository_id.as_deref()
                                     == Some(mismatch.repository_id.as_str())
@@ -2284,6 +2291,10 @@ impl DashboardContext {
                     SessionOperationKind::Launching,
                     None,
                 );
+                // The next thing the person does with a launching session is
+                // write its first message, so the keyboard starts where the
+                // type-ahead composer is.
+                self.dashboard.focus_prompt();
                 self.dashboard
                     .set_notice(format!("Launching {}…", short_id(&session_id)));
                 self.lifecycle_operations.insert(

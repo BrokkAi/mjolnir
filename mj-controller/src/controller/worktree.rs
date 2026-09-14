@@ -598,6 +598,10 @@ pub(super) struct RawToWorkspaceConversion {
     pub(super) checkout: PathBuf,
     /// The source repository represented by the bundle's local path.
     pub(super) repository: PathBuf,
+    /// Where the converted workspace fetches from and pushes to. An isolated
+    /// workspace always clones from a network remote, so the checkout's own
+    /// remote becomes the converted session's provenance.
+    pub(super) source: mj_core::remote_git::NetworkGitSource,
     pub(super) bundle_id: String,
     /// Set when the configuration does not already describe this checkout.
     pub(super) new_bundle: Option<ProjectBundle>,
@@ -656,9 +660,21 @@ pub(super) fn plan_raw_to_workspace(
     );
     let (bundle_id, new_bundle) =
         converted_raw_bundle(config, &session.bundle_id, &repository, &destination);
+    // An isolated workspace is always a fresh network clone, so a checkout
+    // with no network remote cannot become one. Resolve it here, while nothing
+    // has changed yet, and say what to do about it.
+    let source = mj_core::remote_git::resolve_local_repository(&checkout, executor).with_context(
+        || {
+            format!(
+                "{} has no network Git remote; add one (for example `git remote add origin <url>`) or resume this session on a bare target",
+                checkout.display()
+            )
+        },
+    )?;
     Ok(RawToWorkspaceConversion {
         checkout,
         repository,
+        source,
         bundle_id,
         new_bundle,
         retire,
@@ -710,6 +726,311 @@ fn converted_raw_bundle(
         }],
     };
     (id, Some(bundle))
+}
+
+/// The repository id a converted raw session's archive uses. A raw checkpoint
+/// has always described the session's directory as one repository.
+const RAW_CONVERSION_REPOSITORY_ID: &str = "project";
+
+/// Snapshot the host checkout as the repository content an isolated workspace
+/// arrives with: commits that are on no origin ref, plus staged, unstaged, and
+/// untracked work.
+///
+/// The metadata carries the checkout's own network remote, so the container
+/// clones real provenance and its later checkpoints behave like any other
+/// workspace session's.
+pub(super) fn raw_checkout_snapshot(
+    checkout: &Path,
+    source: &mj_core::remote_git::NetworkGitSource,
+    destination: &Path,
+    git: &dyn mj_checkpoint::archive::GitCommandRunner,
+) -> Result<mj_checkpoint::archive::RepositorySnapshot> {
+    // Bundling "everything not on origin" only works when origin refs exist:
+    // every bundle prerequisite then sits on the remote the container clones.
+    mj_checkpoint::checkpoint::repair_origin_refs(git, checkout, RAW_CONVERSION_REPOSITORY_ID)?;
+    mj_checkpoint::checkpoint::reject_dirty_submodules(git, checkout)
+        .with_context(|| format!("checkout {}", checkout.display()))?;
+    let mut snapshot = mj_checkpoint::archive::collect_git_snapshot(
+        git,
+        checkout,
+        &mj_checkpoint::archive::GitCollectionSpec {
+            id: RAW_CONVERSION_REPOSITORY_ID.to_owned(),
+            relative_destination: destination.to_path_buf(),
+            history: mj_checkpoint::archive::GitHistoryMode::SessionDelta,
+            origin_override: None,
+        },
+    )
+    .with_context(|| format!("snapshot the checkout at {}", checkout.display()))?;
+    // The resolved remote, not whatever `origin` happens to be: the checkout's
+    // branch may track another remote. Credentials stay out of the archive.
+    snapshot.metadata.origin =
+        mj_checkpoint::archive::redact_origin_credentials(&source.fetch_url)?;
+    snapshot.metadata.push_urls = source
+        .push_urls
+        .iter()
+        .map(|url| mj_checkpoint::archive::redact_origin_credentials(url))
+        .collect::<Result<Vec<_>>>()?;
+    snapshot.metadata.remote_workspace = true;
+    snapshot.metadata.base_commit = origin_boundary_commit(git, checkout)?
+        .unwrap_or_else(|| snapshot.metadata.head_commit.clone());
+    Ok(snapshot)
+}
+
+/// The newest commit the checkout shares with `origin`, which is where a
+/// converted workspace measures its own session delta from. `None` when HEAD
+/// is already on an origin ref, leaving no boundary to report.
+fn origin_boundary_commit(
+    git: &dyn mj_checkpoint::archive::GitCommandRunner,
+    checkout: &Path,
+) -> Result<Option<String>> {
+    let listed = git_runner_stdout(
+        git,
+        checkout,
+        [
+            "rev-list",
+            "--boundary",
+            "HEAD",
+            "--not",
+            "--remotes=origin",
+        ],
+        "list commits outside origin",
+    )?;
+    // `--boundary` marks the excluded parents of the listed commits with `-`,
+    // and lists them after the commits themselves.
+    Ok(listed
+        .lines()
+        .filter_map(|line| line.strip_prefix('-'))
+        .map(|commit| commit.trim().to_owned())
+        .find(|commit| !commit.is_empty()))
+}
+
+fn git_runner_stdout(
+    git: &dyn mj_checkpoint::archive::GitCommandRunner,
+    repository: &Path,
+    args: impl IntoIterator<Item = impl AsRef<str>>,
+    purpose: &str,
+) -> Result<String> {
+    let output = git.run(
+        repository,
+        &mj_checkpoint::archive::GitCommand {
+            arguments: args
+                .into_iter()
+                .map(|argument| std::ffi::OsString::from(argument.as_ref()))
+                .collect(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+        },
+    )?;
+    command_stdout(
+        CommandOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        },
+        purpose,
+    )
+}
+
+/// Describe a raw-to-workspace conversion for a person to confirm. Reads Git
+/// and asks the remote for its default branch; changes nothing.
+pub(super) fn raw_conversion_preview(
+    session: &SessionRecord,
+    conversion: &RawToWorkspaceConversion,
+    executor: &impl CommandExecutor,
+) -> Result<mj_core::state::RawConversionPreview> {
+    let checkout = conversion.checkout.as_path();
+    // A dirty submodule cannot be captured, so say so now rather than failing
+    // after the session has been stopped.
+    reject_dirty_submodules_in_checkout(executor, checkout)?;
+    let default_branch = mj_core::remote_git::default_branch(&conversion.source, executor)?;
+    let position = read_checkout_position(executor, &ManagedWorktreeTarget::Local, checkout)?;
+    let unpushed_commits = unpushed_commit_count(executor, checkout)?;
+    let dirty = dirty_file_counts(executor, checkout)?;
+    // The archive names the session's own directory, which is where the
+    // restored harness session looks for its files inside the target.
+    let directory = session
+        .project_directory
+        .as_deref()
+        .context("a raw session has no project directory")?
+        .file_name()
+        .context("a raw project directory cannot be the filesystem root")?;
+    Ok(mj_core::state::RawConversionPreview {
+        checkout: checkout.to_path_buf(),
+        destination: PathBuf::from(mj_core::targets::CONTAINER_WORKSPACE).join(directory),
+        branch: position.branch,
+        fetch_url: conversion.source.fetch_url.clone(),
+        push_urls: conversion.source.push_urls.clone(),
+        default_branch,
+        unpushed_commits,
+        staged_files: dirty.staged_files,
+        unstaged_files: dirty.unstaged_files,
+        untracked_files: dirty.untracked_files,
+        untracked_bytes: untracked_bytes(executor, checkout)?,
+        host_checkout_retained: conversion.retire.is_none(),
+    })
+}
+
+fn reject_dirty_submodules_in_checkout(
+    executor: &impl CommandExecutor,
+    checkout: &Path,
+) -> Result<()> {
+    let listed = managed_git_stdout(
+        executor,
+        &ManagedWorktreeTarget::Local,
+        checkout,
+        [
+            "submodule",
+            "foreach",
+            "--recursive",
+            "--quiet",
+            "git status --porcelain",
+        ],
+        "inspect submodules",
+    )?;
+    ensure!(
+        listed.trim().is_empty(),
+        "{} has a dirty submodule, which cannot move into a target; commit or discard the submodule's changes first",
+        checkout.display()
+    );
+    Ok(())
+}
+
+/// Commits the conversion archive has to carry. A checkout whose origin refs
+/// are missing even after a repair fetch reports nothing rather than counting
+/// its entire history as unpushed.
+fn unpushed_commit_count(executor: &impl CommandExecutor, checkout: &Path) -> Result<u64> {
+    if !origin_refs_available(executor, checkout)? {
+        return Ok(0);
+    }
+    let counted = managed_git_stdout(
+        executor,
+        &ManagedWorktreeTarget::Local,
+        checkout,
+        ["rev-list", "--count", "HEAD", "--not", "--remotes=origin"],
+        "count commits outside origin",
+    )?;
+    counted
+        .trim()
+        .parse()
+        .with_context(|| format!("parse the commit count {counted:?}"))
+}
+
+fn origin_refs_available(executor: &impl CommandExecutor, checkout: &Path) -> Result<bool> {
+    if origin_refs_listed(executor, checkout)? {
+        return Ok(true);
+    }
+    // A checkout that has never fetched has no origin refs yet. Try once; a
+    // remote that cannot be reached leaves the count unreported, not failed.
+    let fetch = managed_git_command(
+        &ManagedWorktreeTarget::Local,
+        checkout,
+        ["fetch", "origin"],
+        "fetch origin refs",
+    );
+    executor.execute(&fetch)?;
+    origin_refs_listed(executor, checkout)
+}
+
+fn origin_refs_listed(executor: &impl CommandExecutor, checkout: &Path) -> Result<bool> {
+    managed_git_stdout(
+        executor,
+        &ManagedWorktreeTarget::Local,
+        checkout,
+        [
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/remotes/origin",
+        ],
+        "list origin refs",
+    )
+    .map(|refs| !refs.trim().is_empty())
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DirtyFileCounts {
+    staged_files: u64,
+    unstaged_files: u64,
+    untracked_files: u64,
+}
+
+/// Count what `git status` reports, one entry per path. A rename's second
+/// record names the original path, so it is consumed rather than counted.
+fn dirty_file_counts(executor: &impl CommandExecutor, checkout: &Path) -> Result<DirtyFileCounts> {
+    let command = managed_git_command(
+        &ManagedWorktreeTarget::Local,
+        checkout,
+        ["status", "--porcelain=v1", "-z"],
+        "read checkout status",
+    );
+    let output = executor.execute(&command)?;
+    ensure!(
+        output.status == 0,
+        "read checkout status failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let mut counts = DirtyFileCounts::default();
+    let mut records = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty());
+    while let Some(record) = records.next() {
+        let [index, worktree, ..] = record else {
+            bail!("git status produced a record shorter than its status field");
+        };
+        if *index == b'?' && *worktree == b'?' {
+            counts.untracked_files += 1;
+            continue;
+        }
+        if !matches!(index, b' ' | b'?') {
+            counts.staged_files += 1;
+        }
+        if !matches!(worktree, b' ' | b'?') {
+            counts.unstaged_files += 1;
+        }
+        if *index == b'R' || *index == b'C' || *worktree == b'R' || *worktree == b'C' {
+            records.next();
+        }
+    }
+    Ok(counts)
+}
+
+/// How much untracked content the conversion archive has to carry. `git status`
+/// collapses an untracked directory into one entry, so the bytes come from the
+/// file list instead.
+fn untracked_bytes(executor: &impl CommandExecutor, checkout: &Path) -> Result<u64> {
+    let command = managed_git_command(
+        &ManagedWorktreeTarget::Local,
+        checkout,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+        "list untracked files",
+    );
+    let output = executor.execute(&command)?;
+    ensure!(
+        output.status == 0,
+        "list untracked files failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let mut total = 0;
+    for record in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let relative = mj_core::path_input::from_git_bytes(record)?;
+        let path = checkout.join(relative);
+        // Do not follow links, and tolerate a file the agent removed between
+        // the listing and this read.
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => total += metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("measure {}", path.display()));
+            }
+        }
+    }
+    Ok(total)
 }
 
 /// Where a checkout stands: its head commit and, unless detached, its branch.
@@ -1457,6 +1778,7 @@ mod tests {
     use crate::controller::Controller;
     use crate::controller::resume::apply_failed_resume_rollback;
     use crate::controller::test_support::{
+        FIXTURE_FETCH_URL, FixtureRemoteExecutor, checkout_with_network_remote,
         checkpoint_test_session, committed_repository, local_bundle, managed_raw_session,
         managed_worktree_session, raw_session_on, resume_compatibility_config, ssh_worktree_target,
         test_git,
@@ -2199,16 +2521,231 @@ mod tests {
         assert!(reason.contains("dev@builder"), "{reason}");
     }
     #[test]
-    fn raw_checkpoints_cannot_move_to_an_isolated_target() {
+    fn a_whole_local_checkout_can_move_to_an_isolated_target() {
         let config = resume_compatibility_config();
         for session in [
             managed_raw_session(ManagedWorktreeTarget::Local),
             raw_session_on("local-bare", "/home/dev/project"),
         ] {
-            let reason = resume_compatibility(&session, &config, "podman").unwrap_err();
-            assert!(reason.contains("network repository provenance"), "{reason}");
-            assert!(reason.contains("bare target"), "{reason}");
+            assert_eq!(
+                resume_compatibility(&session, &config, "podman"),
+                Ok(ResumePlan::RawToWorkspace)
+            );
         }
+    }
+    /// Give a checkout the network remote a conversion requires. Planning
+    /// never contacts it.
+    fn add_network_remote(checkout: &Path) {
+        test_git(checkout, &["remote", "add", "origin", FIXTURE_FETCH_URL]);
+    }
+
+    fn fixture_network_source() -> mj_core::remote_git::NetworkGitSource {
+        mj_core::remote_git::NetworkGitSource {
+            fetch_url: FIXTURE_FETCH_URL.to_owned(),
+            push_urls: vec![FIXTURE_FETCH_URL.to_owned()],
+        }
+    }
+
+    #[test]
+    fn a_checkout_without_a_network_remote_cannot_be_planned_for_a_target() {
+        let repository = committed_repository();
+        let config = resume_compatibility_config();
+        let session = raw_session_on("local-bare", &repository.path().to_string_lossy());
+
+        let error = plan_raw_to_workspace(&session, &config, &ProcessExecutor).unwrap_err();
+
+        let detail = format!("{error:#}");
+        assert!(detail.contains("has no network Git remote"), "{detail}");
+        assert!(detail.contains("git remote add origin"), "{detail}");
+        assert!(detail.contains("bare target"), "{detail}");
+    }
+
+    #[test]
+    fn planning_a_conversion_records_the_checkouts_network_remote() {
+        let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
+        let config = resume_compatibility_config();
+        let session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+
+        let conversion = plan_raw_to_workspace(&session, &config, &ProcessExecutor).unwrap();
+
+        assert_eq!(conversion.source.fetch_url, FIXTURE_FETCH_URL);
+        assert_eq!(conversion.source.push_urls, [FIXTURE_FETCH_URL]);
+        assert_eq!(conversion.checkout, checkout.path().canonicalize().unwrap());
+        assert!(conversion.retire.is_none());
+    }
+
+    #[test]
+    fn a_raw_checkout_snapshot_restores_into_a_fresh_clone_of_its_remote() {
+        let (checkout, _remote_parent, remote) = checkout_with_network_remote();
+        let pushed = test_git(checkout.path(), &["rev-parse", "HEAD"]);
+        // A session commit on top of the pushed base has to travel in the
+        // snapshot, and its prerequisite has to stay on the remote.
+        std::fs::write(checkout.path().join("nested/file.txt"), "session commit\n").unwrap();
+        test_git(checkout.path(), &["commit", "-am", "session commit"]);
+        let head = test_git(checkout.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(checkout.path().join("staged.txt"), "staged\n").unwrap();
+        test_git(checkout.path(), &["add", "staged.txt"]);
+        std::fs::write(checkout.path().join("nested/file.txt"), "unstaged\n").unwrap();
+        // Larger than a pipe buffer, so a truncated untracked capture cannot
+        // pass on a toy fixture.
+        let untracked = "u".repeat(100 * 1024);
+        std::fs::write(checkout.path().join("untracked.txt"), &untracked).unwrap();
+        let source =
+            mj_core::remote_git::resolve_local_repository(checkout.path(), &ProcessExecutor)
+                .unwrap();
+
+        let snapshot = raw_checkout_snapshot(
+            checkout.path(),
+            &source,
+            Path::new("project"),
+            &mj_checkpoint::archive::SystemGit,
+        )
+        .unwrap();
+
+        assert!(snapshot.metadata.remote_workspace);
+        assert_eq!(snapshot.metadata.origin, FIXTURE_FETCH_URL);
+        assert_eq!(snapshot.metadata.push_urls, [FIXTURE_FETCH_URL]);
+        assert_eq!(snapshot.metadata.base_commit, pushed);
+        assert_eq!(snapshot.metadata.head_commit, head);
+        assert_eq!(snapshot.metadata.branch.as_deref(), Some("master"));
+
+        // A fresh clone of the remote is what the container really gets, so
+        // every bundle prerequisite has to be reachable from its origin refs.
+        let fresh_parent = tempfile::tempdir().unwrap();
+        let fresh = fresh_parent.path().join("workspace");
+        let output = Command::new("git")
+            .arg("clone")
+            .arg(&remote)
+            .arg(&fresh)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        mj_checkpoint::archive::restore_git_snapshot(
+            &mj_checkpoint::archive::SystemGit,
+            &fresh,
+            &snapshot,
+        )
+        .unwrap();
+
+        assert_eq!(test_git(&fresh, &["rev-parse", "HEAD"]), head);
+        assert_eq!(test_git(&fresh, &["branch", "--show-current"]), "master");
+        assert_eq!(
+            test_git(&fresh, &["diff", "--cached", "--name-only"]),
+            "staged.txt"
+        );
+        assert_eq!(
+            test_git(&fresh, &["diff", "--name-only"]),
+            "nested/file.txt"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fresh.join("nested/file.txt")).unwrap(),
+            "unstaged\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fresh.join("untracked.txt")).unwrap(),
+            untracked
+        );
+        assert_eq!(
+            test_git(&fresh, &["config", "--local", "mj.remoteWorkspace"]),
+            "true"
+        );
+        assert_eq!(
+            test_git(&fresh, &["config", "--local", "mj.baseCommit"]),
+            pushed
+        );
+    }
+
+    #[test]
+    fn a_conversion_preview_counts_unpushed_commits_and_dirty_files() {
+        let (checkout, _remote_parent, remote) = checkout_with_network_remote();
+        std::fs::write(checkout.path().join("nested/file.txt"), "session commit\n").unwrap();
+        test_git(checkout.path(), &["commit", "-am", "session commit"]);
+        std::fs::write(checkout.path().join("staged.txt"), "staged\n").unwrap();
+        test_git(checkout.path(), &["add", "staged.txt"]);
+        std::fs::write(checkout.path().join("nested/file.txt"), "unstaged\n").unwrap();
+        let untracked = "u".repeat(100 * 1024);
+        std::fs::write(checkout.path().join("untracked.txt"), &untracked).unwrap();
+        let config = resume_compatibility_config();
+        let session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+        let executor = FixtureRemoteExecutor { remote };
+        let conversion = plan_raw_to_workspace(&session, &config, &executor).unwrap();
+
+        let preview = raw_conversion_preview(&session, &conversion, &executor).unwrap();
+
+        assert_eq!(preview.fetch_url, FIXTURE_FETCH_URL);
+        assert_eq!(preview.default_branch, "master");
+        assert_eq!(preview.branch.as_deref(), Some("master"));
+        assert_eq!(preview.unpushed_commits, 1);
+        assert_eq!(preview.staged_files, 1);
+        assert_eq!(preview.unstaged_files, 1);
+        assert_eq!(preview.untracked_files, 1);
+        assert_eq!(preview.untracked_bytes, untracked.len() as u64);
+        assert!(
+            preview.host_checkout_retained,
+            "the user's own checkout stays on this machine"
+        );
+        assert_eq!(
+            preview.destination,
+            PathBuf::from("/workspace").join(checkout.path().file_name().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_conversion_preview_reports_a_managed_worktree_as_not_retained() {
+        let (checkout, _remote_parent, remote) = checkout_with_network_remote();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let session = managed_worktree_session(checkout.path(), session_id);
+        let config = resume_compatibility_config();
+        let executor = FixtureRemoteExecutor { remote };
+        let conversion = plan_raw_to_workspace(&session, &config, &executor).unwrap();
+
+        let preview = raw_conversion_preview(&session, &conversion, &executor).unwrap();
+
+        assert!(
+            !preview.host_checkout_retained,
+            "a managed worktree is retired by the move"
+        );
+        assert_eq!(preview.branch, Some(format!("mj/{session_id}")));
+        assert_eq!(preview.unpushed_commits, 0);
+        assert_eq!(preview.staged_files, 0);
+        assert_eq!(preview.unstaged_files, 0);
+        assert_eq!(
+            preview.destination,
+            PathBuf::from("/workspace").join(session_id)
+        );
+    }
+
+    #[test]
+    fn a_conversion_preview_refuses_a_dirty_submodule() {
+        let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
+        let submodule = committed_repository();
+        test_git(
+            checkout.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &submodule.path().to_string_lossy(),
+                "sub",
+            ],
+        );
+        test_git(checkout.path(), &["commit", "-m", "add submodule"]);
+        std::fs::write(checkout.path().join("sub/nested/file.txt"), "dirty\n").unwrap();
+        let config = resume_compatibility_config();
+        let session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+        let conversion = plan_raw_to_workspace(&session, &config, &ProcessExecutor).unwrap();
+
+        let error = raw_conversion_preview(&session, &conversion, &ProcessExecutor).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("dirty submodule"),
+            "{error:#}"
+        );
     }
     #[test]
     fn a_raw_checkout_on_an_ssh_host_cannot_convert() {
@@ -2446,6 +2983,7 @@ mod tests {
     #[test]
     fn a_managed_conversion_carries_the_session_worktree_not_the_primary_checkout() {
         let repository = committed_repository();
+        add_network_remote(repository.path());
         let session_id = "0123456789abcdef0123456789abcdef";
         let session = managed_worktree_session(repository.path(), session_id);
         let worktree = session.managed_worktree.clone().unwrap();
@@ -2474,6 +3012,7 @@ mod tests {
     #[test]
     fn an_unmanaged_conversion_serves_the_main_repository_behind_a_linked_worktree() {
         let repository = committed_repository();
+        add_network_remote(repository.path());
         let session_id = "0123456789abcdef0123456789abcdef";
         let linked = managed_worktree_session(repository.path(), session_id);
         let checkout = linked.managed_worktree.unwrap().worktree_root;
@@ -2500,6 +3039,7 @@ mod tests {
     #[test]
     fn an_unmanaged_conversion_accepts_a_checkout_reached_through_a_symlink() {
         let repository = committed_repository();
+        add_network_remote(repository.path());
         let session_id = "0123456789abcdef0123456789abcdef";
         let linked = managed_worktree_session(repository.path(), session_id);
         let checkout = linked.managed_worktree.unwrap().worktree_root;
@@ -2567,6 +3107,7 @@ mod tests {
         let conversion = RawToWorkspaceConversion {
             checkout: record.project_directory.clone().unwrap(),
             repository: PathBuf::from("/home/dev/project"),
+            source: fixture_network_source(),
             bundle_id: "project".into(),
             new_bundle: Some(ProjectBundle {
                 primary_repo: "project".into(),
@@ -2861,6 +3402,7 @@ mod tests {
             &RawToWorkspaceConversion {
                 checkout: previous.project_directory.clone().unwrap(),
                 repository: PathBuf::from("/home/dev/project"),
+                source: fixture_network_source(),
                 bundle_id: "project".into(),
                 new_bundle: None,
                 retire: previous.managed_worktree.clone(),

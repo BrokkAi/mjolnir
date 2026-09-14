@@ -787,18 +787,14 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
     let mut output = Vec::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
     output.clear();
-    // The command palette remains a keyboard entry point for the visible
-    // workspace menu and opens management inside the existing terminal.
-    master.write_all(b"\x1bOQ").expect("open command palette");
-    wait_for_output(
-        &mut master,
-        &mut output,
-        b"Commands",
-        Instant::now() + TIMEOUT,
-    );
+    // Shift-Tab from the Sessions pane lands on the workspace pane's pinned
+    // hamburger, which opens management inside the existing terminal. The
+    // command palette no longer lists the command, because that button is the
+    // visible way to run it.
     master
-        .write_all(b"workspaces\r")
-        .expect("run the Workspaces command");
+        .write_all(b"\x1b[Z")
+        .expect("focus the workspace hamburger");
+    master.write_all(b"\r").expect("run the Workspaces command");
     wait_for_output(
         &mut master,
         &mut output,

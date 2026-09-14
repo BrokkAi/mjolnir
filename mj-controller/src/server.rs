@@ -1494,13 +1494,54 @@ pub enum BundleFailure {
 /// slot, and it must answer before the person has decided anything. It also
 /// needs the controller, because resolving a local repository's configured
 /// remotes is a fact about the disk rather than about the projection.
+///
+/// Resume preflights share this channel, and so the concurrency cap on it,
+/// because they do the same kind of work on the same disk.
 #[derive(Debug)]
-pub struct PreflightRequest {
+pub enum PreflightRequest {
+    New(NewPreflightRequest),
+    Resume(ResumePreflightRequest),
+}
+
+#[derive(Debug)]
+pub struct NewPreflightRequest {
     pub bundle_id: String,
     pub target_id: String,
     pub project_directory: Option<PathBuf>,
     pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
     pub reply: tokio::sync::oneshot::Sender<Result<PreflightNew, PreflightFailure>>,
+}
+
+/// A resume preflight for one stopped session and one destination target. It
+/// travels on the same channel and under the same concurrency cap as the
+/// new-session preflight because it does the same kind of work: reading a
+/// working tree and asking a remote about itself.
+#[derive(Debug)]
+pub struct ResumePreflightRequest {
+    pub session_id: String,
+    pub target_id: String,
+    pub reply: tokio::sync::oneshot::Sender<Result<PreflightResume, PreflightFailure>>,
+}
+
+/// What a resume preflight found.
+///
+/// `Ready` covers every resume that changes nothing about where repository
+/// content comes from. `ConvertingRawCheckout` means this resume moves a
+/// local checkout into an isolated workspace, and carries the preview the
+/// person has to confirm. `Unavailable` reports why the conversion cannot be
+/// planned, in the plan's own words, because that message says what to do
+/// about it (add a remote, commit a submodule) and the browser has no other
+/// way to learn it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PreflightResume {
+    Ready,
+    ConvertingRawCheckout {
+        preview: Box<mj_core::state::RawConversionPreview>,
+    },
+    Unavailable {
+        detail: String,
+    },
 }
 
 /// A move preparation is intentionally separate from action admission. It
@@ -1748,6 +1789,7 @@ fn router(options: ServerOptions) -> Router {
         .route("/api/events", get(events))
         .route("/api/bundles", post(create_bundle))
         .route("/api/preflight/new", post(preflight_new))
+        .route("/api/preflight/resume", post(preflight_resume))
         .route("/api/moves/prepare", post(prepare_move))
         .route("/api/sessions/{session_id}/client-state", get(client_state))
         .route(
@@ -2272,13 +2314,13 @@ async fn preflight_new(
     let (reply, result) = tokio::sync::oneshot::channel();
     state
         .preflight_tx
-        .send(PreflightRequest {
+        .send(PreflightRequest::New(NewPreflightRequest {
             bundle_id: request.bundle_id,
             target_id: request.target_id,
             project_directory: request.project_directory,
             remote_repairs: request.remote_repairs,
             reply,
-        })
+        }))
         .await
         .map_err(|_| ApiError::controller_unavailable())?;
     result
@@ -2298,6 +2340,56 @@ async fn preflight_new(
             PreflightFailure::Controller(_) => ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "the controller could not check this project",
+            ),
+        })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightResumeRequest {
+    session_id: String,
+    target_id: String,
+}
+
+/// Answer what resuming this session on this target would do to its
+/// repository content, before the person commits to it.
+///
+/// A resume that changes nothing answers `Ready` without touching the disk,
+/// so the browser can ask about every destination it offers.
+async fn preflight_resume(
+    State(state): State<ServerState>,
+    Json(request): Json<PreflightResumeRequest>,
+) -> Result<Json<PreflightResume>, ApiError> {
+    if !state
+        .snapshot_rx
+        .borrow()
+        .sessions
+        .iter()
+        .any(|session| session.id == request.session_id)
+    {
+        return Err(ApiError::not_found("unknown session"));
+    }
+    let (reply, result) = tokio::sync::oneshot::channel();
+    state
+        .preflight_tx
+        .send(PreflightRequest::Resume(ResumePreflightRequest {
+            session_id: request.session_id,
+            target_id: request.target_id,
+            reply,
+        }))
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    result
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+        .map(Json)
+        .map_err(|failure| match failure {
+            PreflightFailure::Validation | PreflightFailure::InvalidRepository(_) => {
+                ApiError::bad_request("this session cannot resume on that target")
+            }
+            PreflightFailure::Controller(_) => ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the controller could not check this checkout",
             ),
         })
 }
@@ -5641,6 +5733,15 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
     /// A preflight starts nothing. It answers the questions a person needs
     /// before committing, and it refuses an impossible combination there
     /// rather than after the commit.
+    /// Every preflight test in this module asks about a new session; a resume
+    /// preflight shares the channel but never these fixtures.
+    fn new_preflight(request: PreflightRequest) -> NewPreflightRequest {
+        match request {
+            PreflightRequest::New(request) => request,
+            other => panic!("expected a new-session preflight, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn a_preflight_validates_before_it_reaches_the_controller() {
         for (body, why) in [
@@ -5687,7 +5788,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
                     ))
                     .unwrap(),
             ));
-        let request = preflights.recv().await.expect("the controller was asked");
+        let request = new_preflight(preflights.recv().await.expect("the controller was asked"));
         assert_eq!(request.bundle_id, "hel");
         assert_eq!(request.target_id, "raw");
         assert_eq!(request.project_directory, Some(PathBuf::from("~/project")));
@@ -5710,6 +5811,76 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         assert_eq!(answer.project_directory, Some("/remote/project".into()));
     }
 
+    /// The resume card cannot warn about a checkout it has not asked about.
+    /// The route has to reach the controller and hand the answer back whole.
+    #[tokio::test]
+    async fn a_resume_preflight_returns_the_conversion_preview_it_was_given() {
+        let (app, _, _, mut preflights, _) = app();
+        let response = tokio::spawn(
+            app.oneshot(
+                Request::post("/api/preflight/resume")
+                    .header(COOKIE, cookie())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"session_id":"session-1","target_id":"podman"}"#,
+                    ))
+                    .unwrap(),
+            ),
+        );
+        let request = preflights.recv().await.expect("the controller was asked");
+        let PreflightRequest::Resume(request) = request else {
+            panic!("expected a resume preflight");
+        };
+        assert_eq!(request.session_id, "session-1");
+        assert_eq!(request.target_id, "podman");
+        request
+            .reply
+            .send(Ok(PreflightResume::ConvertingRawCheckout {
+                preview: Box::new(mj_core::state::RawConversionPreview {
+                    checkout: "/work/repo".into(),
+                    destination: "/workspace/repo".into(),
+                    branch: Some("mj/session-1".into()),
+                    fetch_url: "https://github.com/example/repo.git".into(),
+                    push_urls: Vec::new(),
+                    default_branch: "main".into(),
+                    unpushed_commits: 1,
+                    staged_files: 0,
+                    unstaged_files: 1,
+                    untracked_files: 0,
+                    untracked_bytes: 0,
+                    host_checkout_retained: true,
+                }),
+            }))
+            .unwrap();
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(answer["kind"], "converting-raw-checkout");
+        assert_eq!(answer["preview"]["branch"], "mj/session-1");
+        assert_eq!(answer["preview"]["host_checkout_retained"], true);
+    }
+
+    /// A session the projection does not have never reaches the controller.
+    #[tokio::test]
+    async fn a_resume_preflight_for_an_unknown_session_is_refused_without_the_controller() {
+        let (app, _, _, mut preflights, _) = app();
+        let response = app
+            .oneshot(
+                Request::post("/api/preflight/resume")
+                    .header(COOKIE, cookie())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"session_id":"missing","target_id":"podman"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(preflights.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn a_bare_preflight_validation_failure_is_actionable_without_its_details() {
         let (app, _, _, mut preflights, _) = app();
@@ -5722,7 +5893,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
                 ))
                 .unwrap(),
         ));
-        let request = preflights.recv().await.expect("the controller was asked");
+        let request = new_preflight(preflights.recv().await.expect("the controller was asked"));
         request
             .reply
             .send(Err(PreflightFailure::Validation))
@@ -5753,7 +5924,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
                     .unwrap(),
             ),
         );
-        let request = preflights.recv().await.expect("the controller was asked");
+        let request = new_preflight(preflights.recv().await.expect("the controller was asked"));
         request
             .reply
             .send(Err(PreflightFailure::Controller(
@@ -5786,7 +5957,7 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
                     .unwrap(),
             ),
         );
-        let request = preflights.recv().await.expect("the controller was asked");
+        let request = new_preflight(preflights.recv().await.expect("the controller was asked"));
         assert_eq!(request.bundle_id, "hel");
         assert_eq!(request.target_id, "podman");
         assert_eq!(request.project_directory, None);
@@ -6515,6 +6686,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
             .reply
             .send(Ok(MovePreparation {
                 source_unavailable: false,
+                conversion: None,
                 selection: request.selection,
                 source_profile_id: "codex-1".into(),
                 source_target_template_id: "podman".into(),
@@ -7009,6 +7181,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
         };
         let preparation = MovePreparation {
             source_unavailable: false,
+            conversion: None,
             selection,
             source_profile_id: "codex-1".into(),
             source_target_template_id: "podman".into(),

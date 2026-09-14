@@ -11,12 +11,13 @@
 # `mj` and places the helpers beside it. Both hosts get a native worker for
 # local sessions. On macOS, Docker or Podman builds the portable Linux worker.
 #
-# The binaries are built exactly as scripts/run.sh builds them, so the two
-# scripts reuse each other's artifacts: `mj` and the dictation helper in the
-# default `target/`, the workers in `target/worker`, all under one profile.
-# The profile is release unless the arguments select another one. Arguments
-# are passed to the `cargo build` for `mj`; only the profile reaches the
-# worker builds, as in scripts/run.sh. For example:
+# The binaries are built exactly as scripts/run.sh builds them, through the
+# shared scripts/lib/build.sh, so the two scripts reuse each other's artifacts:
+# `mj` and the dictation helper in the default `target/`, the workers in
+# `target/worker`, all under one profile. Both default to release, because the
+# installed worker is uploaded to remote and container targets. A profile flag
+# applies to every binary; other arguments reach the `cargo build` for `mj` and
+# the dictation helper, which share a target directory. For example:
 #   scripts/install.sh
 #   scripts/install.sh --profile dev
 #   CARGO_INSTALL_ROOT="$HOME/.local" scripts/install.sh
@@ -31,55 +32,14 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
+. "$repo_root/scripts/lib/build.sh"
 
 install_root=${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}
 bin_dir="$install_root/bin"
 
-# Match the profile across every binary, so the daemon finds workers built
-# the same way as the controller. Release is the default for an install.
-cargo_args=("$@")
-profile_args=(--release)
-profile_chosen=0
-for ((index=0; index<${#cargo_args[@]}; index++)); do
-  case "${cargo_args[index]}" in
-    --release|-r) profile_args=(--release); profile_chosen=1 ;;
-    --profile)
-      if ((index+1 >= ${#cargo_args[@]})); then echo "--profile needs a value" >&2; exit 2; fi
-      index=$((index+1))
-      profile_args=(--profile "${cargo_args[index]}"); profile_chosen=1 ;;
-    --profile=*) profile_args=(--profile "${cargo_args[index]#--profile=}"); profile_chosen=1 ;;
-  esac
-done
-# The caller's own profile flag already sits in cargo_args; Cargo rejects it twice.
-if [ "$profile_chosen" = 0 ]; then
-  cargo_args+=("${profile_args[@]}")
-fi
-# Cargo names the dev profile's directory `debug`.
-case "${profile_args[*]}" in
-  --release) profile_dir=release ;;
-  "--profile dev") profile_dir=debug ;;
-  *) profile_dir=${profile_args[1]} ;;
-esac
-
-# Build one binary and print the path Cargo reports for it, so the caller
-# does not have to reconstruct profile and target directory names.
-build_executable() {
-  local package=$1 binary=$2
-  shift 2
-  cargo build --locked -p "$package" --bin "$binary" "$@" --message-format=json-render-diagnostics |
-  node --input-type=module -e '
-    import { readFileSync } from "node:fs";
-    const artifacts = readFileSync(0, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
-    const paths = new Set(artifacts.filter(item => item.reason === "compiler-artifact" &&
-      item.target?.name === process.argv[1] && item.target.kind.includes("bin") && item.executable).map(item => item.executable));
-    if (paths.size !== 1) throw new Error(`Cargo did not report exactly one ${process.argv[1]} executable`);
-    process.stdout.write([...paths][0]);
-  ' "$binary"
-}
-
-build_worker() {
-  build_executable brokk-mj-worker mj-worker --target-dir target/worker "$@" ${profile_args[@]+"${profile_args[@]}"}
-}
+# Match the profile across every binary, so the daemon finds workers built the
+# same way as the controller.
+mj_parse_cargo_args "$@"
 
 # Built binaries and the file names they take in the install directory.
 sources=()
@@ -87,36 +47,18 @@ names=()
 
 case "$(uname -s)" in
   Linux)
-    case "$(uname -m)" in
-      x86_64 | amd64) arch=x86_64 ;;
-      aarch64 | arm64) arch=aarch64 ;;
-      *)
-        echo "Unsupported Linux architecture: $(uname -m)" >&2
-        exit 1
-        ;;
-    esac
-    triple="${arch}-unknown-linux-musl"
-    if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
-      echo "The $triple target is not installed. Run: rustup target add $triple" >&2
-      exit 1
-    fi
-    sources+=("$(build_worker)")
+    mj_host_musl_triple
+    sources+=("$(mj_build_worker)")
     names+=("mj-worker")
-    sources+=("$(build_worker --target "$triple")")
+    sources+=("$(mj_build_worker --target "$triple")")
     names+=("mj-worker-$triple")
     ;;
   Darwin)
-    sources+=("$(build_worker)")
+    sources+=("$(mj_build_worker)")
     names+=("mj-worker")
     # The native macOS worker cannot run in a Linux container, so container
     # targets need a worker built through the available engine.
-    engine=""
-    for candidate in docker podman; do
-      if command -v "$candidate" >/dev/null 2>&1 && "$candidate" info >/dev/null 2>&1; then
-        engine="$candidate"
-        break
-      fi
-    done
+    mj_container_engine
     if [ -n "$engine" ]; then
       triple=$("$repo_root/scripts/build-linux-worker.sh" "$engine" ${profile_args[@]+"${profile_args[@]}"})
       sources+=("target/worker/$triple/$profile_dir/mj-worker")
@@ -131,11 +73,12 @@ case "$(uname -s)" in
     ;;
 esac
 
-# Dictation runs on the host, including when the session worker is remote.
-sources+=("$(build_executable brokk-mj-voice-worker mj-voice-worker ${profile_args[@]+"${profile_args[@]}"})")
+# Dictation runs on the host, including when the session worker is remote. It
+# shares the default target directory with `mj`, so it takes the same arguments.
+sources+=("$(mj_build_executable brokk-mj-voice-worker mj-voice-worker ${cargo_args[@]+"${cargo_args[@]}"})")
 names+=("mj-voice-worker")
 
-sources+=("$(build_executable brokk-mjolnir mj "${cargo_args[@]}")")
+sources+=("$(mj_build_executable brokk-mjolnir mj ${cargo_args[@]+"${cargo_args[@]}"})")
 names+=("mj")
 
 # Replace each binary by rename, so the copy never writes into an executable

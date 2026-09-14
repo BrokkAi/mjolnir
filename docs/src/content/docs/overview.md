@@ -103,8 +103,9 @@ same harness is selected again. A cross-harness resume instead restores the
 workspace and supplies a size-bounded handoff derived from the canonical
 transcript. See [Durability and recovery](/durability/).
 
-Kimi Code and DeepSeek Harness do not provide a guardian approval mode. They
-should not be used on a raw, unsandboxed target. DeepSeek Harness and Muse Code currently
+Kimi Code, DeepSeek Harness, and Muse Code do not provide a guardian approval
+mode. They should not be used on a raw, unsandboxed target. DeepSeek Harness
+and Muse Code currently
 accept one workspace root, so use either a one-repository bundle or one bare
 project directory, without attached directories.
 

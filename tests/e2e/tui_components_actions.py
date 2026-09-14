@@ -71,7 +71,8 @@ def palette_viewport(tmux, evidence):
     record(tmux, evidence, "palette-filter-small", "Shift-Tab; type open setup", "filtered settings entry fits in the short palette")
     tmux.send_key("Enter")
     tmux.wait_for("× Setup")
-    click(tmux, "  Cancel  ")
+    # Setup has no Cancel button; Escape closes it (through the dirty guard).
+    tmux.send_key("Escape")
     absent(tmux, "× Setup")
     tmux.resize(140, 40)
 

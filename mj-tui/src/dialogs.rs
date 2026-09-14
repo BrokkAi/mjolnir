@@ -297,6 +297,15 @@ pub(crate) enum Confirmation {
         /// there is nothing to recover and only the transcript is on offer.
         recoverable: bool,
     },
+    /// A resume that moves a local checkout into an isolated workspace. The
+    /// preflight already produced the receipt and the preview; this asks the
+    /// person to agree to what travels before anything is stopped.
+    ConvertRawCheckout {
+        launch: Box<DashboardAction>,
+        receipt: Box<mj_core::state::ResumeRepositorySourceReceipt>,
+        preview: Box<mj_core::state::RawConversionPreview>,
+        previous: Box<Mode>,
+    },
     /// A Move left a verified checkpoint or a ready destination that needs an
     /// explicit same-destination retry. Resume with the source settings is
     /// deliberately hidden while queue admission may already have run.
@@ -449,6 +458,7 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             ..
         } => &["Keep importing", "Cancel import"],
         Confirmation::DirtyLocal { .. } => &["Cancel", "Continue"],
+        Confirmation::ConvertRawCheckout { .. } => &["Cancel", "Confirm"],
         Confirmation::DestroyStopped { .. } => &["No", "Yes"],
         Confirmation::CloseFailed { .. } => &["Cancel", "Force stop", "Retry stop"],
         Confirmation::StopWithSubagents { .. } => &["Cancel", "Stop children and parent"],
@@ -487,6 +497,7 @@ fn initial_confirmation_button(confirmation: &Confirmation, labels: &[&str]) -> 
             | Confirmation::CloseFailed { .. }
             | Confirmation::StopWithSubagents { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
+            | Confirmation::ConvertRawCheckout { .. }
     ) {
         0
     } else {
@@ -1293,6 +1304,16 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 Line::raw("Keep importing, or cancel the operation?"),
             ],
         ),
+        Confirmation::ConvertRawCheckout { preview, .. } => {
+            let mut lines = vec![Line::raw(preview.summary_line()), Line::raw("")];
+            for warning in preview.warning_lines() {
+                lines.push(Line::styled(
+                    warning,
+                    Style::default().fg(theme::palette().warning),
+                ));
+            }
+            (" Move this checkout into the target? ", lines)
+        }
         Confirmation::DirtyLocal { repositories, .. } => {
             let mut lines = vec![
                 Line::raw("The initial worker will include these uncommitted changes:"),
@@ -1456,6 +1477,7 @@ pub(crate) fn render_confirmation(
         | Confirmation::RepairRepositoryRemotes { .. } => 16,
         Confirmation::Dismiss { .. } => 8,
         Confirmation::DirtyLocal { .. } => 11,
+        Confirmation::ConvertRawCheckout { .. } => 16,
         Confirmation::CloseFailed { .. } => 12,
         Confirmation::StopWithSubagents { .. } => 10,
         Confirmation::DestroyStopped { .. } => 10,
@@ -2154,6 +2176,24 @@ impl DashboardState {
         self.mark_render_changed();
     }
 
+    /// Ask before a resume moves a local checkout into an isolated workspace.
+    /// Cancelling returns to the wizard the preflight was started from.
+    pub fn show_raw_conversion_confirmation(
+        &mut self,
+        launch: DashboardAction,
+        receipt: mj_core::state::ResumeRepositorySourceReceipt,
+        preview: mj_core::state::RawConversionPreview,
+    ) {
+        let previous = Box::new(self.mode.clone());
+        self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ConvertRawCheckout {
+            launch: Box::new(launch),
+            receipt: Box::new(receipt),
+            preview: Box::new(preview),
+            previous,
+        }));
+        self.mark_render_changed();
+    }
+
     pub fn show_dirty_local_confirmation(
         &mut self,
         action: DashboardAction,
@@ -2350,6 +2390,7 @@ impl DashboardState {
             Confirmation::ConfigurationRepair { .. }
                 | Confirmation::LaunchFailed { .. }
                 | Confirmation::RepairRepositoryRemotes { .. }
+                | Confirmation::ConvertRawCheckout { .. }
         ) && let Event::Key(key) = &event
             && key.kind != crossterm::event::KeyEventKind::Release
         {
@@ -2388,7 +2429,8 @@ impl DashboardState {
                 Confirmation::Dismiss { mode, .. }
                 | Confirmation::RepairRepositoryRemotes { previous: mode, .. }
                 | Confirmation::ConfigurationRepair { previous: mode, .. }
-                | Confirmation::LaunchFailed { previous: mode, .. } => {
+                | Confirmation::LaunchFailed { previous: mode, .. }
+                | Confirmation::ConvertRawCheckout { previous: mode, .. } => {
                     self.restore_dismissed_mode(mode);
                 }
                 Confirmation::DestroyStopped { reopen, .. } => {
@@ -2473,6 +2515,22 @@ impl DashboardState {
                 }
                 self.cancel_modal();
                 action
+            }
+            (
+                Confirmation::ConvertRawCheckout {
+                    launch,
+                    receipt,
+                    previous,
+                    ..
+                },
+                index,
+            ) => {
+                if index == 1 {
+                    self.cancel_modal();
+                    DashboardAction::ConfirmRawConversion { launch, receipt }
+                } else {
+                    self.restore_dismissed_mode(previous)
+                }
             }
             (Confirmation::ForceDestroy { session_id }, 1) => {
                 self.cancel_modal();

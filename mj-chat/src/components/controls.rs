@@ -65,6 +65,16 @@ impl Button {
     }
 }
 
+/// Which edge of its area a [`ButtonRow`] packs against when it fits.
+///
+/// A row wider than its area ignores this and stays left-anchored so the
+/// focus-following scroll keeps working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowAlign {
+    Left,
+    Right,
+}
+
 /// A row of equally aligned buttons with content-sized hitboxes.
 pub struct ButtonRow;
 
@@ -75,6 +85,17 @@ impl ButtonRow {
         area: Rect,
         buttons: &[(K, &str, bool)],
         form: &mut Form<K>,
+    ) {
+        Self::render_aligned(frame, area, buttons, form, RowAlign::Left);
+    }
+
+    /// Draws and registers buttons in order, packed against `align`.
+    pub fn render_aligned<K: Copy + Eq>(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        buttons: &[(K, &str, bool)],
+        form: &mut Form<K>,
+        align: RowAlign,
     ) {
         if buttons.is_empty() {
             return;
@@ -92,7 +113,18 @@ impl ButtonRow {
             .iter()
             .map(|(_, label, _)| u16::try_from(label.width() + 4).unwrap_or(u16::MAX))
             .collect::<Vec<_>>();
-        let mut start = 0usize;
+        // Only a row that fits can be pushed to the right edge; when it
+        // overflows the offset is zero and the scroll below behaves as before.
+        let total = widths
+            .iter()
+            .map(|width| usize::from(*width))
+            .sum::<usize>()
+            .saturating_add(widths.len().saturating_sub(1));
+        let offset = match align {
+            RowAlign::Left => 0,
+            RowAlign::Right => usize::from(area.width).saturating_sub(total),
+        };
+        let mut start = offset;
         let mut scroll = 0usize;
         for ((id, _, _), width) in buttons.iter().zip(&widths) {
             if form.is_focused(*id) {
@@ -103,7 +135,7 @@ impl ButtonRow {
             }
             start = start.saturating_add(usize::from(*width)).saturating_add(1);
         }
-        start = 0;
+        start = offset;
         for ((id, label, enabled), width) in buttons.iter().zip(widths) {
             let end = start.saturating_add(usize::from(width));
             let visible_start = start.max(scroll);
@@ -834,6 +866,48 @@ mod tests {
         form.handle(&event(MouseEventKind::Down(MouseButton::Left)));
         form.handle(&event(MouseEventKind::Up(MouseButton::Left)))
             .action
+    }
+
+    fn row_text(width: u16, align: RowAlign) -> String {
+        let mut form = Form::<u8>::new();
+        form.declare(1, ControlKind::Button);
+        form.declare(2, ControlKind::Button);
+        form.end_frame(1);
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                form.begin_frame();
+                ButtonRow::render_aligned(
+                    frame,
+                    frame.area(),
+                    &[(1, "First", true), (2, "Last", true)],
+                    &mut form,
+                    align,
+                );
+                form.end_frame(1);
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn a_right_aligned_row_that_fits_ends_flush_with_the_area() {
+        // "  First  " and "  Last  " are 9 and 8 cells, plus one separator
+        // between them, so an 18-cell row leaves 12 dead cells on the left.
+        let text = row_text(30, RowAlign::Right);
+        assert!(text.ends_with("  First     Last  "), "{text:?}");
+        assert_eq!(&text[..12], " ".repeat(12), "{text:?}");
+    }
+
+    #[test]
+    fn a_row_wider_than_its_area_ignores_right_alignment() {
+        assert_eq!(row_text(10, RowAlign::Right), row_text(10, RowAlign::Left));
     }
 
     #[test]

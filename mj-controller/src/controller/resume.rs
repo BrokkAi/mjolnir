@@ -39,7 +39,8 @@ use super::worktree::{
     apply_workspace_to_raw, cleanup_managed_worktree, create_managed_worktree,
     managed_worktree_checkout_exists, plan_raw_to_workspace,
     preserve_retained_managed_worktree_branch, raw_checkout_divergence_notice,
-    raw_checkout_position, restore_managed_worktree, resume_compatibility, retire_managed_worktree,
+    raw_checkout_position, raw_checkout_snapshot, raw_conversion_preview, restore_managed_worktree,
+    resume_compatibility, retire_managed_worktree,
 };
 use super::{
     Controller, SessionResumeOptions, execute_checked, now, selected_host_container_size,
@@ -62,6 +63,14 @@ pub use mj_core::state::ResumeRepositorySourceReceipt;
 pub enum ResumeRepositorySourcePreflight {
     Ready(ResumeRepositorySourceReceipt),
     RepositoryMoved(ResumeRepositorySourceMismatch),
+    /// The resume converts a local checkout into an isolated workspace. The
+    /// receipt is already valid; the preview is what a person has to confirm
+    /// before the checkout is snapshotted and the session moves off this
+    /// machine.
+    ConvertingRawCheckout {
+        receipt: ResumeRepositorySourceReceipt,
+        preview: Box<mj_core::state::RawConversionPreview>,
+    },
 }
 
 struct ResumeRepositoryBundles {
@@ -122,11 +131,26 @@ impl Controller {
         Ok(())
     }
     /// Prove that each configured repository source still supplies the commit
-    /// boundary its checkpoint bundle expects, before provisioning anything.
+    /// boundary its checkpoint bundle expects, before provisioning anything,
+    /// and describe a local checkout's conversion so a person can confirm it.
     pub fn preflight_resume_repository_sources(
         &self,
         session_id: &str,
         target_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        self.preflight_repository_sources(session_id, target_id, true, executor)
+    }
+
+    /// `describe_conversion` buys the conversion preview with a read of the
+    /// checkout and a question to its remote. The resume itself only needs to
+    /// know whether a configured source moved, and the person has already
+    /// confirmed by then, so it asks for the cheap answer.
+    fn preflight_repository_sources(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        describe_conversion: bool,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
         let session = self
@@ -149,14 +173,24 @@ impl Controller {
             // bundle is only a grouping identity and may no longer be in the
             // config; neither an in-place resume nor a raw-to-workspace
             // conversion restores repository contents from that bundle.
-            return Ok(ResumeRepositorySourcePreflight::Ready(
-                ResumeRepositorySourceReceipt {
-                    session_id: session_id.to_owned(),
-                    bundle_id: session.bundle_id.clone(),
-                    checkpoint_sha256: checkpoint.sha256.clone(),
-                    repositories: Vec::new(),
-                },
-            ));
+            let receipt = ResumeRepositorySourceReceipt {
+                session_id: session_id.to_owned(),
+                bundle_id: session.bundle_id.clone(),
+                checkpoint_sha256: checkpoint.sha256.clone(),
+                repositories: Vec::new(),
+            };
+            // A conversion reads the checkout and its remote so the person
+            // sees what will travel. Planning failures (no network remote, an
+            // unreachable remote, a dirty submodule) are this preflight's
+            // error, which every surface already reports.
+            if describe_conversion && plan == ResumePlan::RawToWorkspace {
+                let preview = raw_conversion_preview_for(session, &self.config, executor)?;
+                return Ok(ResumeRepositorySourcePreflight::ConvertingRawCheckout {
+                    receipt,
+                    preview: Box::new(preview),
+                });
+            }
+            return Ok(ResumeRepositorySourcePreflight::Ready(receipt));
         }
         let repositories = read_checkpoint_repository_bundles(&checkpoint.archive_path)?;
         self.preflight_verified_repository_sources(
@@ -394,6 +428,21 @@ impl Controller {
             executor,
         )
     }
+}
+
+/// Plan a local checkout's conversion into an isolated workspace and describe
+/// it, without changing anything.
+///
+/// The resume preflight and the browser's resume card both need this answer
+/// before a person confirms, and neither owns a [`Controller`] at that point,
+/// so it takes the record and the configuration directly.
+pub fn raw_conversion_preview_for(
+    session: &SessionRecord,
+    config: &Config,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<mj_core::state::RawConversionPreview> {
+    let conversion = plan_raw_to_workspace(session, config, executor)?;
+    raw_conversion_preview(session, &conversion, executor)
 }
 
 fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectRepository> {
@@ -700,7 +749,7 @@ impl Controller {
         {
             let _phase = ResumePhaseTimer::new(session_id, "preflight repository sources");
             if let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) =
-                self.preflight_resume_repository_sources(session_id, target_id, executor)?
+                self.preflight_repository_sources(session_id, target_id, false, executor)?
             {
                 bail!(
                     "checkpoint base commit {} is missing from configured source {:?} for repository {:?}; the repository may have moved (archived origin: {:?})",
@@ -764,9 +813,6 @@ impl Controller {
             .get(target_id)
             .with_context(|| format!("unknown target template {target_id:?}"))?
             .clone();
-        if !mj_core::config::is_bare_project_target(&target_template) {
-            super::network_git::bundle_from_manifest(&archive_manifest)?;
-        }
         // Decide the representation before the record changes, so an
         // incompatible target fails here instead of during provisioning.
         self.validate_muse_resume_destination(&previous, profile.kind, target_id)?;
@@ -776,6 +822,14 @@ impl Controller {
         );
         let plan = resume_compatibility(&previous, &self.config, target_id)
             .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+        // A converting resume writes its own archive below, from the host
+        // checkout's own network remote, and provisioning reads that one. Every
+        // other isolated resume clones what its stored archive already names.
+        if !mj_core::config::is_bare_project_target(&target_template)
+            && plan != ResumePlan::RawToWorkspace
+        {
+            super::network_git::bundle_from_manifest(&archive_manifest)?;
+        }
         if plan == ResumePlan::InPlace
             && previous.managed_worktree.is_none()
             && let Some(project_directory) = &previous.project_directory
@@ -816,24 +870,8 @@ impl Controller {
                 .context("clean up target from failed resume")?;
         }
         let mut resume_notices = Vec::new();
-        if let Some(conversion) = conversion
-            .as_ref()
-            .and_then(ResumeConversion::raw_to_workspace)
-            && let Some(project_directory) = &previous.project_directory
-        {
-            resume_notices.push(match &conversion.retire {
-                Some(worktree) => format!(
-                    "This session moved out of {} and into the {target_id} target. Its branch {} stays in {}.",
-                    project_directory.display(),
-                    worktree.branch,
-                    worktree.source_repository.display()
-                ),
-                None => format!(
-                    "This session moved out of {} and into the {target_id} target.",
-                    project_directory.display()
-                ),
-            });
-        }
+        // The raw-to-workspace notice is written where the conversion snapshot
+        // is taken, because it reports the branch the container arrives on.
         if let Some(conversion) = conversion
             .as_ref()
             .and_then(ResumeConversion::workspace_to_raw)
@@ -998,11 +1036,14 @@ impl Controller {
         } else {
             crate::database::save_session(&self.state.sessions[session_id])?;
         }
-        if let Some((host, size)) = selected_container_size {
-            self.state.remember_container_size(&host, size);
+        if let Some((host, size)) = selected_container_size.as_ref() {
+            self.state.remember_container_size(host, *size);
         }
 
         let mut recreated_managed_worktree = false;
+        // Set once a conversion has written its archive, so the success path can
+        // retire the archive it replaced and the failure path can remove it.
+        let mut conversion_checkpoint_written: Option<mj_core::state::CheckpointMetadata> = None;
         let result = async {
             if let Some(worktree) = previous.managed_worktree.as_ref() {
                 recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
@@ -1044,6 +1085,70 @@ impl Controller {
                     &SystemGit,
                 )
                 .context("restore this session's checkout")?;
+            }
+            // A local checkout becomes an isolated workspace by being
+            // re-snapshotted into a new archive whose provenance is the
+            // checkout's own network remote. Provisioning clones that remote,
+            // and the restore below lays this snapshot over the fresh clone.
+            if let Some(conversion) = conversion
+                .as_ref()
+                .and_then(ResumeConversion::raw_to_workspace)
+            {
+                let destination = PathBuf::from(
+                    previous
+                        .project_directory
+                        .as_deref()
+                        .context("a raw session has no project directory")?
+                        .file_name()
+                        .context("a raw project directory cannot be the filesystem root")?,
+                );
+                let snapshot = raw_checkout_snapshot(
+                    &conversion.checkout,
+                    &conversion.source,
+                    &destination,
+                    &SystemGit,
+                )
+                .context("snapshot the host checkout for its new target")?;
+                resume_notices.push(conversion_notice(
+                    target_id,
+                    previous
+                        .project_directory
+                        .as_deref()
+                        .unwrap_or(&conversion.checkout),
+                    snapshot.metadata.branch.as_deref(),
+                    conversion.retire.as_ref(),
+                ));
+                let archives = mj_core::config::sessions_dir();
+                std::fs::create_dir_all(&archives).with_context(|| {
+                    format!("create the checkpoint directory {}", archives.display())
+                })?;
+                // Named like every other managed archive, so an interrupted
+                // conversion's file is reconciled away, with `converted`
+                // marking where it came from.
+                let output = archives.join(format!(
+                    "{session_id}-converted-{}-{}.hel.zip",
+                    previous
+                        .checkpoint
+                        .as_ref()
+                        .map_or(0, |checkpoint| checkpoint.event_frontier),
+                    new_command_id("archive")?
+                ));
+                let written = conversion_checkpoint(&archive_path, snapshot, &output)?;
+                conversion_checkpoint_written = Some(written.clone());
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                record.checkpoint = Some(written);
+                record.updated_at = now();
+                // The whole row again: provisioning must read the converted
+                // archive even if this process dies right here.
+                if let Some((host, size)) = selected_container_size.as_ref() {
+                    crate::database::save_session_with_container_size(
+                        &self.state.sessions[session_id],
+                        host,
+                        *size,
+                    )?;
+                } else {
+                    crate::database::save_session(&self.state.sessions[session_id])?;
+                }
             }
             let utility_handoff = {
                 let _provisioning = ResumePhaseTimer::new(session_id, "provision destination");
@@ -1102,24 +1207,38 @@ impl Controller {
             };
             let remote_archive = format!("{worker_root}/restore.hel.zip");
             let remote_spec = format!("{worker_root}/restore-spec.json");
+            // A conversion restores the archive it just wrote, not the raw one
+            // the session was stopped with.
+            let restored_archive = conversion_checkpoint_written
+                .as_ref()
+                .map_or(archive_path.as_path(), |checkpoint| {
+                    checkpoint.archive_path.as_path()
+                });
             let restore = CheckpointRestoreSpec {
                 archive_path: restore_archive_path(
                     &backend,
-                    &archive_path,
+                    restored_archive,
                     &target_path(&remote_archive),
                 ),
                 workspace_root: target_path(&workspace_root),
                 relay_root: target_path(&worker_root),
                 harness_home: target_path(&harness_home),
-                // A converted session's repository arrives as a seed from its
-                // own checkout. An in-place managed checkout recreated from
-                // its retained branch still needs the archive's dirty state.
-                restore_repositories: (resumed_project_directory.is_none() && conversion.is_none())
+                // A local checkout converting into a workspace arrives as a
+                // fresh clone of its own remote, and the conversion archive
+                // carries the commits, dirty files, and branch that go over it.
+                // An in-place managed checkout recreated from its retained
+                // branch still needs the archive's dirty state.
+                restore_repositories: (resumed_project_directory.is_none()
+                    && conversion.is_none())
+                    || plan == ResumePlan::RawToWorkspace
                     || (recreated_managed_worktree && plan == ResumePlan::InPlace),
                 restore_native: same_harness,
-                // A conversion puts the checkout somewhere the archive could
+                // A move onto a checkout puts it somewhere the archive could
                 // not have named, so the restored harness session is pointed at
-                // the real working directory instead of the archived one.
+                // the real working directory instead of the archived one. A
+                // move into a target has no host directory left, and the
+                // conversion archive already names the destination under
+                // `/workspace`, so this stays empty there.
                 primary_repository_root: conversion
                     .is_some()
                     .then(|| resumed_project_directory.clone())
@@ -1182,7 +1301,7 @@ impl Controller {
                             restoring,
                             backend_ref,
                             session_id,
-                            &archive_path,
+                            restored_archive,
                             &remote_archive,
                         )?;
                     }
@@ -1332,8 +1451,30 @@ impl Controller {
         }
         .await;
         match result {
-            Ok(materialized) => Ok(materialized),
+            Ok(materialized) => {
+                // The session now runs from the conversion archive, so the raw
+                // one it replaced can go.
+                if let Some(written) = &conversion_checkpoint_written {
+                    super::checkpoint::prune_replaced_checkpoint(
+                        previous.checkpoint.as_ref(),
+                        written,
+                    );
+                }
+                Ok(materialized)
+            }
             Err(error) => {
+                // The rollback puts back a record that names the previous
+                // archive, so the conversion's archive is nothing but litter.
+                if let Some(written) = &conversion_checkpoint_written
+                    && let Err(remove_error) = std::fs::remove_file(&written.archive_path)
+                    && remove_error.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!(
+                        session_id,
+                        path = %written.archive_path.display(),
+                        "could not remove the conversion checkpoint after resume failed: {remove_error}"
+                    );
+                }
                 // Put back whatever this resume could have written to the
                 // durable projection. Both branches restore archived content,
                 // so they are correct whether or not the write had happened
@@ -1512,6 +1653,92 @@ pub(super) fn apply_failed_resume_rollback(
             anyhow::anyhow!(failure)
         }
     }
+}
+
+/// What the conversation is told when a local session moves into a target.
+fn conversion_notice(
+    target_id: &str,
+    checkout: &Path,
+    branch: Option<&str>,
+    retire: Option<&mj_core::state::ManagedWorktree>,
+) -> String {
+    let branch = branch.unwrap_or("a detached head");
+    match retire {
+        Some(worktree) => format!(
+            "This session moved out of {} and into the {target_id} target, where its checkout is on {branch}. Its branch {} stays in {}.",
+            checkout.display(),
+            worktree.branch,
+            worktree.source_repository.display()
+        ),
+        None => format!(
+            "This session moved out of {} and into the {target_id} target, where its checkout is on {branch}. The checkout on this machine stays where it is.",
+            checkout.display()
+        ),
+    }
+}
+
+/// The archive a converting resume provisions and restores from: the previous
+/// archive's session, conversation, and native state, with the host checkout's
+/// snapshot as its only repository.
+///
+/// The snapshot carries network provenance, so this archive is what lets the
+/// destination clone a real remote and later checkpoint like any other
+/// isolated session.
+fn conversion_checkpoint(
+    previous_archive: &Path,
+    snapshot: mj_checkpoint::archive::RepositorySnapshot,
+    output: &Path,
+) -> Result<mj_core::state::CheckpointMetadata> {
+    let previous = mj_checkpoint::archive::read_archive_verified(previous_archive)
+        .with_context(|| format!("read checkpoint archive {}", previous_archive.display()))?;
+    // Native harness state and relay attachments travel byte for byte: a
+    // conversion replaces repository content and nothing else.
+    let native_artifacts = previous
+        .manifest
+        .payloads
+        .iter()
+        .filter_map(|descriptor| match &descriptor.role {
+            mj_checkpoint::archive::PayloadRole::NativeArtifact { relative_path } => {
+                Some((relative_path, descriptor))
+            }
+            _ => None,
+        })
+        .map(|(relative_path, descriptor)| {
+            Ok(mj_checkpoint::archive::NativeArtifact {
+                relative_path: relative_path.clone(),
+                data: previous.payload(descriptor)?.to_vec(),
+                mode: descriptor.mode,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let canonical_session = previous.canonical_session()?;
+    let event_frontier = canonical_session.event_frontier;
+    let written = mj_checkpoint::archive::write_archive_atomic(
+        output,
+        &mj_checkpoint::archive::ArchiveInput {
+            session: previous.manifest.session.clone(),
+            // Provenance for a person reading the archive; a restore reads
+            // nothing from it, so the target it was captured on stands.
+            target: previous.manifest.target.clone(),
+            bundle: mj_checkpoint::archive::BundleManifest {
+                id: previous.manifest.bundle.id.clone(),
+                // A restore finds the primary repository by this id, and with
+                // it the working directory the native transcript is rewritten
+                // to, so it has to name the snapshot.
+                primary_repository: snapshot.metadata.id.clone(),
+            },
+            canonical_session,
+            native_artifacts,
+            repositories: vec![snapshot],
+        },
+    )
+    .with_context(|| format!("write the conversion archive {}", output.display()))?;
+    Ok(mj_core::state::CheckpointMetadata {
+        archive_path: output.to_path_buf(),
+        sha256: written.archive_sha256,
+        created_at: now(),
+        event_frontier,
+    })
 }
 
 /// Whether a resume has to rebuild the durable projection from its archive.
@@ -1775,8 +2002,10 @@ mod tests {
     use anyhow::Result;
 
     use crate::controller::test_support::{
+        FIXTURE_FETCH_URL, FixtureRemoteExecutor, checkout_with_network_remote,
         checkpoint_test_session, committed_repository, managed_worktree_session,
-        resume_compatibility_config, write_checkpoint_gate_archive,
+        network_remote_for, raw_session_on, resume_compatibility_config,
+        write_checkpoint_archive_with_native_state, write_checkpoint_gate_archive,
     };
     use crate::controller::{Controller, SessionResumeOptions};
     use mj_checkpoint::archive::{GitCommandRunner, verify_archive_streaming};
@@ -1790,6 +2019,54 @@ mod tests {
     use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
 
     use super::*;
+
+    /// A person choosing a container for a local session has to see what the
+    /// move does before it happens, and a person resuming the same session in
+    /// place must not be asked anything.
+    #[test]
+    fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() {
+        let (checkout, _remote_parent, remote) = checkout_with_network_remote();
+        std::fs::write(checkout.path().join("untracked.txt"), "u".repeat(2048)).unwrap();
+        let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+        session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+            archive_path: checkout.path().join("unused.hel.zip"),
+            sha256: "a".repeat(64),
+            created_at: "2026-09-14T00:00:00Z".into(),
+            event_frontier: 3,
+        });
+        let session_id = session.id.clone();
+        let controller = Controller {
+            config: resume_compatibility_config(),
+            state: State {
+                sessions: BTreeMap::from([(session_id.clone(), session)]),
+                ..State::default()
+            },
+        };
+        let executor = FixtureRemoteExecutor { remote };
+
+        let converting = controller
+            .preflight_resume_repository_sources(&session_id, "podman", &executor)
+            .unwrap();
+        let ResumeRepositorySourcePreflight::ConvertingRawCheckout { receipt, preview } =
+            converting
+        else {
+            panic!("a container destination converts the checkout, got {converting:?}");
+        };
+        assert_eq!(receipt.session_id, session_id);
+        assert_eq!(preview.fetch_url, FIXTURE_FETCH_URL);
+        assert_eq!(preview.untracked_files, 1);
+        assert!(preview.host_checkout_retained);
+
+        assert!(
+            matches!(
+                controller
+                    .preflight_resume_repository_sources(&session_id, "local-bare", &executor)
+                    .unwrap(),
+                ResumeRepositorySourcePreflight::Ready(_)
+            ),
+            "resuming in place asks nothing"
+        );
+    }
 
     const RESUME_ROLLBACK_TEST_CHILD: &str = "MJ_RESUME_ROLLBACK_TEST_CHILD";
     const RETIRED_WORKTREE_RESUME_TEST_CHILD: &str = "MJ_RETIRED_WORKTREE_RESUME_TEST_CHILD";
@@ -3133,15 +3410,84 @@ mod tests {
             .unwrap();
         assert!(branch.success(), "resume rollback must retain the branch");
     }
+    #[test]
+    fn a_conversion_archive_carries_the_checkouts_remote_and_the_conversation() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let previous = write_checkpoint_archive_with_native_state(directory.path(), session_id, 7);
+        let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
+        let source =
+            mj_core::remote_git::resolve_local_repository(checkout.path(), &ProcessExecutor)
+                .unwrap();
+        let dirname = PathBuf::from(checkout.path().file_name().unwrap());
+        let snapshot =
+            raw_checkout_snapshot(checkout.path(), &source, &dirname, &SystemGit).unwrap();
+
+        let output = directory.path().join("converted.hel.zip");
+        let converted = conversion_checkpoint(&previous.archive_path, snapshot, &output).unwrap();
+
+        // The archive provisioning will read: a real network clone of the
+        // checkout's own remote, landing where the archive says.
+        let verified = mj_checkpoint::archive::read_archive_verified(&output).unwrap();
+        assert_eq!(converted.archive_path, output);
+        assert_eq!(converted.sha256, verified.archive_sha256);
+        assert_eq!(converted.event_frontier, previous.event_frontier);
+        let bundle =
+            crate::controller::network_git::bundle_from_manifest(&verified.manifest).unwrap();
+        assert_eq!(bundle.primary, dirname.to_string_lossy());
+        assert_eq!(bundle.repositories.len(), 1);
+        assert_eq!(
+            bundle.repositories[0].url.as_deref(),
+            Some(FIXTURE_FETCH_URL)
+        );
+        assert_eq!(bundle.repositories[0].push_urls, [FIXTURE_FETCH_URL]);
+        assert_eq!(
+            bundle.repositories[0].destination,
+            dirname.to_string_lossy()
+        );
+
+        // Everything the conversation is made of comes across untouched.
+        let original =
+            mj_checkpoint::archive::read_archive_verified(&previous.archive_path).unwrap();
+        assert_eq!(
+            verified.canonical_session().unwrap(),
+            original.canonical_session().unwrap()
+        );
+        assert_eq!(verified.manifest.session, original.manifest.session);
+        assert_eq!(native_state(&original), native_state(&verified));
+        assert!(
+            !native_state(&verified).is_empty(),
+            "the fixture has native state"
+        );
+    }
+
+    /// Every native payload of an archive as (path, mode, bytes).
+    fn native_state(
+        archive: &mj_checkpoint::archive::VerifiedArchive,
+    ) -> Vec<(PathBuf, u32, Vec<u8>)> {
+        archive
+            .manifest
+            .payloads
+            .iter()
+            .filter_map(|descriptor| match &descriptor.role {
+                mj_checkpoint::archive::PayloadRole::NativeArtifact { relative_path } => Some((
+                    relative_path.clone(),
+                    descriptor.mode,
+                    archive.payload(descriptor).unwrap().to_vec(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
     const RAW_CONVERSION_TEST_CHILD: &str = "MJ_RAW_CONVERSION_TEST_CHILD";
     #[test]
-    fn unsupported_raw_conversion_leaves_config_and_worktree_unchanged() {
+    fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
         // MJ_DATA_DIR and MJ_CONFIG_DIR are process-global, so run the half
         // that writes them in an exact child test.
         if std::env::var_os(RAW_CONVERSION_TEST_CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
             let test_name = format!(
-                "{}::unsupported_raw_conversion_leaves_config_and_worktree_unchanged",
+                "{}::a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint",
                 module_path!()
                     .strip_prefix("mj_controller::")
                     .unwrap_or(module_path!())
@@ -3193,8 +3539,11 @@ mod tests {
         let checkpoint = write_checkpoint_gate_archive(&archive_directory, session_id, 7);
 
         let repository = committed_repository();
+        // An isolated workspace is a clone of a network remote, so the
+        // checkout that converts has to have one, with its base pushed.
+        let (_remote_parent, _remote) = network_remote_for(repository.path());
         let mut session = managed_worktree_session(repository.path(), session_id);
-        session.checkpoint = Some(checkpoint);
+        session.checkpoint = Some(checkpoint.clone());
         let worktree = session.managed_worktree.clone().unwrap();
         let previous = session.clone();
 
@@ -3240,20 +3589,56 @@ mod tests {
                 &GitWithoutPodmanExecutor,
             ))
             .unwrap_err();
+        // The conversion ran: it wrote its archive and reshaped the record,
+        // and then the destination could not be provisioned.
         assert!(
-            format!("{error:#}").contains("network repository provenance"),
+            format!("{error:#}").contains("podman is temporarily unavailable"),
             "{error:#}"
         );
         assert!(!format!("{error:#}").contains("returned to stopped"));
 
-        assert_eq!(controller.config, original_config);
-        assert_eq!(mj_core::config::Config::load().unwrap(), original_config);
+        // A conversion installs a bundle for the checkout it converts, and
+        // reuses it on a retry. Nothing else about the configuration moves.
+        let mut expected_config = original_config.clone();
+        let (bundle_id, bundle) = mj_core::config::Config::load()
+            .unwrap()
+            .bundles
+            .into_iter()
+            .next()
+            .expect("the conversion installed a bundle for the checkout");
+        expected_config.bundles.insert(bundle_id, bundle);
+        assert_eq!(controller.config, expected_config);
+        assert_eq!(mj_core::config::Config::load().unwrap(), expected_config);
 
         let retained = controller.state.sessions.get(session_id).unwrap();
         assert_eq!(retained.state, SessionState::Stopped);
+        assert_eq!(retained.checkpoint, Some(checkpoint.clone()));
         assert_eq!(retained.project_directory, previous.project_directory);
         assert_eq!(retained.managed_worktree, previous.managed_worktree);
         assert_eq!(retained.bundle_id, previous.bundle_id);
         assert!(worktree.worktree_root.is_dir(), "the checkout stays put");
+        assert!(
+            checkpoint.archive_path.is_file(),
+            "the previous archive is what the rolled-back record names"
+        );
+        let durable = crate::database::load_state().unwrap();
+        assert_eq!(durable.sessions[session_id].checkpoint, Some(checkpoint));
+        // The conversion archive is litter once the resume has failed, and the
+        // directory it was written in proves the conversion really ran.
+        let sessions = mj_core::config::sessions_dir();
+        assert!(sessions.is_dir(), "the conversion wrote an archive");
+        let leftover: Vec<_> = std::fs::read_dir(&sessions)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name())
+                    .filter(|name| name.to_string_lossy().ends_with(".hel.zip"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            leftover.is_empty(),
+            "{leftover:?} in {}",
+            sessions.display()
+        );
     }
 }

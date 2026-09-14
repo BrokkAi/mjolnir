@@ -988,7 +988,7 @@ pub(super) fn build_untracked_tar(
     {
         let mut builder = tar::Builder::new(&mut output);
         for (index, raw_path) in paths.into_iter().enumerate() {
-            let relative = path_from_git_bytes(raw_path)?;
+            let relative = mj_core::path_input::from_git_bytes(raw_path)?;
             validate_archive_relative_path(&relative)?;
             // In addition to Git's ignore rules, skip conventional credential
             // paths so they can never enter the untracked payload.
@@ -1029,20 +1029,6 @@ pub(super) fn build_untracked_tar(
         builder.finish().context("finish untracked-file tar")?;
     }
     Ok(output)
-}
-
-fn path_from_git_bytes(bytes: &[u8]) -> Result<PathBuf> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        Ok(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(PathBuf::from(
-            std::str::from_utf8(bytes).context("Git path is not UTF-8")?,
-        ))
-    }
 }
 
 pub(super) fn validate_untracked_tar(bytes: &[u8]) -> Result<()> {

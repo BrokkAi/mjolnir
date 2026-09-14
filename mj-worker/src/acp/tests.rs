@@ -4068,3 +4068,168 @@ fn echoed_user_images_do_not_reenter_the_relay_journal() {
         "session-1"
     ));
 }
+
+/// The credit delta is measured over the wire: the worker must read the
+/// account counter on both sides of the prompt and report the difference.
+#[tokio::test]
+async fn a_zcode_turn_records_the_credit_delta_measured_around_the_prompt() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(async move {
+        let (read, mut write) = tokio::io::split(bridge_stream);
+        let mut lines = BufReader::new(read).lines();
+        let mut quota_reads = 0_usize;
+        while let Some(line) = lines.next_line().await.expect("read scripted bridge input") {
+            let request: serde_json::Value =
+                serde_json::from_str(&line).expect("bridge input must be JSON-RPC");
+            let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let _ = observed_tx.send(method.to_owned());
+            let id = request
+                .get("id")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let result = match method {
+                "initialize" => serde_json::json!({"protocolVersion": 1}),
+                // ZCode sessions must select the `build` execution mode before
+                // the worker will prompt.
+                "session/new" => serde_json::json!({
+                    "sessionId": "scripted",
+                    "modes": {
+                        "currentModeId": "ask",
+                        "availableModes": [
+                            {"id": "ask", "name": "Ask"},
+                            {"id": "build", "name": "Build"},
+                        ],
+                    },
+                }),
+                "session/set_mode" => serde_json::json!({}),
+                "account/usage_stats" => {
+                    quota_reads += 1;
+                    let used = if quota_reads == 1 { 1874 } else { 1931 };
+                    serde_json::json!({
+                        "glm": {"kind": "success", "level": "pro", "items": [
+                            {"key": "token_5h", "label": "5h",
+                             "usedPercent": 10, "leftPercent": 90},
+                            {"key": "credit_limit", "label": "CREDIT_LIMIT",
+                             "usedPercent": 6, "leftPercent": 94,
+                             "usedCount": used, "totalCount": 28000,
+                             "nextResetTime": 4_102_444_800_000_i64},
+                            {"key": "credit_limit", "label": "CREDIT_LIMIT",
+                             "usedPercent": 1, "leftPercent": 99,
+                             "usedCount": used, "totalCount": 140000,
+                             "nextResetTime": 4_102_444_800_000_i64},
+                        ]},
+                        "opencode": {"kind": "not_configured"},
+                    })
+                }
+                "session/prompt" => serde_json::json!({
+                    "stopReason": "end_turn",
+                    "usage": {"totalTokens": 130, "inputTokens": 100, "outputTokens": 30},
+                    "_meta": {"zcode": {"usage": {"modelRequestCount": 3}}},
+                }),
+                _ => continue,
+            };
+            let response = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+            if write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let spec = LaunchSpec {
+        subagent_mcp_socket: None,
+        goal_recovery: Default::default(),
+        command: "scripted".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: std::env::current_dir().unwrap(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Zcode,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::acp::StepClock::default(),
+    };
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "turn".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("hello"))],
+        })
+        .await
+        .unwrap();
+    let finished = wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::PromptFinished { .. })
+    })
+    .await;
+    let RuntimeEvent::PromptFinished { usage, .. } = finished else {
+        unreachable!("wait_for_runtime_event matched a finished prompt");
+    };
+    let usage = usage.expect("ZCode reports whole-turn usage");
+    let details = usage.provider_details.expect("provider details");
+    assert_eq!(details.model_calls, Some(3));
+    let credits = details.credits.expect("the credit delta is recorded");
+    assert_eq!(
+        (credits.used, credits.before, credits.after),
+        (57, 1874, 1931)
+    );
+    // The weekly window has the larger allowance and is the one measured.
+    assert_eq!(credits.window, "credit_limit/140000");
+    assert!(!credits.window_reset_crossed);
+    assert!(credits.account_shared);
+
+    let mut methods = Vec::new();
+    while let Ok(method) = observed_rx.try_recv() {
+        methods.push(method);
+    }
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| *method == "account/usage_stats")
+            .count(),
+        2,
+        "the counter is read once on each side of the prompt: {methods:?}"
+    );
+    let prompt_at = methods
+        .iter()
+        .position(|method| method == "session/prompt")
+        .expect("the prompt was sent");
+    let first_quota = methods
+        .iter()
+        .position(|method| method == "account/usage_stats")
+        .expect("the baseline was read");
+    assert!(
+        first_quota < prompt_at,
+        "the baseline is read before the prompt: {methods:?}"
+    );
+
+    drop(request_tx);
+    driver.await.unwrap().unwrap();
+    bridge.await.unwrap();
+}

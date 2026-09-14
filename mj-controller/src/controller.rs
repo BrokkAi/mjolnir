@@ -77,6 +77,7 @@ pub use checkpoint::{
 pub use recovery_scan::{RecoveryCandidate, RecoveryScan};
 pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
+    raw_conversion_preview_for,
 };
 pub use reviewer::reviewer_stager;
 pub use subagents::RegisterSubagentRequest;

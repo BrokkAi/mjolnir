@@ -12,7 +12,8 @@ use crate::{
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use mj_chat::components::PathField;
 use mj_chat::components::{
-    ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, Interaction, PopupSide, TextField,
+    ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, Interaction, PopupSide, RowAlign,
+    TextField,
 };
 use mj_chat::path_input::PathInput;
 use mj_chat::selection::FrameSurfaces;
@@ -288,8 +289,7 @@ fn preferred_size(draft: &Value) -> SetupSize {
     let mut max_height = 20;
     walk(&[], draft, draft, &mut max_width, &mut max_height);
     for labels in [
-        ["Back", "Add", "Remove", "Detect machine"].as_slice(),
-        ["Cancel", "Save (Ctrl-S)"].as_slice(),
+        ["Back", "Add", "Remove", "Detect machine", "Save (Ctrl-S)"].as_slice(),
         ["Back", "Use default", "Apply"].as_slice(),
     ] {
         let width = labels
@@ -429,6 +429,59 @@ impl SetupDialog {
             || self.path.last().is_some_and(|key| key == "environment")
     }
 
+    /// The one action row for the current screen. Buttons appear only on the
+    /// pages where they apply; the renderer, the inert mirror behind a choice
+    /// popup, and `prepare` all read this list so they cannot drift apart.
+    fn actions(&self) -> Vec<(SetupControl, &'static str, bool)> {
+        use SetupControl::*;
+        if let Some(editor) = &self.editor
+            && editor.choices.is_empty()
+        {
+            let mut actions = vec![(Back, "Back", true)];
+            if !editor.adding {
+                // A name that does not exist yet has no default to restore.
+                actions.push((Clear, "Use default", true));
+            }
+            actions.push((Apply, "Apply", true));
+            return actions;
+        }
+        // The list page stays visible behind a choice popup, but its
+        // item and machine actions must not be reachable through it.
+        let interactive = self.editor.is_none();
+        let collection = self.collection();
+        let mut actions = Vec::new();
+        if !self.path.is_empty() {
+            actions.push((Back, "Back", true));
+        }
+        if collection {
+            actions.push((Add, "Add", interactive));
+            actions.push((Remove, "Remove", interactive && !self.keys().is_empty()));
+        }
+        // Detection writes into profiles, targets and bundles; offer it only
+        // where its results land.
+        if self
+            .path
+            .first()
+            .is_none_or(|key| matches!(key.as_str(), "profiles" | "targets" | "bundles"))
+        {
+            actions.push((
+                Detect,
+                "Detect machine",
+                interactive && !self.discovering && !self.saving,
+            ));
+        }
+        actions.push((
+            Save,
+            if self.saving {
+                "Saving…"
+            } else {
+                "Save (Ctrl-S)"
+            },
+            !self.saving && self.read_only.is_none(),
+        ));
+        actions
+    }
+
     fn prepare(&mut self) {
         if let Some(review) = &self.review_editor {
             review.prepare();
@@ -437,7 +490,7 @@ impl SetupDialog {
         use SetupControl::*;
         let len = self.keys().len();
         self.selected = self.selected.min(len.saturating_sub(1));
-        let collection = self.collection();
+        let actions = self.actions();
         let identity = format!("{:?}/{:?}", self.path, self.keys());
         let form = self.form.get_mut();
         form.begin_frame();
@@ -465,24 +518,8 @@ impl SetupDialog {
             form.set_list_identity(List, identity);
             List
         };
-        form.declare(Back, ControlKind::Button);
-        if self.editor.is_some() {
-            form.declare(Clear, ControlKind::Button);
-            form.declare(Apply, ControlKind::Button);
-        } else {
-            form.declare_with_enabled(Add, ControlKind::Button, collection);
-            form.declare_with_enabled(Remove, ControlKind::Button, collection && len > 0);
-            form.declare_with_enabled(
-                Detect,
-                ControlKind::Button,
-                !self.discovering && !self.saving,
-            );
-            form.declare(Cancel, ControlKind::Button);
-            form.declare_with_enabled(
-                Save,
-                ControlKind::Button,
-                !self.saving && self.read_only.is_none(),
-            );
+        for (id, _, enabled) in actions {
+            form.declare_with_enabled(id, ControlKind::Button, enabled);
         }
         form.end_frame(initial);
     }
@@ -1049,8 +1086,8 @@ impl DashboardState {
             }
             Some(Interaction::Activate(Back)) => {
                 if dialog.back() {
-                    self.cancel_modal();
-                    return DashboardAction::None;
+                    // Leaving from the root is a dismissal; keep the dirty guard.
+                    return self.dismiss_setup(dialog);
                 }
             }
             Some(Interaction::Select(List, index)) => {
@@ -1311,26 +1348,15 @@ pub(crate) fn render_setup(
                 .wrap(Wrap { trim: false }),
             layout.body,
         );
-        if dialog.editor.is_some() {
-            Dialog::render_actions(
-                frame,
-                layout.actions,
-                &[(Back, "Back", true), (Apply, "Apply", !dialog.saving)],
-                &mut form,
-            );
-            form.end_frame(Back);
-        } else {
-            Dialog::render_actions(
-                frame,
-                layout.actions,
-                &[
-                    (Cancel, "Cancel", !dialog.saving),
-                    (Save, "Save", !dialog.saving && dialog.read_only.is_none()),
-                ],
-                &mut form,
-            );
-            form.end_frame(Cancel);
-        }
+        // Too short for the page body: keep only the way out and the commit.
+        let actions = dialog
+            .actions()
+            .into_iter()
+            .filter(|(id, _, _)| matches!(id, Back | Apply | Save))
+            .collect::<Vec<_>>();
+        let initial = actions.first().map_or(Save, |(id, _, _)| *id);
+        Dialog::render_actions_aligned(frame, layout.actions, &actions, &mut form, RowAlign::Right);
+        form.end_frame(initial);
         return;
     }
     let text_editor = dialog
@@ -1369,7 +1395,7 @@ pub(crate) fn render_setup(
         inner.x,
         body_y,
         inner.width,
-        inner.height.saturating_sub(8 + u16::from(nested)).max(1),
+        inner.height.saturating_sub(7 + u16::from(nested)).max(1),
     );
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
@@ -1400,16 +1426,6 @@ pub(crate) fn render_setup(
             EditorInput::Path(input) => PathField::render(frame, area, input, &mut form, Field),
         }
         initial = Field;
-        Dialog::render_actions(
-            frame,
-            mj_chat::components::DialogShell::layout(inner, 0).actions,
-            &[
-                (Back, "Back", true),
-                (Clear, "Use default", true),
-                (Apply, "Apply", true),
-            ],
-            &mut form,
-        );
     } else {
         let rows = dialog
             .keys()
@@ -1465,51 +1481,30 @@ pub(crate) fn render_setup(
             ChoiceList::render(frame, body, &rows, dialog.selected, &mut form, List);
         }
         initial = List;
-        let top_footer = Rect::new(inner.x, inner.bottom() - 2, inner.width, 1);
-        let bottom_footer = mj_chat::components::DialogShell::layout(inner, 0).actions;
-        if choice_editor {
-            frame.render_widget(
-                Paragraph::new("  Back   Add   Remove   Detect machine").style(theme::muted()),
-                top_footer,
-            );
-            frame.render_widget(
-                Paragraph::new("  Cancel   Save (Ctrl-S)").style(theme::muted()),
-                bottom_footer,
-            );
-        } else {
-            Dialog::render_actions(
-                frame,
-                top_footer,
-                &[
-                    (Back, "Back", !dialog.path.is_empty()),
-                    (Add, "Add", dialog.collection()),
-                    (Remove, "Remove", dialog.collection() && !rows.is_empty()),
-                    (
-                        Detect,
-                        "Detect machine",
-                        !dialog.discovering && !dialog.saving,
-                    ),
-                ],
-                &mut form,
-            );
-            Dialog::render_actions(
-                frame,
-                bottom_footer,
-                &[
-                    (Cancel, "Cancel", !dialog.saving),
-                    (
-                        Save,
-                        if dialog.saving {
-                            "Saving…"
-                        } else {
-                            "Save (Ctrl-S)"
-                        },
-                        !dialog.saving && dialog.read_only.is_none(),
-                    ),
-                ],
-                &mut form,
-            );
-        }
+    }
+    let footer = mj_chat::components::DialogShell::layout(inner, 0).actions;
+    if choice_editor {
+        // Inert copy of the row, built from the same list so it cannot drift.
+        let mirror = dialog
+            .actions()
+            .iter()
+            .map(|(_, label, _)| format!("  {label}  "))
+            .collect::<Vec<_>>()
+            .join(" ");
+        frame.render_widget(
+            Paragraph::new(mirror)
+                .alignment(ratatui::layout::Alignment::Right)
+                .style(theme::muted()),
+            footer,
+        );
+    } else {
+        Dialog::render_actions_aligned(
+            frame,
+            footer,
+            &dialog.actions(),
+            &mut form,
+            RowAlign::Right,
+        );
     }
     if choice_editor {
         let editor = dialog.editor.as_ref().expect("choice editor");
@@ -1555,7 +1550,7 @@ pub(crate) fn render_setup(
     if let Some(notice) = dialog.read_only.as_ref().or(dialog.notice.as_ref()) {
         frame.render_widget(
             Paragraph::new(notice.as_str()).wrap(Wrap { trim: false }),
-            Rect::new(inner.x, inner.bottom() - 5, inner.width, 3),
+            Rect::new(inner.x, inner.bottom() - 4, inner.width, 3),
         );
     }
     form.end_frame(initial);
@@ -1805,17 +1800,12 @@ mod tests {
 
         // A click away from the popup must not activate the visible page
         // controls behind it or commit the pending choice.
-        let modal = {
-            let Mode::Setup(dialog) = &dashboard.mode else {
-                panic!("setup");
-            };
-            mj_chat::modal::centered_rect_fixed(
-                dialog.preferred_width,
-                dialog.preferred_height,
-                Rect::new(0, 0, 100, 30),
-            )
-        };
-        let background_button = (modal.x + 2, modal.bottom() - 2);
+        let (row, column) = buffer_lines(terminal.backend().buffer())
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| line.find("Save (Ctrl-S)").map(|column| (row, column)))
+            .expect("mirrored Save row");
+        let background_button = (column as u16 + 1, row as u16);
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),
@@ -2198,6 +2188,84 @@ mod tests {
         assert!(dialog.notice.as_ref().unwrap().contains("disk full"));
     }
 
+    fn action_labels(dashboard: &DashboardState) -> Vec<&'static str> {
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup");
+        };
+        dialog
+            .actions()
+            .into_iter()
+            .map(|(_, label, _)| label)
+            .collect()
+    }
+
+    #[test]
+    fn setup_action_row_offers_only_the_controls_that_apply_to_the_page() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        assert_eq!(
+            action_labels(&dashboard),
+            ["Detect machine", "Save (Ctrl-S)"],
+            "root: no Back, no item actions"
+        );
+        choose(&mut dashboard, "targets");
+        assert_eq!(
+            action_labels(&dashboard),
+            ["Back", "Add", "Remove", "Detect machine", "Save (Ctrl-S)"],
+            "collection: item actions and detection"
+        );
+        dashboard.handle_key(key(KeyCode::Backspace));
+        choose(&mut dashboard, "phone");
+        assert_eq!(
+            action_labels(&dashboard),
+            ["Back", "Save (Ctrl-S)"],
+            "leaf outside the detected sections: no Add, Remove, or Detect"
+        );
+        choose(&mut dashboard, "bind");
+        assert_eq!(
+            action_labels(&dashboard),
+            ["Back", "Use default", "Apply"],
+            "text editor"
+        );
+        activate(&mut dashboard, SetupControl::Back);
+        dashboard.handle_key(key(KeyCode::Backspace));
+        choose(&mut dashboard, "targets");
+        activate(&mut dashboard, SetupControl::Add);
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup");
+        };
+        assert!(dialog.editor.as_ref().is_some_and(|editor| editor.adding));
+        assert_eq!(
+            action_labels(&dashboard),
+            ["Back", "Apply"],
+            "a new name has no default to restore"
+        );
+    }
+
+    #[test]
+    fn backspace_at_the_root_with_a_dirty_draft_asks_before_discarding() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let original = dashboard.config.clone();
+        dashboard.begin_setup();
+        choose(&mut dashboard, "phone");
+        choose(&mut dashboard, "enabled");
+        dashboard.handle_key(key(KeyCode::Backspace));
+        dashboard.handle_key(key(KeyCode::Backspace));
+        let Mode::Confirm(_) = &dashboard.mode else {
+            panic!(
+                "dirty setup must confirm before closing: {:?}",
+                dashboard.modal_open()
+            );
+        };
+        // Esc keeps editing with the draft intact.
+        dashboard.handle_key(key(KeyCode::Esc));
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("setup restored");
+        };
+        assert!(dialog.is_dirty());
+        assert_eq!(dashboard.config, original);
+    }
+
     #[test]
     fn cancelling_setup_preserves_configuration_and_render_keeps_controls_visible() {
         let mut dashboard = dashboard_with_session(stopped_session());
@@ -2206,24 +2274,37 @@ mod tests {
             dashboard.begin_setup();
             choose(&mut dashboard, "phone");
             choose(&mut dashboard, "enabled");
+            dashboard.handle_key(key(KeyCode::Backspace));
+            choose(&mut dashboard, "targets");
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| crate::render::render(frame, &mut dashboard))
                 .unwrap();
-            let text = buffer_lines(terminal.backend().buffer()).join("\n");
-            for label in ["Enabled", "Save (Ctrl-S)", "Cancel"] {
-                assert!(text.contains(label), "{text}");
+            let lines = buffer_lines(terminal.backend().buffer());
+            let text = lines.join("\n");
+            assert!(text.contains("Setup › Machines and Runtimes"), "{text}");
+            // One right-packed row: every button on the line that holds Save,
+            // nothing after Save but the modal border.
+            let row = lines
+                .iter()
+                .find(|line| line.contains("Save (Ctrl-S)"))
+                .unwrap_or_else(|| panic!("{text}"));
+            for label in ["Back", "Add", "Remove", "Detect machine"] {
+                assert!(row.contains(label), "{row}");
             }
+            assert!(!text.contains("Cancel"), "{text}");
+            let tail = &row[row.find("Save (Ctrl-S)").unwrap() + "Save (Ctrl-S)".len()..];
+            // Button padding, the inner margin, then the modal border.
+            assert!(tail.starts_with("   │"), "{row}");
+            // Backspace from the root dismisses through the dirty guard.
             dashboard.handle_key(key(KeyCode::Backspace));
             dashboard.handle_key(key(KeyCode::Backspace));
-            dashboard.handle_key(key(KeyCode::Esc));
-            if dashboard.modal_open() {
-                dashboard.handle_key(key(KeyCode::Right));
-                assert_eq!(
-                    dashboard.handle_key(key(KeyCode::Enter)),
-                    DashboardAction::None
-                );
-            }
+            assert!(matches!(dashboard.mode, Mode::Confirm(_)), "{text}");
+            dashboard.handle_key(key(KeyCode::Right));
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Enter)),
+                DashboardAction::None
+            );
             assert!(!dashboard.modal_open());
             assert_eq!(dashboard.config, original);
         }

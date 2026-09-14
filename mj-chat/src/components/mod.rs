@@ -9,7 +9,7 @@ pub mod scrollbar;
 pub(crate) mod text_layout;
 
 pub use controls::{
-    Button, ButtonRow, Checkbox, ChoiceList, ComboBox, ComboBoxState, TabStrip, TextField,
+    Button, ButtonRow, Checkbox, ChoiceList, ComboBox, ComboBoxState, RowAlign, TabStrip, TextField,
 };
 pub use layout::{
     AutocompletePopup, FormViewport, PopupSide, dialog_content, dialog_rect, form_area,
@@ -21,6 +21,7 @@ pub use scope::{
     apply_field_edit,
 };
 pub use scrollbar::{ScrollbarGeometry, render_scrollbar, scrollbar_geometry};
+pub use text_layout::{input_cursor_visual_position, input_visual_rows, set_input_cursor};
 
 /// A path field with the standard readline editing and cursor behavior.
 pub struct PathField;

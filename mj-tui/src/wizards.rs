@@ -865,6 +865,7 @@ pub(crate) fn render_new_wizard(
                 remote_preflight_in_flight: wizard.remote_preflight_in_flight,
                 remote_preflight_error: wizard.remote_preflight_error.as_deref(),
                 local_changes_excluded: !raw_project,
+                conversion: None,
             },
             &mut form,
             surfaces,
@@ -1273,6 +1274,9 @@ struct ReviewWizardView<'a> {
     remote_preflight_in_flight: bool,
     remote_preflight_error: Option<&'a str>,
     local_changes_excluded: bool,
+    /// Present only when a move converts a local checkout into an isolated
+    /// workspace, so the review can say what travels before the confirmation.
+    conversion: Option<&'a mj_core::state::RawConversionPreview>,
 }
 
 fn render_review_wizard(
@@ -1309,6 +1313,7 @@ fn render_review_wizard(
         remote_preflight_in_flight,
         remote_preflight_error,
         local_changes_excluded,
+        conversion,
     } = view;
     let target = &dashboard.config.targets[target_id];
     let can_attach = mount_history_host(target).is_some();
@@ -1356,6 +1361,15 @@ fn render_review_wizard(
         if clear_resource_allocation {
             lines.push(Line::styled(
                 "Fixed/default destination resources will replace the source sizing.",
+                Style::default().fg(theme::palette().warning),
+            ));
+        }
+    }
+    if let Some(conversion) = conversion.filter(|_| moving) {
+        lines.push(Line::raw(conversion.summary_line()));
+        for warning in conversion.warning_lines() {
+            lines.push(Line::styled(
+                warning,
                 Style::default().fg(theme::palette().warning),
             ));
         }
@@ -2011,6 +2025,10 @@ pub(crate) fn render_resume_wizard(
                 remote_preflight_in_flight: false,
                 remote_preflight_error: None,
                 local_changes_excluded: false,
+                conversion: wizard
+                    .preparation
+                    .as_ref()
+                    .and_then(|preparation| preparation.conversion.as_deref()),
             },
             &mut form,
             surfaces,

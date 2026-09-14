@@ -1590,15 +1590,30 @@ pub async fn run_server(
                     }
                 }
                 preflight = preflight_rx.recv(), if preflight_jobs.len() < MAX_CONCURRENT_PREFLIGHTS => {
-                    let Some(crate::server::PreflightRequest {
+                    let Some(preflight) = preflight else {
+                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering preflight requests");
+                        break;
+                    };
+                    // A resume preflight asks a different question about the
+                    // same disk, so it runs on the same supervised task set
+                    // and under the same cap as a new-session preflight.
+                    let crate::server::NewPreflightRequest {
                         bundle_id,
                         target_id,
                         project_directory,
                         mut reply,
                         remote_repairs,
-                    }) = preflight else {
-                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering preflight requests");
-                        break;
+                    } = match preflight {
+                        crate::server::PreflightRequest::New(request) => request,
+                        crate::server::PreflightRequest::Resume(request) => {
+                            spawn_resume_preflight(
+                                &mut preflight_jobs,
+                                &controller,
+                                request,
+                                &termination,
+                            );
+                            continue;
+                        }
                     };
                     // Reading a working tree's status or validating a project
                     // directory touches the disk, so it runs on its own task
@@ -2255,6 +2270,100 @@ fn run_new_preflight(
         Arc::new(AtomicBool::new(false)),
         Vec::new(),
     )
+}
+
+/// Run one resume preflight on its own task, like a new-session preflight:
+/// the disk work stays off the feed loop, a disconnected browser cancels it,
+/// and the task is supervised by the same `JoinSet`.
+fn spawn_resume_preflight(
+    jobs: &mut tokio::task::JoinSet<()>,
+    controller: &Controller,
+    request: crate::server::ResumePreflightRequest,
+    termination: &tokio_util::sync::CancellationToken,
+) {
+    let crate::server::ResumePreflightRequest {
+        session_id,
+        target_id,
+        mut reply,
+    } = request;
+    let config = controller.config.clone();
+    let session = controller.state.sessions.get(&session_id).cloned();
+    let termination = termination.clone();
+    jobs.spawn(async move {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
+        let mut blocking = tokio::task::spawn_blocking(move || {
+            run_resume_preflight(config, session, &target_id, cancelled)
+        });
+        let answer = tokio::select! {
+            biased;
+            _ = termination.cancelled() => None,
+            _ = reply.closed() => None,
+            answer = &mut blocking => Some(answer),
+        };
+        let Some(answer) = answer else {
+            drop(cancellation_guard);
+            if let Err(error) = blocking.await {
+                tracing::warn!(%error, "cancelled phone resume preflight task failed");
+            }
+            return;
+        };
+        let answer = answer.map_err(|error| {
+            tracing::warn!(%error, "phone resume preflight task failed");
+            PreflightFailure::Controller(format!("resume preflight task failed: {error}"))
+        });
+        if reply.send(answer).is_err() {
+            tracing::debug!("phone resume preflight reply dropped after client disconnect");
+        }
+    });
+}
+
+/// What resuming this session on this target does to its repository content.
+///
+/// Anything but a local-checkout conversion is `Ready` and reads nothing:
+/// the compatibility gate is a pure function, so a browser may ask about
+/// every destination it offers. A conversion that cannot be planned reports
+/// the plan's own message, which is what tells a person to add a remote or
+/// commit a submodule.
+fn run_resume_preflight(
+    config: Config,
+    session: Option<mj_core::state::SessionRecord>,
+    target_id: &str,
+    cancelled: Arc<AtomicBool>,
+) -> crate::server::PreflightResume {
+    let Some(session) = session else {
+        return crate::server::PreflightResume::Unavailable {
+            detail: "this session is no longer available".to_owned(),
+        };
+    };
+    match crate::controller::resume_compatibility(&session, &config, target_id) {
+        Err(reason) => crate::server::PreflightResume::Unavailable { detail: reason },
+        Ok(plan) if plan != crate::controller::ResumePlan::RawToWorkspace => {
+            crate::server::PreflightResume::Ready
+        }
+        Ok(_) => {
+            let executor =
+                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
+            match crate::controller::raw_conversion_preview_for(&session, &config, &executor) {
+                Err(error) => crate::server::PreflightResume::Unavailable {
+                    detail: format!("{error:#}"),
+                },
+                Ok(mut preview) => {
+                    // Credentials never reach a browser, here as everywhere
+                    // else a repository URL is published.
+                    preview.fetch_url = display_url(&preview.fetch_url);
+                    preview.push_urls = preview
+                        .push_urls
+                        .iter()
+                        .map(|url| display_url(url))
+                        .collect();
+                    crate::server::PreflightResume::ConvertingRawCheckout {
+                        preview: Box::new(preview),
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn run_new_preflight_with_cancellation(

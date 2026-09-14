@@ -50,7 +50,10 @@ pub fn managed_worktree_target(template: &TargetTemplate) -> Result<ManagedWorkt
 pub enum ResumePlan {
     /// Keep the session in the representation it already has.
     InPlace,
-    /// Move a raw checkout session into a workspace target as a bundle session.
+    /// Move a raw checkout session into a workspace target as a bundle
+    /// session. Only a whole checkout on this machine reaches this plan; the
+    /// conversion still requires that checkout to have a network Git remote,
+    /// which only Git can answer.
     RawToWorkspace,
     /// Move a bundle session out of its workspace into a raw local worktree.
     WorkspaceToRaw,
@@ -93,8 +96,12 @@ pub fn resume_compatibility(
                 "this session opens {directory} directly on its host; resume it on the same kind of bare target"
             ));
         }
+        // A checkout on this machine can become an isolated workspace: the
+        // resume re-snapshots it against its own network remote. Whether the
+        // recorded directory really is a whole checkout with such a remote
+        // needs Git, so the conversion plan decides that, not the picker.
         if matches!(previous, TargetTemplate::LocalBare) {
-            return Err("raw sessions do not have isolated network repository provenance; resume on a bare target or start a new isolated session".to_owned());
+            return Ok(ResumePlan::RawToWorkspace);
         }
         return Err(format!(
             "this session opens {directory} on an SSH host; resume it on a bare target there"
@@ -110,10 +117,10 @@ pub fn resume_compatibility(
             "this session works directly in {directory} on {}; resume it on a bare target there",
             managed_worktree_location(&worktree.target)
         )),
-        // Reject this in the target picker and live-move preparation, before
-        // any source is stopped: raw checkpoints cannot seed isolated clones.
+        // A whole managed worktree on this machine converts: the resume
+        // re-snapshots it against the owning checkout's network remote.
         Err(_) if Some(&worktree.worktree_root) == session.project_directory.as_ref() => {
-            Err("raw sessions do not have isolated network repository provenance; resume on a bare target or start a new isolated session".to_owned())
+            Ok(ResumePlan::RawToWorkspace)
         }
         Err(_) => Err(format!(
             "this session opens {directory}, a subdirectory of its checkout; resume it on a bare target"

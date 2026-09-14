@@ -1613,7 +1613,10 @@ fn read_project_memory_checkpoint_endpoint(path: &Path) -> Result<ProjectMemoryC
 /// This is the one network call in an export. It cannot stop on a prompt:
 /// [`SystemGit`] runs every child with
 /// [`NON_INTERACTIVE_GIT_ENV`](crate::archive::NON_INTERACTIVE_GIT_ENV).
-fn repair_origin_refs(git: &dyn GitCommandRunner, path: &Path, id: &str) -> Result<()> {
+///
+/// Public because the same rule applies wherever a session delta is bundled,
+/// including the raw-checkout conversion in the controller.
+pub fn repair_origin_refs(git: &dyn GitCommandRunner, path: &Path, id: &str) -> Result<()> {
     let listed = || has_origin_refs(git, path).with_context(|| format!("repository '{id}'"));
     if listed()? {
         return Ok(());
@@ -2284,7 +2287,11 @@ fn codex_rollout_has_thread_id(path: &Path, thread_id: &str) -> bool {
     false
 }
 
-fn reject_dirty_submodules(runner: &dyn GitCommandRunner, repository: &Path) -> Result<()> {
+/// Refuse a repository with modified submodule content. A snapshot records
+/// the superproject's gitlink, not the submodule's working tree, so dirty
+/// submodule work would be lost silently. Public for the same reason as
+/// [`repair_origin_refs`].
+pub fn reject_dirty_submodules(runner: &dyn GitCommandRunner, repository: &Path) -> Result<()> {
     let output = runner.run(
         repository,
         &GitCommand {

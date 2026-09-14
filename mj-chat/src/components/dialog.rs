@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-use super::{ButtonRow, ControlKind, EventResult, Form, Interaction, Outcome};
+use super::{ButtonRow, ControlKind, EventResult, Form, Interaction, Outcome, RowAlign};
 use crate::{modal, selection::FrameSurfaces, theme};
 
 /// The meaning of an action, independent of its label and position.
@@ -147,6 +147,17 @@ impl<K: Copy + Eq> Dialog<K> {
         buttons: &[(K, &str, bool)],
         dialog: &mut Self,
     ) {
+        Self::render_actions_aligned(frame, area, buttons, dialog, RowAlign::Left);
+    }
+
+    /// Draws the action row packed against `align`, in the same role order.
+    pub fn render_actions_aligned(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        buttons: &[(K, &str, bool)],
+        dialog: &mut Self,
+        align: RowAlign,
+    ) {
         let mut buttons = buttons.to_vec();
         if dialog.submission_pending {
             for (id, label, enabled) in &mut buttons {
@@ -178,7 +189,7 @@ impl<K: Copy + Eq> Dialog<K> {
                 ActionRole::Primary => 3,
             }
         });
-        ButtonRow::render(frame, area, &buttons, &mut dialog.form);
+        ButtonRow::render_aligned(frame, area, &buttons, &mut dialog.form, align);
     }
 
     /// Declares which action Enter in a single-line field invokes.

@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TextField};
+use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, RowAlign, TextField};
 use mj_chat::selection::FrameSurfaces;
 use mj_chat::text_input::TextInput;
 use mj_chat::theme;
@@ -241,7 +241,7 @@ impl WorkspaceManager {
             WorkspaceManagerView::List => {
                 let selected = self.selected_entry();
                 let mut actions = vec![
-                    (Cancel, "Close", dismiss),
+                    (New, "New workspace", ready),
                     (Rename, "Rename", ready && selected.is_some()),
                     (Delete, "Delete", ready && selected.is_some()),
                 ];
@@ -292,13 +292,11 @@ impl WorkspaceManager {
         use mj_chat::components::{ActionRole, DialogAction};
         let actions = self.actions();
         let draft_len = self.viewed_entry().map_or(0, |entry| entry.drafts.len());
-        let ready = self.can_mutate();
         let destructive = self.delete_is_destructive();
         let form = self.form.get_mut();
         form.begin_update();
         let initial = match self.view {
             WorkspaceManagerView::List => {
-                form.declare_with_enabled(New, ControlKind::Button, ready);
                 form.declare_with_enabled(
                     List,
                     ControlKind::ChoiceList {
@@ -371,8 +369,9 @@ fn workspace_manager_in_mode(mode: &mut Mode) -> Option<&mut WorkspaceManager> {
 
 impl DashboardState {
     /// Handles the two keyboard stops inside the workspace pane. Tabs own
-    /// left/right selection; the pinned menu is a second local stop before
-    /// the ordinary dashboard Tab ring continues to Sessions.
+    /// left/right selection (with up/down as vertical mirrors of the same
+    /// moves); the pinned menu is a second local stop before the ordinary
+    /// dashboard Tab ring continues to Sessions.
     pub(crate) fn handle_workspace_pane_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
         if self.focus != crate::Focus::Workspaces
             || key
@@ -387,6 +386,19 @@ impl DashboardState {
             self.record_event_handled();
             return Some(DashboardAction::ExitSubagentWorkspace);
         }
+        // The tab row is horizontal, so Up/Down carry the same meaning as
+        // Left/Right everywhere in this pane.
+        let key = match key.code {
+            KeyCode::Up => KeyEvent {
+                code: KeyCode::Left,
+                ..key
+            },
+            KeyCode::Down => KeyEvent {
+                code: KeyCode::Right,
+                ..key
+            },
+            _ => key,
+        };
         let back_tab = key.code == KeyCode::BackTab
             || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
         match (self.workspace_control_focus, key.code, back_tab) {
@@ -1164,16 +1176,6 @@ fn render_manager_list(
     dialog: &WorkspaceManager,
     form: &mut Dialog<WorkspaceControl>,
 ) {
-    let body = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(rows[1]);
-    Dialog::render_actions(
-        frame,
-        body[0],
-        &[(WorkspaceControl::New, "New workspace", dialog.can_mutate())],
-        form,
-    );
     let list_items = dialog
         .entries
         .iter()
@@ -1209,27 +1211,27 @@ fn render_manager_list(
         })
         .collect::<Vec<_>>();
     if list_items.is_empty() {
-        frame.render_widget(Paragraph::new("No workspaces."), body[1]);
+        frame.render_widget(Paragraph::new("No workspaces."), rows[1]);
         form.register(
             WorkspaceControl::List,
             ControlKind::ChoiceList {
                 len: 0,
                 selected: 0,
             },
-            body[1],
+            rows[1],
             false,
         );
     } else {
         ChoiceList::render(
             frame,
-            body[1],
+            rows[1],
             &list_items,
             dialog.selected,
             form,
             WorkspaceControl::List,
         );
     }
-    Dialog::render_actions(frame, rows[2], &dialog.actions(), form);
+    Dialog::render_actions_aligned(frame, rows[2], &dialog.actions(), form, RowAlign::Right);
 }
 
 fn render_manager_name_view(
@@ -1262,7 +1264,7 @@ fn render_manager_name_view(
         form,
         WorkspaceControl::Name,
     );
-    Dialog::render_actions(frame, rows[2], &dialog.actions(), form);
+    Dialog::render_actions_aligned(frame, rows[2], &dialog.actions(), form, RowAlign::Right);
 }
 
 fn render_manager_delete(
@@ -1301,7 +1303,7 @@ fn render_manager_delete(
         );
         TextField::render(frame, body[2], &dialog.name, form, WorkspaceControl::Name);
     }
-    Dialog::render_actions(frame, rows[2], &dialog.actions(), form);
+    Dialog::render_actions_aligned(frame, rows[2], &dialog.actions(), form, RowAlign::Right);
 }
 
 fn render_manager_drafts(
@@ -1351,7 +1353,7 @@ fn render_manager_drafts(
             WorkspaceControl::DraftList,
         );
     }
-    Dialog::render_actions(frame, rows[2], &dialog.actions(), form);
+    Dialog::render_actions_aligned(frame, rows[2], &dialog.actions(), form, RowAlign::Right);
 }
 
 #[cfg(test)]
@@ -1581,6 +1583,91 @@ mod tests {
     }
 
     #[test]
+    fn vertical_arrows_mirror_left_and_right_on_the_tabs() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_workspace_names(std::collections::BTreeMap::from([
+            ("a".into(), "First".into()),
+            ("b".into(), "Second".into()),
+            ("c".into(), "Last".into()),
+        ]));
+        dashboard.set_active_workspace(Some("b".into()));
+        dashboard.focus = crate::Focus::Workspaces;
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            DashboardAction::SelectWorkspace {
+                workspace_id: "c".into()
+            }
+        );
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            DashboardAction::SelectWorkspace {
+                workspace_id: "a".into()
+            }
+        );
+        // Down at the last tab hands the pane to the pinned menu, like Right.
+        dashboard.set_active_workspace(Some("c".into()));
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.workspace_control_focus,
+            WorkspaceControlFocus::Menu
+        );
+        // Up from the menu returns to the tabs, like Left.
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.workspace_control_focus,
+            WorkspaceControlFocus::Tabs
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_over_the_workspace_pane_switches_tabs_without_focus() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_workspace_names(std::collections::BTreeMap::from([
+            ("a".into(), "First".into()),
+            ("b".into(), "Second".into()),
+            ("c".into(), "Last".into()),
+        ]));
+        dashboard.set_active_workspace(Some("b".into()));
+        dashboard.focus = crate::Focus::Sessions;
+        let mut terminal = Terminal::new(TestBackend::new(24, 3)).unwrap();
+        terminal
+            .draw(|frame| render_workspace_tabs(frame, Rect::new(0, 0, 24, 3), &mut dashboard))
+            .unwrap();
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: 2,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            dashboard.handle_mouse(wheel(MouseEventKind::ScrollDown)),
+            DashboardAction::SelectWorkspace {
+                workspace_id: "c".into()
+            }
+        );
+        assert_eq!(
+            dashboard.focus,
+            crate::Focus::Sessions,
+            "the wheel switches tabs without stealing focus"
+        );
+        dashboard.set_active_workspace(Some("c".into()));
+        assert_eq!(
+            dashboard.handle_mouse(wheel(MouseEventKind::ScrollUp)),
+            DashboardAction::SelectWorkspace {
+                workspace_id: "b".into()
+            }
+        );
+    }
+
+    #[test]
     fn manager_views_keep_rename_identity_across_reordered_refresh() {
         let mut dashboard = dashboard_with_session(running_session());
         let DashboardAction::LoadWorkspaceManagement { generation } =
@@ -1681,6 +1768,63 @@ mod tests {
     }
 
     #[test]
+    fn the_list_view_dismisses_from_its_title_bar_rather_than_a_close_button() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let DashboardAction::LoadWorkspaceManagement { generation } =
+            dashboard.begin_workspace_manager()
+        else {
+            panic!("load");
+        };
+        dashboard.finish_workspace_management(
+            generation,
+            Ok(vec![entry("workspace-a", "Project alpha")]),
+        );
+        let lines = draw_manager(&dashboard);
+        let list = lines.join("\n");
+        // The shared modal title already draws ×, so a Close button would be a
+        // second dismiss control a few cells away from the first.
+        assert!(!list.contains("Close"), "{list}");
+        assert!(list.contains('×'), "{list}");
+        // Create now sits in the action row, which is packed against the
+        // dialog's right edge.
+        let actions = lines
+            .iter()
+            .find(|line| line.contains("Open"))
+            .expect("the action row")
+            .trim()
+            .trim_matches('│');
+        assert!(actions.trim_start().starts_with("New workspace"), "{list}");
+        assert!(actions.trim_end().ends_with("Open"), "{list}");
+        let leading = actions.len() - actions.trim_start().len();
+        let trailing = actions.len() - actions.trim_end().len();
+        assert!(
+            leading > trailing,
+            "the action row is not right-packed: {list}"
+        );
+
+        // Both remaining dismiss paths work: the title bar's × by mouse, and
+        // Esc by keyboard.
+        manager_click(&mut dashboard, &lines, "×");
+        assert!(!matches!(dashboard.mode, Mode::WorkspaceManager(_)));
+
+        let DashboardAction::LoadWorkspaceManagement { generation } =
+            dashboard.begin_workspace_manager()
+        else {
+            panic!("load");
+        };
+        dashboard.finish_workspace_management(
+            generation,
+            Ok(vec![entry("workspace-a", "Project alpha")]),
+        );
+        let _ = draw_manager(&dashboard);
+        assert_eq!(
+            dashboard.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            DashboardAction::None
+        );
+        assert!(!matches!(dashboard.mode, Mode::WorkspaceManager(_)));
+    }
+
+    #[test]
     fn manager_renders_distinct_create_and_drafts_views() {
         let mut dashboard = dashboard_with_session(running_session());
         let DashboardAction::LoadWorkspaceManagement { generation } =
@@ -1697,10 +1841,18 @@ mod tests {
             owner_pid: None,
         });
         dashboard.finish_workspace_management(generation, Ok(vec![workspace]));
-        let list = draw_manager(&dashboard).join("\n");
+        let lines = draw_manager(&dashboard);
+        let list = lines.join("\n");
         assert!(list.contains("New workspace"), "{list}");
         assert!(list.contains("Open"), "{list}");
         assert!(list.contains("Drafts"), "{list}");
+        // Create belongs to the action row, not to a lone button above the
+        // list where it reads as part of the dialog's header.
+        let actions = lines
+            .iter()
+            .position(|line| line.contains("Open"))
+            .expect("the action row");
+        assert!(lines[actions].contains("New workspace"), "{list}");
 
         if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
             manager.form.get_mut().focus(WorkspaceControl::New);

@@ -727,7 +727,7 @@ fn raw_localhost_warns_for_harnesses_without_guardian_approvals() {
             .collect::<String>()
     };
 
-    for kind in [HarnessKind::Kimi, HarnessKind::Deepseek] {
+    for kind in [HarnessKind::Kimi, HarnessKind::Deepseek, HarnessKind::Muse] {
         let warning = review_text(kind);
         assert!(warning.contains("DANGER"), "{kind:?}: {warning}");
         assert!(
@@ -1480,6 +1480,7 @@ fn open_move_review(dashboard: &mut DashboardState) -> u64 {
 fn move_preparation() -> mj_core::state::MovePreparation {
     mj_core::state::MovePreparation {
         source_unavailable: false,
+        conversion: None,
         selection: mj_core::state::MoveSelection {
             session_id: "session-1".into(),
             profile_id: Some("codex-1".into()),
@@ -1496,6 +1497,122 @@ fn move_preparation() -> mj_core::state::MovePreparation {
         fingerprint: "fingerprint".into(),
         operation_id: "move-1".into(),
     }
+}
+
+fn raw_conversion_preview() -> mj_core::state::RawConversionPreview {
+    mj_core::state::RawConversionPreview {
+        checkout: PathBuf::from("/work/repo"),
+        destination: PathBuf::from("/workspace/repo"),
+        branch: Some("mj/session-1".into()),
+        fetch_url: "https://github.com/example/repo.git".into(),
+        push_urls: vec!["https://github.com/example/repo.git".into()],
+        default_branch: "main".into(),
+        unpushed_commits: 2,
+        staged_files: 1,
+        unstaged_files: 1,
+        untracked_files: 3,
+        untracked_bytes: 2_621_440,
+        host_checkout_retained: true,
+    }
+}
+
+/// The move review is the last thing a person reads before a local checkout
+/// leaves this machine, so it has to name the dirty work that travels and the
+/// checkout that stays.
+#[test]
+fn move_review_reports_what_a_local_checkout_conversion_copies_and_leaves_behind() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let request_id = open_move_review(&mut dashboard);
+    let mut preparation = move_preparation();
+    preparation.conversion = Some(Box::new(raw_conversion_preview()));
+    assert!(dashboard.apply_move_preparation(request_id, preparation));
+
+    let mut terminal = Terminal::new(TestBackend::new(200, 44)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw move review");
+    let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
+    let rendered = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        rendered.contains(
+            "Clone https://github.com/example/repo.git (default branch main) into /workspace/repo on branch mj/session-1"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("1 staged, 1 unstaged, and 3 untracked files (2.5 MB)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("/work/repo stays on this machine and will no longer track this session"),
+        "{rendered}"
+    );
+}
+
+/// The resume preflight answers "this moves your checkout" before anything is
+/// stopped. Nothing may launch until the person says yes, and cancelling has
+/// to leave the wizard exactly where it was.
+#[test]
+fn a_raw_conversion_resume_launches_only_after_it_is_confirmed() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    open_resume_wizard(&mut dashboard);
+    let before = dashboard.mode.clone();
+    let launch = DashboardAction::ResumeSession {
+        workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+        session_id: "session-1".into(),
+        profile_id: "codex-1".into(),
+        target_template_id: "podman".into(),
+        additional_mounts: Vec::new(),
+        resource_allocation: None,
+        discard_queue: false,
+    };
+    let receipt = mj_core::state::ResumeRepositorySourceReceipt {
+        session_id: "session-1".into(),
+        bundle_id: "hel".into(),
+        checkpoint_sha256: "a".repeat(64),
+        repositories: Vec::new(),
+    };
+
+    dashboard.show_raw_conversion_confirmation(
+        launch.clone(),
+        receipt.clone(),
+        raw_conversion_preview(),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(200, 44)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw conversion confirmation");
+    let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
+    let rendered = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        rendered.contains("2 commits not on https://github.com/example/repo.git travel"),
+        "{rendered}"
+    );
+
+    // Cancel is focused first and returns to the wizard without launching.
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert_eq!(dashboard.mode, before);
+
+    dashboard.show_raw_conversion_confirmation(
+        launch.clone(),
+        receipt.clone(),
+        raw_conversion_preview(),
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Tab)),
+        DashboardAction::None
+    );
+    let confirmed = dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        confirmed,
+        DashboardAction::ConfirmRawConversion {
+            launch: Box::new(launch),
+            receipt: Box::new(receipt),
+        }
+    );
 }
 
 #[test]

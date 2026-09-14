@@ -238,8 +238,16 @@ push destinations; no Git connection back to that checkout is created.
 Local and SSH bare sessions instead choose an existing project directory.
 A single-repository isolated session can move into a raw local worktree when
 its source repository is available and contains the archive's prerequisite
-history. Raw sessions cannot move into isolated targets; start a new isolated
-session instead. A multi-repository bundle cannot become one checkout.
+history.
+
+A local session can move or resume the other way, into an isolated target, when
+its checkout is a whole Git checkout on this machine with a network remote
+(`https` or `ssh`). The target clones that remote and the session's unpushed
+commits, staged, unstaged, and untracked files are restored over the clone. A
+checkout with no network remote stays bare-only: add a remote (`git remote add
+origin <url>`) or keep resuming on a bare target. A subdirectory of a checkout,
+an SSH-hosted checkout, and a multi-repository bundle cannot become one
+checkout either way.
 
 DeepSeek Harness supports one ACP workspace root, so it requires a
 single-repository bundle or one existing bare project directory, with no

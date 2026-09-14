@@ -6,14 +6,16 @@
 //! to switch to, so nothing is ever hidden behind a navigation step.
 
 use mj_chat::chat::{ActiveChat, ChatFooter, ChatRegions};
+use mj_chat::components::{input_cursor_visual_position, input_visual_rows, set_input_cursor};
 use mj_chat::selection::{SurfaceFrame, SurfaceId};
+use mj_chat::text_input::TextInput;
 use mj_chat::{spinner, theme};
 use mj_core::state::SessionTransitionKind;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 
 use crate::render::{
     MINIMUM_TERMINAL_WIDTH, SESSION_ACTIONS_HEIGHT, TerminalSizeRequirement, capacity_table_width,
@@ -402,10 +404,11 @@ fn render_combined_themed(
     });
     // With no conversation the prompt band holds the two-line guidance that
     // stands in for a composer, so it asks for the rows to show both. A
-    // transition uses only the compact status panel and its one-line cancel
-    // affordance.
+    // retiring transition uses only the compact status panel, while a
+    // Starting/Resuming one offers the type-ahead composer, whose band grows
+    // with the wrapped draft exactly like the chat's.
     let desired_prompt = if selected_transition.is_some() {
-        PROMPT_MINIMUM
+        transition_prompt_height(dashboard, content_area.width).unwrap_or(PROMPT_MINIMUM)
     } else {
         chat.as_ref().map_or(EMPTY_PROMPT_HEIGHT, |chat| {
             chat.desired_prompt_height(content_area.width)
@@ -747,6 +750,12 @@ enum EmptyConversation {
 /// selected session. The warm chat remains alive off-screen so its draft,
 /// read cursor, and history survive the operation, but neither transcript nor
 /// composer input can be mistaken for a session that is being retired.
+///
+/// Starting and Resuming keep a prompt on screen: the type-ahead composer
+/// below the transition panel accepts the first message before the session is
+/// live, holds it as a draft (Enter does not send), and carries it into the
+/// real composer when the chat opens. Retiring and failed transitions have no
+/// conversation to type toward, so they keep the plain status panel.
 fn render_transition_surface(
     frame: &mut Frame,
     transcript_area: Rect,
@@ -810,23 +819,47 @@ fn render_transition_surface(
             .right_aligned(),
         );
     }
+    let type_ahead = !failed
+        && matches!(
+            transition,
+            SessionTransitionKind::Starting | SessionTransitionKind::Resuming
+        );
+    let mut details = vec![
+        Line::styled(
+            format!("{} · {}", target, session.display_title()),
+            Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+        Line::raw(format!("Operation: {}", transition.label())),
+        Line::raw(format!("Current stage: {stages}")),
+        Line::raw(format!(
+            "Elapsed: {} · Profile: {profile}",
+            mj_client::usage_format::format_clock(now.saturating_sub(started_at))
+        )),
+    ];
+    if type_ahead {
+        details.push(Line::default());
+        details.push(Line::styled(
+            "Select another session to keep working.",
+            theme::muted(),
+        ));
+    }
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled(
-                format!("{} · {}", target, session.display_title()),
-                Style::default().add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-            Line::raw(format!("Operation: {}", transition.label())),
-            Line::raw(format!("Current stage: {stages}")),
-            Line::raw(format!(
-                "Elapsed: {} · Profile: {profile}",
-                mj_client::usage_format::format_clock(now.saturating_sub(started_at))
-            )),
-        ])
-        .wrap(Wrap { trim: true })
-        .block(panel),
+        Paragraph::new(details)
+            .wrap(Wrap { trim: true })
+            .block(panel),
         transcript_area,
     );
+    if type_ahead {
+        render_type_ahead_composer(
+            frame,
+            prompt_area,
+            dashboard,
+            session_id,
+            transition,
+            operation.is_some_and(|operation| operation.cancellable),
+        );
+        return;
+    }
     let cancel_line = if !failed && operation.is_some_and(|operation| operation.cancellable) {
         format!("Alt-X to cancel {}", transition.label().to_lowercase())
     } else if failed {
@@ -856,6 +889,94 @@ fn render_transition_surface(
         .block(theme::panel(false).title(" Status ")),
         prompt_area,
     );
+}
+
+/// The composer that stands in for the conversation while a Starting or
+/// Resuming transition runs. It draws like the chat's prompt pane — same
+/// padding, wrap, gutter marker, and cursor — except its bottom border carries
+/// the cancel chord and nothing it edits can be sent yet.
+fn render_type_ahead_composer(
+    frame: &mut Frame,
+    prompt_area: Rect,
+    dashboard: &DashboardState,
+    session_id: &str,
+    transition: SessionTransitionKind,
+    cancellable: bool,
+) {
+    let focused = dashboard.prompt_has_focus();
+    let input = dashboard.transition_composer(session_id);
+    let text = input.map_or("", TextInput::value);
+    let cursor = input.map_or(0, TextInput::cursor);
+    let mut prompt_block = theme::panel(focused)
+        .padding(Padding::new(2, 1, 0, 0))
+        .title(" Prompt ");
+    if cancellable {
+        prompt_block = prompt_block.title_bottom(
+            Line::styled(
+                format!(" Alt-X to cancel {} ", transition.label().to_lowercase()),
+                theme::muted(),
+            )
+            .left_aligned(),
+        );
+    }
+    let prompt_inner = prompt_block.inner(prompt_area);
+    let content_width = prompt_content_width(prompt_area.width);
+    let lines = if text.is_empty() {
+        vec![Line::styled(
+            "Type ahead · sending opens when the session is live",
+            theme::muted(),
+        )]
+    } else {
+        text.split('\n')
+            .map(|line| Line::raw(line.to_owned()))
+            .collect()
+    };
+    let cursor_row = input_cursor_visual_position(text, cursor, content_width).1;
+    let content_height = usize::from(prompt_inner.height).max(1);
+    let input_scroll = cursor_row.saturating_add(1).saturating_sub(content_height);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme::base())
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(input_scroll).unwrap_or(u16::MAX), 0))
+            .block(prompt_block),
+        prompt_area,
+    );
+    if input_scroll == 0 {
+        frame.render_widget(
+            Line::styled(">", theme::title(focused)),
+            Rect::new(prompt_inner.x.saturating_sub(2), prompt_inner.y, 1, 1),
+        );
+    }
+    // The cursor belongs to whatever has focus, so the pane only shows one
+    // while the keyboard is driving it.
+    if focused {
+        set_input_cursor(frame, prompt_inner, text, cursor, 0, input_scroll);
+    }
+}
+
+/// Rows the type-ahead composer asks for at `width`: the wrapped draft plus
+/// the pane's border rows, with the same floor as an empty chat composer so
+/// the band does not jump when the conversation replaces the draft.
+fn transition_prompt_height(dashboard: &DashboardState, width: u16) -> Option<u16> {
+    let (session_id, _) = dashboard.type_ahead_session()?;
+    let rows = dashboard
+        .transition_composer(session_id)
+        .map_or(1, |input| {
+            input_visual_rows(input.value(), prompt_content_width(width))
+        });
+    Some(
+        u16::try_from(rows)
+            .unwrap_or(u16::MAX)
+            .saturating_add(2)
+            .max(EMPTY_PROMPT_HEIGHT),
+    )
+}
+
+/// The wrap width inside the composer pane: its borders plus the left-2,
+/// right-1 padding, matching the chat composer's content column.
+fn prompt_content_width(width: u16) -> usize {
+    usize::from(width.saturating_sub(5)).max(1)
 }
 
 /// The bordered chrome that stands in for a conversation when none is on
@@ -947,7 +1068,11 @@ fn table_height(rows: usize) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dashboard_with_session, running_session};
+    use crate::test_support::{buffer_lines, dashboard_with_session, key, running_session};
+    use crate::{DashboardAction, SessionOperationKind};
+    use crossterm::event::KeyCode;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn minimized_sessions_use_two_content_lines_per_visible_item() {
@@ -972,6 +1097,136 @@ mod tests {
         assert_eq!(prompt_target(2, 60), PROMPT_MINIMUM);
         assert_eq!(prompt_target(5, 60), 5);
         assert_eq!(prompt_target(50, 60), 20);
+    }
+
+    /// A Starting transition turns the prompt band into the type-ahead
+    /// composer: the draft is on screen, the cancel chord moved onto the
+    /// pane's bottom border, and the old status panel is gone.
+    #[test]
+    fn a_starting_transition_draws_the_type_ahead_composer_with_the_cancel_chord_at_its_bottom() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Launching,
+            None,
+        );
+        dashboard.focus_prompt();
+        for character in "first message ahead".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+            .unwrap();
+
+        let prompt = dashboard.chat_prompt_area.expect("prompt pane rendered");
+        let lines = buffer_lines(terminal.backend().buffer());
+        // The draft is editable text inside the pane...
+        let content = &lines[prompt.y as usize + 1..prompt.bottom() as usize - 1];
+        assert!(
+            content
+                .iter()
+                .any(|line| line.contains("first message ahead")),
+            "draft missing from {content:?}"
+        );
+        // ...and the cancel chord sits on the pane's bottom border row.
+        let border = &lines[prompt.bottom() as usize - 1];
+        assert!(
+            border.contains("Alt-X to cancel starting"),
+            "cancel chord missing from {border:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains(" Status ")),
+            "the status panel should not replace the composer: {:?}",
+            lines
+        );
+        assert_eq!(
+            dashboard
+                .take_transition_composer_draft("session-1")
+                .as_deref(),
+            Some("first message ahead")
+        );
+        // The keystrokes were input, not actions.
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+    }
+
+    /// An empty draft still shows a composer, with the placeholder that says
+    /// what typing ahead means.
+    #[test]
+    fn an_empty_type_ahead_composer_shows_the_placeholder() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
+        dashboard.focus_prompt();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+            .unwrap();
+
+        let prompt = dashboard.chat_prompt_area.expect("prompt pane rendered");
+        let lines = buffer_lines(terminal.backend().buffer());
+        let content = &lines[prompt.y as usize + 1..prompt.bottom() as usize - 1];
+        assert!(
+            content
+                .iter()
+                .any(|line| line.contains("Type ahead · sending opens when the session is live")),
+            "placeholder missing from {content:?}"
+        );
+    }
+
+    /// Retiring transitions keep the status panel: there is no conversation
+    /// to type toward while the session is being stopped.
+    #[test]
+    fn a_stopping_transition_keeps_the_status_panel() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+            .unwrap();
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        assert!(
+            lines.iter().any(|line| line.contains(" Status ")),
+            "status panel missing: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Alt-X to cancel stopping")),
+            "cancel chord missing: {lines:?}"
+        );
+    }
+
+    /// The composer band keeps the empty chat composer's floor and grows with
+    /// the wrapped draft, and retiring transitions ask for none of it.
+    #[test]
+    fn transition_prompt_height_follows_the_wrapped_draft() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Launching,
+            None,
+        );
+        assert_eq!(
+            transition_prompt_height(&dashboard, 100),
+            Some(EMPTY_PROMPT_HEIGHT)
+        );
+
+        dashboard.seed_transition_composer("session-1", "a\nb\nc\nd\ne\nf\ng".into());
+        assert_eq!(
+            dashboard
+                .transition_composer("session-1")
+                .map(|input| input.value()),
+            Some("a\nb\nc\nd\ne\nf\ng")
+        );
+        assert_eq!(transition_prompt_height(&dashboard, 100), Some(9));
+
+        dashboard.finish_session_operation("session-1");
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
+        assert_eq!(transition_prompt_height(&dashboard, 100), None);
     }
 
     #[test]
