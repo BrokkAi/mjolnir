@@ -110,15 +110,22 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
         tokio::time::sleep(RETRY_DELAY).await;
     }
 
-    tokio::task::spawn_blocking(|| -> Result<u32> {
-        let executable = daemon_launch_executable()?;
-        let mut command = std::process::Command::new(executable);
-        command
-            .arg("daemon-run")
-            // This switch makes the invoking development client authoritative. It
-            // has no meaning inside the persistent daemon or its child processes.
-            .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
-        mj_core::subprocess::spawn_detached(&mut command, &data_dir().join("daemon.log"))
+    let log_path = data_dir().join("daemon.log");
+    let launched = tokio::task::spawn_blocking({
+        let log_path = log_path.clone();
+        move || -> Result<LaunchedDaemon> {
+            // Everything the daemon writes from here on belongs to this launch.
+            let log_offset = fs::metadata(&log_path).map(|metadata| metadata.len()).unwrap_or(0);
+            let executable = daemon_launch_executable()?;
+            let mut command = std::process::Command::new(executable);
+            command
+                .arg("daemon-run")
+                // This switch makes the invoking development client authoritative. It
+                // has no meaning inside the persistent daemon or its child processes.
+                .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
+            let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
+            Ok(LaunchedDaemon { pid, log_offset })
+        }
     })
     .await
     .context("spawn daemon task failed")??;
@@ -134,16 +141,90 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
             },
             Err(error) => last_error = Some(error),
         }
+        // A daemon that fails to initialize explains itself in its log and
+        // exits without ever publishing an endpoint. Report that explanation
+        // now instead of dialing the missing endpoint until the deadline.
+        if !process_is_alive(launched.pid) {
+            let output = launched.output_since_launch(&log_path).await;
+            return Err(launched.failure(
+                format!("Mjolnir daemon {} exited before it was ready", launched.pid),
+                output,
+                &log_path,
+            ));
+        }
         tokio::time::sleep(RETRY_DELAY).await;
     }
-    Err(last_error.unwrap_or_else(|| anyhow!("Mjolnir daemon did not become ready"))).with_context(
-        || {
-            format!(
-                "start Mjolnir daemon; details are in {}",
-                data_dir().join("daemon.log").display()
-            )
-        },
-    )
+    let output = launched.output_since_launch(&log_path).await;
+    let last_error = last_error.unwrap_or_else(|| anyhow!("Mjolnir daemon did not become ready"));
+    Err(launched.failure(
+        format!(
+            "Mjolnir daemon {} is still starting after {}s and has not accepted a request (last attempt: {last_error:#})",
+            launched.pid,
+            START_TIMEOUT.as_secs()
+        ),
+        output,
+        &log_path,
+    ))
+}
+
+/// The daemon this client launched and where its log stood at launch.
+#[derive(Debug, Clone, Copy)]
+struct LaunchedDaemon {
+    pid: u32,
+    log_offset: u64,
+}
+
+impl LaunchedDaemon {
+    /// The last lines the daemon appended to its log since this launch.
+    ///
+    /// The log is shared by every daemon launch, so only the bytes written
+    /// after this launch can describe this daemon. Startup failures are a
+    /// short `Error:` report, so a few lines carry the whole explanation.
+    async fn output_since_launch(&self, log_path: &Path) -> String {
+        const KEPT_LINES: usize = 20;
+        let log_path = log_path.to_path_buf();
+        let offset = self.log_offset;
+        let appended = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = fs::File::open(&log_path)?;
+            file.seek(SeekFrom::Start(offset))?;
+            let mut appended = Vec::new();
+            file.read_to_end(&mut appended)?;
+            Ok(appended)
+        })
+        .await;
+        let appended = match appended {
+            Ok(Ok(appended)) => appended,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "could not read the daemon log after a failed launch");
+                return String::new();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "daemon log read task failed");
+                return String::new();
+            }
+        };
+        let text = String::from_utf8_lossy(&appended);
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        let skipped = lines.len().saturating_sub(KEPT_LINES);
+        lines[skipped..].join("\n")
+    }
+
+    fn failure(&self, reason: String, output: String, log_path: &Path) -> anyhow::Error {
+        let error = if output.is_empty() {
+            anyhow!("{reason}; it wrote nothing to {}", log_path.display())
+        } else {
+            anyhow!("{reason}; it reported:\n{output}")
+        };
+        error.context(format!(
+            "start Mjolnir daemon; details are in {}",
+            log_path.display()
+        ))
+    }
 }
 
 fn daemon_launch_executable() -> Result<PathBuf> {
