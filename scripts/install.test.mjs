@@ -21,7 +21,7 @@ function fixture(os, arch) {
   tool('uname', `case "$1" in -s) echo ${os} ;; -m) echo ${arch} ;; esac`);
   tool('rustup', 'echo "${INSTALLED_TARGET:-}"');
   // A built worker records its target so the test can tell which one landed
-  // where; `cargo install` accepts only the locked checkout install.
+  // where. Emit the Cargo JSON artifact message consumed by install.sh.
   tool('cargo', `
     command=$1
     shift
@@ -40,9 +40,15 @@ function fixture(os, arch) {
     test "$locked" = 1
     if [ "$command" = build ]; then
       if [ "\${FAIL_BUILD:-0}" = 1 ] || [ "\${FAIL_TARGET:-none}" = "\${triple:-native}" ] || [ "\${FAIL_TARGET:-none}" = "$binary" ]; then exit 42; fi
-      output="$target_dir/\${triple:+$triple/}release"
+      output="\${target_dir:-target}/\${triple:+$triple/}release"
       mkdir -p "$output"
-      echo "worker \${triple:-native}" > "$output/$binary"
+      if [ "$binary" = mj ]; then
+        printf '#!/bin/bash\necho mj test\n' > "$output/$binary"
+        chmod 755 "$output/$binary"
+      else
+        echo "worker \${triple:-native}" > "$output/$binary"
+      fi
+      printf '{"reason":"compiler-artifact","target":{"name":"%s","kind":["bin"]},"executable":"%s"}\n' "$binary" "$output/$binary"
     elif [ "$command" = install ]; then
       test "$path" = mj-cli
       mkdir -p "$root/bin"
@@ -93,7 +99,7 @@ test('a failed worker build leaves the existing installation alone', () => {
   const { root, installed, run } = fixture('Linux', 'x86_64');
   try {
     const result = run({ INSTALLED_TARGET: 'x86_64-unknown-linux-musl', FAIL_BUILD: '1' });
-    assert.equal(result.status, 42, result.stderr);
+    assert.notEqual(result.status, 0, result.stderr);
     assert.equal(existsSync(installed('mj')), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -120,7 +126,7 @@ for (const target of ['native', 'x86_64-unknown-linux-musl', 'mj-voice-worker'])
       const names = ['mj', 'mj-voice-worker', 'mj-worker', 'mj-worker-x86_64-unknown-linux-musl'];
       for (const name of names) writeFileSync(installed(name), `previous ${name}`);
       const result = run({ INSTALLED_TARGET: 'x86_64-unknown-linux-musl', FAIL_TARGET: target });
-      assert.equal(result.status, 42, result.stderr);
+      assert.notEqual(result.status, 0, result.stderr);
       for (const name of names) assert.equal(readFileSync(installed(name), 'utf8'), `previous ${name}`);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
