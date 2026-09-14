@@ -2580,42 +2580,6 @@ fn load_materialized_transcript_filtered_from(
     }))
 }
 
-/// Remember that an API session-creation key produced this session, so a retry
-/// with the same key returns the same session instead of starting another.
-pub fn record_api_idempotency(key: &str, session_id: &str) -> Result<()> {
-    let key = key.to_owned();
-    let session_id = session_id.to_owned();
-    submit_database_write("record_api_idempotency", move |_| {
-        record_api_idempotency_in(&database_path(), &key, &session_id)
-    })
-}
-
-fn record_api_idempotency_in(path: &Path, key: &str, session_id: &str) -> Result<()> {
-    let connection = open(path)?;
-    connection.execute(
-        "INSERT INTO api_idempotency(key, session_id, created_at_ms)
-             VALUES (?1, ?2, ?3)
-         ON CONFLICT(key) DO NOTHING",
-        params![key, session_id, mj_core::clock::epoch_millis()],
-    )?;
-    Ok(())
-}
-
-/// The session a previous API creation call recorded under this key.
-pub fn lookup_api_idempotency(key: &str) -> Result<Option<String>> {
-    lookup_api_idempotency_from(&database_path(), key)
-}
-
-fn lookup_api_idempotency_from(path: &Path, key: &str) -> Result<Option<String>> {
-    Ok(open_reader(path)?
-        .query_row(
-            "SELECT session_id FROM api_idempotency WHERE key = ?1",
-            [key],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?)
-}
-
 /// Read the newest `limit` transcript items for a session, oldest first.
 ///
 /// A conversation view seeds itself from the tail and discards everything

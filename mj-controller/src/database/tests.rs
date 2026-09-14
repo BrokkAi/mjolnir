@@ -4999,21 +4999,10 @@ fn a_version_twenty_seven_database_migrates_and_reports_no_turn_history() {
         None
     );
 
-    // The idempotency table the migration created is usable straight away.
-    assert_eq!(
-        lookup_api_idempotency_from(&database, "key-1").unwrap(),
-        None
-    );
-    record_api_idempotency_in(&database, "key-1", "session-1").unwrap();
-    assert_eq!(
-        lookup_api_idempotency_from(&database, "key-1").unwrap(),
-        Some("session-1".to_owned())
-    );
-    // A repeated key keeps the session it first named.
-    record_api_idempotency_in(&database, "key-1", "session-2").unwrap();
-    assert_eq!(
-        lookup_api_idempotency_from(&database, "key-1").unwrap(),
-        Some("session-1".to_owned())
+    // The migration still recreates the table it dropped above.
+    assert!(
+        table_has_column(&open(&database).unwrap(), "api_idempotency", "key").unwrap(),
+        "migration 28 must create api_idempotency"
     );
 }
 

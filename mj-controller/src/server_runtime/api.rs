@@ -1140,24 +1140,6 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
-    fn lookup_idempotency(&self, key: String) -> BoxFuture<'_, Result<Option<String>>> {
-        Box::pin(async move {
-            blocking("look up idempotency key", move || {
-                crate::database::lookup_api_idempotency(&key)
-            })
-            .await
-        })
-    }
-
-    fn record_idempotency(&self, key: String, session_id: String) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move {
-            blocking("record idempotency key", move || {
-                crate::database::record_api_idempotency(&key, &session_id)
-            })
-            .await
-        })
-    }
-
     fn transcript(
         &self,
         session_id: String,

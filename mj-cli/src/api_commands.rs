@@ -99,9 +99,6 @@ pub(crate) struct NewArgs {
     /// Harness reasoning effort to select before the first prompt.
     #[arg(long)]
     effort: Option<String>,
-    /// Return the same session when this creation call is retried.
-    #[arg(long)]
-    idempotency_key: Option<String>,
     /// The first prompt. `-` reads it from standard input.
     prompt: Option<String>,
     /// Read the first prompt from this file instead.
@@ -356,7 +353,6 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         model: args.model.clone(),
         effort: args.effort.clone(),
         prompt,
-        idempotency_key: args.idempotency_key.clone(),
     };
     let client = ApiClient::connect().await?;
     let response = client.start(&request).await?;
@@ -787,8 +783,6 @@ mod tests {
             "gpt-5",
             "--effort",
             "high",
-            "--idempotency-key",
-            "key-1",
             "add a README line",
         ])
         .unwrap();
@@ -801,9 +795,27 @@ mod tests {
         assert_eq!(args.project_directory, Some(PathBuf::from(".")));
         assert_eq!(args.model.as_deref(), Some("gpt-5"));
         assert_eq!(args.effort.as_deref(), Some("high"));
-        assert_eq!(args.idempotency_key.as_deref(), Some("key-1"));
         assert_eq!(args.prompt.as_deref(), Some("add a README line"));
         assert!(!args.json);
+
+        // The idempotency key is gone; a command line that still passes it
+        // must fail rather than be silently ignored.
+        assert!(
+            Cli::try_parse_from([
+                "mj",
+                "new",
+                "--profile",
+                "codex",
+                "--target",
+                "local",
+                "--project-directory",
+                ".",
+                "--idempotency-key",
+                "k",
+                "add a README line",
+            ])
+            .is_err()
+        );
 
         // The global workspace flag names a workspace; the session-scoped id
         // is its own flag, so the two cannot collide.

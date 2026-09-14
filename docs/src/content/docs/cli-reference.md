@@ -158,7 +158,7 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 ```text
 mj new --profile <id> --target <id> [--bundle <id>] [--project-directory <path>]
        [--workspace-id <id>] [--title <text>] [--model <name>] [--effort <name>]
-       [--idempotency-key <key>] [--prompt-file <path>] [<prompt>|-] [--json]
+       [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>] [--json]
 mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--json]
 mj transcript --session <id> [--after-seq <seq>] [--limit <count>] [--json]

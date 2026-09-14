@@ -81,7 +81,7 @@ A failure is a JSON object with one field:
 
 | Status | Meaning |
 | --- | --- |
-| `400` | The request was malformed: an empty prompt, an over-long idempotency key, a timeout outside 1–3600 seconds, a file path that is absolute or contains `..`. |
+| `400` | The request was malformed: an empty prompt, a timeout outside 1–3600 seconds, a file path that is absolute or contains `..`. |
 | `401` | No bearer token and no valid viewer cookie. |
 | `404` | No such session, or no transcript recorded for it. |
 | `409` | The session cannot do this now: no prompt capability, no live target, a turn still running, no commits to bundle, no recorded base for a diff, no push remote configured. |
@@ -183,14 +183,15 @@ POST /api/v1/sessions
   "title": "add a README line",
   "model": "gpt-5",
   "effort": "high",
-  "prompt": "add a README line",
-  "idempotency_key": "run-2026-09-11-a"
+  "prompt": "add a README line"
 }
 ```
 
 `profile_id` and `target_id` are required. Supply `bundle_id`, or
 `project_directory`, or both: a directory with no bundle is bundled the way the
-viewer's own form does it. Everything else is optional.
+viewer's own form does it. Everything else is optional. `idempotency_key` is no
+longer accepted: a request that still carries it is rejected as an unknown
+field.
 
 ```json
 { "session_id": "session-1", "turn_id": null }
@@ -201,10 +202,6 @@ The reply is `201` as soon as the controller has published an id.
 first prompt is submitted in the background once the harness is ready, after
 `model` and `effort` are applied. Wait on the session without a `turn_id` and
 the wait picks up that first turn by itself.
-
-`idempotency_key` (1–128 characters) makes a retry safe. A second call with a
-key that already created a session answers `200` with the same `session_id`,
-and with its `turn_id` once the first prompt has been accepted.
 
 ### Send a prompt
 
@@ -431,7 +428,7 @@ which is the quickest way to see a shape before you write a client for it.
 
 ```console
 mj new --profile codex --target local --project-directory . \
-  --idempotency-key run-a "add a README line"
+  "add a README line"
 mj wait --session <id>
 mj prompt --session <id> --wait "now add a test"
 mj diff --session <id>
