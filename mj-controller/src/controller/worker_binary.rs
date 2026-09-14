@@ -177,9 +177,7 @@ impl Controller {
             );
             result?;
             append_hel_target_environment(profile.kind, &profile_stage, backend)?;
-            if profile.kind == mj_core::config::HarnessKind::Muse {
-                configure_muse_execution_settings(&profile_stage, target.execution_policy())?;
-            }
+            apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
             if launch.subagent_tools && profile.kind == mj_core::config::HarnessKind::Claude {
                 configure_claude_subagent_mcp(&profile_stage, worker_root)?;
             }
@@ -426,7 +424,9 @@ fn worker_launch_config(
     workspace_session_id: &str,
     target: &mj_core::config::TargetTemplate,
 ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
-    let execution_policy = target.execution_policy();
+    let execution_policy = profile
+        .kind
+        .effective_execution_policy(target.execution_policy());
     let target_profile_home = target_profile_home(backend, session_id, profile);
     let workspace = if let Some(project_directory) = &session.project_directory {
         (project_directory.to_string_lossy().into_owned(), Vec::new())
@@ -779,38 +779,26 @@ fn configure_claude_subagent_mcp(profile_stage: &Path, worker_root: &str) -> Res
     })
 }
 
-/// Muse composes a session's permission profile from its settings file, so an
-/// unconstrained target has to have the profile staged rather than requested
-/// over the wire. Guardian targets keep the profile the user configured.
-fn configure_muse_execution_settings(
-    profile_stage: &Path,
+/// Write the enforcement table's staged setting, if the harness has one. Muse
+/// composes a session's permission profile from its settings file and nothing
+/// on the ACP wire overrides that choice, so the profile has to be staged.
+fn apply_staged_execution_setting(
+    kind: mj_core::config::HarnessKind,
     policy: mj_core::config::ExecutionPolicy,
+    profile_stage: &Path,
 ) -> Result<()> {
-    if !policy.is_unconstrained() {
+    let Some(setting) = kind
+        .execution_enforcement(policy)
+        .and_then(mj_core::config::ExecutionEnforcement::staged_setting)
+    else {
         return Ok(());
-    }
-    let path = profile_stage.join("settings.json");
-    edit_staged_json_object(&path, "staged Muse settings", |root| {
-        root.entry("schema_version")
-            .or_insert_with(|| serde_json::Value::from(1));
-        let permissions = root
-            .entry("permissions")
-            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
-            .as_object_mut()
-            .with_context(|| {
-                format!(
-                    "permissions in staged Muse settings {} must be a JSON object",
-                    path.display()
-                )
-            })?;
-        permissions
-            .entry("schema_version")
-            .or_insert_with(|| serde_json::Value::from(1));
-        permissions.insert(
-            "default_profile".into(),
-            serde_json::Value::from(mj_core::config::MUSE_UNCONSTRAINED_PERMISSION_PROFILE),
-        );
-        Ok(())
+    };
+    let path = profile_stage.join(setting.file);
+    let label = format!("staged {} settings", kind.display_name());
+    edit_staged_json_object(&path, &label, |root| {
+        setting
+            .apply(root)
+            .with_context(|| format!("{label} {}", path.display()))
     })
 }
 
@@ -4729,8 +4717,17 @@ mod tests {
         (staged, path)
     }
 
+    fn stage_muse_settings(profile_stage: &Path) {
+        apply_staged_execution_setting(
+            HarnessKind::Muse,
+            ExecutionPolicy::Unconstrained,
+            profile_stage,
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn muse_unconstrained_settings_select_the_unrestricted_profile() {
+    fn muse_staged_settings_select_the_unrestricted_profile() {
         let (staged, path) = staged_muse_settings(
             r#"{
                 "schema_version": 1,
@@ -4741,7 +4738,7 @@ mod tests {
             }"#,
         );
 
-        configure_muse_execution_settings(staged.path(), ExecutionPolicy::Unconstrained).unwrap();
+        stage_muse_settings(staged.path());
 
         let document: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -4754,10 +4751,10 @@ mod tests {
     }
 
     #[test]
-    fn muse_unconstrained_settings_are_created_when_absent() {
+    fn muse_staged_settings_are_created_when_absent() {
         let staged = tempfile::tempdir().unwrap();
 
-        configure_muse_execution_settings(staged.path(), ExecutionPolicy::Unconstrained).unwrap();
+        stage_muse_settings(staged.path());
 
         let body = std::fs::read_to_string(staged.path().join("settings.json")).unwrap();
         assert!(body.ends_with('\n'));
@@ -4771,43 +4768,77 @@ mod tests {
     }
 
     #[test]
-    fn muse_unconstrained_settings_add_a_missing_permissions_object() {
-        let (staged, path) =
-            staged_muse_settings("{\"schema_version\": 1, \"provider\": \"anthropic\"}");
-
-        configure_muse_execution_settings(staged.path(), ExecutionPolicy::Unconstrained).unwrap();
-
-        let document: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(document["provider"], "anthropic");
-        assert_eq!(document["permissions"]["schema_version"], 1);
-        assert_eq!(document["permissions"]["default_profile"], ":unrestricted");
-    }
-
-    #[test]
-    fn muse_configured_approvals_leave_settings_untouched() {
+    fn a_harness_without_a_staged_setting_leaves_the_profile_untouched() {
         let source = r#"{"schema_version": 1, "permissions": {"default_profile": ":ask-me"}}"#;
-        let (staged, path) = staged_muse_settings(source);
 
-        configure_muse_execution_settings(staged.path(), ExecutionPolicy::ConfiguredApprovals)
-            .unwrap();
+        for (kind, policy) in [
+            (HarnessKind::Claude, ExecutionPolicy::Unconstrained),
+            (HarnessKind::Muse, ExecutionPolicy::ConfiguredApprovals),
+        ] {
+            let (staged, path) = staged_muse_settings(source);
 
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+            apply_staged_execution_setting(kind, policy, staged.path()).unwrap();
+
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source, "{kind:?}");
+        }
     }
 
     #[test]
     fn muse_settings_that_are_not_an_object_report_the_staged_file() {
         let (staged, path) = staged_muse_settings("[]");
 
-        let error =
-            configure_muse_execution_settings(staged.path(), ExecutionPolicy::Unconstrained)
-                .unwrap_err();
+        let error = apply_staged_execution_setting(
+            HarnessKind::Muse,
+            ExecutionPolicy::Unconstrained,
+            staged.path(),
+        )
+        .unwrap_err();
 
         assert!(
             format!("{error:#}").contains(&path.display().to_string()),
             "error should name the staged file: {error:#}"
         );
     }
+
+    /// Muse has no guardian mode, so even a raw local target launches it
+    /// unconstrained.
+    #[test]
+    fn raw_local_muse_launches_unconstrained() {
+        let project = tempfile::tempdir().unwrap();
+        let mut session = crate::controller::test_support::checkpoint_test_session("s-muse");
+        session.harness_kind = HarnessKind::Muse;
+        session.last_profile = "muse".into();
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some(project.path().to_path_buf());
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: "/home/me/.local/share/hel/worker".into(),
+        });
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Muse,
+            home: PathBuf::from("/profiles/muse"),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        };
+
+        let (launch, _, _) = worker_launch_config(
+            &session,
+            &profile,
+            None,
+            &targets::TargetLocator::LocalBare {
+                worker_root: "/home/me/.local/share/hel/worker".into(),
+            },
+            &session.id,
+            &session.id,
+            &mj_core::config::TargetTemplate::LocalBare,
+        )
+        .unwrap();
+
+        assert_eq!(launch.execution_policy, ExecutionPolicy::Unconstrained);
+        assert_eq!(launch.environment["MUSE_APPROVAL_MODE"], "allowAll");
+        assert_eq!(launch.environment["MUSE_SERVE_ARGS"], "--disable-sandbox");
+    }
+
     #[test]
     fn stage_kimi_profile_preserves_device_identity() {
         let home = tempfile::tempdir().unwrap();

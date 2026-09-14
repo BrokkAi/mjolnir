@@ -36,9 +36,11 @@ controls:
 Kimi's mode is named `auto`, but in this context it approves every call. It is
 not a low-risk guardian policy.
 
-Codex, Claude Code, Grok Build, and Muse Code can preserve guardian-style approvals on a
-raw target. Kimi Code and DeepSeek Harness cannot. Mjolnir warns when a harness
-without guardian support is paired with a raw target, but a warning is not a
+Codex, Claude Code, and Grok Build can preserve guardian-style approvals on a
+raw target. Kimi Code and DeepSeek Harness cannot, and neither can Muse Code:
+its permission profile is a host-lifetime setting that the wire cannot select,
+so every Muse session runs unconstrained. Mjolnir warns when a harness without
+guardian support is paired with a raw target, but a warning is not a
 sandbox—choose a container or instance instead.
 
 Mjolnir does not expose arbitrary extra container-runtime arguments. Container

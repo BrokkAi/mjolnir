@@ -132,7 +132,9 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("session target template is missing")?;
-        let execution_policy = target.execution_policy();
+        let execution_policy = profile
+            .kind
+            .effective_execution_policy(target.execution_policy());
         let (backend, worker_root) = self.worker_placement(session_id)?;
 
         let staging = tempfile::tempdir().context("create reviewer staging directory")?;

@@ -199,10 +199,14 @@ fn session_request_meta(spec: &LaunchSpec) -> Option<serde_json::Map<String, ser
     {
         options.insert("model".to_owned(), serde_json::Value::String(model.clone()));
     }
-    if spec.execution_policy.is_unconstrained() {
+    if let Some(enabled) = spec
+        .harness
+        .execution_enforcement(spec.execution_policy)
+        .and_then(mj_core::config::ExecutionEnforcement::session_sandbox)
+    {
         options.insert(
             "sandbox".to_owned(),
-            serde_json::json!({ "enabled": false }),
+            serde_json::json!({ "enabled": enabled }),
         );
     }
     // Same rule as Codex above: without the Mjolnir delegation socket the
