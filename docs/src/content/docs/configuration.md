@@ -39,6 +39,15 @@ The default path is the operating system's configuration directory followed by
 `~/.config/mjolnir/config.toml`. Set `MJ_CONFIG_DIR` to replace the directory;
 Mjolnir appends `config.toml` to it.
 
+Pass `--instance <name>` (short `-i`, or `MJ_INSTANCE=<name>`) to run a fully
+isolated copy: configuration, database, daemon, and logs move under
+`instances/<name>` inside the default directories (for example
+`~/.config/mjolnir/instances/dev/config.toml` and
+`~/.local/share/mjolnir/instances/dev/mj.sqlite3`). Each instance runs its own
+daemon, so parallel instances never share sessions. The name may only use ASCII
+letters, digits, `.`, `-`, and `_`. Explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR`
+still take precedence over the instance directories.
+
 Every current file starts with the required schema version:
 
 ```toml

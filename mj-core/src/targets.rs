@@ -640,7 +640,10 @@ fn configured_command(command: &CommandSpec) -> Command {
 }
 
 fn cancellable_command(command: &CommandSpec) -> Command {
+    #[cfg(unix)]
     let mut process = configured_command(command);
+    #[cfg(not(unix))]
+    let process = configured_command(command);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;

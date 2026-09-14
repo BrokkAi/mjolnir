@@ -407,7 +407,9 @@ image = "ubuntu:24.04"
         command.pre_exec(|| {
             // Terminal queries must use this fixture's PTY, including when
             // Cargo itself was launched from an interactive terminal.
-            if libc::setsid() < 0 || libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, 0) < 0 {
+            if libc::setsid() < 0
+                || libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as libc::c_ulong, 0) < 0
+            {
                 return Err(io::Error::last_os_error());
             }
             let mut mask = std::mem::zeroed();
@@ -658,7 +660,7 @@ fn sigterm_restores_real_pty_terminal() {
     let DashboardPty {
         _storage,
         mut master,
-        slave,
+        slave: _slave,
         original_termios: before,
         mut child,
     } = spawn_dashboard_pty();
@@ -675,7 +677,7 @@ fn sigterm_restores_real_pty_terminal() {
     drop(child.take());
 
     assert!(status.success(), "PTY child exit: {status}");
-    let after = termios(slave.as_raw_fd());
+    let after = termios(master.as_raw_fd());
     assert_eq!(after.c_iflag, before.c_iflag, "restore input flags");
     assert_eq!(after.c_oflag, before.c_oflag, "restore output flags");
     assert_eq!(
@@ -721,7 +723,7 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
     let DashboardPty {
         _storage,
         mut master,
-        slave,
+        slave: _slave,
         original_termios: before,
         mut child,
     } = spawn_dashboard_pty();
@@ -741,7 +743,7 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
     drop(child.take());
 
     assert!(status.success(), "PTY child exit: {status}");
-    let after = termios(slave.as_raw_fd());
+    let after = termios(master.as_raw_fd());
     assert_eq!(after.c_iflag, before.c_iflag, "restore input flags");
     assert_eq!(after.c_oflag, before.c_oflag, "restore output flags");
     assert_eq!(
@@ -778,7 +780,7 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
     let DashboardPty {
         _storage,
         mut master,
-        slave,
+        slave: _slave,
         original_termios: before,
         mut child,
     } = spawn_dashboard_pty_with_idle_exit(false);
@@ -828,7 +830,7 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
         "workspace manager SIGTERM",
     );
     assert!(status.success(), "manager exit: {status}");
-    let after = termios(slave.as_raw_fd());
+    let after = termios(master.as_raw_fd());
     assert_eq!(after.c_iflag, before.c_iflag);
     assert_eq!(after.c_oflag, before.c_oflag);
     assert_eq!(
@@ -848,7 +850,7 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
     let DashboardPty {
         _storage,
         mut master,
-        slave,
+        slave: _slave,
         original_termios: before,
         mut child,
     } = spawn_dashboard_pty_fixture(false, true);
@@ -887,7 +889,7 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
     drop(child.take());
     assert!(status.success());
     assert_eq!(
-        stable_local_flags(termios(slave.as_raw_fd()).c_lflag),
+        stable_local_flags(termios(master.as_raw_fd()).c_lflag),
         stable_local_flags(before.c_lflag)
     );
 }

@@ -69,6 +69,13 @@ fn artifact_path(thread_id: &str) -> PathBuf {
     Path::new(ARTIFACT_ROOT).join(format!("{thread_id}.json"))
 }
 
+fn database_path(home: &Path) -> Result<PathBuf> {
+    Ok(home
+        .canonicalize()
+        .context("resolve native Codex home")?
+        .join(DATABASE))
+}
+
 /// Returns the last supported migration. Unknown schemas fail before mutation.
 fn schema_version(connection: &Connection) -> Result<usize> {
     let exists: bool = connection.query_row(
@@ -130,10 +137,10 @@ fn read_goal(connection: &Connection, thread_id: &str) -> Result<Option<Goal>> {
 
 pub(super) fn collect(home: &Path, thread_id: &str) -> Result<Option<NativeArtifact>> {
     validate_component(thread_id, "native goal thread ID")?;
-    let path = home.join(DATABASE);
-    if !path.try_exists()? {
+    if !home.join(DATABASE).try_exists()? {
         return Ok(None);
     }
+    let path = database_path(home)?;
     let mut snapshot = Snapshot {
         version: 1,
         thread_id: thread_id.into(),
@@ -210,6 +217,7 @@ pub(super) fn restore(home: &Path, thread_id: &str, path: &Path, data: &[u8]) ->
         return Ok(());
     }
     fs::create_dir_all(home)?;
+    let database = database_path(home)?;
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -336,6 +344,16 @@ mod tests {
     }
 
     #[test]
+    fn missing_native_home_has_no_goal_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(
+            collect(&temp.path().join("missing-home"), "selected")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn cleared_goal_checkpoint_removes_only_that_goal_and_rejects_foreign_identity() {
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
@@ -418,6 +436,7 @@ mod tests {
         assert_eq!(read_goal(&db, "selected").unwrap(), Some(original));
         assert!(collect(target.path(), "selected").is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn worker_checkpoint_entrypoints_restore_native_goal_accounting() {
         let temp = tempfile::tempdir().unwrap();

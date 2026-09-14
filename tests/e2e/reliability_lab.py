@@ -32,7 +32,7 @@ import urllib.request
 
 TIMEOUT = 20.0
 # Match the Codex spec in mj-core/src/harness_runtime.rs when updating that pin.
-MANAGED_CODEX_INSTALL_ID = "brokkai-codex-acp-1.11.1_codex-0.153.4"
+MANAGED_CODEX_INSTALL_ID = "brokkai-codex-acp-1.11.3_codex-0.153.4"
 
 
 def render_terminal(raw: bytes, rows: int = 32, columns: int = 140) -> str:
@@ -427,7 +427,7 @@ import time
 session_id = "reliability-native"
 
 if sys.argv[1:] == ["--version"]:
-    print("@brokkai/codex-acp 1.11.1")
+    print("@brokkai/codex-acp 1.11.3")
     raise SystemExit(0)
 
 log_path = os.environ["MJ_FAKE_ACP_LOG"]
@@ -614,7 +614,7 @@ tailscale_detect = false
 [profiles.fake]
 kind = "codex"
 home = {json.dumps(str(self.profile))}
-environment = {{ MJ_FAKE_ACP_LOG = {json.dumps(str(self.runtime_root / "fake-acp.log"))}, MJ_FAKE_ACP_DELAY_MS = {json.dumps(str(fake_acp_delay_ms))}, MJ_FAKE_ACP_PROMPT_DELAY_MS = {json.dumps(str(fake_acp_prompt_delay_ms))}, PATH = {json.dumps(str(fixture_bin))} }}
+environment = {{ MJ_FAKE_ACP_LOG = {json.dumps(str(self.runtime_root / "fake-acp.log"))}, MJ_FAKE_ACP_DELAY_MS = {json.dumps(str(fake_acp_delay_ms))}, MJ_FAKE_ACP_PROMPT_DELAY_MS = {json.dumps(str(fake_acp_prompt_delay_ms))}, PATH = {json.dumps(str(fixture_bin))}, XDG_CACHE_HOME = {json.dumps(str(self.runtime_root / "cache"))} }}
 
 [bundles.fixture]
 primary_repo = "fixture"

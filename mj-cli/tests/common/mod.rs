@@ -112,6 +112,7 @@ impl DaemonStorage {
     /// live writer is never correct, so the process goes first. The daemon runs
     /// in its own process group, so signalling that group cannot reach this
     /// test process.
+    #[cfg(unix)]
     fn terminate_owner(&self, pid: Option<u32>, refusal: Option<anyhow::Error>) -> Result<()> {
         let Some(pid) = pid else {
             let detail = refusal
@@ -128,6 +129,31 @@ impl DaemonStorage {
             }
         }
         bail!("fixture daemon {pid} outlived SIGKILL or kept its store")
+    }
+
+    #[cfg(not(unix))]
+    fn terminate_owner(&self, pid: Option<u32>, refusal: Option<anyhow::Error>) -> Result<()> {
+        let Some(pid) = pid else {
+            let detail = refusal
+                .map(|error| format!(": {error:#}"))
+                .unwrap_or_default();
+            bail!("fixture controller owns its store without publishing a usable pid{detail}");
+        };
+        let process_id = sysinfo::Pid::from_u32(pid);
+        for signal in [sysinfo::Signal::Term, sysinfo::Signal::Kill] {
+            let mut system = sysinfo::System::new();
+            system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[process_id]), true);
+            let Some(process) = system.process(process_id) else {
+                return Ok(());
+            };
+            if !process.kill_with(signal).unwrap_or_else(|| process.kill()) {
+                bail!("could not terminate fixture daemon {pid}");
+            }
+            if self.wait_for_exit(Instant::now() + Duration::from_secs(5), Some(pid))? {
+                return Ok(());
+            }
+        }
+        bail!("fixture daemon {pid} survived forced termination or kept its store")
     }
 
     /// Whether a process still holds the store's sole-writer lock.
@@ -202,11 +228,22 @@ impl DaemonStorage {
 
 /// Whether a process still exists. Signal 0 runs the existence and permission
 /// checks without delivering anything.
+#[cfg(unix)]
 fn process_exists(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else {
         return false;
     };
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_exists(pid: u32) -> bool {
+    let process_id = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[process_id]), true);
+    system
+        .process(process_id)
+        .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
 }
 
 impl Drop for DaemonStorage {
