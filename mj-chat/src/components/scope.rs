@@ -652,6 +652,14 @@ impl<K: Copy + Eq> Form<K> {
         self.focus_tree.none();
     }
 
+    /// Update choice availability after a background result without waiting
+    /// for another render or invalidating the list's hitboxes.
+    pub fn set_row_enabled(&mut self, id: K, enabled: Vec<bool>) {
+        if let Some(control) = self.control_mut(id) {
+            control.row_enabled = enabled;
+        }
+    }
+
     /// Clears hitboxes and cursor maps while retaining declarations and focus identities.
     pub fn reset_geometry(&mut self) {
         for control in &mut self.controls {

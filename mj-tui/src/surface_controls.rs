@@ -229,7 +229,7 @@ pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &Dashboar
 
 pub(crate) fn render_onboarding_actions(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
     let buttons = [
-        (CommandId::OpenConfig, "Setup"),
+        (CommandId::OpenConfig, "Settings"),
         (CommandId::Palette, "Commands"),
         (CommandId::Workspaces, "Workspaces"),
     ]

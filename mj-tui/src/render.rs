@@ -264,9 +264,9 @@ fn render_onboarding(frame: &mut Frame, area: Rect, dashboard: &DashboardState) 
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             Line::raw(""),
-            Line::raw(format!("Setup can create {missing} from this machine.")),
+            Line::raw(format!("Settings can create {missing} from this machine.")),
             Line::raw(
-                "Press F4 to open Setup, then Detect machine to find your accounts and runtimes.",
+                "Press F7 for Settings to add accounts or connections. Local runtimes are checked automatically.",
             ),
         ])
         .alignment(Alignment::Center)
@@ -536,7 +536,7 @@ fn drawn_session_rows_with_options(
                         Style::default().fg(theme::palette().session_error),
                     ));
                     if expanded && !options.summary_only {
-                        lines.push(Line::from("  Enter for repair details · F7 setup"));
+                        lines.push(Line::from("  Enter for repair details · F7 settings"));
                     }
                     rows.push(DrawnSessionRow {
                         session: Some(index),
@@ -4151,7 +4151,7 @@ mod tests {
         assert_eq!(
             combined_footer_text(&dashboard, 200),
             "Enter open · Tab pane │ Alt-N create · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
-             · Alt-Q detach │ F2 palette · F4 web · F5 refresh · F7 setup · F1 help"
+             · Alt-Q detach │ F2 palette · F4 web · F5 refresh · F7 settings · F1 help"
         );
 
         // The cancel chord takes its fixed place before detach, and only while
@@ -4178,7 +4178,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
         dashboard.focus_sessions();
-        const FUNCTION_KEYS: &str = "F2 palette · F4 web · F5 refresh · F7 setup · F1 help";
+        const FUNCTION_KEYS: &str = "F2 palette · F4 web · F5 refresh · F7 settings · F1 help";
 
         let full = combined_footer_text(&dashboard, 200);
         assert!(
@@ -6115,7 +6115,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_sessions_remain_visible_when_setup_has_no_accounts_or_targets() {
+    fn existing_sessions_remain_visible_when_settings_has_no_accounts_or_targets() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.set_config(Config::default());
         let rendered = drawn(&mut dashboard, 120, 40).join("\n");

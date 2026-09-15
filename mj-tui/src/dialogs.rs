@@ -55,6 +55,7 @@ pub(crate) enum DialogControl {
     TargetList,
     TargetRename,
     TargetTest,
+    TargetSettings,
     ConfirmButton(usize),
     ImportIgnore,
     ImportManagedWorktree,
@@ -411,6 +412,7 @@ fn target_actions_form(
     );
     form.declare(DialogControl::TargetRename, ControlKind::Button);
     form.declare(DialogControl::TargetTest, ControlKind::Button);
+    form.declare(DialogControl::TargetSettings, ControlKind::Button);
     form.end_frame(initial);
     RefCell::new(form)
 }
@@ -430,6 +432,7 @@ fn sync_target_actions_form(dialog: &mut TargetActionsDialog) {
         ControlKind::Button,
         dialog.testing.is_none(),
     );
+    form.declare(DialogControl::TargetSettings, ControlKind::Button);
     form.end_frame(DialogControl::TargetList);
 }
 
@@ -446,13 +449,15 @@ fn clear_dialog_form_geometry(form: &mut Dialog<DialogControl>) {
 pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'static str] {
     match confirmation {
         Confirmation::RepairRepositoryRemotes { .. } => &["Cancel", "Repair and continue"],
-        Confirmation::ConfigurationRepair { .. } => &["Dismiss", "Open transcript", "Open setup"],
+        Confirmation::ConfigurationRepair { .. } => {
+            &["Dismiss", "Open transcript", "Open settings"]
+        }
         Confirmation::LaunchFailed { retry: Some(_), .. } => &["Dismiss", "Retry launch"],
         Confirmation::LaunchFailed { .. } => &["Dismiss"],
         Confirmation::Dismiss {
             intent: DismissalIntent::DiscardSetup,
             ..
-        } => &["Keep editing", "Discard setup"],
+        } => &["Keep editing", "Discard settings"],
         Confirmation::Dismiss {
             intent: DismissalIntent::CancelImport,
             ..
@@ -920,6 +925,11 @@ pub(crate) fn render_target_actions(
         &[
             (DialogControl::TargetRename, "Rename", true),
             (DialogControl::TargetTest, "Test", dialog.testing.is_none()),
+            (
+                DialogControl::TargetSettings,
+                "Settings",
+                dialog.testing.is_none(),
+            ),
         ],
         &mut form,
     );
@@ -1261,7 +1271,7 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 Line::raw(error.clone()),
                 Line::raw(""),
                 Line::raw(
-                    "Open setup to restore the named entries. The session and its history are retained.",
+                    "Open settings to restore the named entries. The session and its history are retained.",
                 ),
                 Line::raw("PgUp/PgDn scroll the full details. Esc dismisses."),
             ],
@@ -1288,9 +1298,9 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
             intent: DismissalIntent::DiscardSetup,
             ..
         } => (
-            " Discard Setup changes? ",
+            " Discard Settings changes? ",
             vec![
-                Line::raw("Setup has unsaved changes."),
+                Line::raw("Settings has unsaved changes."),
                 Line::raw("Keep editing to preserve them, or discard the draft."),
             ],
         ),
@@ -1852,6 +1862,10 @@ impl DashboardState {
                     return DashboardAction::None;
                 };
                 match control {
+                    DialogControl::TargetSettings if dialog.testing.is_none() => {
+                        self.begin_settings_section("targets", Some(&target_id));
+                        return DashboardAction::None;
+                    }
                     DialogControl::TargetRename => {
                         self.mode = Mode::ConfigId(ConfigIdEditor {
                             kind: ConfigEntryKind::Target,

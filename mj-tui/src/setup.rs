@@ -226,7 +226,7 @@ fn preferred_size(draft: &Value) -> SetupSize {
         max_height: &mut u16,
     ) {
         let keys = visible_keys(path, value);
-        let breadcrumb = std::iter::once("Setup".to_owned())
+        let breadcrumb = std::iter::once("Settings".to_owned())
             .chain(path.iter().map(|key| schema::label(key)))
             .collect::<Vec<_>>()
             .join(" › ");
@@ -409,7 +409,7 @@ impl SetupDialog {
     fn current(&self) -> &Value {
         self.draft
             .pointer(&pointer(&self.path))
-            .expect("setup path exists")
+            .expect("settings path exists")
     }
 
     fn keys(&self) -> Vec<String> {
@@ -643,7 +643,7 @@ impl SetupDialog {
 
     pub(crate) fn path_input_context(&self) -> String {
         format!(
-            "setup:{}:{}:{:?}",
+            "settings:{}:{}:{:?}",
             self.generation,
             self.draft,
             self.editor
@@ -818,7 +818,7 @@ impl SetupDialog {
         match result {
             Ok(config) => {
                 self.saving = true;
-                self.notice = Some("Saving setup…".into());
+                self.notice = Some("Saving settings…".into());
                 DashboardAction::SaveSetup {
                     generation: self.generation,
                     original: self.original.clone(),
@@ -854,7 +854,7 @@ impl SetupDialog {
             Ok(config) => config,
             Err(error) => {
                 self.notice = Some(format!(
-                    "Fix the invalid setup draft before opening Code Review: {error}"
+                    "Fix the invalid settings draft before opening Code Review: {error}"
                 ));
                 self.form = RefCell::new(Dialog::default());
                 self.prepare();
@@ -926,6 +926,19 @@ impl SetupDialog {
 }
 
 impl DashboardState {
+    pub(crate) fn begin_settings_section(&mut self, section: &str, entry: Option<&str>) {
+        let mut dialog = SetupDialog::new(&self.config);
+        dialog.path = vec![section.to_owned()];
+        if let Some(entry) = entry
+            && dialog.draft[section].get(entry).is_some()
+        {
+            dialog.path.push(entry.to_owned());
+        }
+        dialog.prepare();
+        self.mode = Mode::Setup(dialog);
+        self.mark_render_changed();
+    }
+
     pub fn begin_setup(&mut self) {
         self.mode = Mode::Setup(SetupDialog::new(&self.config));
         self.mark_render_changed();
@@ -1219,7 +1232,7 @@ impl DashboardState {
         if !current {
             match result {
                 Ok(config) => self.set_config(config),
-                Err(error) => self.set_failure_notice(format!("Could not save Setup: {error}")),
+                Err(error) => self.set_failure_notice(format!("Could not save Settings: {error}")),
             }
             return;
         }
@@ -1227,7 +1240,7 @@ impl DashboardState {
             Ok(config) => {
                 self.set_config(config);
                 self.cancel_modal();
-                self.set_notice("Setup saved. New sessions use these defaults. Web listener changes apply on its next start.");
+                self.set_notice("Settings saved. New sessions use these defaults. Web listener changes apply on its next start.");
             }
             Err(error) => {
                 if let Some(dialog) = setup_dialog_mut(&mut self.mode) {
@@ -1258,7 +1271,7 @@ impl DashboardState {
                     Ok(current) => current,
                     Err(error) => {
                         dialog.notice = Some(format!(
-                            "Review the setup draft before detecting entries: {error}"
+                            "Review the settings draft before detecting entries: {error}"
                         ));
                         dialog.prepare();
                         self.mark_render_changed();
@@ -1337,7 +1350,7 @@ pub(crate) fn render_setup(
         let title = dismissible_modal_title(
             &mut form,
             popup,
-            "Setup",
+            "Settings",
             theme::title(true),
             !dialog.saving,
         );
@@ -1374,7 +1387,7 @@ pub(crate) fn render_setup(
     };
     let nested = !path.is_empty();
     if nested {
-        let breadcrumb = std::iter::once("Setup".to_owned())
+        let breadcrumb = std::iter::once("Settings".to_owned())
             .chain(path.iter().map(|key| schema::label(key)))
             .collect::<Vec<_>>()
             .join(" › ");
@@ -1402,7 +1415,7 @@ pub(crate) fn render_setup(
     let title = dismissible_modal_title(
         &mut form,
         popup,
-        "Setup",
+        "Settings",
         theme::title(true),
         !dialog.saving && !choice_editor,
     );
@@ -1564,6 +1577,42 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
+    fn settings_can_add_zcode_without_file_edits() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_settings_section("profiles", None);
+        dashboard.handle_key(key(KeyCode::Char('a')));
+        dashboard.handle_paste("zcode-account");
+        dashboard.handle_key(key(KeyCode::Enter));
+        choose(&mut dashboard, "kind");
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        let editor = dialog.editor.as_mut().unwrap();
+        let selected = editor
+            .choices
+            .iter()
+            .position(|value| value == "zcode")
+            .unwrap();
+        editor.combo.preview(SetupControl::Choices, selected);
+        dialog.prepare();
+        dashboard.handle_key(key(KeyCode::Enter));
+        choose(&mut dashboard, "home");
+        dashboard.handle_paste("/profiles/zcode");
+        dashboard.handle_key(key(KeyCode::Enter));
+        let DashboardAction::SaveSetup { updated, .. } =
+            dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        else {
+            panic!(
+                "settings must save: {:?}",
+                setup_dialog_mut(&mut dashboard.mode).unwrap().notice
+            );
+        };
+        let saved: Config = serde_json::from_str(&updated).unwrap();
+        assert_eq!(
+            saved.profiles["zcode-account"].kind,
+            mj_core::config::HarnessKind::Zcode
+        );
+    }
+
+    #[test]
     fn subagent_profile_choices_are_checkboxes_and_false_entries_are_not_persisted() {
         let config = config();
         let dialog = SetupDialog::new(&config);
@@ -1586,7 +1635,7 @@ mod tests {
 
     fn choose(dashboard: &mut DashboardState, name: &str) {
         let Mode::Setup(dialog) = &mut dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         dialog.selected = dialog.keys().iter().position(|key| key == name).unwrap();
         dialog.form.get_mut().focus(SetupControl::List);
@@ -1596,7 +1645,7 @@ mod tests {
 
     fn activate(dashboard: &mut DashboardState, control: SetupControl) {
         let Mode::Setup(dialog) = &mut dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         dialog.form.get_mut().focus(control);
         dashboard.handle_key(key(KeyCode::Enter));
@@ -1639,7 +1688,7 @@ mod tests {
         choose(&mut dashboard, "codex-1");
         choose(&mut dashboard, "home");
         let Mode::Setup(dialog) = &mut dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         let editor = dialog.editor.as_mut().unwrap();
         assert!(matches!(editor.input, EditorInput::Path(_)));
@@ -1647,7 +1696,7 @@ mod tests {
         dashboard.handle_paste("~/.codex4");
         dashboard.handle_key(key(KeyCode::Enter));
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert!(dialog.editor.is_none(), "{:?}", dialog.notice);
         let config: Config = config_from_draft(dialog.draft.clone()).unwrap();
@@ -1677,7 +1726,7 @@ mod tests {
         choose(&mut dashboard, "remote-path");
         choose(&mut dashboard, "workspace_prefix");
         let Mode::Setup(dialog) = &mut dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         dialog.editor.as_mut().unwrap().input.set_value("~/work");
         let DashboardAction::ResolveSetupPath {
@@ -1698,20 +1747,20 @@ mod tests {
             Err("SSH unavailable".into()),
         );
         let Mode::Setup(dialog) = &mut dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert_eq!(dialog.editor.as_ref().unwrap().input.value(), "~/work");
         assert_eq!(dialog.notice.as_deref(), Some("SSH unavailable"));
         dialog.editor.as_mut().unwrap().input.set_value("~/newer");
         dashboard.setup_path_resolved(generation, &draft, &path, &value, Ok("/remote/work".into()));
         let Mode::Setup(dialog) = &mut dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert_eq!(dialog.editor.as_ref().unwrap().input.value(), "~/newer");
         dialog.editor.as_mut().unwrap().input.set_value(&value);
         dashboard.setup_path_resolved(generation, &draft, &path, &value, Ok("/remote/work".into()));
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert_eq!(
             dialog.draft["targets"]["remote-path"]["workspace_prefix"],
@@ -1750,7 +1799,7 @@ mod tests {
         dashboard.begin_setup();
         choose(&mut dashboard, "interface");
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert_eq!(dialog.keys(), ["sessions_side", "spinner", "theme"]);
         assert_eq!(dialog.draft["theme"], "midnight");
@@ -1771,7 +1820,7 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Down));
         dashboard.handle_key(key(KeyCode::Tab));
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert!(dialog.editor.is_none());
         assert_eq!(dialog.path, ["interface"]);
@@ -1818,13 +1867,13 @@ mod tests {
             }));
         }
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert!(dialog.editor.is_some());
         assert_eq!(dialog.draft["theme"], "midnight");
         dashboard.handle_key(key(KeyCode::Esc));
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert!(dialog.editor.is_none(), "escape closes the popup");
         assert_eq!(dialog.draft["theme"], "midnight");
@@ -1859,7 +1908,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }));
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert!(dialog.editor.is_none(), "click commits the popup choice");
         assert_eq!(dialog.draft["theme"], "light");
@@ -1879,11 +1928,11 @@ mod tests {
             let rect = dashboard
                 .frame_surfaces()
                 .surface(mj_chat::selection::SurfaceId::ModalBody)
-                .expect("rendered Setup modal surface")
+                .expect("rendered Settings modal surface")
                 .rect;
             assert!(
                 rect.width < mj_chat::modal::modal_area(area).width,
-                "setup should be compact: {rect:?}"
+                "settings should be compact: {rect:?}"
             );
             assert_eq!(expected.get_or_insert(rect), &rect);
         };
@@ -1985,14 +2034,14 @@ mod tests {
             .draw(|frame| crate::render::render(frame, &mut dashboard))
             .unwrap();
         let root = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert_eq!(root.matches("Setup").count(), 1, "{root}");
+        assert_eq!(root.matches("Settings").count(), 1, "{root}");
 
         choose(&mut dashboard, "phone");
         terminal
             .draw(|frame| crate::render::render(frame, &mut dashboard))
             .unwrap();
         let nested = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(nested.contains("Setup › Web Access"), "{nested}");
+        assert!(nested.contains("Settings › Web Access"), "{nested}");
     }
 
     #[test]
@@ -2015,7 +2064,7 @@ mod tests {
 
         choose(&mut dashboard, "enabled");
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], false);
         assert!(dialog.draft["review"]["profile"].is_null());
@@ -2124,7 +2173,7 @@ mod tests {
         );
         let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         let DashboardAction::SaveSetup { updated, .. } = action else {
-            panic!("expected Setup save, got {action:?}")
+            panic!("expected Settings save, got {action:?}")
         };
         let saved: Config = serde_json::from_str(&updated).unwrap();
         assert!(saved.advanced.show_stopped_sessions);
@@ -2141,7 +2190,7 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Enter));
         choose(&mut dashboard, "kind");
         let Mode::Setup(dialog) = &mut dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         let editor = dialog.editor.as_mut().unwrap();
         let selected = editor
@@ -2158,7 +2207,7 @@ mod tests {
         ));
         assert_eq!(action, DashboardAction::None);
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert!(dialog.notice.as_ref().unwrap().contains("SSH host"));
         choose(&mut dashboard, "host");
@@ -2178,7 +2227,7 @@ mod tests {
         let generation = setup_dialog_mut(&mut dashboard.mode).unwrap().generation;
         dashboard.setup_saved(generation, Err("disk full".into()));
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert!(!dialog.saving);
         assert_eq!(
@@ -2190,7 +2239,7 @@ mod tests {
 
     fn action_labels(dashboard: &DashboardState) -> Vec<&'static str> {
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         dialog
             .actions()
@@ -2232,7 +2281,7 @@ mod tests {
         choose(&mut dashboard, "targets");
         activate(&mut dashboard, SetupControl::Add);
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup");
+            panic!("settings");
         };
         assert!(dialog.editor.as_ref().is_some_and(|editor| editor.adding));
         assert_eq!(
@@ -2253,14 +2302,14 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Backspace));
         let Mode::Confirm(_) = &dashboard.mode else {
             panic!(
-                "dirty setup must confirm before closing: {:?}",
+                "dirty settings must confirm before closing: {:?}",
                 dashboard.modal_open()
             );
         };
         // Esc keeps editing with the draft intact.
         dashboard.handle_key(key(KeyCode::Esc));
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup restored");
+            panic!("settings restored");
         };
         assert!(dialog.is_dirty());
         assert_eq!(dashboard.config, original);
@@ -2282,7 +2331,7 @@ mod tests {
                 .unwrap();
             let lines = buffer_lines(terminal.backend().buffer());
             let text = lines.join("\n");
-            assert!(text.contains("Setup › Machines and Runtimes"), "{text}");
+            assert!(text.contains("Settings › Machines and Runtimes"), "{text}");
             // One right-packed row: every button on the line that holds Save,
             // nothing after Save but the modal border.
             let row = lines
@@ -2328,7 +2377,7 @@ mod tests {
         assert!(matches!(dashboard.mode, Mode::Setup(_)));
         assert!(!dashboard.config.review.enabled);
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup remains open after leaving review")
+            panic!("settings remains open after leaving review")
         };
         assert!(dialog.draft["review"]["enabled"].as_bool().unwrap());
         dashboard.handle_key(key(KeyCode::Esc));
@@ -2336,7 +2385,7 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Right));
         dashboard.handle_key(key(KeyCode::Enter));
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("discard returns to setup")
+            panic!("discard returns to settings")
         };
         assert!(dialog.review_editor.is_none());
         assert!(!dialog.draft["review"]["enabled"].as_bool().unwrap_or(false));
@@ -2358,7 +2407,7 @@ mod tests {
         ));
         assert!(matches!(action, DashboardAction::SaveSetup { .. }));
         let Mode::Setup(dialog) = &dashboard.mode else {
-            panic!("setup save remains pending")
+            panic!("settings save remains pending")
         };
         let generation = dialog.generation;
         let updated: Config = serde_json::from_str(match &action {
@@ -2484,7 +2533,7 @@ mod tests {
                 .get_mut()
                 .focus(crate::review_settings::ReviewSettingsFocus::Back);
         } else {
-            panic!("setup remains open after discovery");
+            panic!("settings remains open after discovery");
         }
         dashboard.handle_key(key(KeyCode::Enter));
         choose(&mut dashboard, "profiles");

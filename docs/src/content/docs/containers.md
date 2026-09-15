@@ -74,10 +74,8 @@ multi-arch for both `linux/amd64` and `linux/arm64`, so the same image name
 works whether Mjolnir is running it through Podman, Docker, Apple's `container`
 runtime, or an arm64 SSH host.
 
-You don't need to do anything to get it: `mj setup`'s image prompt already
-defaults to this published image, and Podman, Docker, and Apple's `container`
-runtime pull an image automatically the first time it's needed. Accepting the
-default when you run `mj setup`, below, is enough.
+The standard local targets already use this published image. Podman, Docker,
+and Apple's container runtime pull it automatically when first needed.
 
 Building it yourself remains a supported alternative, for example to
 customize the image or to work offline:
@@ -89,24 +87,15 @@ podman build --pull=always \
   .
 ```
 
-## Run `mj setup`
+## Choose a runtime in the UI
 
-```console
-mj setup
-```
+Create a session and choose a local runtime in the target picker. Mjolnir checks
+its availability in the background and blocks unavailable choices. Start a
+stopped service, then press **F5** to recheck. No `mj setup` command is required.
 
-Setup reports the Codex, Claude Code, Kimi Code, Grok Build, and DeepSeek
-Harness homes it found, the
-GitHub origin of the current directory, and which local container runtimes
-are usable. If one or more are usable, it prompts you for:
-
-1. The container image, defaulting to `ghcr.io/brokkai/mjolnir/agent-dev:latest`
-   — press Enter to accept it, or enter `localhost/mjolnir/agent-dev:latest` here
-   if you built the image yourself above.
-
-It creates one ordinary target for every usable runtime (for example, `podman`
-and `docker`). Those targets appear independently in Mjolnir's normal target
-picker; setup does not choose one on your behalf.
+Use **F7 Settings → Machines and Runtimes** to override the container image,
+resource defaults, or environment, or to add an SSH or EC2 connection. The
+optional CLI setup command remains available.
 
 A plain image such as `ubuntu:24.04` still works if you enter it here: Mjolnir
 auto-installs Git, GitHub CLI, and Node the first time a session needs them.

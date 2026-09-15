@@ -237,7 +237,7 @@ fn harness_discovery_check_from(
                 "harness.discovery",
                 "Harness home discovery",
                 "No Codex, Claude Code, Kimi Code, or Grok Build home was found in the default or environment-overridden locations.",
-                "Install and sign in to a supported harness, then run `mj setup`.",
+                "Install and sign in to a supported harness, then open F7 Settings → Agent Profiles.",
             )
         };
     }
@@ -340,7 +340,7 @@ fn configuration_checks(path: &Path) -> (Option<Config>, Vec<DoctorCheck>) {
                 "config",
                 "Mjolnir configuration",
                 format!("{} does not exist", path.display()),
-                "Run `mj setup` to create config.toml.",
+                "Open Mjolnir and press F7 for Settings to add an agent profile.",
             )],
         );
     }
@@ -361,15 +361,12 @@ fn configuration_checks(path: &Path) -> (Option<Config>, Vec<DoctorCheck>) {
                     format!("{} is valid", path.display()),
                 ),
             }];
-            if config.enabled_profiles().next().is_none()
-                || config.bundles.is_empty()
-                || config.targets.is_empty()
-            {
+            if config.enabled_profiles().next().is_none() || config.bundles.is_empty() {
                 checks.push(DoctorCheck::fixable(
                     "config.session-prerequisites",
                     "Session configuration",
-                    "At least one enabled profile, bundle, and target are required.",
-                    "Run `mj setup`, or enable or add profiles, bundles, and targets in config.toml.",
+                    "An enabled profile and project bundle are required for configured bundle sessions. Local targets are supplied automatically.",
+                    "Open F7 Settings to add or enable agent profiles and projects.",
                 ));
             } else {
                 checks.push(DoctorCheck::ready(
@@ -406,7 +403,7 @@ fn harness_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> V
             "harness.profiles",
             "Harness profiles",
             "No harness profiles are configured.",
-            "Run `mj setup` to discover homes, or add a profile to config.toml.",
+            "Open F7 Settings → Agent Profiles to detect accounts or add a profile.",
         )];
     }
     config
@@ -2420,7 +2417,9 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Fixable);
         assert_eq!(
             check.remediation.as_deref(),
-            Some("Install and sign in to a supported harness, then run `mj setup`.")
+            Some(
+                "Install and sign in to a supported harness, then open F7 Settings → Agent Profiles."
+            )
         );
     }
 

@@ -3640,8 +3640,14 @@ mod tests {
             .next()
             .expect("the conversion installed a bundle for the checkout");
         expected_config.bundles.insert(bundle_id, bundle);
-        assert_eq!(controller.config, expected_config);
-        assert_eq!(mj_core::config::Config::load().unwrap(), expected_config);
+        assert_eq!(
+            controller.config,
+            expected_config.clone().with_local_targets()
+        );
+        assert_eq!(
+            mj_core::config::Config::load_from(&mj_core::config::config_path()).unwrap(),
+            expected_config
+        );
 
         let retained = controller.state.sessions.get(session_id).unwrap();
         assert_eq!(retained.state, SessionState::Stopped);

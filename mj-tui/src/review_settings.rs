@@ -883,7 +883,7 @@ pub(crate) fn render_review_settings(
     };
     let mut notes = vec![
         Line::styled(
-            "Changes stay in the Setup draft until you save Setup.",
+            "Changes stay in the Settings draft until you save Settings.",
             theme::muted(),
         ),
         Line::styled(
@@ -971,7 +971,7 @@ pub(crate) fn render_review_settings(
     let title = dismissible_modal_title(
         &mut form,
         popup,
-        "Setup › Code Review",
+        "Settings › Code Review",
         theme::title(true),
         !setup_saving && !dialog.saving && dialog.combo.open_id().is_none(),
     );
@@ -1083,7 +1083,7 @@ pub(crate) fn render_review_settings(
                 if dialog.saving {
                     "Saving…"
                 } else {
-                    "Save Setup"
+                    "Save Settings"
                 },
                 dialog.can_save(),
             ),

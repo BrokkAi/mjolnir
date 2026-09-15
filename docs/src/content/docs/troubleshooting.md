@@ -47,8 +47,8 @@ matter, but only `fixable` means the doctor loop has not converged.
 
 ## Configuration is missing, invalid, or read-only
 
-If `config.toml` does not exist, run `mj setup` or simply run `mj` and complete
-the first-run dialog. The dashboard needs at least one profile and one target.
+If `config.toml` does not exist, run `mj` and open **F7 Settings** to add or detect
+an agent profile. Local target choices are supplied automatically.
 Managed container and EC2 sessions also need a bundle; a bare session selects
 an existing Git project directory instead.
 

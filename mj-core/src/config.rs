@@ -235,6 +235,7 @@ impl SubagentConfig {
 
 pub const CONFIG_VERSION: u32 = 9;
 pub const PRODUCT_DIR: &str = "mjolnir";
+pub const DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1554,7 +1555,41 @@ impl Config {
     }
 
     pub fn load() -> Result<Self> {
-        Self::load_from(&config_path())
+        Self::load_from(&config_path()).map(Self::with_local_targets)
+    }
+
+    /// Supply standard local choices without requiring setup or writing a file.
+    /// These are candidates: callers must check availability before offering launch.
+    /// Explicit entries with the same name override the standard defaults.
+    pub fn with_local_targets(mut self) -> Self {
+        let container = ContainerTemplate {
+            image: DEFAULT_CONTAINER_IMAGE.into(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: BTreeMap::new(),
+            workspace_storage: Default::default(),
+        };
+        #[cfg(unix)]
+        self.targets
+            .entry("localhost".into())
+            .or_insert(TargetTemplate::LocalBare);
+        self.targets
+            .entry("podman".into())
+            .or_insert_with(|| TargetTemplate::LocalPodman {
+                container: container.clone(),
+            });
+        self.targets
+            .entry("docker".into())
+            .or_insert_with(|| TargetTemplate::LocalDocker {
+                container: container.clone(),
+            });
+        #[cfg(target_os = "macos")]
+        self.targets
+            .entry("apple-container".into())
+            .or_insert_with(|| TargetTemplate::AppleContainer { container });
+        self
     }
 
     /// Read the config from `path`, returning [`Config::default`] when the
@@ -1680,7 +1715,7 @@ impl Config {
     /// Load the latest config, apply one edit, validate it, and save it while
     /// holding the config lock for the complete transaction.
     ///
-    /// The returned config is the version that was written, and the second
+    /// The returned config includes runtime local defaults, and the second
     /// value is whatever the edit returned. Keeping the load and edit under
     /// the same lock is what lets independent processes update disjoint
     /// sections without one stale full-config save erasing the other.
@@ -1688,7 +1723,26 @@ impl Config {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
-        Self::update_to(&config_path(), edit)
+        Self::update_to(&config_path(), |config| {
+            // Edits see the same local candidates as reads, but unrelated
+            // changes must not write implicit defaults into the user's file.
+            let mut runtime = config.clone().with_local_targets();
+            let implicit: Vec<_> = runtime
+                .targets
+                .iter()
+                .filter(|(id, _)| !config.targets.contains_key(*id))
+                .map(|(id, target)| (id.clone(), target.clone()))
+                .collect();
+            let value = edit(&mut runtime)?;
+            for (id, target) in implicit {
+                if runtime.targets.get(&id) == Some(&target) {
+                    runtime.targets.remove(&id);
+                }
+            }
+            *config = runtime;
+            Ok(value)
+        })
+        .map(|(config, value)| (config.with_local_targets(), value))
     }
 
     /// As [`Self::update`], using an explicit config path.
@@ -1709,7 +1763,7 @@ impl Config {
     /// stale dashboard snapshot cannot overwrite profiles, bundles, targets,
     /// or phone settings changed concurrently by another client.
     pub fn save_review(review: ReviewConfig) -> Result<Self> {
-        Self::save_review_to(&config_path(), review)
+        Self::save_review_to(&config_path(), review).map(Self::with_local_targets)
     }
 
     /// As [`Self::save_review`], using an explicit path for tests and tools.
@@ -2188,6 +2242,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_targets_need_no_setup_and_preserve_explicit_overrides() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let raw = Config::load_from(&path).unwrap();
+        assert!(raw.targets.is_empty());
+        let available = raw.with_local_targets();
+        assert!(matches!(
+            available.targets["docker"],
+            TargetTemplate::LocalDocker { .. }
+        ));
+        assert!(matches!(
+            available.targets["podman"],
+            TargetTemplate::LocalPodman { .. }
+        ));
+        assert!(
+            !path.exists(),
+            "runtime defaults must not write configuration"
+        );
+        let mut custom = Config::default();
+        custom
+            .targets
+            .insert("docker".into(), TargetTemplate::LocalBare);
+        let resolved = custom.with_local_targets();
+        assert_eq!(resolved.targets["docker"], TargetTemplate::LocalBare);
+        assert_eq!(resolved.clone().with_local_targets(), resolved);
+    }
+
+    #[test]
     fn obsolete_startup_settings_are_ignored_and_removed_when_saving() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -2594,11 +2676,7 @@ mod tests {
         assert_eq!(claude.session_sandbox(), None);
         assert_eq!(claude.staged_setting(), None);
 
-        for kind in [
-            HarnessKind::Kimi,
-            HarnessKind::Grok,
-            HarnessKind::Deepseek,
-        ] {
+        for kind in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::Deepseek] {
             assert_eq!(
                 kind.execution_enforcement(ExecutionPolicy::ConfiguredApprovals),
                 None,

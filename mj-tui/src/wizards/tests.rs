@@ -20,21 +20,24 @@ use crate::{DashboardAction, DashboardState, Mode, nth_key};
 #[test]
 fn new_session_wizard_returns_all_three_choices() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    assert_eq!(dashboard.handle_key(alt_key('w')), DashboardAction::None);
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Down)),
+        ready_key(&mut dashboard, alt_key('w')),
         DashboardAction::None
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Down)),
         DashboardAction::None
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert_eq!(
@@ -63,10 +66,10 @@ fn new_session_wizard_returns_all_three_choices() {
 #[test]
 fn isolated_creation_review_checks_prerequisites_before_enabling_create() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(matches!(
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession { .. })
@@ -84,7 +87,7 @@ fn isolated_creation_review_checks_prerequisites_before_enabling_create() {
             .contains("Checking prerequisites…")
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
 
@@ -102,7 +105,7 @@ fn isolated_creation_review_checks_prerequisites_before_enabling_create() {
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .expect("draw ready review");
-    let action = dashboard.handle_key(key(KeyCode::Enter));
+    let action = ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(matches!(action, DashboardAction::CreateSession { .. }));
     assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
@@ -110,10 +113,10 @@ fn isolated_creation_review_checks_prerequisites_before_enabling_create() {
 #[test]
 fn isolated_creation_runs_one_check_at_a_time_and_retries_after_failure() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let original_check = dashboard
         .take_prerequisite_check()
         .expect("opening the review starts its prerequisite check");
@@ -127,7 +130,7 @@ fn isolated_creation_runs_one_check_at_a_time_and_retries_after_failure() {
         "a running check must not start a second resolver worker"
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
 
@@ -148,7 +151,7 @@ fn isolated_creation_runs_one_check_at_a_time_and_retries_after_failure() {
             .contains("Retry")
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert_eq!(
@@ -164,10 +167,10 @@ fn switching_workspaces_preserves_remote_preflight_in_its_original_workspace() {
     let workspace_b = "workspace-b".to_owned();
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
 
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let Some(DashboardAction::PreflightCreateSession { launch: launch_a }) =
         dashboard.take_prerequisite_check()
     else {
@@ -197,17 +200,17 @@ fn switching_workspaces_preserves_remote_preflight_in_its_original_workspace() {
             push_urls: vec!["https://github.com/example/hel.git".into()],
         }]),
     );
-    let completed = dashboard.handle_key(key(KeyCode::Enter));
+    let completed = ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(matches!(
         completed,
         DashboardAction::CreateSession { workspace_id, .. } if workspace_id == workspace_a
     ));
     assert_eq!(dashboard.active_workspace_id(), Some(workspace_b.as_str()));
 
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let Some(DashboardAction::PreflightCreateSession { launch: launch_b }) =
         dashboard.take_prerequisite_check()
     else {
@@ -223,7 +226,7 @@ fn switching_workspaces_preserves_remote_preflight_in_its_original_workspace() {
 #[test]
 fn new_session_wizard_renders_and_focuses_explicit_navigation_buttons() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
+    ready_key(&mut dashboard, alt_key('w'));
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -238,13 +241,13 @@ fn new_session_wizard_renders_and_focuses_explicit_navigation_buttons() {
     assert!(rendered.contains("Cancel"));
     assert!(rendered.contains("Next"));
 
-    dashboard.handle_key(key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new-session wizard");
     };
     assert_eq!(wizard.form.borrow().focused(), Some(WizardControl::Cancel));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
@@ -268,7 +271,7 @@ fn opening_session_wizards_prefetches_all_aws_sizes() {
     let mut dashboard = DashboardState::new(config.clone(), State::default(), BTreeMap::new());
 
     assert_eq!(
-        dashboard.handle_key(alt_key('w')),
+        ready_key(&mut dashboard, alt_key('w')),
         DashboardAction::ResolveAwsResourceOptions {
             target_template_ids: vec!["aws-a".into(), "aws-b".into()],
         }
@@ -350,18 +353,18 @@ fn new_session_can_request_a_repository_when_no_bundle_exists() {
     let mut config = config();
     config.bundles.clear();
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     for character in "example/new-repo".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
     }
     for _ in 0..4 {
-        dashboard.handle_key(key(KeyCode::Tab));
+        ready_key(&mut dashboard, key(KeyCode::Tab));
     }
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateBundle {
             sources: vec!["example/new-repo".into()],
         }
@@ -372,10 +375,10 @@ fn dashboard_at_new_bundle_editor() -> DashboardState {
     let mut config = config();
     config.bundles.clear();
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(matches!(
         dashboard.mode,
         Mode::New(NewWizard {
@@ -388,13 +391,13 @@ fn dashboard_at_new_bundle_editor() -> DashboardState {
 
 fn type_source(dashboard: &mut DashboardState, source: &str) {
     for character in source.chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
+        ready_key(dashboard, key(KeyCode::Char(character)));
     }
 }
 
 fn focus_create_bundle(dashboard: &mut DashboardState, tabs: usize) {
     for _ in 0..tabs {
-        dashboard.handle_key(key(KeyCode::Tab));
+        ready_key(dashboard, key(KeyCode::Tab));
     }
 }
 
@@ -403,12 +406,12 @@ fn new_bundle_editor_adds_multiple_repositories_and_removes_selected() {
     let mut dashboard = dashboard_at_new_bundle_editor();
     type_source(&mut dashboard, "owner/primary");
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     type_source(&mut dashboard, "owner/secondary");
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     let Mode::New(wizard) = &dashboard.mode else {
@@ -422,8 +425,8 @@ fn new_bundle_editor_adds_multiple_repositories_and_removes_selected() {
 
     // Back-tab from the source selects the list; Delete removes its selected
     // (newest) row and leaves the primary row intact.
-    dashboard.handle_key(key(KeyCode::BackTab));
-    dashboard.handle_key(key(KeyCode::Delete));
+    ready_key(&mut dashboard, key(KeyCode::BackTab));
+    ready_key(&mut dashboard, key(KeyCode::Delete));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new-bundle editor");
     };
@@ -439,7 +442,7 @@ fn new_bundle_editor_creates_from_current_source_without_add() {
     // draft is empty, so the form skips it during focus navigation.
     focus_create_bundle(&mut dashboard, 4);
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateBundle {
             sources: vec!["owner/only".into()]
         }
@@ -457,7 +460,7 @@ fn new_bundle_editor_preserves_draft_after_failure_for_retry() {
     type_source(&mut dashboard, "owner/only");
     focus_create_bundle(&mut dashboard, 4);
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateBundle {
             sources: vec!["owner/only".into()]
         }
@@ -473,7 +476,7 @@ fn new_bundle_editor_preserves_draft_after_failure_for_retry() {
         Some("Could not create bundle: repository not found")
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateBundle {
             sources: vec!["owner/only".into()]
         }
@@ -484,18 +487,18 @@ fn new_bundle_editor_preserves_draft_after_failure_for_retry() {
 fn new_bundle_editor_submits_all_sources_once_and_advances_after_success() {
     let mut dashboard = dashboard_at_new_bundle_editor();
     type_source(&mut dashboard, "owner/primary");
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     type_source(&mut dashboard, "owner/secondary");
     // Add, Remove, Cancel, Back, Create.
     focus_create_bundle(&mut dashboard, 5);
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateBundle {
             sources: vec!["owner/primary".into(), "owner/secondary".into()]
         }
     );
     for code in [KeyCode::Enter, KeyCode::Esc, KeyCode::Backspace] {
-        assert_eq!(dashboard.handle_key(key(code)), DashboardAction::None);
+        assert_eq!(ready_key(&mut dashboard, key(code)), DashboardAction::None);
     }
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("creation must remain pending");
@@ -591,14 +594,14 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     state.remember_project_directory("builder.example.com", std::path::Path::new("/srv/older"));
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
 
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new-session wizard")
     };
     assert_eq!(wizard.project_directory, "/srv/older");
-    dashboard.handle_key(key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Down));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new-session wizard")
     };
@@ -606,13 +609,13 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     while let Mode::New(wizard) = &dashboard.mode
         && !wizard.project_directory.is_empty()
     {
-        dashboard.handle_key(key(KeyCode::Backspace));
+        ready_key(&mut dashboard, key(KeyCode::Backspace));
     }
     for character in "/srv/project".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
     }
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::ValidateProjectDirectory {
             target_template_id: "machine".into(),
             directory: "/srv/project".into(),
@@ -636,7 +639,10 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
         .collect::<String>();
     assert!(rendered.contains("Error: remote project directory /srv/project does not exist"));
 
-    dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    ready_key(
+        &mut dashboard,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+    );
     dashboard.handle_paste("/srv/repaired");
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("invalid project validation should keep the wizard open");
@@ -644,7 +650,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(wizard.project_directory, "/srv/repaired");
     assert_eq!(wizard.project_directory_error, None);
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::ValidateProjectDirectory {
             target_template_id: "machine".into(),
             directory: "/srv/repaired".into(),
@@ -677,7 +683,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert!(!rendered.contains("Attached directories"));
 
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
             mjolnir_subagents: Some(true),
             create_managed_worktree: Some(true),
@@ -713,7 +719,7 @@ fn raw_localhost_warns_for_harnesses_without_guardian_approvals() {
         let mut state = State::default();
         state.remember_project_directory("local", std::path::Path::new("/home/me/project"));
         let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-        dashboard.handle_key(alt_key('w'));
+        ready_key(&mut dashboard, alt_key('w'));
         let mut terminal = Terminal::new(TestBackend::new(180, 32)).unwrap();
         terminal
             .draw(|frame| render(frame, &mut dashboard))
@@ -760,7 +766,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     state.remember_project_directory("local", std::path::Path::new("/home/me/project"));
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
 
-    dashboard.handle_key(alt_key('w'));
+    ready_key(&mut dashboard, alt_key('w'));
     let mut terminal = Terminal::new(TestBackend::new(140, 28)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -774,14 +780,14 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         .collect::<String>();
     assert!(rendered.contains("DANGER"));
 
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected local project directory step")
     };
     assert_eq!(wizard.project_directory, "/home/me/project");
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::ValidateProjectDirectory {
             target_template_id: "localhost".into(),
             directory: "/home/me/project".into(),
@@ -799,7 +805,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         )),
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
             mjolnir_subagents: None,
             create_managed_worktree: Some(true),
@@ -842,10 +848,10 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
     );
 
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
@@ -891,7 +897,7 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
     };
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
 
-    dashboard.handle_key(alt_key('w'));
+    ready_key(&mut dashboard, alt_key('w'));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new-session wizard");
     };
@@ -913,18 +919,18 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
 /// source already typed and the destination filled in.
 fn dashboard_at_mount_editor(source: &str) -> DashboardState {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Down));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::BackTab));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::BackTab));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     for character in source.chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
     }
     // Enter on the source fills the default destination and moves on.
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     dashboard
 }
 
@@ -946,20 +952,20 @@ fn wizard_mounts(dashboard: &DashboardState) -> &MountWizard {
 fn the_read_only_checkbox_rides_the_mount_into_the_created_session() {
     let mut dashboard = dashboard_at_mount_editor("/opt/cache");
 
-    dashboard.handle_key(key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     assert_eq!(
         new_wizard_focus(&dashboard),
         Some(WizardControl::MountReadOnly)
     );
-    dashboard.handle_key(key(KeyCode::Char(' ')));
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
     assert!(wizard_mounts(&dashboard).read_only);
 
     // Tab past Cancel and Back to the add button, then commit.
     for _ in 0..3 {
-        dashboard.handle_key(key(KeyCode::Tab));
+        ready_key(&mut dashboard, key(KeyCode::Tab));
     }
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::ValidateMountSource {
             target_template_id: "podman".into(),
             source: "/opt/cache".into(),
@@ -984,7 +990,7 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
     let mut dashboard = dashboard_at_mount_editor("/nfs/share");
 
     assert!(!wizard_mounts(&dashboard).read_only);
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     dashboard
         .apply_mount_source_validation("/nfs/share", Ok(Some("nfs (network filesystem)".into())));
     assert_eq!(
@@ -997,14 +1003,14 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
     );
 
     // Reopen the entry: the checkbox is checked, locked, and named.
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(wizard_mounts(&dashboard).read_only);
     assert_eq!(
         wizard_mounts(&dashboard).forced_read_only(),
         Some("nfs (network filesystem)")
     );
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected mount editor");
     };
@@ -1031,27 +1037,27 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
         .collect::<String>();
     assert!(rendered.contains("[✓] Read-only (locked)"));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Esc)),
+        ready_key(&mut dashboard, key(KeyCode::Esc)),
         DashboardAction::None
     );
     assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Review));
-    dashboard.handle_key(key(KeyCode::Esc));
+    ready_key(&mut dashboard, key(KeyCode::Esc));
     assert!(dashboard.dialog_confirmation_open());
-    dashboard.handle_key(key(KeyCode::Right));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Right));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
 fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Down));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::BackTab));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::BackTab));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -1079,12 +1085,12 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
     );
     assert!(rendered.contains("Add directory"));
     for character in "/opt/cache".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
     }
     dashboard.apply_mount_source_completions("/opt/ca", vec!["/opt/cache/".into()]);
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::ValidateMountSource {
             target_template_id: "podman".into(),
             source: "/opt/cache".into(),
@@ -1133,7 +1139,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
 #[test]
 fn failed_submit_preflight_reopens_the_invalid_mount() {
     let mut dashboard = dashboard_at_mount_editor("/opt/cache");
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
     assert!(matches!(
         dashboard.take_prerequisite_check(),
@@ -1167,14 +1173,14 @@ fn failed_submit_preflight_reopens_the_invalid_mount() {
 #[test]
 fn directory_completion_is_bounded_and_keyboard_selectable() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::BackTab));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::BackTab));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     for character in "/opt/".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
     }
     let candidates = (0..12)
         .map(|index| format!("/opt/directory-{index}/"))
@@ -1185,8 +1191,8 @@ fn directory_completion_is_bounded_and_keyboard_selectable() {
         panic!("expected directory editor");
     };
     assert_eq!(wizard.mounts.completion_candidates.len(), 5);
-    dashboard.handle_key(key(KeyCode::Down));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected directory editor");
     };
@@ -1210,18 +1216,18 @@ fn directory_completion_is_bounded_and_keyboard_selectable() {
 #[test]
 fn failed_source_validation_does_not_add_new_or_resume_mounts() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::BackTab));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::BackTab));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     for character in "/missing".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
     }
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::ValidateMountSource { .. }
     ));
     dashboard.apply_mount_source_validation(
@@ -1244,16 +1250,16 @@ fn failed_source_validation_does_not_add_new_or_resume_mounts() {
 
     let mut dashboard = dashboard_with_session(stopped_session());
     open_resume_wizard(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::BackTab));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::BackTab));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     for character in "/missing".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
     }
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::ValidateMountSource { .. }
     ));
     dashboard.apply_mount_source_validation(
@@ -1279,11 +1285,11 @@ fn resume_can_convert_to_another_harness() {
     dashboard.set_active_workspace(Some("workspace-origin".into()));
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     open_resume_wizard(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Up));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Up));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::PreflightResumeRepositories {
             launch: Box::new(DashboardAction::ResumeSession {
                 workspace_id: "workspace-origin".into(),
@@ -1312,10 +1318,10 @@ fn resume_keeps_the_workspace_where_its_dialog_was_opened() {
     open_resume_wizard(&mut dashboard);
     dashboard.set_active_workspace(Some(workspace_b));
 
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let DashboardAction::PreflightResumeRepositories { launch } =
-        dashboard.handle_key(key(KeyCode::Enter))
+        ready_key(&mut dashboard, key(KeyCode::Enter))
     else {
         panic!("resume should retain its captured workspace");
     };
@@ -1329,15 +1335,15 @@ fn resume_keeps_the_workspace_where_its_dialog_was_opened() {
 #[test]
 fn wizard_back_activation_preserves_the_draft_and_cancel_closes_it() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
 
     // Target step: Tab reaches Cancel, then Back. Activating Back returns to
     // Profile while keeping the wizard open with its draft state.
-    dashboard.handle_key(key(KeyCode::Tab));
-    dashboard.handle_key(key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     let Mode::New(wizard) = &dashboard.mode else {
@@ -1346,9 +1352,9 @@ fn wizard_back_activation_preserves_the_draft_and_cancel_closes_it() {
     assert_eq!(wizard.step, WizardStep::Profile);
 
     // The same explicit button path then closes the modal.
-    dashboard.handle_key(key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
@@ -1358,12 +1364,12 @@ fn wizard_back_activation_preserves_the_draft_and_cancel_closes_it() {
 fn resume_back_activation_preserves_the_draft_and_cancel_closes_it() {
     let mut dashboard = dashboard_with_session(stopped_session());
     open_resume_wizard(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
 
-    dashboard.handle_key(key(KeyCode::Tab));
-    dashboard.handle_key(key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     let Mode::Resume(wizard) = &dashboard.mode else {
@@ -1371,9 +1377,9 @@ fn resume_back_activation_preserves_the_draft_and_cancel_closes_it() {
     };
     assert_eq!(wizard.step, WizardStep::Profile);
 
-    dashboard.handle_key(key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
@@ -1414,15 +1420,15 @@ fn resume_refuses_a_target_the_session_cannot_use_and_says_why() {
         .insert("bare".into(), TargetTemplate::LocalBare);
 
     open_resume_wizard(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Up));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Up));
     assert_eq!(
         nth_key(&dashboard.config.targets, resume_wizard(&dashboard).target),
         "bare"
     );
 
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
 
@@ -1439,7 +1445,7 @@ fn resume_marks_an_unusable_target_row_as_disabled() {
         .targets
         .insert("bare".into(), TargetTemplate::LocalBare);
     open_resume_wizard(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
 
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
     terminal
@@ -1461,14 +1467,14 @@ fn open_move_review(dashboard: &mut DashboardState) -> u64 {
     dashboard.focus_sessions();
     assert_eq!(dashboard.begin_move(), DashboardAction::None);
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(dashboard, key(KeyCode::Enter)),
         DashboardAction::None,
         "profile selection advances to the move target"
     );
     let DashboardAction::MoveSession {
         preparation_request_id: Some(request_id),
         ..
-    } = dashboard.handle_key(key(KeyCode::Enter))
+    } = ready_key(dashboard, key(KeyCode::Enter))
     else {
         panic!("entering move review should request preparation");
     };
@@ -1591,7 +1597,7 @@ fn a_raw_conversion_resume_launches_only_after_it_is_confirmed() {
 
     // Cancel is focused first and returns to the wizard without launching.
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert_eq!(dashboard.mode, before);
@@ -1602,10 +1608,10 @@ fn a_raw_conversion_resume_launches_only_after_it_is_confirmed() {
         raw_conversion_preview(),
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Tab)),
+        ready_key(&mut dashboard, key(KeyCode::Tab)),
         DashboardAction::None
     );
-    let confirmed = dashboard.handle_key(key(KeyCode::Enter));
+    let confirmed = ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(
         confirmed,
         DashboardAction::ConfirmRawConversion {
@@ -1619,26 +1625,26 @@ fn a_raw_conversion_resume_launches_only_after_it_is_confirmed() {
 fn resume_dialog_attaches_an_additional_resource() {
     let mut dashboard = dashboard_with_session(stopped_session());
     open_resume_wizard(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::BackTab));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::BackTab));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     for character in "/opt/cache".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
     }
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::ValidateMountSource {
             target_template_id: "podman".into(),
             source: "/opt/cache".into(),
         }
     );
     dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
-    dashboard.handle_key(key(KeyCode::BackTab));
+    ready_key(&mut dashboard, key(KeyCode::BackTab));
 
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::ValidateSessionMounts {
             target_template_id: "podman".into(),
             mounts: vec![AdditionalMount {
@@ -1678,10 +1684,10 @@ fn resume_dialog_can_remove_a_previous_resource() {
     }];
     let mut dashboard = dashboard_with_session(session);
     open_resume_wizard(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Tab));
-    dashboard.handle_key(key(KeyCode::Delete));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Delete));
 
     let Mode::Resume(wizard) = &dashboard.mode else {
         panic!("expected resume resource dialog");
@@ -1699,10 +1705,10 @@ fn resume_review_edits_an_existing_attached_directory_in_place() {
     }];
     let mut dashboard = dashboard_with_session(session);
     open_resume_wizard(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Tab));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
 
     let Mode::Resume(wizard) = &dashboard.mode else {
         panic!("expected attached-directory editor");
@@ -1711,9 +1717,9 @@ fn resume_review_edits_an_existing_attached_directory_in_place() {
     assert_eq!(wizard.mounts.destination, "/mnt/cache");
     assert_eq!(wizard.mounts.editing_mount, Some(0));
 
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::ValidateMountSource {
             target_template_id: "podman".into(),
             source: "/opt/cache".into(),
@@ -1767,7 +1773,7 @@ fn resume_profile_step_marks_cross_harness_profiles_as_lossy() {
     assert!(rendered.contains("Resume · 1/3"));
     assert!(rendered.contains("Lossy: text only; tool calls + reasoning dropped."));
 
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .expect("draw resume target step");
@@ -1780,7 +1786,7 @@ fn resume_profile_step_marks_cross_harness_profiles_as_lossy() {
         .collect::<String>();
     assert!(rendered.contains("Resume · 2/3"));
 
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .expect("draw resume resource step");
@@ -1814,7 +1820,7 @@ fn move_wizard_labels_each_step_as_move() {
     assert!(rendered.contains("Move · 1/3"));
     assert!(!rendered.contains("Resume · 1/3"));
 
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .expect("draw move target step");
@@ -1828,7 +1834,7 @@ fn move_wizard_labels_each_step_as_move() {
     assert!(rendered.contains("Move · 2/3"));
     assert!(!rendered.contains("Resume · 2/3"));
 
-    let preparation_request = dashboard.handle_key(key(KeyCode::Enter));
+    let preparation_request = ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(matches!(
         preparation_request,
         DashboardAction::MoveSession {
@@ -1859,7 +1865,7 @@ fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     // A submission that arrives before preparation is ready must leave the
     // wizard open so the user can wait or reprepare the move.
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert!(dashboard.take_move_preparation("session-1").is_none());
@@ -1878,7 +1884,7 @@ fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     // Once ready, one click emits execution directly. The controller then
     // takes the retained preparation as the lifecycle handoff.
     assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::MoveSession {
             preparation_request_id: None,
             ..
@@ -1925,7 +1931,7 @@ fn failed_move_preparation_stays_visible_and_retry_requests_preparation() {
     assert!(rendered.contains("Move preparation failed: destination is unavailable"));
     assert!(rendered.contains("Retry"));
 
-    let retry_id = match dashboard.handle_key(key(KeyCode::Enter)) {
+    let retry_id = match ready_key(&mut dashboard, key(KeyCode::Enter)) {
         DashboardAction::MoveSession {
             preparation_request_id: Some(request_id),
             ..
@@ -1947,7 +1953,7 @@ fn stale_move_preparation_is_ignored_after_cancel_and_reopen() {
     let old_request_id = open_move_review(&mut dashboard);
     let preparation = move_preparation();
 
-    dashboard.handle_key(key(KeyCode::Esc));
+    ready_key(&mut dashboard, key(KeyCode::Esc));
     assert!(matches!(dashboard.mode, Mode::Dashboard));
     assert!(!dashboard.apply_move_preparation(old_request_id, preparation.clone()));
     assert!(!dashboard.set_move_preparation_failed(
@@ -1970,19 +1976,19 @@ fn stale_move_preparation_is_ignored_after_back_and_reentering_review() {
 
     // Submit is disabled while loading; Tab reaches Back from the form's
     // fallback focus. Returning to the target picker invalidates the request.
-    dashboard.handle_key(key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     assert_eq!(
         resume_wizard(&dashboard).form.borrow().focused(),
         Some(WizardControl::Back)
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert_eq!(resume_wizard(&dashboard).step, WizardStep::Target);
     assert!(!dashboard.apply_move_preparation(old_request_id, preparation));
 
-    let new_request_id = match dashboard.handle_key(key(KeyCode::Enter)) {
+    let new_request_id = match ready_key(&mut dashboard, key(KeyCode::Enter)) {
         DashboardAction::MoveSession {
             preparation_request_id: Some(request_id),
             ..
@@ -2010,7 +2016,7 @@ fn queue_choice_keeps_a_ready_move_confirmation_when_only_prepared_queue_exists(
     // There is no queue in session_details; the prepared queue still owns the
     // review checkbox and changing its disposition must preserve readiness.
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('q'))),
+        ready_key(&mut dashboard, key(KeyCode::Char('q'))),
         DashboardAction::None
     );
     assert!(!resume_wizard(&dashboard).discard_queue);
@@ -2020,7 +2026,7 @@ fn queue_choice_keeps_a_ready_move_confirmation_when_only_prepared_queue_exists(
     );
 
     assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::MoveSession {
             preparation_request_id: None,
             queue: Some(mj_core::state::ResumeQueueDisposition::Start),
@@ -2043,8 +2049,8 @@ fn removing_a_move_attachment_invalidates_and_reprepares_the_review() {
 
     // Submit wraps to the attachment list; removing the selected directory
     // changes the move selection and immediately starts a fresh preparation.
-    dashboard.handle_key(key(KeyCode::Tab));
-    let new_request_id = match dashboard.handle_key(key(KeyCode::Delete)) {
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    let new_request_id = match ready_key(&mut dashboard, key(KeyCode::Delete)) {
         DashboardAction::MoveSession {
             preparation_request_id: Some(request_id),
             ..
@@ -2080,8 +2086,8 @@ fn raw_resume_review_names_the_exact_reused_project_directory() {
         BTreeMap::new(),
     );
     open_resume_wizard(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
 
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
     terminal
@@ -2138,7 +2144,7 @@ fn resume_target_step_minus_halves_container_size_through_the_key_path() {
     assert_eq!(wizard.step, WizardStep::Profile);
 
     // 1/3 -> 2/3 target step; podman is the session's target.
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::Resume(wizard) = &dashboard.mode else {
         panic!("expected resume wizard on target step");
     };
@@ -2156,7 +2162,7 @@ fn resume_target_step_minus_halves_container_size_through_the_key_path() {
         })
     );
 
-    dashboard.handle_key(key(KeyCode::Char('-')));
+    ready_key(&mut dashboard, key(KeyCode::Char('-')));
     let Mode::Resume(wizard) = &dashboard.mode else {
         panic!("expected resume wizard after '-'");
     };
@@ -2172,13 +2178,13 @@ fn resume_target_step_minus_halves_container_size_through_the_key_path() {
 #[test]
 fn new_target_step_minus_halves_container_size_when_focus_is_off_content() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
+    ready_key(&mut dashboard, alt_key('w'));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new wizard, got {:?}", dashboard.mode);
     };
     assert_eq!(wizard.step, WizardStep::Profile);
 
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new wizard on target step");
     };
@@ -2192,7 +2198,7 @@ fn new_target_step_minus_halves_container_size_when_focus_is_off_content() {
         })
     );
 
-    dashboard.handle_key(key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new wizard after tab");
     };
@@ -2201,7 +2207,7 @@ fn new_target_step_minus_halves_container_size_when_focus_is_off_content() {
         Some(WizardControl::TargetList)
     );
 
-    dashboard.handle_key(key(KeyCode::Char('-')));
+    ready_key(&mut dashboard, key(KeyCode::Char('-')));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new wizard after '-'");
     };
@@ -2247,8 +2253,8 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
         0,
     );
 
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new wizard on target step");
     };
@@ -2281,7 +2287,7 @@ fn resume_keeps_the_sessions_size_instead_of_the_hosts_latest_size() {
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
 
     dashboard.begin_resume_for("session-1");
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::Resume(wizard) = &dashboard.mode else {
         panic!("expected resume wizard on target step");
     };
@@ -2498,10 +2504,10 @@ fn ec2_size_controls_use_exact_doubling_steps() {
 #[test]
 fn cancelling_a_wizard_invalidates_checks_before_reopening_the_same_form() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
+    ready_key(&mut dashboard, alt_key('w'));
     let pending = dashboard.session_preflight_generation();
-    dashboard.handle_key(key(KeyCode::Esc));
-    dashboard.handle_key(alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Esc));
+    ready_key(&mut dashboard, alt_key('w'));
     assert!(matches!(dashboard.mode, Mode::New(_)));
     assert_ne!(pending, dashboard.session_preflight_generation());
 }
@@ -2514,12 +2520,12 @@ fn target_next_focuses_the_project_field_and_footer_keys_do_not_edit_it() {
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    dashboard.handle_key(alt_key('w'));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, alt_key('w'));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     for _ in 0..3 {
-        dashboard.handle_key(key(KeyCode::Tab));
+        ready_key(&mut dashboard, key(KeyCode::Tab));
     }
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -2530,9 +2536,9 @@ fn target_next_focuses_the_project_field_and_footer_keys_do_not_edit_it() {
         panic!("project step");
     };
     assert_eq!(wizard.project_directory, "/work/project");
-    dashboard.handle_key(key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
     assert!(!dashboard.text_input_focused());
-    dashboard.handle_key(key(KeyCode::Char('x')));
+    ready_key(&mut dashboard, key(KeyCode::Char('x')));
     dashboard.handle_paste("ignored");
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("project step");
@@ -2555,7 +2561,7 @@ fn resume_target_next_mouse_release_advances_to_review() {
     state.sessions.insert(session.id.clone(), session);
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
     open_resume_wizard(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
     dashboard.reset_component_geometry();
     terminal
@@ -2632,20 +2638,20 @@ fn container_destination_rejects_home_shorthand() {
 fn revisiting_or_reselecting_a_target_preserves_edited_resources() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.begin_new();
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Char('-')));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Char('-')));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("new wizard")
     };
     let edited = wizard.resource_allocation.clone();
-    dashboard.handle_key(key(KeyCode::Home));
+    ready_key(&mut dashboard, key(KeyCode::Home));
     let Mode::New(wizard) = &mut dashboard.mode else {
         panic!("new wizard")
     };
     assert_eq!(wizard.resource_allocation, edited);
     wizard.form.get_mut().focus(WizardControl::Back);
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("new wizard")
     };
@@ -2691,7 +2697,7 @@ fn raw_review_waits_for_worktree_inspection_and_preserves_explicit_selection() {
         .form
         .get_mut()
         .focus(WizardControl::CreateManagedWorktree);
-    dashboard.handle_key(key(KeyCode::Char(' ')));
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("new wizard")
     };
@@ -2714,7 +2720,7 @@ fn raw_review_waits_for_worktree_inspection_and_preserves_explicit_selection() {
     assert!(!wizard.create_managed_worktree);
     wizard.form.get_mut().focus(WizardControl::Submit);
     assert!(
-        matches!(dashboard.handle_key(key(KeyCode::Enter)), DashboardAction::CreateSession {
+        matches!(ready_key(&mut dashboard, key(KeyCode::Enter)), DashboardAction::CreateSession {
         create_managed_worktree: Some(false), project_directory: Some(directory), ..
     } if directory == std::path::Path::new("/work/main"))
     );
@@ -2789,13 +2795,13 @@ fn new_session_wizard_sends_subagent_choice() {
                 panic!("new wizard")
             };
             wizard.form.get_mut().focus(WizardControl::MjolnirSubagents);
-            dashboard.handle_key(key(KeyCode::Char(' ')));
+            ready_key(&mut dashboard, key(KeyCode::Char(' ')));
         }
         let Mode::New(wizard) = &mut dashboard.mode else {
             panic!("new wizard")
         };
         wizard.form.get_mut().focus(WizardControl::Submit);
-        dashboard.handle_key(key(KeyCode::Enter))
+        ready_key(&mut dashboard, key(KeyCode::Enter))
     };
 
     assert!(matches!(
@@ -2903,16 +2909,122 @@ fn worktree_inspection_ignores_old_directories_and_allows_linked_checkout_opt_in
         .form
         .get_mut()
         .focus(WizardControl::CreateManagedWorktree);
-    dashboard.handle_key(key(KeyCode::Char(' ')));
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
     let Mode::New(wizard) = &mut dashboard.mode else {
         panic!("new wizard")
     };
     wizard.form.get_mut().focus(WizardControl::Submit);
     assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
             create_managed_worktree: Some(true),
             ..
         }
     ));
+}
+
+/// Complete availability probes as a healthy runtime would for wizard tests
+/// concerned with other behavior. Readiness-specific tests use handle_key directly.
+fn ready_key(dashboard: &mut DashboardState, event: crossterm::event::KeyEvent) -> DashboardAction {
+    complete_ready_targets(dashboard);
+    let action = dashboard.handle_key(event);
+    complete_ready_targets(dashboard);
+    action
+}
+
+fn complete_ready_targets(dashboard: &mut DashboardState) {
+    let on_target = matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Target)
+        || matches!(&dashboard.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Target);
+    if on_target
+        && let Some(DashboardAction::CheckTargetReadiness {
+            generation,
+            target_ids,
+        }) = dashboard.take_prerequisite_check()
+    {
+        for id in target_ids {
+            dashboard.apply_target_readiness(generation, id, Ok(()));
+        }
+    }
+}
+
+#[test]
+fn unavailable_target_blocks_launch_and_refresh_allows_recovery() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("availability check must start");
+    };
+    assert_eq!(target_ids, ["podman"]);
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Target));
+    dashboard.apply_target_readiness(
+        generation,
+        "podman".into(),
+        Err("service is stopped".into()),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(180, 32)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(text.contains("unavailable: service is stopped"), "{text}");
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Target));
+    dashboard.handle_key(key(KeyCode::F(5)));
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation: fresh, ..
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("refresh must recheck");
+    };
+    dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
+    assert!(dashboard.target_readiness_rejection("podman").is_some());
+    dashboard.apply_target_readiness(fresh, "podman".into(), Ok(()));
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Bundle));
+}
+
+#[test]
+fn readiness_checks_are_independent_and_ignore_changed_configuration() {
+    let mut config = config();
+    config.targets.insert(
+        "remote".into(),
+        TargetTemplate::SshBare {
+            ssh: SshConnection {
+                host: "example.test".into(),
+                user: None,
+                identity_file: None,
+                extra_args: vec![],
+            },
+            permissions: mj_core::config::PermissionMode::Guardian,
+            workspace_prefix: PathBuf::from("workspaces"),
+        },
+    );
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("check");
+    };
+    assert_eq!(target_ids.len(), 2);
+    dashboard.apply_target_readiness(generation, "remote".into(), Ok(()));
+    assert!(dashboard.target_readiness_rejection("remote").is_none());
+    assert!(dashboard.target_readiness_rejection("podman").is_some());
+    if let TargetTemplate::SshBare { ssh, .. } = dashboard.config.targets.get_mut("remote").unwrap()
+    {
+        ssh.host = "changed.test".into();
+    }
+    dashboard.apply_target_readiness(generation, "remote".into(), Ok(()));
+    assert!(dashboard.target_readiness_rejection("remote").is_some());
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(!matches!(dashboard.mode, Mode::New(_)));
 }

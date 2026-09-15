@@ -36,6 +36,8 @@ pub enum CommandId {
     EditProfile,
     Refresh,
     OpenConfig,
+    ManageProfiles,
+    ManageTargets,
     CycleFocus,
     CycleFocusedPaneSize,
     TogglePanePreset,
@@ -78,7 +80,7 @@ impl Scope {
             Self::Session => "Selected session",
             Self::Targets => "Targets pane",
             Self::Quota => "Quota pane",
-            Self::Setup => "First-run setup",
+            Self::Setup => "First-run settings",
         }
     }
 }
@@ -537,7 +539,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: CommandId::EditProfile,
-        label: "Edit profile",
+        label: "Rename profile",
         description: "Rename the selected profile's configuration id.",
         scope: Scope::Quota,
         keys: &[
@@ -550,12 +552,34 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: profiles_present,
     },
     CommandSpec {
+        id: CommandId::ManageProfiles,
+        label: "Manage agent profiles",
+        description: "Add or edit agent accounts, harnesses, and environment settings.",
+        scope: Scope::Settings,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::ManageTargets,
+        label: "Manage machines and runtimes",
+        description: "Add SSH or EC2 connections and edit runtime settings.",
+        scope: Scope::Settings,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::OpenConfig,
-        label: "Open setup",
-        description: "Edit all configuration in the Setup modal.",
+        label: "Open settings",
+        description: "Edit all configuration in the Settings modal.",
         scope: Scope::Settings,
         keys: &[KeyHint::plain(KeyCode::F(7), "F7")],
-        footer: footer_word!("setup"),
+        footer: footer_word!("settings"),
         footer_group: FooterGroup::Function,
         footer_rank: 4,
         available: always_ready,
@@ -979,6 +1003,14 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::Refresh => DashboardAction::RefreshAll,
+            CommandId::ManageProfiles => {
+                self.begin_settings_section("profiles", None);
+                DashboardAction::None
+            }
+            CommandId::ManageTargets => {
+                self.begin_settings_section("targets", None);
+                DashboardAction::None
+            }
             CommandId::OpenConfig => {
                 self.begin_setup();
                 DashboardAction::None
@@ -1277,6 +1309,15 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::None
         );
+        if let Some(DashboardAction::CheckTargetReadiness {
+            generation,
+            target_ids,
+        }) = dashboard.take_prerequisite_check()
+        {
+            for id in target_ids {
+                dashboard.apply_target_readiness(generation, id, Ok(()));
+            }
+        }
         let preparation_request_id = match dashboard.handle_key(key(KeyCode::Enter)) {
             DashboardAction::MoveSession {
                 preparation_request_id: Some(request_id),

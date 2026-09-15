@@ -104,6 +104,11 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         result: std::result::Result<Controller, String>,
     },
+    TargetReadiness {
+        generation: u64,
+        target_id: String,
+        result: std::result::Result<(), String>,
+    },
     TargetTest {
         target_id: String,
         result: std::result::Result<(), String>,
@@ -837,6 +842,16 @@ fn save_setup_at(
     updated_config.validate()?;
     let updated = serde_json::to_value(updated_config)?;
     Config::update_to(path, |config| {
+        // The editor includes implicit local defaults. Treat those same defaults
+        // as the merge base when they have not been written to disk yet.
+        let defaults = Config::default().with_local_targets();
+        for (id, target) in defaults.targets {
+            if !config.targets.contains_key(&id)
+                && original["targets"][&id] == serde_json::to_value(&target)?
+            {
+                config.targets.insert(id, target);
+            }
+        }
         let current = serde_json::to_value(&*config)?;
         let merged = merge_setup_edit(Some(&original), Some(&updated), Some(&current), "Setup")?
             .context("setup cannot remove the configuration")?;
@@ -1892,6 +1907,14 @@ impl DashboardContext {
                     short_id(&session_id)
                 )),
             },
+            DashboardIoUpdate::TargetReadiness {
+                generation,
+                target_id,
+                result,
+            } => {
+                self.dashboard
+                    .apply_target_readiness(generation, target_id, result);
+            }
             DashboardIoUpdate::TargetTest { target_id, result } => {
                 self.target_test_cancel = None;
                 self.dashboard.apply_target_test(target_id, result);
@@ -1944,6 +1967,7 @@ impl DashboardContext {
                 self.dashboard.setup_discovered(generation, result)
             }
             DashboardIoUpdate::SetupSaved { generation, result } => {
+                let result = result.map(Config::with_local_targets);
                 if let Ok(config) = &result {
                     self.controller.config = config.clone();
                     self.refresh_chat_context();
@@ -2513,6 +2537,31 @@ mod tests {
                 .unwrap()
                 .advanced
                 .show_stopped_sessions
+        );
+    }
+
+    #[test]
+    fn settings_can_override_an_implicit_local_target_without_a_setup_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let original = Config::default().with_local_targets();
+        let mut edited = original.clone();
+        if let mj_core::config::TargetTemplate::LocalDocker { container } =
+            edited.targets.get_mut("docker").unwrap()
+        {
+            container.image = "example.test/custom:latest".into();
+        }
+        let saved = save_setup_at(
+            &path,
+            &serde_json::to_string(&original).unwrap(),
+            &serde_json::to_string(&edited).unwrap(),
+            &State::default(),
+        )
+        .unwrap();
+        assert_eq!(saved.targets["docker"], edited.targets["docker"]);
+        assert_eq!(
+            Config::load_from(&path).unwrap().targets["docker"],
+            edited.targets["docker"]
         );
     }
 

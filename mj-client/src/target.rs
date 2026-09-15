@@ -8,7 +8,7 @@ use mj_core::state::{ManagedWorktreeTarget, SessionRecord};
 // .github/workflows/publish-agent-dev-image.yml. It already carries Node, Rust,
 // Git, gh, and the pinned ACP bridges, so a first session does not have to
 // install them.
-pub const DEFAULT_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
+pub use mj_core::config::DEFAULT_CONTAINER_IMAGE as DEFAULT_IMAGE;
 
 /// Convert a configured bare target to the durable target identity stored on
 /// managed worktrees.

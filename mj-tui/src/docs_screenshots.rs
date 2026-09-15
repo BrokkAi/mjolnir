@@ -72,8 +72,8 @@ fn generate_documentation_screenshots() {
     setup.handle_key(key(KeyCode::F(7)));
     capture(
         &output.join("setup.svg"),
-        "Mjolnir Setup",
-        "The compact Setup modal with Interface, Advanced, Agent Profiles, Machines and Runtimes, Projects, Code Review, and Web Access settings.",
+        "Mjolnir Settings",
+        "The compact Settings modal with Interface, Advanced, Agent Profiles, Machines and Runtimes, Projects, Code Review, and Web Access settings.",
         &mut setup,
     );
 

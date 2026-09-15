@@ -127,13 +127,11 @@ From your project directory, run:
 mj
 ```
 
-On first launch, Mjolnir creates a workspace from the current directory. If the
-opened workspace has no live session, it starts one automatically using your
-configured Codex account and prefers usable Podman, then Docker, then a local
-directory target. This happens once while the dashboard opens; switching
-workspace tabs only filters the list. Press **Create** for the full wizard, or
-use `mj setup` to configure other harness accounts and targets. Run `mj doctor`
-to check prerequisites.
+On first launch, Mjolnir creates a workspace from the current directory.
+Press **Create** to choose a profile, target, and project. Local target choices
+are supplied automatically and checked before selection. Open **F7 Settings**
+to manage harness accounts, SSH or EC2 connections, and runtime options; no
+setup command is required. Run `mj doctor` for additional prerequisite checks.
 
 Follow the [quickstart](https://mjolnir.brokk.ai/quickstart/) for your first
 session. The [installation guide](https://mjolnir.brokk.ai/install/) covers npm,

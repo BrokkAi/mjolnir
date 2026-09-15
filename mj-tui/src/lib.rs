@@ -253,6 +253,10 @@ pub enum DashboardAction {
         target_id: String,
     },
     CancelTargetTest,
+    CheckTargetReadiness {
+        generation: u64,
+        target_ids: Vec<String>,
+    },
     LoadWebAccess,
     RecoverWebViewer(WebViewerRecovery),
     InspectWebListener,
@@ -547,6 +551,8 @@ pub struct DashboardState {
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: BTreeMap<String, MoveOperation>,
     pub(crate) capacity_details: BTreeMap<String, CapacityDetail>,
+    pub(crate) target_readiness: BTreeMap<String, wizards::TargetReadiness>,
+    pub(crate) target_readiness_generation: u64,
     /// Selection anchor for the Sessions pane, by id rather than position: the
     /// pane shows different row sets at different explicit sizes, so a
     /// position could silently point at a different session after resizing.
@@ -716,6 +722,8 @@ impl DashboardState {
             transition_composers: BTreeMap::new(),
             move_operations: BTreeMap::new(),
             capacity_details: BTreeMap::new(),
+            target_readiness: BTreeMap::new(),
+            target_readiness_generation: 0,
             selected_session_id: None,
             sessions_scroll: Cell::new(0),
             targets_scroll: Cell::new(0),

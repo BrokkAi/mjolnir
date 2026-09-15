@@ -238,6 +238,30 @@ pub(crate) async fn apply_dashboard_action(
             context.web_request_cancel = None;
             context.web_request_generation = context.web_request_generation.wrapping_add(1);
         }
+        DashboardAction::CheckTargetReadiness {
+            generation,
+            target_ids,
+        } => {
+            for target_id in target_ids {
+                let config = context.controller.config.clone();
+                let reported_id = target_id.clone();
+                spawn_cancellable_io(
+                    context.critical_operations.clone(),
+                    format!("checking target {target_id}"),
+                    context.dashboard_io_tx.clone(),
+                    move |cancelled| {
+                        let executor = CancellableProcessExecutor::new(cancelled)
+                            .with_deadline(std::time::Duration::from_secs(15));
+                        config_only_controller(config).test_target(&target_id, &executor)
+                    },
+                    move |result| DashboardIoUpdate::TargetReadiness {
+                        generation,
+                        target_id: reported_id,
+                        result,
+                    },
+                );
+            }
+        }
         DashboardAction::TestTarget { target_id } => {
             let config = context.controller.config.clone();
             let reported_id = target_id.clone();

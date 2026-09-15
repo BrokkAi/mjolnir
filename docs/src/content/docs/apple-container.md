@@ -26,8 +26,8 @@ an [EC2 target](/aws/) instead.
 
 ## Configure a target
 
-`mj setup` detects a usable Apple container installation and writes this target
-when you select it:
+Mjolnir supplies this local target automatically on macOS and checks the runtime
+before allowing selection. Customize it in **F7 Settings → Machines and Runtimes**:
 
 ```toml
 [targets.apple-container]

@@ -77,6 +77,13 @@ pub(crate) enum WizardControl {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct TargetReadiness {
+    template: TargetTemplate,
+    generation: u64,
+    result: Option<Result<(), String>>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct NewWizard {
     pub(crate) worktree_options: Option<(String, String, mj_core::state::ManagedWorktreeOptions)>,
     pub(crate) create_managed_worktree: bool,
@@ -1207,7 +1214,7 @@ pub(crate) fn render_new_wizard(
         WizardStep::ProjectDirectory => unreachable!("project directory input was rendered above"),
     };
     let help = if wizard.step == WizardStep::Target {
-        "+ double · - halve · c +8 CPU · m +50% memory · r reset"
+        "+ double · - halve · c +8 CPU · m +50% memory · r reset · F5 recheck"
     } else {
         "↑/↓ select · Tab moves focus · Enter activates"
     };
@@ -1215,7 +1222,25 @@ pub(crate) fn render_new_wizard(
         frame,
         area,
         title,
-        choices.into_iter().map(PickerChoice::from).collect(),
+        choices
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let reason = (wizard.step == WizardStep::Target)
+                    .then(|| {
+                        dashboard
+                            .target_readiness_rejection(&nth_key(&dashboard.config.targets, index))
+                    })
+                    .flatten();
+                match reason {
+                    Some(reason) => PickerChoice {
+                        text: format!("{text} · {reason}"),
+                        disabled: true,
+                    },
+                    None => PickerChoice::from(text),
+                }
+            })
+            .collect(),
         &[help],
         PickerNavigation {
             has_back: wizard.step != WizardStep::Profile,
@@ -1227,14 +1252,17 @@ pub(crate) fn render_new_wizard(
                 _ => unreachable!("picker step has a list control"),
             },
             next_enabled: wizard.step != WizardStep::Target
-                || wizard.resource_allocation.is_some()
-                || !matches!(
-                    dashboard
-                        .config
-                        .targets
-                        .get(&nth_key(&dashboard.config.targets, wizard.target)),
-                    Some(TargetTemplate::AwsEc2 { .. })
-                ),
+                || (dashboard
+                    .target_readiness_rejection(&nth_key(&dashboard.config.targets, wizard.target))
+                    .is_none()
+                    && (wizard.resource_allocation.is_some()
+                        || !matches!(
+                            dashboard
+                                .config
+                                .targets
+                                .get(&nth_key(&dashboard.config.targets, wizard.target)),
+                            Some(TargetTemplate::AwsEc2 { .. })
+                        ))),
         },
         &mut form,
         surfaces,
@@ -2108,7 +2136,7 @@ pub(crate) fn render_resume_wizard(
                 })
                 .collect(),
             wizard.target,
-            &["+ double · - halve · c +8 CPU · m +50% memory · r reset"][..],
+            &["+ double · - halve · c +8 CPU · m +50% memory · r reset · F5 recheck"][..],
         ),
         WizardStep::Bundle => unreachable!("resume does not select a bundle"),
         WizardStep::Review => unreachable!("review was rendered above"),

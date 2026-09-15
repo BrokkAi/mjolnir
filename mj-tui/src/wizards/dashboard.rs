@@ -34,10 +34,11 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
         }
         WizardStep::Target => {
             let target_id = nth_key(&dashboard.config.targets, wizard.target);
-            let enabled = !matches!(
-                dashboard.config.targets.get(&target_id),
-                Some(TargetTemplate::AwsEc2 { .. })
-            ) || wizard.resource_allocation.is_some();
+            let enabled = dashboard.target_readiness_rejection(&target_id).is_none()
+                && (!matches!(
+                    dashboard.config.targets.get(&target_id),
+                    Some(TargetTemplate::AwsEc2 { .. })
+                ) || wizard.resource_allocation.is_some());
             form.declare_with_enabled(
                 WizardControl::TargetList,
                 ControlKind::ChoiceList {
@@ -45,6 +46,15 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
                     selected: wizard.target,
                 },
                 true,
+            );
+            form.set_row_enabled(
+                WizardControl::TargetList,
+                dashboard
+                    .config
+                    .targets
+                    .keys()
+                    .map(|id| dashboard.target_readiness_rejection(id).is_none())
+                    .collect(),
             );
             declare_wizard_buttons(&mut form, true, enabled);
         }
@@ -180,6 +190,19 @@ fn declare_resume_controls(dashboard: &DashboardState, wizard: &ResumeWizard) {
                     selected: wizard.target,
                 },
                 true,
+            );
+            form.set_row_enabled(
+                WizardControl::TargetList,
+                dashboard
+                    .config
+                    .targets
+                    .keys()
+                    .map(|id| {
+                        dashboard
+                            .resume_target_rejection(&wizard.session_id, id)
+                            .is_none()
+                    })
+                    .collect(),
             );
             declare_wizard_buttons(&mut form, true, enabled);
         }
@@ -1051,6 +1074,12 @@ impl DashboardState {
                 wizard.form.get_mut().focus(WizardControl::Submit);
             }
         }
+        if wizard.step == WizardStep::Target && key.code == KeyCode::F(5) {
+            self.target_readiness.clear();
+            self.mark_render_changed();
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
         if wizard.step == WizardStep::Target
             && matches!(key.code, KeyCode::Char('+' | '-' | 'r' | 'c' | 'm'))
         {
@@ -1098,6 +1127,11 @@ impl DashboardState {
             }
             WizardStep::Target => {
                 let target_template_id = nth_key(&self.config.targets, wizard.target);
+                if let Some(reason) = self.target_readiness_rejection(&target_template_id) {
+                    self.notices.set(reason);
+                    self.mode = Mode::New(wizard);
+                    return DashboardAction::None;
+                }
                 let target = self
                     .config
                     .targets
@@ -1335,6 +1369,42 @@ impl DashboardState {
     /// review never waits on a check that nothing started, whichever path
     /// opened it.
     pub fn take_prerequisite_check(&mut self) -> Option<DashboardAction> {
+        if matches!(&self.mode, Mode::New(wizard) if wizard.step == WizardStep::Target)
+            || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Target)
+        {
+            let target_ids: Vec<_> = self
+                .config
+                .targets
+                .iter()
+                .filter(|(id, template)| {
+                    !matches!(template, TargetTemplate::LocalBare)
+                        && self
+                            .target_readiness
+                            .get(*id)
+                            .is_none_or(|check| &check.template != *template)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            if !target_ids.is_empty() {
+                self.target_readiness_generation = self.target_readiness_generation.wrapping_add(1);
+                let generation = self.target_readiness_generation;
+                for id in &target_ids {
+                    self.target_readiness.insert(
+                        id.clone(),
+                        TargetReadiness {
+                            template: self.config.targets[id].clone(),
+                            generation,
+                            result: None,
+                        },
+                    );
+                }
+                self.mark_render_changed();
+                return Some(DashboardAction::CheckTargetReadiness {
+                    generation,
+                    target_ids,
+                });
+            }
+        }
         let Mode::New(wizard) = &self.mode else {
             return None;
         };
@@ -1531,12 +1601,52 @@ impl DashboardState {
         )
     }
 
+    pub(super) fn target_readiness_rejection(&self, target_id: &str) -> Option<String> {
+        let template = self.config.targets.get(target_id)?;
+        // A raw local target runs in this controller process's host; there is
+        // no external service or connection whose readiness needs a probe.
+        if matches!(template, TargetTemplate::LocalBare) {
+            return None;
+        }
+        match self
+            .target_readiness
+            .get(target_id)
+            .filter(|check| &check.template == template)
+            .and_then(|check| check.result.as_ref())
+        {
+            Some(Ok(())) => None,
+            Some(Err(error)) => Some(format!("unavailable: {error}")),
+            None => Some("checking availability…".into()),
+        }
+    }
+
+    pub fn apply_target_readiness(
+        &mut self,
+        generation: u64,
+        target_id: String,
+        result: Result<(), String>,
+    ) {
+        let Some(check) = self.target_readiness.get_mut(&target_id) else {
+            return;
+        };
+        if check.generation != generation
+            || self.config.targets.get(&target_id) != Some(&check.template)
+        {
+            return;
+        }
+        check.result = Some(result);
+        self.mark_render_changed();
+    }
+
     /// Why this session cannot resume on `target_id`, or `None` when it can.
     pub(super) fn resume_target_rejection(
         &self,
         session_id: &str,
         target_id: &str,
     ) -> Option<String> {
+        if let Some(reason) = self.target_readiness_rejection(target_id) {
+            return Some(reason);
+        }
         let session = self.state.sessions.get(session_id)?;
         mj_client::target::resume_compatibility(session, &self.config, target_id).err()
     }
@@ -1970,6 +2080,12 @@ impl DashboardState {
                     .clone();
                 return self.request_move_preparation_for_review(wizard, profile_id);
             }
+        }
+        if wizard.step == WizardStep::Target && key.code == KeyCode::F(5) {
+            self.target_readiness.clear();
+            self.mark_render_changed();
+            self.mode = Mode::Resume(wizard);
+            return DashboardAction::None;
         }
         if wizard.step == WizardStep::Target
             && matches!(key.code, KeyCode::Char('+' | '-' | 'r' | 'c' | 'm'))
@@ -2502,9 +2618,9 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_new(&mut self) -> DashboardAction {
+        self.target_readiness.clear();
         if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
-            self.notices
-                .set("Configure at least one profile and target first.");
+            self.begin_settings_section("profiles", None);
             return DashboardAction::None;
         }
         let recent = most_recent_configured_session(&self.config, &self.state);
@@ -2529,7 +2645,13 @@ impl DashboardState {
                     .keys()
                     .position(|id| id == &session.target_template_id)
             })
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                self.config
+                    .targets
+                    .keys()
+                    .position(|id| id == "localhost")
+                    .unwrap_or(0)
+            });
         self.mode = Mode::New(NewWizard {
             worktree_options: None,
             create_managed_worktree: false,
@@ -2566,6 +2688,7 @@ impl DashboardState {
     /// this for a failed but checkpointed session; the resume dialog reaches it
     /// for a stopped one.
     pub fn begin_resume_for(&mut self, session_id: &str) -> DashboardAction {
+        self.target_readiness.clear();
         let Some(session) = self.state.sessions.get(session_id).cloned() else {
             return DashboardAction::None;
         };
@@ -2624,6 +2747,7 @@ impl DashboardState {
     /// The source workspace and session identity are fixed; only the
     /// destination profile, target, sizing, and attachments are editable.
     pub(crate) fn begin_move(&mut self) -> DashboardAction {
+        self.target_readiness.clear();
         let Some(session) = self.selected_session().cloned() else {
             return DashboardAction::None;
         };
@@ -2683,6 +2807,7 @@ impl DashboardState {
     /// live. The failed destination is prefilled so the user can inspect the
     /// exact interruption and queue choice before retrying it.
     pub fn begin_move_recovery(&mut self, operation: MoveOperation) {
+        self.target_readiness.clear();
         let Some(session) = self
             .state
             .sessions

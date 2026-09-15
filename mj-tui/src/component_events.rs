@@ -457,20 +457,20 @@ mod tests {
         assert!(
             !draw(&mut dashboard)
                 .join("\n")
-                .contains("Setup › Interface")
+                .contains("Settings › Interface")
         );
         click(&mut dashboard, position);
         assert!(
             draw(&mut dashboard)
                 .join("\n")
-                .contains("Setup › Interface")
+                .contains("Settings › Interface")
         );
         dashboard.handle_key(key(KeyCode::Backspace));
         dashboard.handle_key(key(KeyCode::Enter));
         assert!(
             draw(&mut dashboard)
                 .join("\n")
-                .contains("Setup › Interface")
+                .contains("Settings › Interface")
         );
     }
 

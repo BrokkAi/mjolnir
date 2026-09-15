@@ -206,9 +206,9 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "kind" if path.iter().any(|key| key == "workspace_storage") => {
             &["podman-volume", "host-helper", "container-layer"]
         }
-        "kind" if path.first().is_some_and(|key| key == "profiles") => {
-            &["codex", "claude", "kimi", "grok", "deepseek", "muse"]
-        }
+        "kind" if path.first().is_some_and(|key| key == "profiles") => &[
+            "codex", "claude", "kimi", "grok", "deepseek", "muse", "zcode",
+        ],
         "kind" => &[
             "local-bare",
             "local-podman",
@@ -252,7 +252,7 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
 pub(super) fn help(path: &[String]) -> &'static str {
     match path.last().map(String::as_str).unwrap_or("") {
         "theme" => {
-            "Colors for the terminal dashboard and conversation. Applies immediately after saving Setup."
+            "Colors for the terminal dashboard and conversation. Applies immediately after saving Settings."
         }
         "profiles" => "Add an agent profile or use Detect machine to find your installed profiles.",
         "home" => {

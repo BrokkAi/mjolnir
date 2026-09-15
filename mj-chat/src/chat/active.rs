@@ -3262,7 +3262,13 @@ fn test_footer(area: Rect) -> ChatFooter<'static> {
     ChatFooter {
         area,
         chords: &["Alt-G panes", "Alt-Q detach"],
-        functions: &["F2 palette", "F4 web", "F5 refresh", "F7 setup", "F1 help"],
+        functions: &[
+            "F2 palette",
+            "F4 web",
+            "F5 refresh",
+            "F7 settings",
+            "F1 help",
+        ],
     }
 }
 
@@ -5111,7 +5117,7 @@ mod tests {
             "Ctrl-R history",
             "Alt-T rendering",
             "│ Alt-G panes · Alt-Q detach │",
-            "F2 palette · F4 web · F5 refresh · F7 setup · F1 help",
+            "F2 palette · F4 web · F5 refresh · F7 settings · F1 help",
         ] {
             assert!(footer.contains(hint), "{footer:?} omits {hint}");
         }
@@ -5129,7 +5135,7 @@ mod tests {
         for hint in [
             "Ctrl-R history",
             "│ Alt-G panes · Alt-Q detach │",
-            "F2 palette · F4 web · F5 refresh · F7 setup · F1 help",
+            "F2 palette · F4 web · F5 refresh · F7 settings · F1 help",
         ] {
             assert!(footer.contains(hint), "{footer:?} omits {hint}");
         }

@@ -7,24 +7,28 @@ Mjolnir keeps per-user configuration in `config.toml`. Workspaces, sessions,
 prompt history, per-session resource choices, drafts, and read markers live in
 Mjolnir's state database instead; they are not fields in this file.
 
-Run `mj setup` to generate a starting configuration, then edit the file for
-additional profiles, bundles, or targets. Rerun `mj setup` after installing new
-software: it adds discoveries without removing existing entries or preferences.
-Conflicting target settings can be added under a separate name. The terminal
-setup editor also adds discoveries under separate names for review. It refuses
-to remove or rewrite configuration used by an active session; add an alternative
-entry or stop the session first. Global defaults and profile enablement remain
-editable. After a manual edit, restart the daemon and validate the result:
+Open **Settings** with **F7** to add or edit agent profiles, SSH and EC2
+connections, projects, runtime overrides, and interface options. The command
+palette (**F2**) also provides **Manage agent profiles** and **Manage machines
+and runtimes**. No setup command or file editing is required. **Detect machine**
+can import existing agent accounts for review.
 
-```console
-mj daemon restart
-mj doctor
-```
+Standard local targets are supplied automatically: localhost, Podman, Docker,
+and Apple container on macOS. Saved entries override their defaults. The new,
+resume, and move target pickers check every target in the background, including
+SSH connectivity and AWS credentials and launch templates. Pending or failed
+checks block Next and show the reason; press **F5** to recheck after fixing it.
+Checks do not start stopped services, and launch performs a final preflight.
+
+Settings refuses to remove or rewrite configuration used by an active session;
+add an alternative entry or stop the session first. Global defaults and profile
+enablement remain editable. The optional `mj setup` command and direct
+`config.toml` editing remain available for users who prefer them.
 
 If an active session references a missing profile, bundle, or target, Mjolnir
 still opens and marks that session as needing configuration repair. Select it
-and press Enter for repair details, its retained transcript, or the setup editor.
-The web session menu also provides repair guidance. Restore the named entry in `config.toml` and retry. Setup can rediscover installations,
+and press Enter for repair details, its retained transcript, or Settings.
+The web session menu also provides repair guidance. Restore the named entry in Settings and retry. Detect machine can rediscover installations,
 but cannot reconstruct an arbitrary deleted bundle or custom target. Other
 sessions remain accessible, and configuration diagnostics do not change the
 affected session's stored lifecycle state.

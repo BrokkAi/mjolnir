@@ -10,12 +10,12 @@ Git project directory. The target decides where work runs, what isolation
 contains unrestricted agent actions, how the workspace is created, and what is
 removed after a verified stop.
 
-`mj setup` creates a `localhost` raw target and one target for each usable local
-container runtime it discovers. Add SSH and AWS targets during setup or edit
-`config.toml` directly. Press `F5` in the dashboard to refresh target capacity,
-or run `mj doctor --smoke` for end-to-end checks of local Podman, local Docker,
-Apple Container, and SSH Podman targets. Bare and AWS targets do not have smoke
-tests.
+Local target choices are supplied automatically and checked live when you open
+the target picker. Add SSH and AWS connections or customize runtime defaults in
+**F7 Settings → Machines and Runtimes**. No setup command is required. A target
+that is checking or unavailable cannot advance; **F5** in the picker rechecks
+all targets. Dashboard **F5** refreshes host capacity. The optional
+`mj doctor --smoke` command exercises container creation and removal.
 
 ## Capability matrix
 

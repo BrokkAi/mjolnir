@@ -3811,7 +3811,7 @@ mod tests {
                 .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
                 .collect::<String>();
             assert!(footer.contains("F4 web"), "{focus:?}: {footer}");
-            assert!(footer.contains("F7 setup"), "{focus:?}: {footer}");
+            assert!(footer.contains("F7 settings"), "{focus:?}: {footer}");
 
             let web = chord(&dashboard, function_key(4)).expect("F4 is global");
             assert_eq!(
@@ -3835,7 +3835,7 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect::<String>();
-            assert!(screen.contains("Setup"), "{focus:?}: {screen}");
+            assert!(screen.contains("Settings"), "{focus:?}: {screen}");
             assert!(screen.contains("Detect machine"), "{focus:?}: {screen}");
             assert_eq!(chord(&dashboard, function_key(4)), None);
         }
