@@ -18,7 +18,8 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 - [x] (2026-09-15 17:20Z) Milestone 1: provider descriptor and per-profile capabilities in `mj-core`. Added `mj-core/src/codex_provider.rs`, `mj-core/src/codex_catalog.rs`, `HarnessProfile::{codex_provider, auth_scheme, authentication_marker, credential_freshness, credential_expiry, supports_guardian_approvals}`, the `AuthScheme` enum, provider validation, and `login_command` returning `Result`.
 - [x] (2026-09-15 18:40Z) Milestone 2: controller, worker, and CLI consumers use the per-profile capabilities. Auth gate takes the profile; `QuotaRefreshRequest::for_profile` resolves the provider and key and routes Z.ai hosts to the renamed `mj-controller/src/zai_usage.rs`; credential sync skips the file exchange for an API-key profile; `WorkerLaunchConfig::authentication_marker` carries the marker name to the worker; API-key profiles are excluded from utility duty; staging fetches, stamps, and installs `models.json` with a cached fallback.
 - [x] (2026-09-15 20:10Z) Milestone 3: the ZCode harness is gone from code, assets, the container image, and the documentation. `HarnessKind` has six variants; `captures_native_session`, `pins_startup_config_by_environment`, the `account/usage_stats` credit probe, `mj-worker/src/acp/zcode_usage.rs`, the `credits` turn-usage field, the AppImage installer, the assets, and the Containerfile layer are all removed. Migration 32 and the tolerated `'zcode'` CHECK value stay, with a comment saying why.
-- [ ] Milestone 4: documentation (in scope) and live validation on the user's install (out of scope for the implementing agent; the real Z.ai key is the user's, so every behavioural step in `Validation and Acceptance` remains unperformed and must be run by the user).
+- [x] (2026-09-15 20:45Z) Milestone 4, documentation half: `docs/src/content/docs/profiles.md` gained a "Codex with a custom provider" section with the exact `config.toml` and profile block, the six-kind harness table now names `config.toml` as the API-key marker, and `docs/src/content/docs/configuration.md` states the `environment` requirement. `npx astro check` reports 0 errors.
+- [ ] Milestone 4, live validation: not performed. It needs the user's real Z.ai Coding Plan key, which the implementing agent does not have, so every behavioural step in `Validation and Acceptance` is still open and must be run by the user on their own install.
 
 ## Surprises & Discoveries
 
@@ -129,7 +130,42 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 
 ## Outcomes & Retrospective
 
-To be written at completion. Optional follow-up not in this plan: codex-acp discards Codex's `guardianWarning` app-server event, so surfacing the reviewer's reasoning in the transcript would be a small bridge-only change. A second optional follow-up: let API-key Codex profiles serve as utility models by giving anvil's `OpenAiClient` a constructor that uses its base URL verbatim, publishing that anvil-client patch, bumping the `brokk-anvil-client` pin in the workspace `Cargo.toml`, and adding a `backend_for_profile` arm that builds the client from the provider's chat base URL (`https://api.z.ai/api/coding/paas/v4` for Z.ai) and the key from the profile environment.
+Milestones 1 to 3 and the documentation half of Milestone 4 are complete and
+committed. A Codex profile can now name any Responses-API model provider and
+authenticate with an API key from the profile's `environment`: it reports as
+authenticated without a login, exchanges no credential file, advertises only the
+provider's own models, runs Guardian reviews on the provider's newest flash
+model, reports Coding Plan quota for Z.ai and Zhipu hosts, and is excluded from
+utility-model duty. The ZCode harness is gone from code, assets, the container
+image, and the documentation; only migration 32 and the tolerated `'zcode'`
+CHECK value remain, so stores written by earlier releases still open.
+
+Validation: `cargo test` passes with 3,375 tests and no failures, and
+`cargo clippy --all-targets -- -D warnings` is clean, both on the dev profile
+outside the sandbox. Two suites (`controller::update::tests::npm_upgrade_*` and
+`mj-cli`'s `store_divergence`) failed once each under full-suite parallelism and
+passed in isolation and on a rerun; they are pre-existing contention flakes, not
+regressions from this work.
+
+What remains: the behavioural acceptance in `Validation and Acceptance` has not
+been run. It needs the user's real Z.ai Coding Plan key on their own install.
+The user should work through steps 1 to 8 there, in particular that the session
+offers only `glm-5.3` and `glm-5.3-flash`, that the staged home's `models.json`
+carries `"auto_review_model_override": "glm-5.3-flash"` on every entry and its
+`config.toml` begins with `model_catalog_json = "models.json"`, that the quota
+panel shows Coding Plan windows, and that a freshly built `agent-dev` image has
+no `/opt/zcode` path. The user must also remove `[profiles.zcode]` from
+`~/.config/mjolnir/config.toml`: a configuration that still names that kind
+fails to load with "unknown harness kind".
+
+Lessons: two assumptions in the original plan were wrong in ways that would have
+shipped a silently broken feature, and both were caught only by writing the
+behaviour test rather than the code. `model_catalog_json` is a top-level Codex
+key, so the planned "append a line" would have buried it in the last table; and
+a local bare Codex session runs straight from the user's own profile home, so
+there was no staged copy to put the catalog in. Both are recorded above.
+
+Optional follow-up not in this plan: codex-acp discards Codex's `guardianWarning` app-server event, so surfacing the reviewer's reasoning in the transcript would be a small bridge-only change. A second optional follow-up: let API-key Codex profiles serve as utility models by giving anvil's `OpenAiClient` a constructor that uses its base URL verbatim, publishing that anvil-client patch, bumping the `brokk-anvil-client` pin in the workspace `Cargo.toml`, and adding a `backend_for_profile` arm that builds the client from the provider's chat base URL (`https://api.z.ai/api/coding/paas/v4` for Z.ai) and the key from the profile environment.
 
 ## Context and Orientation
 

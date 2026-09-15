@@ -1,6 +1,6 @@
 ---
 title: Profiles and harnesses
-description: Configure Codex, Claude Code, Kimi Code, Grok Build, and DeepSeek Harness accounts, credentials, skills, runtimes, and quota reporting.
+description: Configure Codex (including custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, and DeepSeek Harness accounts, credentials, skills, runtimes, and quota reporting.
 ---
 
 A profile connects Mjolnir to one installed coding-agent harness and one account.
@@ -16,12 +16,16 @@ available choices can come from the provider's current catalog.
 
 | Harness | `kind` | Home variable | Conventional home | Authentication marker | Guardian approvals on a raw target |
 | --- | --- | --- | --- | --- | --- |
-| Codex | `codex` | `CODEX_HOME` | `~/.codex` | `auth.json` | yes |
+| Codex | `codex` | `CODEX_HOME` | `~/.codex` | `auth.json`, or `config.toml` for an API-key provider | yes |
 | Claude Code | `claude` | `CLAUDE_CONFIG_DIR` | `~/.claude` | `.credentials.json` | yes |
 | Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | no |
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
 | DeepSeek Harness | `deepseek` | `DSH_HOME` | `~/.dsh` | `.credentials.yaml` | no |
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | yes |
+
+There are six harness kinds. A Codex profile can also authenticate with an API
+key against a model provider other than OpenAI; see
+[Codex with a custom provider](#codex-with-a-custom-provider).
 
 `mj setup` checks the home variable first and otherwise looks in the
 conventional location. A detected home becomes the explicit `home` path in
@@ -32,6 +36,76 @@ warns before using either on a raw `local-bare` target or an `ssh-bare` target
 configured with `permissions = "guardian"`. Container and EC2 targets instead
 run every harness unconstrained inside the target's isolation boundary. See
 [Targets](/targets/) and [Security boundaries](/security/).
+
+## Codex with a custom provider
+
+A Codex profile does not have to talk to OpenAI. Codex's own `config.toml`
+decides which service it uses, and Mjolnir copies that file into the staged
+profile home unchanged. Point it at another service that speaks the Responses
+API and the profile runs through the same Codex bridge as any other, with no
+`mj login` and no OAuth.
+
+Write the provider into the profile home's `config.toml`. This example uses
+Z.ai's GLM Coding Plan:
+
+```toml
+model = "glm-5.3"
+model_provider = "zai"
+model_reasoning_effort = "high"
+
+[model_providers.zai]
+name = "Z.ai coding plan"
+base_url = "https://api.z.ai/api/v1"
+env_key = "ZAI_API_KEY"
+wire_api = "responses"
+```
+
+`wire_api` must be `responses`; Codex no longer supports the chat-completions
+form. `env_key` names the environment variable that carries the API key, and the
+key itself goes in the Mjolnir profile, not in the Codex file:
+
+```toml
+[profiles.glm]
+kind = "codex"
+home = "/home/me/.codex-glm"
+
+[profiles.glm.environment]
+ZAI_API_KEY = "<your Coding Plan key>"
+```
+
+Mjolnir refuses to load a configuration whose provider names a variable the
+profile's `environment` does not set, and the error names both the profile and
+the variable. A provider may instead inline its key as
+`experimental_bearer_token`; prefer `env_key`, because the inline form writes the
+key into a file that is copied to every target.
+
+What changes for such a profile:
+
+- **No login.** `mj login` reports that the profile authenticates with its API
+  key and exits non-zero. The profile counts as set up as soon as its Codex
+  `config.toml` exists, so `mj doctor` reports it authenticated with no
+  remediation line. There is no credential file to expire, refresh, or sync into
+  a running session.
+- **Models come from the provider.** Mjolnir fetches the provider's model catalog
+  from `{base_url}/models` before each launch and stages it as `models.json`
+  beside the staged `config.toml`. Without it Codex would offer OpenAI's built-in
+  model names and send them to your provider. Do not set `model_catalog_json`
+  yourself; Mjolnir owns that file and rejects a profile that writes one. If the
+  provider is unreachable, the last catalog Mjolnir fetched for the profile is
+  staged instead.
+- **Guardian reviews run on the newest flash model** the catalog lists. Mjolnir
+  stamps that choice on every catalog entry, so a heavyweight session model is
+  not also its own reviewer. When the catalog lists no flash model, Codex reviews
+  with the session model.
+- **A private staged home, always.** Even on a raw local target, the session runs
+  from a copy of the profile home rather than the home itself, so the generated
+  catalog never lands in your own Codex directory.
+- **Quota** is reported for Z.ai (`api.z.ai`) and Zhipu (`open.bigmodel.cn`)
+  hosts, which publish the Coding Plan windows. Any other provider reports that
+  quota is unavailable for it; the profile still runs sessions.
+- **Not a utility model.** Mjolnir's own inference, such as compacting a
+  transcript for a handoff, uses chat completions, which these profiles cannot
+  serve. Keep an OpenAI Codex or other profile configured for that work.
 
 ## Configure a profile
 
@@ -114,7 +188,7 @@ environment before starting the harness's interactive login:
 
 | Harness | Command run by `mj login` |
 | --- | --- |
-| Codex | `codex login` |
+| Codex | `codex login` (not applicable to an API-key provider) |
 | Claude Code | `claude auth login` |
 | Kimi Code | `kimi login` |
 | Grok Build | `grok login` |
@@ -248,7 +322,7 @@ profiles independently, so a slow provider does not delay the others. Press
 
 | Harness | Quota source shown by Mjolnir |
 | --- | --- |
-| Codex | Provider usage windows and reset times. |
+| Codex | Provider usage windows and reset times. For a custom provider, the provider's own windows when it publishes them. |
 | Claude Code | Five-hour and weekly subscription windows when reported. |
 | Kimi Code | Usage windows returned by the configured Kimi service. |
 | Grok Build | The harness's ACP billing extension. |

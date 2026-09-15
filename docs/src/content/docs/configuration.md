@@ -190,7 +190,7 @@ home = "/home/me/.codex-work"
 | `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
 | `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `deepseek`, or `muse`. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
-| `environment` | table of strings | no | empty | Environment passed to harness/profile commands. Keys cannot be blank or contain `=`. |
+| `environment` | table of strings | no | empty | Environment passed to harness/profile commands. Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` must set that variable here, with a non-empty value. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
