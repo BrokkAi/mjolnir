@@ -107,6 +107,17 @@ mod tests {
             let mut state = quiet.clone();
             make_busy(&mut state);
             assert!(!state.is_quiet(), "{reason}");
+            // A held barrier is the one reason `is_quiet` refuses that is not
+            // itself work: a caller already holding a barrier asks
+            // `has_work_in_flight` to tell whether anything *else* is running.
+            if reason == "a checkpoint barrier is waiting" {
+                assert!(
+                    !state.has_work_in_flight(),
+                    "a held barrier is not work in flight"
+                );
+            } else {
+                assert!(state.has_work_in_flight(), "{reason}");
+            }
         }
     }
 

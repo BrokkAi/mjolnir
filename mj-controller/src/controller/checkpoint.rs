@@ -915,12 +915,6 @@ impl Controller {
             }
             if exclusivity == LatchExclusivity::ReleaseAfterLatch {
                 let snapshot = relay.connection_mut().sync().await?;
-                if snapshot.operational.execution == RelayExecutionState::Running {
-                    // A routine recovery copy must not open a barrier just to
-                    // abandon it as soon as it observes the active turn.
-                    relay.release();
-                    return Err(CheckpointDeferred::harness_busy().into());
-                }
                 if !snapshot
                     .operational
                     .safe_for_checkpoint(session.harness_kind)
@@ -935,6 +929,17 @@ impl Controller {
                         session.harness_kind,
                     )
                     .into());
+                }
+                if snapshot.operational.execution != RelayExecutionState::Closed
+                    && snapshot.operational.has_work_in_flight()
+                {
+                    // A routine recovery copy must not open a barrier just to
+                    // abandon it as soon as it observes the active turn, and a
+                    // bare execution flag misses a turn or tool whose
+                    // projection has not caught up. Any remaining work defers
+                    // to the next idle observation.
+                    relay.release();
+                    return Err(CheckpointDeferred::harness_busy().into());
                 }
             }
             let barrier_command_id = new_command_id("checkpoint")?;
@@ -1584,16 +1589,25 @@ async fn wait_for_checkpoint_barrier(
     let mut cancel_started_at: Option<Instant> = None;
     loop {
         let snapshot = relay.sync().await?;
-        if busy == BarrierBusyPolicy::DeferWhileRunning
-            && !snapshot.operational.safe_for_checkpoint(harness)
-        {
-            // The native task level can change after the controller's initial
-            // idle sync and before the queued BeginCheckpoint is processed.
-            // Defer from the barrier wait rather than allowing its timeout to
-            // classify the worker as wedged and restart it.
-            return Err(
-                CheckpointDeferred::background_snapshot(&snapshot.operational, harness).into(),
-            );
+        if busy == BarrierBusyPolicy::DeferWhileRunning {
+            if !snapshot.operational.safe_for_checkpoint(harness) {
+                // The native task level can change after the controller's
+                // initial idle sync and before the queued BeginCheckpoint is
+                // processed. Defer from the barrier wait rather than allowing
+                // its timeout to classify the worker as wedged and restart it.
+                return Err(CheckpointDeferred::background_snapshot(
+                    &snapshot.operational,
+                    harness,
+                )
+                .into());
+            }
+            if snapshot.operational.has_work_in_flight() {
+                // A foreground tool, a turn the execution flag has not caught
+                // up with, or queued work can all appear after the initial
+                // sync. Defer rather than let the deadline restart the worker
+                // underneath it.
+                return Err(CheckpointDeferred::harness_busy().into());
+            }
         }
         if checkpoint_barrier_is_ready(&snapshot, command_id) {
             if let Some(started_at) = cancel_started_at {
@@ -1681,7 +1695,10 @@ async fn wait_for_checkpoint_barrier(
 ///
 /// The deadline means "wedged": it restarts the worker only after a close has
 /// already requested cancellation and the turn still has not settled. A
-/// checkpoint that can try again later defers as soon as it sees work.
+/// checkpoint that can try again later defers as soon as it sees work. "Work"
+/// is the shared in-flight predicate, not the bare execution flag: a stale
+/// projection can report `Idle` while a harness turn or a foreground tool is
+/// still live, and treating that as wedged would restart the worker under it.
 fn checkpoint_barrier_wait_ended(
     snapshot: &ManagedSessionSnapshot,
     command_id: &str,
@@ -1692,14 +1709,17 @@ fn checkpoint_barrier_wait_ended(
     if snapshot.operational.execution == RelayExecutionState::Closed {
         return Some(CheckpointBarrierUnreachable::runtime_stopped().into());
     }
+    if busy == BarrierBusyPolicy::DeferWhileRunning {
+        if snapshot.operational.has_work_in_flight() {
+            return Some(CheckpointDeferred::harness_busy().into());
+        }
+        return out_of_time.then(|| CheckpointBarrierUnreachable::not_admitted(command_id).into());
+    }
+    // Close already asked to interrupt the active turn, so only a turn that
+    // never settles after cancellation reaches the restart path.
     if snapshot.operational.execution == RelayExecutionState::Running {
-        return Some(match busy {
-            BarrierBusyPolicy::DeferWhileRunning => CheckpointDeferred::harness_busy().into(),
-            BarrierBusyPolicy::InterruptWhileRunning if out_of_time && cancel_submitted => {
-                CheckpointBarrierUnreachable::cancel_timed_out(command_id).into()
-            }
-            BarrierBusyPolicy::InterruptWhileRunning => return None,
-        });
+        return (out_of_time && cancel_submitted)
+            .then(|| CheckpointBarrierUnreachable::cancel_timed_out(command_id).into());
     }
     out_of_time.then(|| CheckpointBarrierUnreachable::not_admitted(command_id).into())
 }
@@ -3397,6 +3417,27 @@ mod tests {
             "{interrupted:#}"
         );
         assert!(!checkpoint_was_deferred(&interrupted), "{interrupted:#}");
+
+        // A foreground tool can outlive the execution flag: a restart or a
+        // stale projection can leave `execution` Idle while a tool is still
+        // running. The shared in-flight predicate still defers, so a routine
+        // copy never restarts the worker underneath the tool.
+        snapshot.operational.execution = RelayExecutionState::Idle;
+        snapshot.operational.foreground_tool_started_at_ms = Some(1);
+        let tool_deferred = checkpoint_barrier_wait_ended(
+            &snapshot,
+            "checkpoint-1",
+            BarrierBusyPolicy::DeferWhileRunning,
+            true,
+            false,
+        )
+        .expect("a live foreground tool ends the wait at once");
+        assert!(checkpoint_was_deferred(&tool_deferred), "{tool_deferred:#}");
+        assert!(
+            !checkpoint_barrier_needs_worker_restart(&tool_deferred),
+            "a live foreground tool must never restart the worker: {tool_deferred:#}"
+        );
+        snapshot.operational.foreground_tool_started_at_ms = None;
 
         // An idle session that never admits the barrier is the real wedge,
         // whatever the policy.

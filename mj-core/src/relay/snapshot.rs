@@ -487,30 +487,40 @@ impl RelayOperationalState {
     /// Whether nothing the worker owns would be destroyed by killing it now.
     ///
     /// Stopping a worker tears down the ACP bridge with it, so any operation
-    /// that replaces a worker in place has to wait for this. Every way the
-    /// session can still be holding work is listed here, and each is a
-    /// separate fact: the agent can be mid-turn, the harness can have started
-    /// a turn of its own, a foreground tool, a terminal or a command it
-    /// launched can still be running, a prompt can be queued behind the
-    /// current one, a user shell can be open, and a checkpoint barrier can be
-    /// waiting to capture.
+    /// that replaces a worker in place has to wait for this. A held checkpoint
+    /// barrier is itself a reason to wait; [`Self::has_work_in_flight`] is the
+    /// same predicate without it, for a caller that holds the barrier and is
+    /// asking whether anything else is running.
     #[must_use]
     pub fn is_quiet(&self) -> bool {
-        self.goal.pending_resume.is_none()
-            && self.goal.decision.is_none()
-            && !self.goal.active()
-            && !self.goal.running()
-            && self.execution == RelayExecutionState::Idle
-            && self.acp_ready != Some(false)
-            && self.background_work_known != Some(false)
-            && self.active_prompt.is_none()
-            && self.harness_turn.is_none()
-            && self.queued_prompts.is_empty()
-            && self.active_user_shells.is_empty()
-            && self.active_agent_terminals.is_empty()
-            && self.foreground_tool_started_at_ms.is_none()
-            && self.background_commands.is_empty()
-            && self.checkpoint_barrier.is_none()
+        self.checkpoint_barrier.is_none() && !self.has_work_in_flight()
+    }
+
+    /// Whether the session still owns foreground or background work.
+    ///
+    /// Every way the session can still be holding work is listed here, and
+    /// each is a separate fact: the agent can be mid-turn, the harness can
+    /// have started a turn of its own, a foreground tool, a terminal or a
+    /// command it launched can still be running, a prompt can be queued behind
+    /// the current one, and a user shell can be open. The durable execution
+    /// flag alone is not enough: a stale projection can report `Idle` while a
+    /// turn the harness started, or a tool it is still running, is live.
+    #[must_use]
+    pub fn has_work_in_flight(&self) -> bool {
+        self.goal.pending_resume.is_some()
+            || self.goal.decision.is_some()
+            || self.goal.active()
+            || self.goal.running()
+            || self.execution != RelayExecutionState::Idle
+            || self.acp_ready == Some(false)
+            || self.background_work_known == Some(false)
+            || self.active_prompt.is_some()
+            || self.harness_turn.is_some()
+            || !self.queued_prompts.is_empty()
+            || !self.active_user_shells.is_empty()
+            || !self.active_agent_terminals.is_empty()
+            || self.foreground_tool_started_at_ms.is_some()
+            || !self.background_commands.is_empty()
     }
 
     /// Whether a controller may replace this worker without losing work.
