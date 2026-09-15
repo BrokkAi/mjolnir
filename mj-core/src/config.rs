@@ -11,6 +11,8 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+
+use crate::codex_provider::CodexProvider;
 use sha2::{Digest, Sha256};
 
 /// Stable context identity for a bare project at the serialized path boundary.
@@ -760,6 +762,72 @@ impl HarnessProfile {
         self.kind.execution_enforcement(policy)
     }
 
+    /// The custom model provider named in this profile's Codex `config.toml`,
+    /// if any. Always `None` for a harness other than Codex, and for a Codex
+    /// profile whose home does not exist yet or uses Codex's own provider.
+    pub fn codex_provider(&self) -> Result<Option<CodexProvider>> {
+        if self.kind != HarnessKind::Codex {
+            return Ok(None);
+        }
+        crate::codex_provider::codex_provider(&self.home)
+    }
+
+    /// How this profile proves it may talk to its service.
+    ///
+    /// `ApiKey` means the key is supplied through the named environment
+    /// variable from the profile's `environment` map, so there is no
+    /// interactive login and no credential file to sync or expire. Every other
+    /// profile, including a Codex provider that inlines its key as
+    /// `experimental_bearer_token`, reports `NativeLogin`: for the inline form
+    /// the key already sits inside the staged configuration file, which is the
+    /// same file the authentication gate checks. Prefer `env_key` so the key
+    /// never lands in a staged file.
+    pub fn auth_scheme(&self) -> AuthScheme {
+        match self.codex_provider() {
+            Ok(Some(provider)) => match provider.env_key {
+                Some(env_key) => AuthScheme::ApiKey { env_key },
+                None => AuthScheme::NativeLogin,
+            },
+            // An unreadable or malformed home is reported where it is read
+            // (validation, staging, doctor), not silently here.
+            Ok(None) | Err(_) => AuthScheme::NativeLogin,
+        }
+    }
+
+    /// The file inside this profile's home that proves it is authenticated.
+    /// An API-key profile is proven by its Codex `config.toml`, because the key
+    /// itself lives in the profile environment rather than in a file.
+    pub fn authentication_marker(&self) -> PathBuf {
+        match self.auth_scheme() {
+            AuthScheme::ApiKey { .. } => self.home.join("config.toml"),
+            AuthScheme::NativeLogin => harness_authentication_marker(self.kind, &self.home),
+        }
+    }
+
+    /// See [`crate::credentials::credential_freshness`]. An API key does not
+    /// expire or refresh, so it orders no copies.
+    pub fn credential_freshness(&self, bytes: &[u8]) -> Option<i64> {
+        match self.auth_scheme() {
+            AuthScheme::ApiKey { .. } => None,
+            AuthScheme::NativeLogin => crate::credentials::credential_freshness(self.kind, bytes),
+        }
+    }
+
+    /// See [`crate::credentials::credential_expiry`]. An API key has no expiry.
+    pub fn credential_expiry(&self, bytes: &[u8]) -> Option<i64> {
+        match self.auth_scheme() {
+            AuthScheme::ApiKey { .. } => None,
+            AuthScheme::NativeLogin => crate::credentials::credential_expiry(self.kind, bytes),
+        }
+    }
+
+    /// Whether this profile can review actions that leave the sandbox before
+    /// running them. Codex runs its Guardian reviewer against whatever provider
+    /// the profile names, so the answer depends only on the harness kind.
+    pub fn supports_guardian_approvals(&self) -> bool {
+        self.kind.supports_guardian_approvals()
+    }
+
     fn validate(&self, id: &str) -> Result<()> {
         validate_id("profile", id)?;
         if self.kind == HarnessKind::Muse {
@@ -794,7 +862,45 @@ impl HarnessProfile {
         {
             bail!("profile {id:?}: `context_window_bytes` must be at least 32768");
         }
+        let provider = self
+            .codex_provider()
+            .with_context(|| format!("profile {id:?}"))?;
+        if let Some(provider) = provider {
+            if provider.model_catalog_json.is_some() {
+                bail!(
+                    "profile {id:?}: remove `model_catalog_json` from {}; Mjolnir fetches the model catalog from {} and stages it for every launch",
+                    self.home.join("config.toml").display(),
+                    provider.base_url
+                );
+            }
+            if let Some(env_key) = provider.env_key.as_deref()
+                && self
+                    .environment
+                    .get(env_key)
+                    .is_none_or(|value| value.trim().is_empty())
+            {
+                bail!(
+                    "profile {id:?}: {} authenticates with {env_key}, so set it under [profiles.{id}.environment] in Mjolnir's config.toml",
+                    self.home.join("config.toml").display()
+                );
+            }
+        }
         Ok(())
+    }
+}
+
+/// How a profile proves it may talk to its service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthScheme {
+    /// The harness's own login writes a credential file into the profile home.
+    NativeLogin,
+    /// A long-lived API key supplied through this environment variable.
+    ApiKey { env_key: String },
+}
+
+impl AuthScheme {
+    pub const fn is_api_key(&self) -> bool {
+        matches!(self, Self::ApiKey { .. })
     }
 }
 
@@ -2240,6 +2346,103 @@ fn atomic_write_with_parent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessProfile {
+        fs::write(
+            home.join("config.toml"),
+            "model = \"glm-5.3\"\n\
+             model_provider = \"zai\"\n\
+             [model_providers.zai]\n\
+             base_url = \"https://api.z.ai/api/v1\"\n\
+             env_key = \"ZAI_API_KEY\"\n\
+             wire_api = \"responses\"\n",
+        )
+        .expect("write Codex configuration");
+        HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: home.to_path_buf(),
+            environment,
+            context_window_bytes: None,
+        }
+    }
+
+    #[test]
+    fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let without_key = zai_profile(home.path(), BTreeMap::new());
+        let error = without_key
+            .validate("glm")
+            .expect_err("a missing key is a configuration error")
+            .to_string();
+        assert!(error.contains("ZAI_API_KEY"), "{error}");
+        assert!(error.contains("glm"), "{error}");
+
+        let with_key = zai_profile(
+            home.path(),
+            [("ZAI_API_KEY".to_owned(), "secret".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        with_key
+            .validate("glm")
+            .expect("a configured key validates");
+        assert_eq!(
+            with_key.auth_scheme(),
+            AuthScheme::ApiKey {
+                env_key: "ZAI_API_KEY".to_owned()
+            }
+        );
+        assert_eq!(
+            with_key.authentication_marker(),
+            home.path().join("config.toml"),
+            "the Codex configuration proves an API-key profile is set up"
+        );
+        assert_eq!(with_key.credential_freshness(b"{}"), None);
+        assert_eq!(with_key.credential_expiry(b"{}"), None);
+    }
+
+    #[test]
+    fn a_codex_profile_may_not_supply_its_own_model_catalog() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let mut profile = zai_profile(
+            home.path(),
+            [("ZAI_API_KEY".to_owned(), "secret".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        let body = fs::read_to_string(home.path().join("config.toml")).expect("read");
+        fs::write(
+            home.path().join("config.toml"),
+            format!("model_catalog_json = \"mine.json\"\n{body}"),
+        )
+        .expect("write");
+        profile.enabled = true;
+        let error = profile
+            .validate("glm")
+            .expect_err("Mjolnir owns the catalog")
+            .to_string();
+        assert!(error.contains("model_catalog_json"), "{error}");
+    }
+
+    #[test]
+    fn a_codex_profile_with_no_home_yet_reports_a_native_login() {
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: PathBuf::from("/does/not/exist"),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        };
+        assert_eq!(profile.auth_scheme(), AuthScheme::NativeLogin);
+        assert_eq!(
+            profile.authentication_marker(),
+            PathBuf::from("/does/not/exist/auth.json")
+        );
+        profile
+            .validate("fresh")
+            .expect("discovery creates profiles before their homes exist");
+    }
 
     #[test]
     fn local_targets_need_no_setup_and_preserve_explicit_overrides() {

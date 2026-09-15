@@ -25,7 +25,7 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
-use crate::config::{HarnessKind, HarnessProfile};
+use crate::config::{AuthScheme, HarnessKind, HarnessProfile};
 use crate::relay::{RelayEvent, RelayObservation};
 use crate::targets::CommandSpec;
 
@@ -654,7 +654,22 @@ pub fn events_report_auth_failure(_kind: HarnessKind, events: &[RelayEvent]) -> 
 /// `grok login`, DeepSeek's `dsh web` credential settings UI, and ZCode's
 /// headless backend. The desktop `zcode` launcher is deliberately never used.
 ///
-pub fn login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
+pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> {
+    if let AuthScheme::ApiKey { env_key } = profile.auth_scheme() {
+        bail!(
+            "this profile authenticates with the {env_key} API key from its `environment` entry, so it has no interactive login"
+        );
+    }
+    Ok(native_login_command(profile))
+}
+
+/// The harness CLI's own login command, ignoring how the profile actually
+/// authenticates.
+///
+/// Setup discovery uses this to find an installed CLI before any profile
+/// exists, where "this profile needs no login" is not a useful answer: it only
+/// wants the program name to run `--version` against.
+pub fn native_login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
     match profile.kind {
         HarnessKind::Codex => ("codex".to_owned(), vec!["login".to_owned()]),
         HarnessKind::Claude => (
@@ -1399,36 +1414,64 @@ mod tests {
             environment: Default::default(),
             context_window_bytes: None,
         };
+        let command = |kind: HarnessKind| login_command(&profile(kind)).expect("login command");
         assert_eq!(
-            login_command(&profile(HarnessKind::Codex)),
+            command(HarnessKind::Codex),
             ("codex".to_owned(), vec!["login".to_owned()])
         );
         assert_eq!(
-            login_command(&profile(HarnessKind::Claude)),
+            command(HarnessKind::Claude),
             (
                 "claude".to_owned(),
                 vec!["auth".to_owned(), "login".to_owned()]
             )
         );
         assert_eq!(
-            login_command(&profile(HarnessKind::Kimi)),
+            command(HarnessKind::Kimi),
             ("kimi".to_owned(), vec!["login".to_owned()])
         );
         assert_eq!(
-            login_command(&profile(HarnessKind::Grok)),
+            command(HarnessKind::Grok),
             ("grok".to_owned(), vec!["login".to_owned()])
         );
         assert_eq!(
-            login_command(&profile(HarnessKind::Deepseek)),
+            command(HarnessKind::Deepseek),
             ("dsh".to_owned(), vec!["web".to_owned()])
         );
         assert_eq!(
-            login_command(&profile(HarnessKind::Zcode)),
+            command(HarnessKind::Zcode),
             (
                 "/opt/ZCode/resources/glm/zcode.cjs".to_owned(),
                 vec!["login".to_owned()]
             )
         );
+    }
+
+    #[test]
+    fn an_api_key_profile_reports_that_it_has_no_interactive_login() {
+        let home = tempfile::tempdir().expect("temporary home");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "model_provider = \"zai\"\n\
+             [model_providers.zai]\n\
+             base_url = \"https://api.z.ai/api/v1\"\n\
+             env_key = \"ZAI_API_KEY\"\n\
+             wire_api = \"responses\"\n",
+        )
+        .expect("write config");
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: home.path().to_path_buf(),
+            environment: [("ZAI_API_KEY".to_owned(), "key".to_owned())]
+                .into_iter()
+                .collect(),
+            context_window_bytes: None,
+        };
+        let error = login_command(&profile)
+            .expect_err("API-key profiles have no login")
+            .to_string();
+        assert!(error.contains("ZAI_API_KEY"), "{error}");
     }
 
     #[test]

@@ -312,7 +312,7 @@ fn discover_installed_harnesses(
             environment: BTreeMap::new(),
             context_window_bytes: None,
         };
-        let (program, _) = mj_core::credentials::login_command(&profile);
+        let (program, _) = mj_core::credentials::native_login_command(&profile);
         let probe = CommandSpec::new(program, ["--version"])
             .purpose("detect installed harness before first login");
         match executor.execute(&probe) {

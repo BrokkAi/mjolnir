@@ -459,7 +459,13 @@ fn harness_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> V
 /// [`login_command`], the one place that tracks what each harness CLI actually
 /// accepts, so this text cannot drift away from what `mj login` runs.
 fn harness_login_remediation(id: &str, profile: &HarnessProfile) -> String {
-    let (program, arguments) = login_command(profile);
+    let (program, arguments) = match login_command(profile) {
+        Ok(command) => command,
+        // An API-key profile has no login to recommend; say what is missing
+        // instead. The authentication gate normally passes such a profile, so
+        // this text appears only when its configuration file is absent.
+        Err(error) => return format!("{error} Check {}.", profile.home.display()),
+    };
     format!(
         "Run `mj login --profile {id}`; it runs `{program} {}` against {}.",
         arguments.join(" "),
@@ -2349,7 +2355,7 @@ mod tests {
         );
         // The underlying command is quoted from the one place that verified it,
         // so doctor cannot recommend something `mj login` does not run.
-        let (program, arguments) = login_command(&profile);
+        let (program, arguments) = login_command(&profile).expect("OAuth profile has a login command");
         assert!(
             remediation.contains(&format!("`{program} {}`", arguments.join(" "))),
             "{remediation}"

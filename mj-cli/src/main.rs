@@ -986,9 +986,10 @@ async fn login(args: LoginArgs) -> Result<()> {
     if args.setup_token {
         return store_claude_setup_token(&profile_id, profile).await;
     }
-    let marker = mj_core::config::harness_authentication_marker(profile.kind, &profile.home);
+    let (program, arguments) = mj_core::credentials::login_command(profile)
+        .with_context(|| format!("profile {profile_id:?}"))?;
+    let marker = profile.authentication_marker();
     let (before, _) = mj_core::credentials::read_credential_file(profile.kind, &marker)?;
-    let (program, arguments) = mj_core::credentials::login_command(profile);
 
     println!(
         "Running `{program} {}` against {}.",
