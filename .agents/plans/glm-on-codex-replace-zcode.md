@@ -105,6 +105,9 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
   Evidence: the test `parse_rejects_a_body_in_neither_shape_and_names_both`
   asserts the error names `models` and `data`.
 
+- Observation: Removing `HarnessKind::Zcode` wedged the live daemon on the next start. Milestone 3 made `load_state_from` skip a session whose harness no longer parses, but the parallel path `load_move_operations` (read for every durable move intent at startup) still decoded each row strictly, so one completed `zcode` to `deepseek` move whose stored `recovery_session.harness_kind` was `"zcode"` failed the whole load with `unknown variant \`zcode\``. Two facts combined: the source harness was gone, and the move had already completed (phase `completed`, destination session already `harness_kind=deepseek, running`) yet its `session_moves` row lingered because nothing ever deletes a completed move intent. Fixed by making `load_move_operations` skip an undecodable row with a warning, mirroring `load_state_from` (commit on branch; test `bulk_load_skips_a_move_intent_whose_harness_no_longer_decodes`). The retained-completed-intent question is filed as BrokkAi/mjolnir#1026. Milestone 7 (DeepSeek removal) must not reintroduce this: the same skip now covers a removed `deepseek` harness too.
+  Evidence: daemon startup error `Error: decode durable move intent / unknown variant \`zcode\`, expected one of codex, claude, kimi, grok, deepseek, muse`; the row's `phase=completed`, `queue_admission_finished=1`; no `DELETE FROM session_moves` exists in the code.
+
 ## Decision Log
 
 - Decision: Represent a GLM-backed Codex profile as `kind = "codex"` rather than a new `HarnessKind` variant.
