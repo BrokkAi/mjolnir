@@ -1444,6 +1444,7 @@ mod tests {
                 home: PathBuf::from("/home/user/.claude"),
                 environment: Default::default(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         assert_eq!(resolve_login_profile(&config, None).unwrap(), "work");

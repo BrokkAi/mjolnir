@@ -1401,6 +1401,7 @@ mod tests {
             home: PathBuf::from("/home/user/.config"),
             environment: Default::default(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
         let command = |kind: HarnessKind| login_command(&profile(kind)).expect("login command");
         assert_eq!(
@@ -1448,6 +1449,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
         let error = login_command(&profile)
             .expect_err("API-key profiles have no login")

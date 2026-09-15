@@ -1800,6 +1800,7 @@ mod tests {
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/home/test/.codex"),
                     environment: BTreeMap::new(),
+                    guardian_review_model: None,
                 },
             )]),
             bundles: BTreeMap::from([(

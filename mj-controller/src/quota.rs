@@ -1420,6 +1420,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             context_window_bytes: None,
+            guardian_review_model: None,
         }
     }
 
@@ -1453,6 +1454,7 @@ mod tests {
                 home: native.path().to_path_buf(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
             native.path().to_path_buf(),
         );

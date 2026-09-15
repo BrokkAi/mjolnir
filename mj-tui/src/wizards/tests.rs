@@ -791,6 +791,7 @@ fn raw_localhost_warns_for_harnesses_without_guardian_approvals() {
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                guardian_review_model: None,
                 kind,
                 home: PathBuf::from("/profiles/harness"),
                 environment: BTreeMap::new(),
@@ -837,6 +838,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            guardian_review_model: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
             environment: BTreeMap::new(),
@@ -2984,6 +2986,7 @@ fn subagent_wizard_config() -> mj_core::config::Config {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            guardian_review_model: None,
             kind: HarnessKind::Grok,
             home: PathBuf::from("/profiles/grok"),
             environment: BTreeMap::new(),

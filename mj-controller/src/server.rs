@@ -3961,6 +3961,7 @@ mod tests {
                 HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    guardian_review_model: None,
                     kind: HarnessKind::Codex,
                     home: "/highly/secret/codex".into(),
                     environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]),
@@ -6968,6 +6969,7 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                guardian_review_model: None,
                 kind: HarnessKind::Claude,
                 home: "/secret/claude".into(),
                 environment: BTreeMap::new(),

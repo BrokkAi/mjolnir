@@ -19,7 +19,8 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 - [x] (2026-09-15 18:40Z) Milestone 2: controller, worker, and CLI consumers use the per-profile capabilities. Auth gate takes the profile; `QuotaRefreshRequest::for_profile` resolves the provider and key and routes Z.ai hosts to the renamed `mj-controller/src/zai_usage.rs`; credential sync skips the file exchange for an API-key profile; `WorkerLaunchConfig::authentication_marker` carries the marker name to the worker; API-key profiles are excluded from utility duty; staging fetches, stamps, and installs `models.json` with a cached fallback.
 - [x] (2026-09-15 20:10Z) Milestone 3: the ZCode harness is gone from code, assets, the container image, and the documentation. `HarnessKind` has six variants; `captures_native_session`, `pins_startup_config_by_environment`, the `account/usage_stats` credit probe, `mj-worker/src/acp/zcode_usage.rs`, the `credits` turn-usage field, the AppImage installer, the assets, and the Containerfile layer are all removed. Migration 32 and the tolerated `'zcode'` CHECK value stay, with a comment saying why.
 - [x] (2026-09-15 20:45Z) Milestone 4, documentation half: `docs/src/content/docs/profiles.md` gained a "Codex with a custom provider" section with the exact `config.toml` and profile block, the six-kind harness table now names `config.toml` as the API-key marker, and `docs/src/content/docs/configuration.md` states the `environment` requirement. `npx astro check` reports 0 errors.
-- [ ] Milestone 4, live validation: not performed. It needs the user's real Z.ai Coding Plan key, which the implementing agent does not have, so every behavioural step in `Validation and Acceptance` is still open and must be run by the user on their own install.
+- [x] (2026-09-15 23:30Z) Milestone 5: `mj_core::codex_catalog::parse` accepts the Codex catalog shape and OpenAI's plain model list, `parse_codex_shape` and `merge_overrides` apply a profile's own `models.json`, `HarnessProfile::guardian_review_model` selects the reviewer, and `stage_codex_catalog` merges, then stamps accordingly. `docs/src/content/docs/profiles.md` documents the DeepSeek example, the override file, and the setting; `docs/src/content/docs/configuration.md` lists the new field.
+- [ ] Live validation (the behavioural half of Milestone 4 and the new steps 9 and 10): not performed. It needs the user's real Z.ai Coding Plan key, which the implementing agent does not have, so every behavioural step in `Validation and Acceptance` is still open and must be run by the user on their own install.
 
 ## Surprises & Discoveries
 
@@ -76,6 +77,27 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 
 - Observation: The Coding Plan key is rejected by the chat-completions path under `https://api.z.ai/api/v1` but accepted under `https://api.z.ai/api/coding/paas/v4`. This matters only for Mjolnir's utility model (anvil's client speaks chat completions and appends `/v1` to its base URL), not for Codex.
   Evidence: `POST /api/v1/chat/completions` returned `403 model_access_denied` for `glm-5.3`; `POST /api/coding/paas/v4/chat/completions` returned 200 `pong`.
+
+- Observation: `models.json` was never added to the Codex staging allowlist in
+  `stage_profile`, although the Milestone 5 text assumed Milestone 2 had done
+  so. Nothing depends on it: `stage_codex_catalog` writes the merged, stamped
+  catalog over `<staged home>/models.json` on every launch, and it reads the
+  user's override from `profile.home`, not from the staged copy. The allowlist
+  is left unchanged so the only `models.json` Codex can ever see is the one
+  Mjolnir generated.
+  Evidence: the allowlist in `mj-controller/src/controller/worker_binary.rs`
+  lists `auth.json`, `config.toml`, `AGENTS.md`, `instructions.md`, `rules`, and
+  `skills` for Codex; the test
+  `a_plain_model_list_becomes_a_catalog_the_profiles_overrides_refine` writes an
+  override in the profile home and asserts the staged catalog carries it.
+
+- Observation: `parse` accepts a `data` array whether or not the body also says
+  `"object": "list"`. The plan named the shape with that key, but providers vary
+  on whether they send it and the `data` array alone is unambiguous once the
+  Codex `models` key is absent. A body with neither array still fails, naming
+  both shapes, which is the behaviour the plan asked for.
+  Evidence: the test `parse_rejects_a_body_in_neither_shape_and_names_both`
+  asserts the error names `models` and `data`.
 
 ## Decision Log
 
@@ -147,10 +169,35 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
   Rationale: The flash reviewer denied a benign action that the full model allowed. The user wants flash for cost, but needs a one-line switch to the session model or a named model when a provider's small model reviews badly. An explicit slug that the fetched catalog does not list fails the launch with an error naming the slug, rather than silently reviewing with something else.
   Date/Author: 2026-09-15, user and Claude.
 
+- Decision: Keep a separate `parse_codex_shape` for the user's override file
+  rather than letting `parse` serve both jobs.
+  Rationale: `parse` guesses between two shapes because a provider's response is
+  not under the user's control. An override file is, and a file that silently
+  parsed as an OpenAI list would replace the user's carefully written entries
+  with Mjolnir's conservative defaults. Refusing anything but the Codex shape
+  tells the user their file is wrong.
+  Date/Author: 2026-09-15, Claude.
+
+- Decision: A `guardian_review_model` naming a slug the merged catalog does not
+  list fails the whole launch before anything is staged.
+  Rationale: The alternative is stamping nothing, which silently falls back to
+  reviewing with the session model: the expensive outcome the setting exists to
+  avoid, with no signal that the setting did nothing. The error names the
+  profile, the slug, and the slugs the catalog lists, so the fix is a copy and
+  paste. The test asserts no `models.json` is written in that case.
+  Date/Author: 2026-09-15, Claude.
+
+- Decision: Reject `guardian_review_model` on a profile with no custom Codex
+  provider at validation time.
+  Rationale: Mjolnir generates a catalog only for those profiles, so on any
+  other profile the setting can have no effect. Accepting it would be a
+  configuration that reads as if it does something.
+  Date/Author: 2026-09-15, Claude.
+
 ## Outcomes & Retrospective
 
-Milestones 1 to 3 and the documentation half of Milestone 4 are complete and
-committed. A Codex profile can now name any Responses-API model provider and
+Milestones 1 to 3, the documentation half of Milestone 4, and Milestone 5 are
+complete and committed. A Codex profile can now name any Responses-API model provider and
 authenticate with an API key from the profile's `environment`: it reports as
 authenticated without a login, exchanges no credential file, advertises only the
 provider's own models, runs Guardian reviews on the provider's newest flash
@@ -159,7 +206,14 @@ utility-model duty. The ZCode harness is gone from code, assets, the container
 image, and the documentation; only migration 32 and the tolerated `'zcode'`
 CHECK value remain, so stores written by earlier releases still open.
 
-Validation: `cargo test` passes with 3,375 tests and no failures, and
+A Codex profile can additionally name a provider that serves only OpenAI's plain
+model list, refine the translated catalog with its own `models.json`, and choose
+which model runs Guardian reviews.
+
+Validation: after Milestone 5, `cargo test` passes with 3,381 tests and no
+failures, and `cargo clippy --all-targets -- -D warnings` is clean, both on the
+dev profile outside the sandbox. Earlier, after Milestone 4, `cargo test` passed
+with 3,375 tests and
 `cargo clippy --all-targets -- -D warnings` is clean, both on the dev profile
 outside the sandbox. Two suites (`controller::update::tests::npm_upgrade_*` and
 `mj-cli`'s `store_divergence`) failed once each under full-suite parallelism and
@@ -167,7 +221,8 @@ passed in isolation and on a rerun; they are pre-existing contention flakes, not
 regressions from this work.
 
 What remains: the behavioural acceptance in `Validation and Acceptance` has not
-been run. It needs the user's real Z.ai Coding Plan key on their own install.
+been run, including the Milestone 5 steps 9 (a DeepSeek profile, its override
+file, and its reviewer) and 10 (the three `guardian_review_model` settings). It needs the user's real Z.ai Coding Plan key on their own install.
 The user should work through steps 1 to 8 there, in particular that the session
 offers only `glm-5.3` and `glm-5.3-flash`, that the staged home's `models.json`
 carries `"auto_review_model_override": "glm-5.3-flash"` on every entry and its
@@ -264,9 +319,9 @@ Then follow `Validation and Acceptance`.
 
 In `mj-core/src/codex_catalog.rs`, extend `parse` to accept two shapes. The Codex shape is `{"models": [...]}` and is kept as is. The OpenAI shape is `{"object": "list", "data": [{"id": "...", ...}]}`; translate each `data` entry into a Codex catalog entry whose `slug` and `display_name` are the id, whose `description` is the id followed by the `owned_by` value in parentheses when present, and whose remaining fields take these defaults: `default_reasoning_level` absent, `supported_reasoning_levels` empty, `shell_type = "shell_command"`, `visibility = "list"`, `supported_in_api = true`, `priority` = position in the list, `base_instructions = ""`, `supports_reasoning_summaries = false`, `default_reasoning_summary = "none"`, `support_verbosity = false`, `apply_patch_tool_type = "freeform"`, `truncation_policy = {"mode": "bytes", "limit": 10000}`, `context_window = 128000`, `max_context_window = 128000`, `effective_context_window_percent = 95`, `supports_parallel_tool_calls = true`, `experimental_supported_tools = []`, `input_modalities = ["text"]`. A body that matches neither shape is an error naming both.
 
-Add `merge_overrides(catalog, overrides)` to the same module: `overrides` is a parsed Codex-shape catalog; for each override entry, the fetched entry with the same `slug` gets every override field copied over it, and an override slug the fetch did not list is appended as a new entry. In `stage_codex_catalog` (`mj-controller/src/controller/worker_binary.rs`), read `<profile.home>/models.json` when it exists, parse it with the Codex shape only, and merge it before stamping the reviewer. Because staging already copies the Codex allowlist, and `models.json` is on that list from Milestone 2, the user's file also lands in the staged home; that is harmless because Mjolnir then overwrites the staged `models.json` with the merged, stamped catalog.
+Add `merge_overrides(catalog, overrides)` to the same module: `overrides` is a parsed Codex-shape catalog; for each override entry, the fetched entry with the same `slug` gets every override field copied over it, and an override slug the fetch did not list is appended as a new entry. In `stage_codex_catalog` (`mj-controller/src/controller/worker_binary.rs`), read `<profile.home>/models.json` when it exists, parse it with the Codex shape only, and merge it before stamping the reviewer. The override is read from the profile home, not the staged copy, and `models.json` is deliberately not on the Codex staging allowlist, so the only `models.json` Codex ever sees is the merged, stamped catalog Mjolnir writes. (The earlier text claimed Milestone 2 had added `models.json` to the allowlist; it had not, and nothing needs it to.)
 
-Add `guardian_review_model: Option<String>` to `HarnessProfile` in `mj-core/src/config.rs` (serde default, skipped when absent). Validation accepts the literal strings `newest-flash` and `session`, or any non-empty slug; it rejects the field on a profile that is not a Codex profile with a custom provider. Replace the fixed rule in `stage_codex_catalog` with: `newest-flash` (or absent) uses `guardian_review_model(slugs)`; `session` skips stamping; a slug must appear in the merged catalog, else fail the launch with an error naming the profile, the slug, and the slugs the catalog does list. Update the TUI settings schema in `mj-tui/src/setup/schema.rs` if profile fields are enumerated there.
+Add `guardian_review_model: Option<String>` to `HarnessProfile` in `mj-core/src/config.rs` (serde default, skipped when absent), with the two literal values as the constants `GUARDIAN_REVIEW_NEWEST_FLASH` and `GUARDIAN_REVIEW_SESSION` so the controller and the validator agree on their spelling. Validation accepts the literal strings `newest-flash` and `session`, or any non-empty slug; it rejects the field on a profile that is not a Codex profile with a custom provider. Replace the fixed rule in `stage_codex_catalog` with: `newest-flash` (or absent) uses `guardian_review_model(slugs)`; `session` skips stamping; a slug must appear in the merged catalog, else fail the launch with an error naming the profile, the slug, and the slugs the catalog does list. `mj-tui/src/setup/schema.rs` does enumerate profile fields, in three places: the profile default object, the field label table, and the help text table. Add the field to all three. Also add a row to the profile field table in `docs/src/content/docs/configuration.md`.
 
 Update `docs/src/content/docs/profiles.md`: add a DeepSeek example (`base_url = "https://api.deepseek.com/v1"`, `env_key = "DEEPSEEK_API_KEY"`), explain the override file with an example that gives `deepseek-v4-pro` reasoning levels `low` and `high`, and document `guardian_review_model`. Note that quota reporting is available only for Z.ai hosts and that a DeepSeek profile shows no quota.
 
@@ -412,6 +467,8 @@ In `mj-core/src/codex_catalog.rs`, define:
     /// unknown Codex fields pass through unchanged.
     pub struct CodexCatalog { pub models: Vec<serde_json::Map<String, serde_json::Value>> }
     pub fn parse(bytes: &[u8]) -> anyhow::Result<CodexCatalog>;
+    /// Milestone 5: the Codex shape only, for a user-written override file.
+    pub fn parse_codex_shape(bytes: &[u8]) -> anyhow::Result<CodexCatalog>;
     pub fn guardian_review_model(slugs: impl IntoIterator<Item = String>) -> Option<String>;
     pub fn stamp_reviewer(catalog: &mut CodexCatalog, reviewer: &str);
     /// Milestone 5: `parse` accepts the Codex shape and OpenAI's `{"data": [...]}` list.
@@ -440,3 +497,17 @@ In `mj-core/src/worker_launch.rs`, add to `WorkerLaunchConfig`:
     pub authentication_marker: Option<String>,
 
 Dependencies: no new crates. `toml` 0.8 and `serde_json` are already dependencies of `mj-core`; `reqwest` is already a dependency of `mj-controller`. The anvil-client pin is unchanged.
+
+## Revision notes
+
+2026-09-15, Milestone 5 implementation. Corrected the Milestone 5 text, which
+claimed Milestone 2 had put `models.json` on the Codex staging allowlist. It had
+not, and the feature does not need it to: the override is read from the profile
+home and the merged result is written over the staged file. Recorded the
+correction in `Surprises & Discoveries` so a future contributor does not add the
+allowlist entry expecting it to matter. Named `parse_codex_shape` in
+`Interfaces and Dependencies`, since the override file must not be parsed with
+the shape-guessing `parse`. Replaced "if profile fields are enumerated there"
+with the three places in `mj-tui/src/setup/schema.rs` that do enumerate them,
+and added the `docs/src/content/docs/configuration.md` field table, which the
+original text did not mention.

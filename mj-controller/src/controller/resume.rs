@@ -2157,6 +2157,7 @@ mod tests {
                 home: profile_home,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         let mut controller = Controller {
@@ -2631,6 +2632,7 @@ mod tests {
                 home: profile_home,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         config
@@ -3198,6 +3200,7 @@ mod tests {
                 home: profile_home,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         config.bundles.insert(
@@ -3355,6 +3358,7 @@ mod tests {
                 home: profile_home,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         let mut controller = Controller {
@@ -3552,6 +3556,7 @@ mod tests {
                 home: profile_home,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         // Production controllers read this configuration from disk; bundle

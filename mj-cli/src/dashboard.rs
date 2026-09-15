@@ -3051,6 +3051,7 @@ mod tests {
                 mj_core::config::HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    guardian_review_model: None,
                     kind,
                     home: std::path::PathBuf::from("/profiles").join(id),
                     environment: std::collections::BTreeMap::new(),

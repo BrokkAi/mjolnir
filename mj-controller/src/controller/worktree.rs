@@ -3134,6 +3134,7 @@ mod tests {
                 home: PathBuf::from("/profiles/codex"),
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         apply_raw_to_workspace(&mut record, &conversion);
@@ -3328,6 +3329,7 @@ mod tests {
                 home: PathBuf::from("/profiles/codex"),
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         let mut record = checkpoint_test_session(session_id);

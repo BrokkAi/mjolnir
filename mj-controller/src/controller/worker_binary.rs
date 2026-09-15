@@ -1814,18 +1814,92 @@ pub(super) fn stage_codex_catalog(
     };
     let mut catalog = mj_core::codex_catalog::parse(&body)
         .with_context(|| format!("profile {profile_id:?}: model catalog from {url}"))?;
-    match mj_core::codex_catalog::guardian_review_model(catalog.slugs()) {
-        Some(reviewer) => mj_core::codex_catalog::stamp_reviewer(&mut catalog, &reviewer),
-        // With no small model to review with, Codex falls back to reviewing
-        // with the session model, which still runs Guardian.
-        None => tracing::info!(
-            profile_id,
-            "the model catalog lists no flash model; Guardian reviews run on the session model"
-        ),
-    }
+    apply_catalog_overrides(profile_id, &profile.home, &mut catalog)?;
+    stamp_guardian_reviewer(profile_id, profile, &mut catalog)?;
     std::fs::create_dir_all(destination)?;
     std::fs::write(destination.join(STAGED_CATALOG_FILE), catalog.to_json())?;
     point_config_at_catalog(&destination.join("config.toml"))
+}
+
+/// Refine the fetched catalog with the user's own `models.json`, when the
+/// profile home has one.
+///
+/// A provider that serves OpenAI's plain model list gives Mjolnir only model
+/// ids, so the translated entries carry conservative defaults. The override
+/// file is how a user states what that provider actually supports: each entry
+/// is matched by `slug` and its fields are copied over the fetched entry, and a
+/// slug the provider did not list is added. Mjolnir writes the merged result
+/// over the staged `models.json`, so the user's own file never reaches Codex
+/// unmerged.
+fn apply_catalog_overrides(
+    profile_id: &str,
+    home: &Path,
+    catalog: &mut mj_core::codex_catalog::CodexCatalog,
+) -> Result<()> {
+    let path = home.join(STAGED_CATALOG_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", path.display()));
+        }
+    };
+    let overrides = mj_core::codex_catalog::parse_codex_shape(&bytes).with_context(|| {
+        format!(
+            "profile {profile_id:?}: model catalog overrides in {}",
+            path.display()
+        )
+    })?;
+    mj_core::codex_catalog::merge_overrides(catalog, &overrides);
+    Ok(())
+}
+
+/// Record the Guardian reviewer choice on every catalog entry.
+///
+/// Codex reads the reviewer from the session model's own catalog entry, so the
+/// override is stamped on all of them. The profile setting decides which model
+/// that is: the newest flash model by default, the session model itself when
+/// the setting is `session` (nothing is stamped, which is Codex's own
+/// fallback), or a named slug. A named slug the catalog does not list fails the
+/// launch, because stamping it would leave Codex silently reviewing with
+/// something else.
+fn stamp_guardian_reviewer(
+    profile_id: &str,
+    profile: &mj_core::config::HarnessProfile,
+    catalog: &mut mj_core::codex_catalog::CodexCatalog,
+) -> Result<()> {
+    let setting = profile
+        .guardian_review_model
+        .as_deref()
+        .unwrap_or(mj_core::config::GUARDIAN_REVIEW_NEWEST_FLASH);
+    if setting == mj_core::config::GUARDIAN_REVIEW_SESSION {
+        tracing::info!(
+            profile_id,
+            "guardian_review_model is \"session\"; Guardian reviews run on the session model"
+        );
+        return Ok(());
+    }
+    if setting == mj_core::config::GUARDIAN_REVIEW_NEWEST_FLASH {
+        match mj_core::codex_catalog::guardian_review_model(catalog.slugs()) {
+            Some(reviewer) => mj_core::codex_catalog::stamp_reviewer(catalog, &reviewer),
+            // With no small model to review with, Codex falls back to reviewing
+            // with the session model, which still runs Guardian.
+            None => tracing::info!(
+                profile_id,
+                "the model catalog lists no flash model; Guardian reviews run on the session model"
+            ),
+        }
+        return Ok(());
+    }
+    let slugs = catalog.slugs();
+    if !slugs.iter().any(|slug| slug == setting) {
+        bail!(
+            "profile {profile_id:?}: guardian_review_model {setting:?} is not in the provider's model catalog, which lists {}",
+            slugs.join(", ")
+        );
+    }
+    mj_core::codex_catalog::stamp_reviewer(catalog, setting);
+    Ok(())
 }
 
 /// Prepend `model_catalog_json` to a staged Codex `config.toml`.
@@ -3281,6 +3355,7 @@ mod tests {
                 directory.path().to_string_lossy().into_owned(),
             )]),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
         let check = || {
             preflight_harness(
@@ -4590,6 +4665,7 @@ mod tests {
             home: PathBuf::from("/profiles/test"),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         for harness in [
@@ -4852,6 +4928,7 @@ mod tests {
             home: home.to_path_buf(),
             environment: BTreeMap::from([("ZAI_API_KEY".to_owned(), "coding-plan-key".to_owned())]),
             context_window_bytes: None,
+            guardian_review_model: None,
         }
     }
 
@@ -4971,6 +5048,135 @@ mod tests {
         assert!(error.contains("https://api.z.ai/api/v1/models"), "{error}");
     }
 
+    const DEEPSEEK_CONFIG: &str = "model = \"deepseek-v4-pro\"\n\
+                                   model_provider = \"deepseek\"\n\
+                                   \n\
+                                   [model_providers.deepseek]\n\
+                                   base_url = \"https://api.deepseek.com/v1\"\n\
+                                   env_key = \"DEEPSEEK_API_KEY\"\n\
+                                   wire_api = \"responses\"\n";
+
+    const DEEPSEEK_LIST: &str = r#"{"object":"list","data":[
+        {"id":"deepseek-flash","object":"model","owned_by":"deepseek"},
+        {"id":"deepseek-v4-pro","object":"model","owned_by":"deepseek"}
+    ]}"#;
+
+    fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
+        std::fs::write(home.join("config.toml"), DEEPSEEK_CONFIG).unwrap();
+        mj_core::config::HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: home.to_path_buf(),
+            environment: BTreeMap::from([(
+                "DEEPSEEK_API_KEY".to_owned(),
+                "deepseek-key".to_owned(),
+            )]),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        }
+    }
+
+    fn stage_catalog_for(
+        profile: &mj_core::config::HarnessProfile,
+        body: &str,
+        staged: &Path,
+        store: &Path,
+    ) -> Result<mj_core::codex_catalog::CodexCatalog> {
+        stage_codex_catalog(
+            "deepseek",
+            profile,
+            staged,
+            &|_, _| Ok(body.as_bytes().to_vec()),
+            &IsolatedCatalogCache(store.to_path_buf()),
+        )?;
+        mj_core::codex_catalog::parse(&std::fs::read(staged.join("models.json")).unwrap())
+    }
+
+    #[test]
+    fn a_plain_model_list_becomes_a_catalog_the_profiles_overrides_refine() {
+        let home = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let profile = deepseek_profile(home.path());
+        std::fs::write(
+            home.path().join("models.json"),
+            r#"{"models":[
+                {"slug":"deepseek-v4-pro","supported_reasoning_levels":["low","high"]},
+                {"slug":"deepseek-preview","display_name":"DeepSeek Preview"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let catalog = stage_catalog_for(
+            &profile,
+            DEEPSEEK_LIST,
+            staged.path(),
+            &store.path().join("cache.sqlite3"),
+        )
+        .expect("an OpenAI-format model list stages a catalog");
+
+        assert_eq!(
+            catalog.slugs(),
+            ["deepseek-flash", "deepseek-v4-pro", "deepseek-preview"],
+            "the override adds a model the provider's list omits"
+        );
+        assert_eq!(
+            catalog.models[1]["supported_reasoning_levels"],
+            serde_json::json!(["low", "high"]),
+            "the override gives the translated entry its reasoning levels"
+        );
+        assert_eq!(
+            catalog.models[0]["auto_review_model_override"],
+            serde_json::Value::from("deepseek-flash"),
+            "the newest flash model reviews by default"
+        );
+    }
+
+    #[test]
+    fn the_guardian_review_setting_picks_which_model_reviews() {
+        let home = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let mut profile = deepseek_profile(home.path());
+        let cache = store.path().join("cache.sqlite3");
+
+        profile.guardian_review_model = Some("session".to_owned());
+        let staged = tempfile::tempdir().unwrap();
+        let catalog =
+            stage_catalog_for(&profile, DEEPSEEK_LIST, staged.path(), &cache).expect("stage");
+        assert!(
+            catalog
+                .models
+                .iter()
+                .all(|model| !model.contains_key("auto_review_model_override")),
+            "with \"session\" Codex reviews with the session model, so nothing is stamped"
+        );
+
+        profile.guardian_review_model = Some("deepseek-v4-pro".to_owned());
+        let staged = tempfile::tempdir().unwrap();
+        let catalog =
+            stage_catalog_for(&profile, DEEPSEEK_LIST, staged.path(), &cache).expect("stage");
+        for model in &catalog.models {
+            assert_eq!(
+                model["auto_review_model_override"],
+                serde_json::Value::from("deepseek-v4-pro"),
+                "a named slug reviews whichever model the session runs on"
+            );
+        }
+
+        profile.guardian_review_model = Some("deepseek-nonesuch".to_owned());
+        let staged = tempfile::tempdir().unwrap();
+        let error = stage_catalog_for(&profile, DEEPSEEK_LIST, staged.path(), &cache)
+            .expect_err("a reviewer the provider does not serve cannot review")
+            .to_string();
+        assert!(error.contains("deepseek-nonesuch"), "{error}");
+        assert!(error.contains("deepseek"), "{error}");
+        assert!(error.contains("deepseek-flash"), "{error}");
+        assert!(
+            !staged.path().join("models.json").exists(),
+            "a rejected reviewer stages no catalog at all"
+        );
+    }
+
     #[test]
     fn a_native_codex_profile_gets_no_generated_catalog() {
         let home = tempfile::tempdir().unwrap();
@@ -4983,6 +5189,7 @@ mod tests {
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5023,6 +5230,7 @@ mod tests {
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5053,6 +5261,7 @@ mod tests {
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5096,6 +5305,7 @@ mod tests {
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5134,6 +5344,7 @@ mod tests {
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5298,6 +5509,7 @@ mod tests {
             home: PathBuf::from("/profiles/muse"),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         let (launch, _, _) = worker_launch_config(
@@ -5336,6 +5548,7 @@ mod tests {
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5367,6 +5580,7 @@ mod tests {
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
         stage_profile(&profile, staged.path()).unwrap();
         let memory = ProjectMemoryLaunchConfig {
@@ -5463,6 +5677,7 @@ mod tests {
             home: home.path().to_path_buf(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -5497,6 +5712,7 @@ mod tests {
                 home: home.path().to_path_buf(),
                 environment: std::collections::BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             };
 
             stage_profile(&profile, staged.path()).unwrap();
@@ -5529,6 +5745,7 @@ mod tests {
             home: home.path().to_path_buf(),
             environment: std::collections::BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();

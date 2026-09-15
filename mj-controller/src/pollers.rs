@@ -2173,6 +2173,7 @@ mod tests {
                 home: PathBuf::from("/home/dev/.codex"),
                 environment: Default::default(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         config.targets.insert(

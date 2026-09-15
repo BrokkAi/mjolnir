@@ -60,6 +60,7 @@ fn add_codex_profile(config: &mut Config, home: &Path) {
             home: home.to_path_buf(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         },
     );
 }

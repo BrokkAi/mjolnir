@@ -96,7 +96,8 @@ What changes for such a profile:
 - **Guardian reviews run on the newest flash model** the catalog lists. Mjolnir
   stamps that choice on every catalog entry, so a heavyweight session model is
   not also its own reviewer. When the catalog lists no flash model, Codex reviews
-  with the session model.
+  with the session model. Change the choice with
+  [`guardian_review_model`](#choose-the-guardian-review-model).
 - **A private staged home, always.** Even on a raw local target, the session runs
   from a copy of the profile home rather than the home itself, so the generated
   catalog never lands in your own Codex directory.
@@ -106,6 +107,87 @@ What changes for such a profile:
 - **Not a utility model.** Mjolnir's own inference, such as compacting a
   transcript for a handoff, uses chat completions, which these profiles cannot
   serve. Keep an OpenAI Codex or other profile configured for that work.
+
+### Providers that serve a plain model list
+
+Some providers answer `GET {base_url}/models` with Codex's own catalog format,
+`{"models": [...]}`, which carries a full description of each model. Z.ai is one
+of them. Most OpenAI-compatible providers instead answer with OpenAI's plain
+list, `{"object": "list", "data": [{"id": "..."}]}`, which carries only model
+ids. DeepSeek is one of those:
+
+```toml
+model = "deepseek-v4-pro"
+model_provider = "deepseek"
+model_reasoning_effort = "high"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com/v1"
+env_key = "DEEPSEEK_API_KEY"
+wire_api = "responses"
+```
+
+Mjolnir accepts both shapes. For a plain list it builds a catalog entry per id
+with conservative defaults: a 128,000-token context window, the plain shell tool,
+and no reasoning levels, so a session on such a model offers no effort choice
+rather than offering one the provider would reject.
+
+Quota reporting is separate from the catalog and covers Z.ai (`api.z.ai`) and
+Zhipu (`open.bigmodel.cn`) hosts only, so a DeepSeek profile shows no quota
+windows. Sessions on it run normally.
+
+### Refine the catalog with your own `models.json`
+
+Put a `models.json` in the profile home to correct or extend what the provider
+advertises. It uses Codex's catalog format. Each entry is matched to the fetched
+catalog by `slug`; the fields you write replace those on the fetched entry and
+every other field survives. A `slug` the provider did not list is added to the
+catalog. For example, to give DeepSeek's reasoning model its two effort levels:
+
+```json
+{
+  "models": [
+    {
+      "slug": "deepseek-v4-pro",
+      "supported_reasoning_levels": ["low", "high"]
+    }
+  ]
+}
+```
+
+Mjolnir merges this file into the fetched catalog for every launch and writes
+the merged result as the staged `models.json`. Your own file is never edited.
+This is the supported way to shape the catalog; `model_catalog_json` in the
+Codex `config.toml` is still rejected, because Mjolnir writes that key itself.
+
+### Choose the guardian review model
+
+Set `guardian_review_model` on the profile to decide which model reviews an
+escalated action:
+
+```toml
+[profiles.glm]
+kind = "codex"
+home = "/home/me/.codex-glm"
+guardian_review_model = "glm-5.3"
+```
+
+The accepted values are:
+
+- `newest-flash`, the default when the setting is absent: the newest flash model
+  in the merged catalog reviews. Versions compare numerically, so `glm-5.10-flash`
+  is newer than `glm-5.3-flash`.
+- `session`: nothing is stamped, so Codex reviews with whichever model the
+  session is running. This costs more and is the setting to reach for when a
+  provider's small model reviews badly, for instance by denying benign actions.
+- Any model slug from the merged catalog, such as `glm-5.3` above. A slug the
+  catalog does not list fails the launch with an error naming the slug and the
+  slugs the catalog does list, rather than quietly reviewing with something else.
+
+The setting applies only to a Codex profile with a custom provider, because
+Mjolnir generates a catalog only for those. Setting it on any other profile is a
+configuration error.
 
 ## Configure a profile
 

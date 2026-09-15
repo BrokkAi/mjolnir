@@ -179,6 +179,7 @@ kind = "codex"
 home = "/home/me/.codex-work"
 # enabled = false
 # context_window_bytes = 131072
+# guardian_review_model = "newest-flash"
 
 [profiles.codex-work.environment]
 # PATH = "/opt/node/bin:/usr/local/bin:/usr/bin:/bin"
@@ -192,6 +193,7 @@ home = "/home/me/.codex-work"
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
 | `environment` | table of strings | no | empty | Environment passed to harness/profile commands. Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` must set that variable here, with a non-empty value. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
+| `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
 instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,

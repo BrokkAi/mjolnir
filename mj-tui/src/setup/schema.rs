@@ -20,7 +20,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":true,"max_concurrent":6,"eligible_profiles":{}})
         }
         "profiles" if path.len() == 2 => {
-            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null})
+            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null})
         }
         "targets" if path.len() == 2 => {
             target_defaults(value["kind"].as_str().unwrap_or("local-bare"))
@@ -119,6 +119,7 @@ pub(super) fn label(key: &str) -> String {
         "home" => "Account directory",
         "environment" => "Environment variables",
         "context_window_bytes" => "Context budget (bytes)",
+        "guardian_review_model" => "Guardian review model",
         "bind" => "Listen address and port",
         "tailscale_detect" => "Detect Tailscale",
         "tls_cert" => "TLS certificate file",
@@ -283,6 +284,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "memory" => "Examples: 8g or 4096m. Leave blank for no limit.",
         "context_window_bytes" => {
             "Optional positive byte limit for transcript compaction. Leave blank for the default."
+        }
+        "guardian_review_model" => {
+            "For a Codex profile with a custom model provider: newest-flash reviews with the newest flash model, session reviews with the session's own model, or name a model from the provider's catalog. Leave blank for newest-flash."
         }
         _ => "Enter opens or edits a setting. Changes stay in this draft until you save.",
     }

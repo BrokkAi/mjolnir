@@ -4517,6 +4517,7 @@ mod tests {
             mj_core::config::HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                guardian_review_model: None,
                 kind: HarnessKind::Deepseek,
                 home: std::path::PathBuf::from("/profiles/deepseek"),
                 environment: BTreeMap::new(),

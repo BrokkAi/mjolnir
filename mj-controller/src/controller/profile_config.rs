@@ -331,6 +331,7 @@ mod tests {
             home: home.path().into(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
         let mut choices = ProfileConfig {
             model: Some(String::new()),
@@ -357,6 +358,7 @@ mod tests {
             home: root.path().into(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
         let resolve = |environment: BTreeMap<String, String>| {
             let mut environment = environment;

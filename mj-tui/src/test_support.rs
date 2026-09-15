@@ -107,6 +107,7 @@ pub(crate) fn config() -> Config {
                 HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    guardian_review_model: None,
                     kind: HarnessKind::Claude,
                     home: PathBuf::from("/profiles/claude"),
                     environment: BTreeMap::new(),
@@ -117,6 +118,7 @@ pub(crate) fn config() -> Config {
                 HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    guardian_review_model: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/profiles/codex"),
                     environment: BTreeMap::new(),
@@ -127,6 +129,7 @@ pub(crate) fn config() -> Config {
                 HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    guardian_review_model: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/profiles/codex-two"),
                     environment: BTreeMap::new(),

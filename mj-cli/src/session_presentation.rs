@@ -120,6 +120,7 @@ mod tests {
                 home: PathBuf::from("/profiles/profile-1"),
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         config

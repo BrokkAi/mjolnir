@@ -4266,6 +4266,7 @@ mod tests {
                             HarnessProfile {
                                 enabled: true,
                                 context_window_bytes: None,
+                                guardian_review_model: None,
                                 kind: HarnessKind::Codex,
                                 home: PathBuf::from("/home/agent").join(id),
                                 environment: std::collections::BTreeMap::new(),

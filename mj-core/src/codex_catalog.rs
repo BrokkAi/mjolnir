@@ -44,9 +44,57 @@ impl CodexCatalog {
     }
 }
 
-/// Parse a provider's `GET /models` response body, which uses the same shape as
-/// Codex's `model_catalog_json` file.
+/// Parse a provider's `GET /models` response body.
+///
+/// Two shapes are accepted. The Codex shape, `{"models": [...]}`, is what Z.ai
+/// serves and is kept entry for entry. OpenAI's plain model list,
+/// `{"object": "list", "data": [{"id": "..."}]}`, is what DeepSeek and most
+/// OpenAI-compatible providers serve; it carries only ids, so each entry is
+/// translated into a full Codex entry using the conservative defaults in
+/// [`entry_from_openai_model`]. A body with neither array is an error naming
+/// both shapes.
 pub fn parse(bytes: &[u8]) -> Result<CodexCatalog> {
+    let value: Value = serde_json::from_slice(bytes).context("parse model catalog as JSON")?;
+    let entries = if let Some(models) = value.get("models").and_then(Value::as_array) {
+        let mut entries = Vec::with_capacity(models.len());
+        for model in models {
+            let Some(object) = model.as_object() else {
+                bail!("model catalog entry is not a JSON object");
+            };
+            entries.push(object.clone());
+        }
+        entries
+    } else if let Some(data) = value.get("data").and_then(Value::as_array) {
+        let mut entries = Vec::with_capacity(data.len());
+        for (position, model) in data.iter().enumerate() {
+            let Some(object) = model.as_object() else {
+                bail!("model list entry is not a JSON object");
+            };
+            let Some(id) = object.get("id").and_then(Value::as_str) else {
+                bail!("model list entry has no `id`");
+            };
+            entries.push(entry_from_openai_model(
+                id,
+                object.get("owned_by").and_then(Value::as_str),
+                position,
+            ));
+        }
+        entries
+    } else {
+        bail!(
+            "model catalog has neither a `models` array (Codex catalog format) nor a `data` array (OpenAI model list format)"
+        );
+    };
+    if entries.is_empty() {
+        bail!("model catalog lists no models");
+    }
+    Ok(CodexCatalog { models: entries })
+}
+
+/// Parse a Codex-shape catalog only, for the user's optional `models.json`
+/// override file. The override file refines fetched entries, so it must speak
+/// the same language as the catalog it refines.
+pub fn parse_codex_shape(bytes: &[u8]) -> Result<CodexCatalog> {
     let value: Value = serde_json::from_slice(bytes).context("parse model catalog as JSON")?;
     let Some(models) = value.get("models").and_then(Value::as_array) else {
         bail!("model catalog has no `models` array");
@@ -62,6 +110,91 @@ pub fn parse(bytes: &[u8]) -> Result<CodexCatalog> {
         bail!("model catalog lists no models");
     }
     Ok(CodexCatalog { models: entries })
+}
+
+/// Build a Codex catalog entry from one id in an OpenAI-format model list.
+///
+/// The list carries no capabilities, so the defaults are deliberately
+/// conservative: no reasoning levels (a session shows no effort choice rather
+/// than offering one the provider rejects), a 128k context window, and the
+/// plain shell tool. A user who knows better refines any entry with a
+/// `models.json` override file in the profile home.
+fn entry_from_openai_model(
+    id: &str,
+    owned_by: Option<&str>,
+    position: usize,
+) -> Map<String, Value> {
+    let description = match owned_by {
+        Some(owner) if !owner.is_empty() => format!("{id} ({owner})"),
+        _ => id.to_owned(),
+    };
+    let mut entry = Map::new();
+    entry.insert("slug".to_owned(), Value::from(id));
+    entry.insert("display_name".to_owned(), Value::from(id));
+    entry.insert("description".to_owned(), Value::from(description));
+    entry.insert(
+        "supported_reasoning_levels".to_owned(),
+        Value::Array(vec![]),
+    );
+    entry.insert("shell_type".to_owned(), Value::from("shell_command"));
+    entry.insert("visibility".to_owned(), Value::from("list"));
+    entry.insert("supported_in_api".to_owned(), Value::Bool(true));
+    entry.insert("priority".to_owned(), Value::from(position as u64));
+    entry.insert("base_instructions".to_owned(), Value::from(""));
+    entry.insert(
+        "supports_reasoning_summaries".to_owned(),
+        Value::Bool(false),
+    );
+    entry.insert("default_reasoning_summary".to_owned(), Value::from("none"));
+    entry.insert("support_verbosity".to_owned(), Value::Bool(false));
+    entry.insert("apply_patch_tool_type".to_owned(), Value::from("freeform"));
+    entry.insert(
+        "truncation_policy".to_owned(),
+        serde_json::json!({"mode": "bytes", "limit": 10000}),
+    );
+    entry.insert("context_window".to_owned(), Value::from(128000));
+    entry.insert("max_context_window".to_owned(), Value::from(128000));
+    entry.insert(
+        "effective_context_window_percent".to_owned(),
+        Value::from(95),
+    );
+    entry.insert("supports_parallel_tool_calls".to_owned(), Value::Bool(true));
+    entry.insert(
+        "experimental_supported_tools".to_owned(),
+        Value::Array(vec![]),
+    );
+    entry.insert(
+        "input_modalities".to_owned(),
+        Value::Array(vec![Value::from("text")]),
+    );
+    entry
+}
+
+/// Copy the user's override entries over the fetched catalog.
+///
+/// An override entry whose `slug` the provider listed replaces those fields on
+/// the fetched entry and leaves the rest; a slug the provider did not list is
+/// appended, so a user can advertise a model the provider's list omits. This is
+/// how a user adds reasoning levels or a larger context window to a provider
+/// whose model list carries only ids.
+pub fn merge_overrides(catalog: &mut CodexCatalog, overrides: &CodexCatalog) {
+    for entry in &overrides.models {
+        let Some(slug) = entry.get("slug").and_then(Value::as_str) else {
+            continue;
+        };
+        let existing = catalog
+            .models
+            .iter_mut()
+            .find(|model| model.get("slug").and_then(Value::as_str) == Some(slug));
+        match existing {
+            Some(existing) => {
+                for (field, value) in entry {
+                    existing.insert(field.clone(), value.clone());
+                }
+            }
+            None => catalog.models.push(entry.clone()),
+        }
+    }
 }
 
 /// The newest flash model among `slugs`, which Mjolnir uses as the Guardian
@@ -133,6 +266,81 @@ mod tests {
     fn parse_rejects_a_body_without_models() {
         assert!(parse(br#"{"data":[]}"#).is_err());
         assert!(parse(br#"{"models":[]}"#).is_err());
+    }
+
+    const OPENAI_LIST: &[u8] = br#"{"object":"list","data":[
+        {"id":"deepseek-flash","object":"model","owned_by":"deepseek"},
+        {"id":"deepseek-v4-pro","object":"model","owned_by":"deepseek"}
+    ]}"#;
+
+    #[test]
+    fn parse_translates_an_openai_model_list_into_catalog_entries() {
+        let catalog = parse(OPENAI_LIST).expect("parse");
+        assert_eq!(catalog.slugs(), ["deepseek-flash", "deepseek-v4-pro"]);
+        let flash = &catalog.models[0];
+        assert_eq!(flash["display_name"], Value::from("deepseek-flash"));
+        assert_eq!(
+            flash["description"],
+            Value::from("deepseek-flash (deepseek)"),
+            "the owner explains where the model came from"
+        );
+        assert_eq!(
+            flash["supported_reasoning_levels"],
+            Value::Array(vec![]),
+            "a plain list says nothing about reasoning, so no effort is offered"
+        );
+        assert_eq!(flash["context_window"], Value::from(128000));
+        assert_eq!(flash["priority"], Value::from(0));
+        assert_eq!(catalog.models[1]["priority"], Value::from(1));
+        assert_eq!(flash["truncation_policy"]["limit"], Value::from(10000));
+        // Codex must be able to read back what the translation produced.
+        assert!(parse(catalog.to_json().as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_a_body_in_neither_shape_and_names_both() {
+        let error = parse(br#"{"available":["deepseek-v4-pro"]}"#)
+            .expect_err("a third shape cannot be guessed at")
+            .to_string();
+        assert!(error.contains("models"), "{error}");
+        assert!(error.contains("data"), "{error}");
+    }
+
+    #[test]
+    fn overrides_refine_a_listed_model_and_append_an_unlisted_one() {
+        let mut catalog = parse(OPENAI_LIST).expect("parse");
+        let overrides = parse_codex_shape(
+            br#"{"models":[
+                {"slug":"deepseek-v4-pro","supported_reasoning_levels":["low","high"],"context_window":256000},
+                {"slug":"deepseek-reasoner","display_name":"DeepSeek Reasoner"}
+            ]}"#,
+        )
+        .expect("parse overrides");
+
+        merge_overrides(&mut catalog, &overrides);
+
+        assert_eq!(
+            catalog.slugs(),
+            ["deepseek-flash", "deepseek-v4-pro", "deepseek-reasoner"],
+            "an unlisted slug is appended in override order"
+        );
+        let pro = &catalog.models[1];
+        assert_eq!(
+            pro["supported_reasoning_levels"],
+            serde_json::json!(["low", "high"]),
+            "the override field replaces the translated default"
+        );
+        assert_eq!(pro["context_window"], Value::from(256000));
+        assert_eq!(
+            pro["display_name"],
+            Value::from("deepseek-v4-pro"),
+            "fields the override omits survive"
+        );
+        assert_eq!(
+            catalog.models[0]["supported_reasoning_levels"],
+            Value::Array(vec![]),
+            "a model the override does not name is untouched"
+        );
     }
 
     #[test]

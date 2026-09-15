@@ -59,6 +59,7 @@ mod tests {
                     home: PathBuf::from(id),
                     environment: Default::default(),
                     context_window_bytes: None,
+                    guardian_review_model: None,
                 },
             );
         }

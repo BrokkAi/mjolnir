@@ -130,6 +130,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
                 home: claude_home,
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         )]),
         bundles: BTreeMap::new(),
@@ -248,6 +249,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
                 home: kimi_home.clone(),
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         )]),
         bundles: BTreeMap::from([(
@@ -373,6 +375,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
                 home: grok_home.clone(),
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         )]),
         bundles: BTreeMap::from([(
@@ -605,6 +608,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
                 home: codex_home.clone(),
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         )]),
         bundles: BTreeMap::from([(

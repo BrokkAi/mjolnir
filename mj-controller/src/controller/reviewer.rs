@@ -541,6 +541,7 @@ mod tests {
                     home,
                     environment: BTreeMap::from([("EXTRA".into(), "1".into())]),
                     context_window_bytes: None,
+                    guardian_review_model: None,
                 },
             );
         }

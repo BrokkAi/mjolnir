@@ -645,6 +645,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         assert!(!profile_serves_as_utility(&profile));
@@ -689,6 +690,7 @@ mod tests {
                 home: PathBuf::from("/profiles/codex"),
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         let runtime = UtilityLlmRuntime::default();

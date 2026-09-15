@@ -973,6 +973,7 @@ mod tests {
                 enabled: true,
                 environment: Default::default(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         let controller = Controller {

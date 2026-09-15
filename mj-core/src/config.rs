@@ -692,7 +692,20 @@ pub struct HarnessProfile {
     /// Bytes avoid pretending Hel has an accurate tokenizer for every model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window_bytes: Option<usize>,
+    /// Which model reviews this profile's escalated actions in Codex's Guardian
+    /// mode: `"newest-flash"` (the default when absent) picks the newest flash
+    /// model the provider's catalog lists, `"session"` leaves reviews to the
+    /// session's own model, and any other value names a catalog slug. Only
+    /// meaningful for a Codex profile with a custom model provider, because
+    /// Mjolnir generates the catalog only for those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardian_review_model: Option<String>,
 }
+
+/// The `guardian_review_model` value that picks the newest flash model.
+pub const GUARDIAN_REVIEW_NEWEST_FLASH: &str = "newest-flash";
+/// The `guardian_review_model` value that leaves reviews to the session model.
+pub const GUARDIAN_REVIEW_SESSION: &str = "session";
 
 impl HarnessProfile {
     /// Discovery identifies an installation independently of user settings.
@@ -811,7 +824,7 @@ impl HarnessProfile {
         let provider = self
             .codex_provider()
             .with_context(|| format!("profile {id:?}"))?;
-        if let Some(provider) = provider {
+        if let Some(provider) = provider.as_ref() {
             if provider.model_catalog_json.is_some() {
                 bail!(
                     "profile {id:?}: remove `model_catalog_json` from {}; Mjolnir fetches the model catalog from {} and stages it for every launch",
@@ -827,6 +840,19 @@ impl HarnessProfile {
             {
                 bail!(
                     "profile {id:?}: {} authenticates with {env_key}, so set it under [profiles.{id}.environment] in Mjolnir's config.toml",
+                    self.home.join("config.toml").display()
+                );
+            }
+        }
+        if let Some(reviewer) = self.guardian_review_model.as_deref() {
+            if reviewer.trim().is_empty() {
+                bail!(
+                    "profile {id:?}: `guardian_review_model` must be {GUARDIAN_REVIEW_NEWEST_FLASH:?}, {GUARDIAN_REVIEW_SESSION:?}, or a model slug from the provider's catalog"
+                );
+            }
+            if provider.is_none() {
+                bail!(
+                    "profile {id:?}: `guardian_review_model` applies only to a Codex profile whose {} names a custom model provider, because Mjolnir generates the model catalog only for those",
                     self.home.join("config.toml").display()
                 );
             }
@@ -2310,6 +2336,7 @@ mod tests {
             home: home.to_path_buf(),
             environment,
             context_window_bytes: None,
+            guardian_review_model: None,
         }
     }
 
@@ -2372,6 +2399,53 @@ mod tests {
     }
 
     #[test]
+    fn guardian_review_model_accepts_its_three_forms_only_on_a_custom_provider() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let mut profile = zai_profile(
+            home.path(),
+            [("ZAI_API_KEY".to_owned(), "secret".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        for accepted in [
+            GUARDIAN_REVIEW_NEWEST_FLASH,
+            GUARDIAN_REVIEW_SESSION,
+            "glm-5.3",
+        ] {
+            profile.guardian_review_model = Some(accepted.to_owned());
+            profile
+                .validate("glm")
+                .unwrap_or_else(|error| panic!("{accepted} should validate: {error}"));
+        }
+
+        profile.guardian_review_model = Some("   ".to_owned());
+        let error = profile
+            .validate("glm")
+            .expect_err("a blank reviewer names no model")
+            .to_string();
+        assert!(error.contains("guardian_review_model"), "{error}");
+
+        // A native Codex profile has no Mjolnir-generated catalog to pick a
+        // reviewer from, so the setting would silently do nothing.
+        let native = tempfile::tempdir().expect("temporary home");
+        fs::write(native.path().join("config.toml"), "model = \"gpt-5.5\"\n").expect("write");
+        let native_profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: native.path().to_path_buf(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: Some(GUARDIAN_REVIEW_SESSION.to_owned()),
+        };
+        let error = native_profile
+            .validate("work")
+            .expect_err("no custom provider means no generated catalog")
+            .to_string();
+        assert!(error.contains("guardian_review_model"), "{error}");
+        assert!(error.contains("work"), "{error}");
+    }
+
+    #[test]
     fn a_codex_profile_with_no_home_yet_reports_a_native_login() {
         let profile = HarnessProfile {
             enabled: true,
@@ -2379,6 +2453,7 @@ mod tests {
             home: PathBuf::from("/does/not/exist"),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
         assert_eq!(profile.auth_scheme(), AuthScheme::NativeLogin);
         assert_eq!(
@@ -2639,6 +2714,7 @@ mod tests {
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/home/test/.codex-one"),
                     environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]),
+                    guardian_review_model: None,
                 },
             )]),
             bundles: BTreeMap::from([(

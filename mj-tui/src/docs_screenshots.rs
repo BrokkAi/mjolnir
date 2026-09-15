@@ -110,6 +110,7 @@ fn documentation_dashboard() -> DashboardState {
             home: PathBuf::from("/profiles/kimi"),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         },
     );
 

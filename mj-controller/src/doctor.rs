@@ -2337,6 +2337,7 @@ mod tests {
             home,
             environment: std::collections::BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
         let config = Config {
             profiles: [("work".to_owned(), profile.clone())].into_iter().collect(),
@@ -2371,6 +2372,7 @@ mod tests {
             home: PathBuf::from("/missing/disabled-profile"),
             environment: std::collections::BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
         let config = Config {
             profiles: [("retired".to_owned(), profile)].into_iter().collect(),

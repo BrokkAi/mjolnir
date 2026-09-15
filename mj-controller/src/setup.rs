@@ -183,6 +183,7 @@ fn configure_local_startup(config: &mut Config, codex_home: PathBuf) {
             home: codex_home,
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         },
     );
     config
@@ -303,6 +304,7 @@ fn discover_installed_harnesses(
             home: home.clone(),
             environment: BTreeMap::new(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
         let (program, _) = mj_core::credentials::native_login_command(&profile);
         let probe = CommandSpec::new(program, ["--version"])
@@ -374,6 +376,7 @@ fn probe_profile(kind: HarnessKind, home: &Path) -> HarnessProfile {
         home: home.to_path_buf(),
         environment: BTreeMap::new(),
         context_window_bytes: None,
+        guardian_review_model: None,
     }
 }
 
@@ -644,6 +647,7 @@ fn build_config_with_runtimes(
                 home: home.path.clone(),
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
     }
@@ -1480,6 +1484,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             context_window_bytes: None,
+            guardian_review_model: None,
         };
 
         assert!(

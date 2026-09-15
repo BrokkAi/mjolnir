@@ -4674,6 +4674,7 @@ mod tests {
                             home: std::path::PathBuf::from("/profiles").join(id),
                             environment: BTreeMap::new(),
                             context_window_bytes: None,
+                            guardian_review_model: None,
                         },
                     )
                 })

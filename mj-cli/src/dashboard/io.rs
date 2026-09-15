@@ -2801,6 +2801,7 @@ mod tests {
                 home: PathBuf::from("/home/dev/.codex"),
                 environment: BTreeMap::new(),
                 context_window_bytes: None,
+                guardian_review_model: None,
             },
         );
         config.bundles.insert(
