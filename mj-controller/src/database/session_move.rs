@@ -52,12 +52,35 @@ pub(super) fn load_move_operation_with(
 
 pub fn load_move_operations() -> Result<Vec<MoveOperation>> {
     let connection = open_reader(&database_path())?;
-    let mut statement =
-        connection.prepare("SELECT operation_json FROM session_moves ORDER BY session_id")?;
-    statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .map(|row| serde_json::from_str(&row?).context("decode durable move intent"))
-        .collect()
+    load_move_operations_with(&connection)
+}
+
+pub(super) fn load_move_operations_with(connection: &Connection) -> Result<Vec<MoveOperation>> {
+    let mut statement = connection
+        .prepare("SELECT session_id, operation_json FROM session_moves ORDER BY session_id")?;
+    // A move intent recorded before a harness was removed keeps that harness in
+    // its recovery snapshot, so it no longer decodes. The daemon loads every
+    // intent at startup, so a single undecodable row would otherwise stop the
+    // daemon from starting at all. Skip such a row with a warning, exactly as
+    // `load_state_from` skips a session whose harness is no longer supported;
+    // the session it names is skipped there too, so the abandoned move has
+    // nothing left to act on.
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut operations = Vec::new();
+    for row in rows {
+        let (session_id, json) = row?;
+        match serde_json::from_str::<MoveOperation>(&json) {
+            Ok(operation) => operations.push(operation),
+            Err(error) => tracing::warn!(
+                session_id,
+                %error,
+                "durable move intent no longer decodes; skipping it (its harness may have been removed)"
+            ),
+        }
+    }
+    Ok(operations)
 }
 
 pub fn move_checkpoint_is_retained(path: &Path) -> Result<bool> {
@@ -184,6 +207,36 @@ mod tests {
             assert_eq!(restored.source_target, session.target);
             assert_eq!(restored.retains_checkpoint(), phase != MovePhase::Completed);
         }
+    }
+
+    #[test]
+    fn bulk_load_skips_a_move_intent_whose_harness_no_longer_decodes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let good = super::super::tests::session("move-good", "project");
+        let stale_session = super::super::tests::session("move-removed-harness", "project");
+        save_session_to(&path, &good).unwrap();
+        save_session_to(&path, &stale_session).unwrap();
+        let connection = open(&path).unwrap();
+        save_move_operation_with(&connection, &operation(&good)).unwrap();
+        let mut stale_operation = operation(&stale_session);
+        stale_operation.operation_id = "move-two".into();
+        save_move_operation_with(&connection, &stale_operation).unwrap();
+        // Simulate a row recorded before a harness was removed: rewrite the
+        // stored recovery snapshot to name a harness the current binary no
+        // longer knows, so the row fails to decode.
+        let rewritten = connection
+            .execute(
+                "UPDATE session_moves
+                 SET operation_json = replace(operation_json, '\"harness_kind\":\"codex\"', '\"harness_kind\":\"zcode\"')
+                 WHERE session_id = 'move-removed-harness'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(rewritten, 1, "the test session must store a codex harness to rewrite");
+        let loaded = load_move_operations_with(&connection).unwrap();
+        assert_eq!(loaded.len(), 1, "the undecodable row must be skipped, not fail the load");
+        assert_eq!(loaded[0].selection.session_id, good.id);
     }
 
     #[test]
