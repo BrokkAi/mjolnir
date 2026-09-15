@@ -9,6 +9,21 @@ use serde_json::{Value, json};
 
 use mj_core::subagent::{MAX_WAIT_SECONDS, SourceRange, SubagentToolAction, SubagentToolRequest};
 
+/// Server instructions stating the spawn/wait contract: results reach the
+/// model only as the `wait` tool call's own answer, never as a push.
+const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. The user can see every child in the Sub-agents workspace.";
+
+/// The degraded answer when the daemon has not completed the request within
+/// the socket ceiling. The request stays queued; the model must collect the
+/// result itself, because nothing is ever pushed into its conversation.
+fn pending_reply(request_id: &str) -> Value {
+    json!({
+        "request_id":request_id,
+        "accepted":true,
+        "note":"Mjolnir has not answered this request yet; it stays queued. Repeat this call with the same request_key to collect its result. If this was a spawn without a request_key, check list_agents before spawning again so the child is not duplicated."
+    })
+}
+
 pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -38,8 +53,8 @@ pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
                 json!({
                     "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
                     "capabilities":{"tools":{"listChanged":false}},
-                    "serverInfo":{"name":"mj-subagents","version":env!("CARGO_PKG_VERSION")},
-                    "instructions":"Delegate work to Mjolnir sessions in this target. Calls are accepted immediately; results arrive in the parent conversation and are visible in the Sub-agents workspace."
+                    "serverInfo":{"name":"mj-agents","version":env!("CARGO_PKG_VERSION")},
+                    "instructions": SERVER_INSTRUCTIONS
                 }),
             ),
             "ping" => rpc_result(id, json!({})),
@@ -107,7 +122,7 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     let (action, supplied_key) = match params.name.as_str() {
         "list_profiles" => (SubagentToolAction::ListProfiles, None),
-        "spawn_agent" => {
+        "spawn" => {
             let args: SpawnArgs = serde_json::from_value(params.arguments)?;
             let key = args.request_key.clone();
             (
@@ -136,7 +151,7 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
                 None,
             )
         }
-        "wait_agents" => {
+        "wait" => {
             let args: WaitArgs = serde_json::from_value(params.arguments)?;
             (
                 SubagentToolAction::WaitAgents {
@@ -146,9 +161,9 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
                 None,
             )
         }
-        "interrupt_agent" | "close_agent" => {
+        "interrupt" | "close" => {
             let args: ChildArgs = serde_json::from_value(params.arguments)?;
-            let action = if params.name == "interrupt_agent" {
+            let action = if params.name == "interrupt" {
                 SubagentToolAction::InterruptAgent {
                     child_session_id: args.child_session_id,
                 }
@@ -177,14 +192,7 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
                 .unwrap_or(false),
         ));
     }
-    Ok((
-        json!({
-            "request_id":request_id,
-            "accepted":true,
-            "note":"Mjolnir accepted the request. The result will arrive in this conversation; the child is also available in the Sub-agents workspace."
-        }),
-        false,
-    ))
+    Ok((pending_reply(&request_id), false))
 }
 
 #[cfg(unix)]
@@ -220,14 +228,14 @@ fn tool_definitions() -> Vec<Value> {
             json!({"type":"object","additionalProperties":false}),
         ),
         tool(
-            "spawn_agent",
-            "Start an independent Mjolnir child session in this session's target and filesystem. Returns child_session_id at once; the child runs on its own. Do other work, then collect its result with wait_agents.",
+            "spawn",
+            "Start an independent Mjolnir child session in this session's target and filesystem. Returns child_session_id at once; the child runs on its own. Do other work, then collect its result with wait.",
             json!({
                 "type":"object",
                 "properties":{
                     "task_name":{"type":"string"},"instructions":{"type":"string"},
                     "profile_id":{"type":"string"},"model":{"type":"string"},"effort":{"type":"string"},
-                    "working_directory":{"type":"string"},"context":{"type":"string"},"request_key":{"type":"string"},
+                    "working_directory":{"type":"string"},"context":{"type":"string"},"request_key":{"type":"string","description":"Optional idempotency key. Repeating a call with the same key returns the original result instead of duplicating the work; useful for retries and long waits."},
                     "files":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["file","start","end"],"additionalProperties":false}}
                 },
                 "required":["task_name","instructions"],"additionalProperties":false
@@ -244,17 +252,17 @@ fn tool_definitions() -> Vec<Value> {
             json!({"type":"object","properties":{"child_session_id":{"type":"string"},"message":{"type":"string"}},"required":["child_session_id","message"],"additionalProperties":false}),
         ),
         tool(
-            "wait_agents",
+            "wait",
             "Block until the named child sessions finish their current turn, or until the timeout, then return each child's latest output. Spawn agents, do other work, then wait to collect results. timeout_seconds defaults to 300 and is capped at 3600.",
             json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":MAX_WAIT_SECONDS}},"required":["child_session_ids"],"additionalProperties":false}),
         ),
         tool(
-            "interrupt_agent",
+            "interrupt",
             "Interrupt the current turn of one child.",
             child.clone(),
         ),
         tool(
-            "close_agent",
+            "close",
             "Stop one child session and retain its conversation.",
             child,
         ),
@@ -285,14 +293,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wait_agents_advertises_the_shared_runtime_timeout_limit() {
+    fn wait_advertises_the_shared_runtime_timeout_limit() {
         let wait = tool_definitions()
             .into_iter()
-            .find(|tool| tool["name"] == "wait_agents")
-            .expect("wait_agents definition");
+            .find(|tool| tool["name"] == "wait")
+            .expect("wait definition");
         assert_eq!(
             wait["inputSchema"]["properties"]["timeout_seconds"]["maximum"],
             MAX_WAIT_SECONDS
         );
+    }
+
+    #[test]
+    fn instructions_collect_results_through_wait_and_never_promise_a_push() {
+        assert!(SERVER_INSTRUCTIONS.contains("wait"));
+        assert!(
+            !SERVER_INSTRUCTIONS.contains("arrive in"),
+            "instructions must not promise pushed results: {SERVER_INSTRUCTIONS}"
+        );
+    }
+
+    #[test]
+    fn the_pending_reply_directs_retries_through_idempotency() {
+        let reply = pending_reply("request-1");
+        assert_eq!(reply["request_id"], "request-1");
+        assert_eq!(reply["accepted"], true);
+        let note = reply["note"].as_str().expect("note text");
+        assert!(
+            note.contains("request_key") && note.contains("list_agents"),
+            "the note must route retries safely: {note}"
+        );
+        assert!(
+            !note.contains("arrive in"),
+            "the note must not promise pushed results: {note}"
+        );
+    }
+
+    #[test]
+    fn spawn_documents_its_idempotency_key() {
+        let spawn = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "spawn")
+            .expect("spawn definition");
+        let description = spawn["inputSchema"]["properties"]["request_key"]["description"]
+            .as_str()
+            .expect("request_key description");
+        assert!(description.contains("idempotency key"));
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! The extended tier's supervisor decides which specialist lanes are worth
 //! running, mid-turn, and launches them by calling one tool:
-//! `call_review_subagents`. Doing that through a tool rather than through text
+//! `spawn_specialist`. Doing that through a tool rather than through text
 //! is the tier's whole economy -- the supervisor keeps investigating while the
 //! lanes it chose run, instead of ending its turn to ask Hel for them.
 //!
@@ -88,15 +88,15 @@ fn call_tool(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
         .get("name")
         .and_then(Value::as_str)
         .context("tools/call is missing name")?;
-    if name != "call_review_subagents" {
+    if name != "spawn_specialist" {
         bail!("unknown review tool {name:?}");
     }
     let arguments = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let dispatch: LaneDispatch = serde_json::from_value(arguments)
-        .context("call_review_subagents takes a `reviewers` list")?;
+    let dispatch: LaneDispatch =
+        serde_json::from_value(arguments).context("spawn_specialist takes a `reviewers` list")?;
     // Validated here as well as in the worker: a rejected dispatch should read
     // as a tool error the supervisor can correct, not as a silent no-op.
     if let Err(message) = validate_dispatch(&dispatch.reviewers) {
@@ -150,7 +150,7 @@ fn tool_definition() -> Value {
         .collect::<Vec<_>>()
         .join("\n");
     json!({
-        "name": "call_review_subagents",
+        "name": "spawn_specialist",
         "description": format!(
             "Launch read-only specialist reviewers for the turn under review. Each request pairs an `agent_type` with a concrete unresolved `hypothesis` the lane can gather evidence for; topical plausibility is not a reason to launch one. The tool returns the started ids immediately and never waits: reports arrive as later messages in this session, and polling inside a tool call cannot receive them.\n\n{descriptions}"
         ),
@@ -250,7 +250,7 @@ mod tests {
     fn an_invalid_dispatch_is_a_tool_error_the_supervisor_can_correct() {
         let socket = std::path::PathBuf::from("/nonexistent/review-dispatch.sock");
         let params = json!({
-            "name": "call_review_subagents",
+            "name": "spawn_specialist",
             "arguments": {"reviewers": [{"agent_type": "tests", "hypothesis": "  "}]}
         });
         let (result, is_error) = call_tool(&socket, Some(&params)).expect("validation answers");
@@ -263,7 +263,7 @@ mod tests {
         );
 
         let params = json!({
-            "name": "call_review_subagents",
+            "name": "spawn_specialist",
             "arguments": {"reviewers": []}
         });
         let (result, is_error) = call_tool(&socket, Some(&params)).expect("validation answers");
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn an_unknown_tool_is_refused() {
         let socket = std::path::PathBuf::from("/nonexistent/review-dispatch.sock");
-        let params = json!({"name": "memory_write", "arguments": {}});
+        let params = json!({"name": "write", "arguments": {}});
         let error = call_tool(&socket, Some(&params)).expect_err("only one tool is served");
         assert!(format!("{error:#}").contains("unknown review tool"));
     }

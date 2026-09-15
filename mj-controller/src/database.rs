@@ -1475,13 +1475,13 @@ pub fn save_subagent_session(
     })
 }
 
-/// Record the child turn already reported to its parent.
-pub fn mark_subagent_turn_delivered(child_session_id: &str, turn: u64) -> Result<()> {
+/// Record the child turn whose completion notice the parent already has.
+pub fn mark_subagent_turn_noticed(child_session_id: &str, turn: u64) -> Result<()> {
     let child_session_id = child_session_id.to_owned();
-    submit_database_write("mark_subagent_turn_delivered", move |_| {
+    submit_database_write("mark_subagent_turn_noticed", move |_| {
         let mut relation = load_subagent(&child_session_id)?
             .with_context(|| format!("unknown sub-agent session {child_session_id}"))?;
-        relation.delivered_turn = Some(turn);
+        relation.noticed_turn = Some(turn);
         let json = serde_json::to_string(&relation)?;
         let connection = open(&database_path())?;
         connection.execute(

@@ -1208,44 +1208,29 @@ pub async fn run_server(
                         if let Some(relation) = controller.state.subagents.get_mut(&update.session_id)
                             && matches!(snapshot.materialized.execution, mj_core::state::MaterializedExecutionState::Idle)
                             && let Some(outcome) = snapshot.materialized.last_turn_outcome.as_ref()
-                            && relation.delivered_turn != Some(outcome.completed_ordinal)
+                            && relation.noticed_turn != Some(outcome.completed_ordinal)
                         {
                             let turn = outcome.completed_ordinal;
-                            let output = snapshot
-                                .materialized
-                                .transcript
-                                .iter()
-                                .rev()
-                                .find_map(|item| match &item.body {
-                                    mj_core::transcript::TranscriptBody::Agent { chunks, .. }
-                                        if item.position >= outcome.turn_start_position.unwrap_or(0) =>
-                                    {
-                                        Some(mj_core::transcript::materialized_chunks_text(chunks))
-                                    }
-                                    _ => None,
-                                })
-                                .unwrap_or_else(|| "The sub-agent completed without a final text response.".to_owned());
                             let child_id = relation.child_session_id.clone();
                             let parent_id = relation.parent_session_id.clone();
                             let task_name = relation.task_name.clone();
                             let outcome_name = format!("{:?}", outcome.outcome).to_lowercase();
-                            relation.delivered_turn = Some(turn);
+                            relation.noticed_turn = Some(turn);
                             let backend = api_backend.clone();
                             subagent_completion_jobs.spawn(async move {
                                 let result = async {
                                     backend
-                                        .deliver_subagent_completion(
+                                        .record_subagent_completion_notice(
                                             parent_id,
                                             &child_id,
                                             &task_name,
                                             turn,
                                             &outcome_name,
-                                            &output,
                                         )
                                         .await?;
                                     tokio::task::spawn_blocking({
                                         let child_id = child_id.clone();
-                                        move || crate::database::mark_subagent_turn_delivered(&child_id, turn)
+                                        move || crate::database::mark_subagent_turn_noticed(&child_id, turn)
                                     })
                                     .await??;
                                     anyhow::Ok(())
@@ -1334,11 +1319,11 @@ pub async fn run_server(
                         Some(Ok((_, _, Ok(())))) => {}
                         Some(Ok((child_id, turn, Err(error)))) => {
                             if let Some(relation) = controller.state.subagents.get_mut(&child_id)
-                                && relation.delivered_turn == Some(turn)
+                                && relation.noticed_turn == Some(turn)
                             {
-                                relation.delivered_turn = None;
+                                relation.noticed_turn = None;
                             }
-                            tracing::warn!(%child_id, turn, error = %format!("{error:#}"), "could not deliver sub-agent completion");
+                            tracing::warn!(%child_id, turn, error = %format!("{error:#}"), "could not record the sub-agent completion notice");
                         }
                         Some(Err(error)) => tracing::warn!(%error, "sub-agent completion task panicked"),
                         None => {}

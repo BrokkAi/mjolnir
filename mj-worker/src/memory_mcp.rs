@@ -37,7 +37,7 @@ pub fn run_mcp_stdio(root: &Path) -> Result<()> {
                 json!({
                     "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
                     "capabilities": {"tools": {"listChanged": false}},
-                    "serverInfo": {"name": "mj-project-memory", "version": env!("CARGO_PKG_VERSION")},
+                    "serverInfo": {"name": "mj-memory", "version": env!("CARGO_PKG_VERSION")},
                     "instructions": MEMORY_GUIDANCE
                 }),
             ),
@@ -72,7 +72,7 @@ fn call_tool(store: &ProjectMemoryStore, params: Option<&Value>) -> Result<(Valu
         .cloned()
         .unwrap_or_else(|| json!({}));
     let result = match name {
-        "memory_list" => {
+        "list" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Arguments {
@@ -85,7 +85,7 @@ fn call_tool(store: &ProjectMemoryStore, params: Option<&Value>) -> Result<(Valu
                 arguments.cursor.as_deref(),
             ))?
         }
-        "memory_read" => {
+        "read" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Arguments {
@@ -94,7 +94,7 @@ fn call_tool(store: &ProjectMemoryStore, params: Option<&Value>) -> Result<(Valu
             let arguments: Arguments = serde_json::from_value(arguments)?;
             serde_json::to_value(store.read(&arguments.path))?
         }
-        "memory_write" => {
+        "write" => {
             let request: MemoryWriteRequest = serde_json::from_value(arguments)?;
             serde_json::to_value(store.write(request))?
         }
@@ -110,7 +110,7 @@ fn call_tool(store: &ProjectMemoryStore, params: Option<&Value>) -> Result<(Valu
 fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
-            "name": "memory_list",
+            "name": "list",
             "description": "Discover persistent memory documents when the supplied /MEMORY.md index is insufficient for the current task. Select relevant notes rather than routinely listing and reading the entire store.",
             "inputSchema": {
                 "type": "object",
@@ -122,7 +122,7 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "memory_read",
+            "name": "read",
             "description": "Read one persistent memory document and its version token. Choose notes whose index descriptions match the current task. Reuse information already in context unless freshness or an upcoming update requires another read.",
             "inputSchema": {
                 "type": "object",
@@ -132,14 +132,14 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "memory_write",
+            "name": "write",
             "description": "Save a concise, reusable lesson or decision. Replaces the whole document; use the read version or new. Index new notes in /MEMORY.md.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {"type":"string"},
                     "content": {"type":"string", "description":"Full UTF-8 replacement content."},
-                    "if_version": {"type":"string", "maxLength":64, "description":"Version from memory_read, or new when creating."}
+                    "if_version": {"type":"string", "maxLength":64, "description":"Version from read, or new when creating."}
                 },
                 "required": ["path", "content", "if_version"],
                 "additionalProperties": false

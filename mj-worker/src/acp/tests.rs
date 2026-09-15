@@ -169,7 +169,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
     let [McpServer::Stdio(server)] = servers.as_slice() else {
         panic!("non-Claude sessions receive exactly one memory MCP server");
     };
-    assert_eq!(server.name, "mj-project-memory");
+    assert_eq!(server.name, "mj-memory");
     assert_eq!(server.command, Path::new("/worker/hel"));
     assert_eq!(
         server.args,
@@ -323,7 +323,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
     let [McpServer::Stdio(server)] = servers.as_slice() else {
         panic!("Codex receives the Mjolnir sub-agent MCP server");
     };
-    assert_eq!(server.name, "mj-subagents");
+    assert_eq!(server.name, "mj-agents");
     assert_eq!(
         server.args,
         [
