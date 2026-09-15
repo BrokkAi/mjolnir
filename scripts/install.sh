@@ -41,28 +41,35 @@ bin_dir="$install_root/bin"
 # same way as the controller.
 mj_parse_cargo_args "$@"
 
-# Built binaries and the file names they take in the install directory.
+# Built binaries and the file names they take in the install directory. The
+# worker builds and the host build write to different output layouts, so they
+# run at the same time; the two host binaries share one layout and share one
+# Cargo invocation. Each build's reported paths land in its own file, and the
+# copy below starts only once every build has succeeded, so a failed worker
+# build leaves the existing installation alone.
+build_output=$(mktemp -d)
+trap 'rm -rf "$build_output"' EXIT
+build_pids=()
 sources=()
 names=()
 
 case "$(uname -s)" in
   Linux)
     mj_host_musl_triple
-    sources+=("$(mj_build_worker)")
-    names+=("mj-worker")
-    sources+=("$(mj_build_worker --target "$triple")")
-    names+=("mj-worker-$triple")
+    mj_build_worker >"$build_output/worker" &
+    build_pids+=("$!")
+    mj_build_worker --target "$triple" >"$build_output/worker-$triple" &
+    build_pids+=("$!")
     ;;
   Darwin)
-    sources+=("$(mj_build_worker)")
-    names+=("mj-worker")
+    mj_build_worker >"$build_output/worker" &
+    build_pids+=("$!")
     # The native macOS worker cannot run in a Linux container, so container
     # targets need a worker built through the available engine.
     mj_container_engine
     if [ -n "$engine" ]; then
-      triple=$("$repo_root/scripts/build-linux-worker.sh" "$engine" ${profile_args[@]+"${profile_args[@]}"})
-      sources+=("target/worker/$triple/$profile_dir/mj-worker")
-      names+=("mj-worker-$triple")
+      "$repo_root/scripts/build-linux-worker.sh" "$engine" ${profile_args[@]+"${profile_args[@]}"} >"$build_output/linux-triple" &
+      build_pids+=("$!")
     else
       echo "No running Docker or Podman engine; installing the native worker for local sessions only." >&2
     fi
@@ -75,10 +82,29 @@ esac
 
 # Dictation runs on the host, including when the session worker is remote. It
 # shares the default target directory with `mj`, so it takes the same arguments.
-sources+=("$(mj_build_executable brokk-mj-voice-worker mj-voice-worker ${cargo_args[@]+"${cargo_args[@]}"})")
-names+=("mj-voice-worker")
+mj_build_executables brokk-mj-voice-worker mj-voice-worker brokk-mjolnir mj -- \
+  ${cargo_args[@]+"${cargo_args[@]}"} >"$build_output/host" &
+build_pids+=("$!")
+mj_wait_builds "${build_pids[@]}"
 
-sources+=("$(mj_build_executable brokk-mjolnir mj ${cargo_args[@]+"${cargo_args[@]}"})")
+sources+=("$(cat "$build_output/worker")")
+names+=("mj-worker")
+case "$(uname -s)" in
+  Linux)
+    sources+=("$(cat "$build_output/worker-$triple")")
+    names+=("mj-worker-$triple")
+    ;;
+  Darwin)
+    if [ -n "$engine" ]; then
+      triple=$(cat "$build_output/linux-triple")
+      sources+=("target/worker/$triple/$profile_dir/mj-worker")
+      names+=("mj-worker-$triple")
+    fi
+    ;;
+esac
+sources+=("$(sed -n 1p "$build_output/host")")
+names+=("mj-voice-worker")
+sources+=("$(sed -n 2p "$build_output/host")")
 names+=("mj")
 
 # Replace each binary by rename, so the copy never writes into an executable
