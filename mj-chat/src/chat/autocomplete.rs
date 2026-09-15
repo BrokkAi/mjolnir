@@ -114,6 +114,13 @@ impl ChatState {
     }
 
     pub(super) fn update_autocomplete(&mut self) {
+        // A standby composer has no session to answer commands, and its host
+        // does not run the overlay pass that draws the popup, so offering
+        // completion would only open an invisible state that eats arrows.
+        if self.standby {
+            self.set_autocomplete(None);
+            return;
+        }
         if !self.input_images.is_empty() {
             self.set_autocomplete(None);
             return;

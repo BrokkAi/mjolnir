@@ -1263,7 +1263,7 @@ impl DashboardContext {
         }
         self.dashboard
             .begin_session_operation(session_id.to_owned(), kind, None);
-        // A restart or resume parks the conversation behind the type-ahead
+        // A restart or resume parks the conversation behind the standby
         // composer. Select the session coming back so that composer is the
         // one on screen, seed it with the warm chat's text so nothing typed
         // is lost, and put the keyboard where the typing happens.
@@ -1278,7 +1278,7 @@ impl DashboardContext {
                 .filter(|chat| chat.session_id() == session_id)
                 .map(|chat| chat.draft())
             {
-                self.dashboard.seed_transition_composer(session_id, text);
+                self.dashboard.seed_standby_prompt(session_id, text);
             }
             self.dashboard.focus_prompt();
         }

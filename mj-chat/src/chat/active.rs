@@ -34,7 +34,7 @@ use super::attachments;
 use super::autocomplete::render_autocomplete;
 use super::elicitation::render_elicitation_in;
 use super::history::{highlighted_input_lines, history_scope_name, history_search_footer};
-use super::input::{input_cursor_visual_position, input_visual_rows, set_input_cursor};
+use super::input::{input_cursor_visual_position, set_input_cursor};
 use super::remote::{
     ChatRemoteOperation, ChatRemoteResult, ChatRemoteSupervisor, apply_chat_remote_result,
     queue_chat_remote_operation, restore_unsent_input, restore_unsent_prompt,
@@ -2524,11 +2524,7 @@ impl ActiveChat {
     /// Rows the composer wants at `width`: the wrapped input, up to three
     /// queued-prompt previews, and the block's own border rows.
     pub fn desired_prompt_height(&self, width: u16) -> u16 {
-        let content_width = prompt_content_width(width);
-        let input_rows =
-            u16::try_from(input_visual_rows(&self.state.input, content_width)).unwrap_or(u16::MAX);
-        let queued = u16::try_from(self.state.queued_prompts.len().min(3)).unwrap_or(3);
-        input_rows.saturating_add(queued).saturating_add(2).max(4)
+        self.state.desired_prompt_height(width)
     }
 
     /// Draws the transcript and the composer into `regions`, for a host that
@@ -2654,7 +2650,7 @@ pub(super) fn render_full_frame(
     let inner = frame.area();
     let prompt_width = prompt_content_width(inner.width);
     let visible_queued = chat.queued_prompts.len().min(3) as u16;
-    let input_rows = input_visual_rows(&chat.input, prompt_width) as u16;
+    let input_rows = super::input::input_visual_rows(&chat.input, prompt_width) as u16;
     let prompt_height = input_rows
         .saturating_add(visible_queued)
         .saturating_add(2)
@@ -2707,7 +2703,6 @@ pub(super) fn render_in(
     let inner = regions.overlay;
     let mut transcript_area = regions.transcript;
     let prompt_area = regions.prompt;
-    let prompt_width = prompt_content_width(prompt_area.width);
 
     // An open question replaces the composer, but only with the natural
     // height of its current page (up to half of the combined conversation
@@ -2866,220 +2861,7 @@ pub(super) fn render_in(
     } else {
         chat.split_action_areas.clear();
         chat.turn_review_action_areas.clear();
-        let (prompt_title, activity_title, config_chips) = prompt_title_line(chat, prompt_area);
-        chat.config_chip_areas = config_chips;
-        let mut prompt_block = theme::panel(prompt_focused)
-            .padding(Padding::new(2, 1, 0, 0))
-            .title(prompt_title);
-        if let Some(activity_title) = activity_title {
-            prompt_block = prompt_block.title(activity_title.right_aligned());
-        }
-        chat.task_control_area = None;
-        chat.subagent_control_area = None;
-        let bottom_width = prompt_area.width.saturating_sub(2);
-        let queue_control = prompt_bottom_queue_control(chat);
-        let task_label = (chat.background_task_count() > 0)
-            .then(|| format!(" View tasks ({}) ", chat.background_task_count()));
-        let subagent_label = (chat.subagent_count() > 0)
-            .then(|| format!(" Sub-agents ({}) ", chat.subagent_count()));
-        let command_hints = (prompt_focused && prompt_area.width >= 56).then(|| {
-            Line::from(vec![
-                Span::styled(" Enter ", theme::selection(false)),
-                Span::styled(" send  ", theme::muted()),
-                Span::styled(" / ", theme::selection(false)),
-                Span::styled(" commands ", theme::muted()),
-            ])
-            .right_aligned()
-        });
-        let queue_width = queue_control.as_ref().map_or(0, Line::width);
-        let task_width = task_label.as_ref().map_or(0, |label| display_width(label));
-        let subagent_width = subagent_label
-            .as_ref()
-            .map_or(0, |label| display_width(label));
-        let command_width = command_hints.as_ref().map_or(0, Line::width);
-        let task_separator_width = usize::from(queue_control.is_some() && task_label.is_some()) * 2;
-        // Fit queue/control text first, then a complete task button, then hints.
-        let left_with_task = queue_width + task_separator_width + task_width;
-        let show_task = task_label.is_some() && left_with_task <= usize::from(bottom_width);
-        let mut left_width = if show_task {
-            left_with_task
-        } else {
-            queue_width
-        };
-        let subagent_separator_width = usize::from(left_width > 0) * 2;
-        let show_subagents = subagent_label.is_some()
-            && left_width + subagent_separator_width + subagent_width <= usize::from(bottom_width);
-        if show_subagents {
-            left_width += subagent_separator_width + subagent_width;
-        }
-        let show_command_hints = command_hints.is_some()
-            && left_width + usize::from(left_width > 0) + command_width
-                <= usize::from(bottom_width);
-        let mut bottom_spans = Vec::new();
-        let mut bottom_left_width = 0usize;
-        if let Some(queue_control) = queue_control {
-            bottom_left_width = queue_width;
-            bottom_spans.extend(queue_control.spans);
-        }
-        if show_task {
-            let task_start = bottom_left_width + task_separator_width;
-            if bottom_left_width > 0 {
-                bottom_spans.push(Span::raw(" ·"));
-            }
-            let task_label = task_label.expect("show_task implies a task label");
-            let task_width = u16::try_from(task_width).expect("task label fits in u16");
-            chat.task_control_area = Some(Rect::new(
-                prompt_area
-                    .x
-                    .saturating_add(1)
-                    .saturating_add(u16::try_from(task_start).unwrap_or(u16::MAX)),
-                prompt_area.bottom().saturating_sub(1),
-                task_width,
-                1,
-            ));
-            bottom_spans.push(Span::styled(
-                task_label,
-                if chat.task_control_focused() {
-                    theme::selection(false)
-                } else {
-                    theme::muted()
-                },
-            ));
-            bottom_left_width = task_start + usize::from(task_width);
-        }
-        if show_subagents {
-            let separator_width = usize::from(bottom_left_width > 0) * 2;
-            let subagent_start = bottom_left_width + separator_width;
-            if bottom_left_width > 0 {
-                bottom_spans.push(Span::raw(" ·"));
-            }
-            let label = subagent_label.expect("show_subagents implies a label");
-            let width = u16::try_from(subagent_width).expect("subagent label fits in u16");
-            chat.subagent_control_area = Some(Rect::new(
-                prompt_area
-                    .x
-                    .saturating_add(1)
-                    .saturating_add(u16::try_from(subagent_start).unwrap_or(u16::MAX)),
-                prompt_area.bottom().saturating_sub(1),
-                width,
-                1,
-            ));
-            bottom_spans.push(Span::styled(
-                label,
-                if chat.subagent_control_focused() {
-                    theme::selection(false)
-                } else {
-                    theme::muted()
-                },
-            ));
-        }
-        if !bottom_spans.is_empty() {
-            prompt_block = prompt_block.title_bottom(Line::from(bottom_spans).left_aligned());
-        }
-        if show_command_hints {
-            prompt_block = prompt_block.title_bottom(command_hints.expect("presence checked"));
-        }
-        let prompt_inner = prompt_block.inner(prompt_area);
-        chat.prompt_content_width = prompt_width;
-        chat.voice_button_area = voice_button_area(prompt_area);
-        let mut prompt_lines = chat
-            .queued_prompts
-            .iter()
-            .rev()
-            .take(3)
-            .rev()
-            .enumerate()
-            .map(|(index, queued)| {
-                Line::from(Span::styled(
-                    truncate_to_width(
-                        &format!(
-                            "{} {}: {}",
-                            queued.queue_label(),
-                            index + 1,
-                            queued_prompt_preview(&queued.text)
-                        ),
-                        usize::from(prompt_inner.width),
-                    ),
-                    Style::default().fg(theme::palette().muted),
-                ))
-            })
-            .collect::<Vec<_>>();
-        let queue_rows = prompt_lines.len();
-        prompt_lines.extend(if let Some(search) = chat.history_search.as_ref() {
-            highlighted_input_lines(&chat.input, &search.query)
-        } else if chat.input.is_empty() {
-            vec![Line::from(Span::styled(
-                if chat.phase == WorkerPhase::Running {
-                    "Add a follow-up while the agent works…"
-                } else if chat.entries.is_empty()
-                    && chat.unconverted_prefix == 0
-                    && !chat.transcript_loading
-                {
-                    "What would you like to build?"
-                } else {
-                    ""
-                },
-                theme::muted(),
-            ))]
-        } else {
-            chat.input
-                .split('\n')
-                .map(|line| Line::raw(line.to_owned()))
-                .collect()
-        });
-        let cursor_row = input_cursor_visual_position(&chat.input, chat.input_cursor, prompt_width)
-            .1
-            + queue_rows;
-        let content_height = usize::from(prompt_inner.height).max(1);
-        let input_scroll = cursor_row.saturating_add(1).saturating_sub(content_height);
-        frame.render_widget(
-            Paragraph::new(prompt_lines)
-                .style(Style::default().fg(theme::palette().text))
-                .wrap(Wrap { trim: false })
-                .scroll((input_scroll as u16, 0))
-                .block(prompt_block),
-            prompt_area,
-        );
-        if let Some(marker_row) = queue_rows.checked_sub(input_scroll)
-            && marker_row < usize::from(prompt_inner.height)
-        {
-            frame.render_widget(
-                Line::styled(">", theme::title(prompt_focused)),
-                Rect::new(
-                    prompt_inner.x.saturating_sub(2),
-                    prompt_inner.y.saturating_add(marker_row as u16),
-                    1,
-                    1,
-                ),
-            );
-        }
-        if let Some(button_area) = chat.voice_button_area {
-            chat.voice_form.register(
-                super::VoiceControl::Microphone,
-                ControlKind::Button,
-                button_area,
-                chat.voice_available || chat.voice_active,
-            );
-            frame.render_widget(
-                voice_button_line(chat.voice_available, chat.voice_active),
-                button_area,
-            );
-        }
-        chat.voice_form.end_frame(super::VoiceControl::Microphone);
-        chat.frame_surfaces
-            .push(SurfaceFrame::fixed(SurfaceId::PromptInput, prompt_inner));
-        // The cursor belongs to whatever has focus, so the composer only shows one
-        // while the keyboard is driving it.
-        if chat.history_search.is_none() && prompt_focused && chat.elicitation.is_none() {
-            set_input_cursor(
-                frame,
-                prompt_inner,
-                &chat.input,
-                chat.input_cursor,
-                queue_rows,
-                input_scroll,
-            );
-        }
+        render_composer_band(frame, prompt_area, chat, prompt_focused, None);
     }
     if let Some(area) = activity_area {
         let mut activity = if area.width >= 48 {
@@ -3281,6 +3063,251 @@ fn remembered_value(stored: Option<&str>) -> Option<String> {
     stored
         .filter(|value| *value != mj_core::second_opinion::HARNESS_DEFAULT_VALUE)
         .map(str::to_owned)
+}
+
+/// Draws the composer band: the title, borders, queued-prompt previews,
+/// input, and cursor. The full chat render calls this for its ordinary
+/// prompt, and hosts call it through
+/// [`ChatState::draw_prompt_band`] to show the real composer while a session
+/// is not attached.
+///
+/// `note` adds a left-aligned line to the bottom border — the standby
+/// prompt's cancel chord; the ordinary render passes `None`.
+pub(super) fn render_composer_band(
+    frame: &mut Frame,
+    prompt_area: Rect,
+    chat: &mut ChatState,
+    prompt_focused: bool,
+    note: Option<Line<'static>>,
+) {
+    let prompt_width = prompt_content_width(prompt_area.width);
+    let (prompt_title, activity_title, config_chips) = prompt_title_line(chat, prompt_area);
+    chat.config_chip_areas = config_chips;
+    let mut prompt_block = theme::panel(prompt_focused)
+        .padding(Padding::new(2, 1, 0, 0))
+        .title(prompt_title);
+    if let Some(activity_title) = activity_title {
+        prompt_block = prompt_block.title(activity_title.right_aligned());
+    }
+    chat.task_control_area = None;
+    chat.subagent_control_area = None;
+    let bottom_width = prompt_area.width.saturating_sub(2);
+    let queue_control = prompt_bottom_queue_control(chat);
+    let task_label = (chat.background_task_count() > 0)
+        .then(|| format!(" View tasks ({}) ", chat.background_task_count()));
+    let subagent_label =
+        (chat.subagent_count() > 0).then(|| format!(" Sub-agents ({}) ", chat.subagent_count()));
+    let command_hints = (prompt_focused && prompt_area.width >= 56).then(|| {
+        // A standby composer cannot send, so the hint says what Enter does
+        // there instead of advertising a send that would be refused.
+        if chat.standby {
+            Line::from(vec![
+                Span::styled(" Enter ", theme::selection(false)),
+                Span::styled(" keeps the draft ", theme::muted()),
+            ])
+            .right_aligned()
+        } else {
+            Line::from(vec![
+                Span::styled(" Enter ", theme::selection(false)),
+                Span::styled(" send  ", theme::muted()),
+                Span::styled(" / ", theme::selection(false)),
+                Span::styled(" commands ", theme::muted()),
+            ])
+            .right_aligned()
+        }
+    });
+    let queue_width = queue_control.as_ref().map_or(0, Line::width);
+    let task_width = task_label.as_ref().map_or(0, |label| display_width(label));
+    let subagent_width = subagent_label
+        .as_ref()
+        .map_or(0, |label| display_width(label));
+    let command_width = command_hints.as_ref().map_or(0, Line::width);
+    let task_separator_width = usize::from(queue_control.is_some() && task_label.is_some()) * 2;
+    // Fit queue/control text first, then a complete task button, then hints.
+    let left_with_task = queue_width + task_separator_width + task_width;
+    let show_task = task_label.is_some() && left_with_task <= usize::from(bottom_width);
+    let mut left_width = if show_task {
+        left_with_task
+    } else {
+        queue_width
+    };
+    let subagent_separator_width = usize::from(left_width > 0) * 2;
+    let show_subagents = subagent_label.is_some()
+        && left_width + subagent_separator_width + subagent_width <= usize::from(bottom_width);
+    if show_subagents {
+        left_width += subagent_separator_width + subagent_width;
+    }
+    let show_command_hints = command_hints.is_some()
+        && left_width + usize::from(left_width > 0) + command_width <= usize::from(bottom_width);
+    let mut bottom_spans = Vec::new();
+    let mut bottom_left_width = 0usize;
+    if let Some(queue_control) = queue_control {
+        bottom_left_width = queue_width;
+        bottom_spans.extend(queue_control.spans);
+    }
+    if show_task {
+        let task_start = bottom_left_width + task_separator_width;
+        if bottom_left_width > 0 {
+            bottom_spans.push(Span::raw(" ·"));
+        }
+        let task_label = task_label.expect("show_task implies a task label");
+        let task_width = u16::try_from(task_width).expect("task label fits in u16");
+        chat.task_control_area = Some(Rect::new(
+            prompt_area
+                .x
+                .saturating_add(1)
+                .saturating_add(u16::try_from(task_start).unwrap_or(u16::MAX)),
+            prompt_area.bottom().saturating_sub(1),
+            task_width,
+            1,
+        ));
+        bottom_spans.push(Span::styled(
+            task_label,
+            if chat.task_control_focused() {
+                theme::selection(false)
+            } else {
+                theme::muted()
+            },
+        ));
+        bottom_left_width = task_start + usize::from(task_width);
+    }
+    if show_subagents {
+        let separator_width = usize::from(bottom_left_width > 0) * 2;
+        let subagent_start = bottom_left_width + separator_width;
+        if bottom_left_width > 0 {
+            bottom_spans.push(Span::raw(" ·"));
+        }
+        let label = subagent_label.expect("show_subagents implies a label");
+        let width = u16::try_from(subagent_width).expect("subagent label fits in u16");
+        chat.subagent_control_area = Some(Rect::new(
+            prompt_area
+                .x
+                .saturating_add(1)
+                .saturating_add(u16::try_from(subagent_start).unwrap_or(u16::MAX)),
+            prompt_area.bottom().saturating_sub(1),
+            width,
+            1,
+        ));
+        bottom_spans.push(Span::styled(
+            label,
+            if chat.subagent_control_focused() {
+                theme::selection(false)
+            } else {
+                theme::muted()
+            },
+        ));
+    }
+    if !bottom_spans.is_empty() {
+        prompt_block = prompt_block.title_bottom(Line::from(bottom_spans).left_aligned());
+    }
+    if show_command_hints {
+        prompt_block = prompt_block.title_bottom(command_hints.expect("presence checked"));
+    }
+    if let Some(note) = note {
+        prompt_block = prompt_block.title_bottom(note);
+    }
+    let prompt_inner = prompt_block.inner(prompt_area);
+    chat.prompt_content_width = prompt_width;
+    chat.voice_button_area = voice_button_area(prompt_area);
+    let mut prompt_lines = chat
+        .queued_prompts
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .enumerate()
+        .map(|(index, queued)| {
+            Line::from(Span::styled(
+                truncate_to_width(
+                    &format!(
+                        "{} {}: {}",
+                        queued.queue_label(),
+                        index + 1,
+                        queued_prompt_preview(&queued.text)
+                    ),
+                    usize::from(prompt_inner.width),
+                ),
+                Style::default().fg(theme::palette().muted),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let queue_rows = prompt_lines.len();
+    prompt_lines.extend(if let Some(search) = chat.history_search.as_ref() {
+        highlighted_input_lines(&chat.input, &search.query)
+    } else if chat.input.is_empty() {
+        vec![Line::from(Span::styled(
+            if chat.standby {
+                "Type a draft · sending opens when the session is live"
+            } else if chat.phase == WorkerPhase::Running {
+                "Add a follow-up while the agent works…"
+            } else if chat.entries.is_empty()
+                && chat.unconverted_prefix == 0
+                && !chat.transcript_loading
+            {
+                "What would you like to build?"
+            } else {
+                ""
+            },
+            theme::muted(),
+        ))]
+    } else {
+        chat.input
+            .split('\n')
+            .map(|line| Line::raw(line.to_owned()))
+            .collect()
+    });
+    let cursor_row =
+        input_cursor_visual_position(&chat.input, chat.input_cursor, prompt_width).1 + queue_rows;
+    let content_height = usize::from(prompt_inner.height).max(1);
+    let input_scroll = cursor_row.saturating_add(1).saturating_sub(content_height);
+    frame.render_widget(
+        Paragraph::new(prompt_lines)
+            .style(Style::default().fg(theme::palette().text))
+            .wrap(Wrap { trim: false })
+            .scroll((input_scroll as u16, 0))
+            .block(prompt_block),
+        prompt_area,
+    );
+    if let Some(marker_row) = queue_rows.checked_sub(input_scroll)
+        && marker_row < usize::from(prompt_inner.height)
+    {
+        frame.render_widget(
+            Line::styled(">", theme::title(prompt_focused)),
+            Rect::new(
+                prompt_inner.x.saturating_sub(2),
+                prompt_inner.y.saturating_add(marker_row as u16),
+                1,
+                1,
+            ),
+        );
+    }
+    if let Some(button_area) = chat.voice_button_area {
+        chat.voice_form.register(
+            super::VoiceControl::Microphone,
+            ControlKind::Button,
+            button_area,
+            chat.voice_available || chat.voice_active,
+        );
+        frame.render_widget(
+            voice_button_line(chat.voice_available, chat.voice_active),
+            button_area,
+        );
+    }
+    chat.voice_form.end_frame(super::VoiceControl::Microphone);
+    chat.frame_surfaces
+        .push(SurfaceFrame::fixed(SurfaceId::PromptInput, prompt_inner));
+    // The cursor belongs to whatever has focus, so the composer only shows one
+    // while the keyboard is driving it.
+    if chat.history_search.is_none() && prompt_focused && chat.elicitation.is_none() {
+        set_input_cursor(
+            frame,
+            prompt_inner,
+            &chat.input,
+            chat.input_cursor,
+            queue_rows,
+            input_scroll,
+        );
+    }
 }
 
 fn prompt_title(chat: &ChatState) -> String {
@@ -3572,7 +3599,7 @@ fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat: &mut ChatS
 
 /// The composer keeps a `>` gutter on the left and one cell of space on the
 /// right.
-fn prompt_content_width(width: u16) -> usize {
+pub(super) fn prompt_content_width(width: u16) -> usize {
     usize::from(width.saturating_sub(5)).max(1)
 }
 
