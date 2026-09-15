@@ -393,7 +393,11 @@ impl Controller {
 /// Wait until a restarted worker's projection stops moving and reports idle.
 ///
 /// Three stable polls, not one: a worker that has just recovered its journal
-/// can report idle between two events it is still applying.
+/// can report idle between two events it is still applying. "Idle" is the
+/// shared in-flight predicate, not the bare execution flag, so a foreground
+/// tool or a turn the projection has not caught up with keeps the restart from
+/// being declared ready underneath it. A synchronized active goal is the one
+/// deliberate exception: the restarted worker is meant to continue it.
 async fn wait_for_idle_projection(relay: &mut StandaloneSession, timeout: Duration) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_ordinal = None;
@@ -401,11 +405,11 @@ async fn wait_for_idle_projection(relay: &mut StandaloneSession, timeout: Durati
     loop {
         let snapshot = relay.sync().await?;
         let ordinal = snapshot.operational.latest_ordinal;
+        let goal_active =
+            snapshot.operational.goal.synchronized() && snapshot.operational.goal.active();
         let idle = snapshot.operational.native_session_is_ready()
-            && (snapshot.operational.execution == RelayExecutionState::Idle
-                || (snapshot.operational.goal.synchronized()
-                    && snapshot.operational.goal.active()));
-        if idle && (snapshot.operational.goal.active() || last_ordinal == Some(ordinal)) {
+            && (!snapshot.operational.has_work_in_flight() || goal_active);
+        if idle && (goal_active || last_ordinal == Some(ordinal)) {
             stable_polls = stable_polls.saturating_add(1);
             if stable_polls >= 3 {
                 return Ok(());
