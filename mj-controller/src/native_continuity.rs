@@ -56,6 +56,10 @@ pub(crate) struct NativeContinuityInputs {
     pub harness: HarnessKind,
     pub recorded_native_session_id: Option<String>,
     pub context_bytes: usize,
+    /// The configuration the handoff summarizer resolves a utility model from.
+    /// Both constructors already hold a `Config`, so it travels with the inputs
+    /// to the recovery caller that has no configuration of its own in scope.
+    config: Config,
 }
 
 impl NativeContinuityInputs {
@@ -63,11 +67,10 @@ impl NativeContinuityInputs {
         Self {
             harness: record.harness_kind,
             recorded_native_session_id: record.native_session_id.clone(),
-            context_bytes: config
-                .profiles
-                .get(&record.last_profile)
-                .and_then(|profile| profile.context_window_bytes)
-                .unwrap_or(crate::compaction::DEFAULT_CONTEXT_BYTES),
+            context_bytes: crate::handoff::profile_handoff_bytes(
+                config.profiles.get(&record.last_profile),
+            ),
+            config: config.clone(),
         }
     }
 
@@ -90,17 +93,22 @@ impl NativeContinuityInputs {
 /// The id update and the notice are the contract; a failed handover is
 /// reported and does not fail the restart, because a session that lost its
 /// transcript context is still far better than no worker at all.
+///
+/// Returns the adopted native session id when the record followed the worker
+/// (whether or not the conversation was handed over), so a caller that holds
+/// the launch configuration can keep it naming the live session. Returns
+/// `None` when nothing changed or the worker reported no native session.
 pub(crate) async fn recover_native_continuity(
     session_id: &str,
     inputs: &NativeContinuityInputs,
     connection: &mut StandaloneSession,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let snapshot = connection
         .sync()
         .await
         .context("read the reconnected worker state before checking native continuity")?;
     let Some(reported) = snapshot.operational.native_session_id.clone() else {
-        return Ok(());
+        return Ok(None);
     };
     let action = native_continuity_action(
         inputs.harness,
@@ -109,7 +117,7 @@ pub(crate) async fn recover_native_continuity(
         snapshot.operational.native_continuity_lost,
     );
     if action == NativeContinuityAction::Unchanged {
-        return Ok(());
+        return Ok(None);
     }
     // The write lane applies backpressure synchronously, so it must not run
     // on the async thread that owns this connection.
@@ -131,7 +139,7 @@ pub(crate) async fn recover_native_continuity(
         "the restarted worker opened a different native session"
     );
     if action == NativeContinuityAction::Adopt {
-        return Ok(());
+        return Ok(Some(reported));
     }
     push_session_notice(
         session_id,
@@ -140,14 +148,24 @@ pub(crate) async fn recover_native_continuity(
          The conversation so far is being handed to it as context.",
     )
     .await;
-    let handoff = mj_transcript::projection::canonical_session_from_materialized(
-        &snapshot.materialized,
-    )
-    .map(|canonical| crate::compaction::render_recent_snapshot(&canonical, inputs.context_bytes));
-    let installed = match handoff {
-        Ok(text) => connection.install_prompt_context(text).await,
-        Err(error) => Err(error),
-    };
+    let installed = async {
+        let canonical = mj_transcript::projection::canonical_session_from_materialized(
+            &snapshot.materialized,
+        )?;
+        // This recovery path carries no external cancellation, so a fresh token
+        // that is never cancelled lets the handoff run to completion.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let text = crate::handoff::build_handoff_context(
+            session_id,
+            &inputs.config,
+            &canonical,
+            inputs.context_bytes,
+            &cancel,
+        )
+        .await?;
+        connection.install_prompt_context(text).await
+    }
+    .await;
     if let Err(error) = installed {
         tracing::warn!(
             session_id,
@@ -161,7 +179,7 @@ pub(crate) async fn recover_native_continuity(
         )
         .await;
     }
-    Ok(())
+    Ok(Some(reported))
 }
 
 /// Record something in the conversation for every attached surface to show.

@@ -2717,6 +2717,10 @@ async fn sync_actor_connection(
             };
             match inputs {
                 Ok(inputs) => {
+                    // The adopted native session id is ignored here: this actor
+                    // holds no controller state or worker root to rewrite the
+                    // installed launch.json, and it self-heals on the next
+                    // controller-driven restart, which does rewrite it.
                     if let Err(error) = crate::native_continuity::recover_native_continuity(
                         &target.session_id,
                         &inputs,

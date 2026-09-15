@@ -923,9 +923,7 @@ impl Controller {
         let same_harness = profile.kind == archive_manifest.session.harness_kind;
         let native_continuity =
             native_continuity_preserved(profile.kind, archive_manifest.session.harness_kind);
-        let context_bytes = profile
-            .context_window_bytes
-            .unwrap_or(crate::compaction::DEFAULT_CONTEXT_BYTES);
+        let context_bytes = crate::handoff::profile_handoff_bytes(Some(&profile));
         // Cross-harness compaction is started alongside destination
         // provisioning below. Clone only the configuration it reads so the
         // controller can continue owning and mutating its session record.
@@ -1972,40 +1970,8 @@ async fn utility_handoff_while_cancellable(
     }
     let _compacting = ProvisionStageGuard::new(executor, ProvisionStage::Compacting);
     let cancel = cancellation.child_token();
-    let operation = async {
-        let candidates = match crate::utility_llm::UtilityLlmRuntime::shared()
-            .resolve(config, &cancel)
-            .await
-        {
-            Ok(candidates) => candidates,
-            // A cancelled discovery is the caller's own doing; report it.
-            Err(error) if cancel.is_cancelled() => return Err(error),
-            // No utility model is configured, credentialed, or in quota. The
-            // resume still has to hand the conversation over, so send the
-            // recent transcript verbatim instead of failing the resume.
-            Err(error) => {
-                tracing::warn!(
-                    session_id,
-                    error = format!("{error:#}"),
-                    "no utility model is available for the resume handoff; handing over the most recent transcript verbatim"
-                );
-                return Ok(crate::compaction::render_recent_snapshot(
-                    snapshot,
-                    context_bytes,
-                ));
-            }
-        };
-        let backend = crate::utility_llm::UtilityCompactionBackend::new(candidates, cancel.clone());
-        // Pages are sized by what the summarizer can read; the handoff is
-        // sized by what the target harness accepts. They are unrelated
-        // numbers, and using the target's for both is what made one incident
-        // shard a transcript into 33 pages.
-        let budget = crate::compaction::CompactionBudget {
-            page_bytes: backend.page_bytes(),
-            handoff_bytes: context_bytes,
-        };
-        crate::compaction::compact_snapshot(snapshot, budget, &backend).await
-    };
+    let operation =
+        crate::handoff::build_handoff_context(session_id, config, snapshot, context_bytes, &cancel);
     tokio::pin!(operation);
     loop {
         tokio::select! {

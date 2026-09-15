@@ -12,6 +12,7 @@ pub mod controller;
 pub mod desktop;
 pub mod dictation;
 pub mod doctor;
+pub(crate) mod handoff;
 pub mod image;
 pub mod import;
 pub(crate) mod native_continuity;
