@@ -609,8 +609,10 @@ pub enum RelayObservation {
         native_session_id: String,
         resumed: bool,
         /// This session was opened fresh because the recorded native session
-        /// could not be reloaded. Older journals omit it.
-        #[serde(default)]
+        /// could not be reloaded. Older journals omit it, and `false` is never
+        /// written: the event digest covers this encoding, so emitting the
+        /// field for existing events would invalidate every journal on disk.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         native_continuity_lost: bool,
     },
     SessionConfigured {
@@ -2049,4 +2051,39 @@ fn cancels_capacity_retry(command: &RelayCommand) -> bool {
             | RelayCommand::SetSessionMode { .. }
             | RelayCommand::Close { .. }
     )
+}
+
+#[cfg(test)]
+mod native_continuity_encoding_tests {
+    use super::*;
+
+    /// A `session_opened` record written before the flag existed, copied from
+    /// a live journal. Its digest covers the encoding without the field, so
+    /// the field must stay absent when it is false or every existing journal
+    /// fails validation on the next worker start.
+    const RECORDED_BEFORE_THE_FLAG: &str = r#"{"format":2,"ordinal":493425,"digest":"28c6574464b1361ad00dedd7cb04dac0c617948e290936082f1fd354334b262e","recorded_at_ms":1789421283703,"observation":{"type":"session_opened","data":{"native_session_id":"fe6031fb-9af5-49ca-a587-5a816de61f86","resumed":false}}}"#;
+
+    #[test]
+    fn a_session_opened_record_without_the_flag_still_verifies() {
+        let event: RelayEvent = serde_json::from_str(RECORDED_BEFORE_THE_FLAG).unwrap();
+        validate_relay_event_self(&event).expect("the stored digest must still match");
+        let encoded = serde_json::to_string(&event.observation).unwrap();
+        assert!(
+            !encoded.contains("native_continuity_lost"),
+            "false must not be written: {encoded}"
+        );
+    }
+
+    #[test]
+    fn a_lost_native_session_is_written_and_read_back() {
+        let observation = RelayObservation::SessionOpened {
+            native_session_id: "fresh".into(),
+            resumed: false,
+            native_continuity_lost: true,
+        };
+        let encoded = serde_json::to_string(&observation).unwrap();
+        assert!(encoded.contains("\"native_continuity_lost\":true"));
+        let decoded: RelayObservation = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, observation);
+    }
 }
