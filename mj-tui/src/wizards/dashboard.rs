@@ -25,12 +25,13 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
             form.declare_with_enabled(
                 WizardControl::BundleList,
                 ControlKind::ChoiceList {
-                    len: dashboard.config.bundles.len() + 1,
+                    len: dashboard.config.bundles.len(),
                     selected: wizard.bundle,
                 },
-                true,
+                !dashboard.config.bundles.is_empty(),
             );
-            declare_wizard_buttons(&mut form, true, true);
+            form.declare_with_enabled(WizardControl::Add, ControlKind::Button, true);
+            declare_wizard_buttons(&mut form, true, !dashboard.config.bundles.is_empty());
         }
         WizardStep::Target => {
             let target_id = nth_key(&dashboard.config.targets, wizard.target);
@@ -848,6 +849,14 @@ impl DashboardState {
         if wizard.step == WizardStep::NewBundle {
             return self.activate_new_bundle_control(wizard, id);
         }
+        if wizard.step == WizardStep::Bundle && id == WizardControl::Add {
+            self.invalidate_new_remote_preflight(&mut wizard);
+            wizard.step = WizardStep::NewBundle;
+            wizard.form.get_mut().focus(step_initial(wizard.step));
+            wizard.form.get_mut().focus(WizardControl::NewBundleSource);
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
         if id == WizardControl::Back {
             wizard.step = match wizard.step {
                 WizardStep::Target => WizardStep::Profile,
@@ -1085,14 +1094,6 @@ impl DashboardState {
                 action
             }
             WizardStep::Bundle => {
-                if wizard.bundle == self.config.bundles.len() {
-                    self.invalidate_new_remote_preflight(&mut wizard);
-                    wizard.step = WizardStep::NewBundle;
-                    wizard.form.get_mut().focus(step_initial(wizard.step));
-                    wizard.form.get_mut().focus(WizardControl::NewBundleSource);
-                    self.mode = Mode::New(wizard);
-                    return DashboardAction::None;
-                }
                 wizard.step = WizardStep::Review;
                 wizard.form.get_mut().focus(WizardControl::Submit);
                 self.mode = Mode::New(wizard);
