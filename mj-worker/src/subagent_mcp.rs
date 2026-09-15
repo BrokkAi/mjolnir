@@ -38,7 +38,7 @@ pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
                 json!({
                     "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
                     "capabilities":{"tools":{"listChanged":false}},
-                    "serverInfo":{"name":"mj-subagents","version":env!("CARGO_PKG_VERSION")},
+                    "serverInfo":{"name":"mj-agents","version":env!("CARGO_PKG_VERSION")},
                     "instructions":"Delegate work to Mjolnir sessions in this target. Calls are accepted immediately; results arrive in the parent conversation and are visible in the Sub-agents workspace."
                 }),
             ),
@@ -107,7 +107,7 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     let (action, supplied_key) = match params.name.as_str() {
         "list_profiles" => (SubagentToolAction::ListProfiles, None),
-        "spawn_agent" => {
+        "spawn" => {
             let args: SpawnArgs = serde_json::from_value(params.arguments)?;
             let key = args.request_key.clone();
             (
@@ -136,7 +136,7 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
                 None,
             )
         }
-        "wait_agents" => {
+        "wait" => {
             let args: WaitArgs = serde_json::from_value(params.arguments)?;
             (
                 SubagentToolAction::WaitAgents {
@@ -146,9 +146,9 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
                 None,
             )
         }
-        "interrupt_agent" | "close_agent" => {
+        "interrupt" | "close" => {
             let args: ChildArgs = serde_json::from_value(params.arguments)?;
-            let action = if params.name == "interrupt_agent" {
+            let action = if params.name == "interrupt" {
                 SubagentToolAction::InterruptAgent {
                     child_session_id: args.child_session_id,
                 }
@@ -220,8 +220,8 @@ fn tool_definitions() -> Vec<Value> {
             json!({"type":"object","additionalProperties":false}),
         ),
         tool(
-            "spawn_agent",
-            "Start an independent Mjolnir child session in this session's target and filesystem. Returns child_session_id at once; the child runs on its own. Do other work, then collect its result with wait_agents.",
+            "spawn",
+            "Start an independent Mjolnir child session in this session's target and filesystem. Returns child_session_id at once; the child runs on its own. Do other work, then collect its result with wait.",
             json!({
                 "type":"object",
                 "properties":{
@@ -244,17 +244,17 @@ fn tool_definitions() -> Vec<Value> {
             json!({"type":"object","properties":{"child_session_id":{"type":"string"},"message":{"type":"string"}},"required":["child_session_id","message"],"additionalProperties":false}),
         ),
         tool(
-            "wait_agents",
+            "wait",
             "Block until the named child sessions finish their current turn, or until the timeout, then return each child's latest output. Spawn agents, do other work, then wait to collect results. timeout_seconds defaults to 300 and is capped at 3600.",
             json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":MAX_WAIT_SECONDS}},"required":["child_session_ids"],"additionalProperties":false}),
         ),
         tool(
-            "interrupt_agent",
+            "interrupt",
             "Interrupt the current turn of one child.",
             child.clone(),
         ),
         tool(
-            "close_agent",
+            "close",
             "Stop one child session and retain its conversation.",
             child,
         ),
@@ -285,11 +285,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wait_agents_advertises_the_shared_runtime_timeout_limit() {
+    fn wait_advertises_the_shared_runtime_timeout_limit() {
         let wait = tool_definitions()
             .into_iter()
-            .find(|tool| tool["name"] == "wait_agents")
-            .expect("wait_agents definition");
+            .find(|tool| tool["name"] == "wait")
+            .expect("wait definition");
         assert_eq!(
             wait["inputSchema"]["properties"]["timeout_seconds"]["maximum"],
             MAX_WAIT_SECONDS

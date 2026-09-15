@@ -690,7 +690,7 @@ pub fn startup_prompt_context(
     let mut context = vec![
         "<mj-project-memory>".to_owned(),
         MEMORY_GUIDANCE.to_owned(),
-        "Use memory_list, memory_read, and memory_write to maintain it. memory_write replaces a whole document and requires the version returned by memory_read, or new when creating.".to_owned(),
+        "Use list, read, and write to maintain it. write replaces a whole document and requires the version returned by read, or new when creating.".to_owned(),
     ];
     if repository_roots.len() > 1 {
         context.push("This is a multi-root project. Bundle-wide memories live at the root; intentionally root-specific memories may live under /roots/<repository-id>/. Workspace roots:".into());

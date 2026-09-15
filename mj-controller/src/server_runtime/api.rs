@@ -468,7 +468,7 @@ impl ApiBackend {
     /// Record that a child finished a turn as a Mjolnir notice in the parent's
     /// conversation. This is the one unsolicited sub-agent event, so it is a
     /// notice, not a prompt: it must not forge a user turn or start one. The
-    /// child's output is left for `wait_agents` and the child transcript; the
+    /// child's output is left for `wait` and the child transcript; the
     /// notice only says what happened, and `output` is accepted for the log.
     pub async fn deliver_subagent_completion(
         &self,

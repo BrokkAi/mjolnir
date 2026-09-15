@@ -145,7 +145,7 @@ fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
         return Vec::new();
     };
     vec![McpServer::Stdio(
-        McpServerStdio::new("mj-project-memory", spec.command.clone()).args(vec![
+        McpServerStdio::new("mj-memory", spec.command.clone()).args(vec![
             "worker".into(),
             "memory-mcp".into(),
             "--root".into(),
@@ -419,7 +419,7 @@ fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     {
         let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
         servers.push(McpServer::Stdio(
-            McpServerStdio::new("mj-subagents", worker).args(vec![
+            McpServerStdio::new("mj-agents", worker).args(vec![
                 "worker".into(),
                 "subagent-mcp".into(),
                 "--socket".into(),

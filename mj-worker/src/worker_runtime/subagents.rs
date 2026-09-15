@@ -19,7 +19,7 @@ const SUBAGENT_QUEUE: &str = "subagents.json";
 
 /// How long a socket call waits for the daemon's result before giving up and
 /// answering with the "still running" placeholder. The daemon bounds its
-/// longest action (`wait_agents`) to [`MAX_WAIT_SECONDS`], so this ceiling is
+/// longest action (`wait`) to [`MAX_WAIT_SECONDS`], so this ceiling is
 /// only reached if the daemon never answers; it exists so a lost daemon cannot
 /// wedge the socket task forever.
 const SOCKET_WAIT_CEILING: Duration = Duration::from_secs(MAX_WAIT_SECONDS + 60);
