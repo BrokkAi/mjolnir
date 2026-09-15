@@ -88,9 +88,6 @@ Pane-specific actions are deliberately small:
 | Workspaces | `↑` / `↓` | Select the previous or next workspace tab immediately |
 | Sessions | `n` / `N` | Open the full session creation wizard |
 | Sessions | `Alt+S` | Open the stopped-session Resume picker |
-| Sessions | `s` | Stop immediately, without confirmation |
-| Sessions | `r` | Restart with the same settings, without confirmation |
-| Sessions | `d` / `Delete` | Delete after a Yes/No choice; `y` accepts, `n` cancels |
 | Sessions | `Space` | Fold or unfold the selected project |
 | Sessions | `1`–`9` | Fold or unfold the numbered project |
 | Targets | `Enter` or `e` | Open target actions, including test and rename |
@@ -150,7 +147,7 @@ Click **Commands** or press `F2` to expose both shortcut-backed and palette-only
   <figcaption>Type to filter commands. Unavailable actions remain visible with the reason they cannot run.</figcaption>
 </figure>
 
-Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Move, Stop, and Force destroy. **Move** opens a preparation and confirmation flow for a compatible profile or target; it keeps the logical session while rebuilding a fresh environment. Stop and Restart run without confirmation. Delete permanently removes the session, its target, and its recovery archive after a Yes/No choice. The palette is also how you discover useful commands that have no dedicated key.
+Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Move, Stop, Restart, and Delete. Stop, Restart, Move, and Delete have no keyboard shortcut: they are available from the palette and from a session row's **⋯** menu only, so a mis-hit key cannot stop a live session. **Move** opens a preparation and confirmation flow for a compatible profile or target; it keeps the logical session while rebuilding a fresh environment. Stop and Restart run without confirmation, and Stop also retries a stop that failed part-way. Delete permanently removes the session, its target, and its recovery archive after a Yes/No choice; `y` accepts, `n` cancels. The palette is also how you discover useful commands that have no dedicated key.
 
 ## New session and Setup
 

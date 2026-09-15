@@ -3777,20 +3777,29 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_restart_use_one_key_without_a_modal() {
+    fn stop_and_restart_run_from_the_palette_without_a_modal() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
         dashboard.focus_sessions();
+        // Neither command binds a dashboard key any more.
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('s'))),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('r'))),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.dispatch_command(crate::actions::CommandId::StopSession),
             DashboardAction::Close {
                 session_id: "session-1".into()
             }
         );
         assert!(matches!(dashboard.mode, Mode::Dashboard));
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('r'))),
+            dashboard.dispatch_command(crate::actions::CommandId::RestartSession),
             DashboardAction::RestartSession {
                 session_id: "session-1".into()
             }
@@ -3802,7 +3811,7 @@ mod tests {
     fn deleting_a_session_only_asks_yes_or_no() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::Delete));
+        dashboard.dispatch_command(crate::actions::CommandId::ForceDestroySession);
         let Mode::Confirm(dialog) = &dashboard.mode else {
             panic!("delete confirmation");
         };
@@ -3812,7 +3821,7 @@ mod tests {
             DashboardAction::None
         );
         assert!(matches!(dashboard.mode, Mode::Dashboard));
-        dashboard.handle_key(key(KeyCode::Delete));
+        dashboard.dispatch_command(crate::actions::CommandId::ForceDestroySession);
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('y'))),
             DashboardAction::ForceDestroy {

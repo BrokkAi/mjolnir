@@ -2665,9 +2665,15 @@ mod tests {
             DashboardAction::None
         );
         assert_eq!(dashboard.mode, Mode::Dashboard);
-        // Restart is a direct session action.
+        // Restart no longer answers a plain key: a session transition has to
+        // be chosen from the palette or the row menu.
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char('r'))),
+            DashboardAction::None
+        );
+        assert_eq!(dashboard.mode, Mode::Dashboard);
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::RestartSession),
             DashboardAction::RestartSession {
                 session_id: "session-1".into()
             }

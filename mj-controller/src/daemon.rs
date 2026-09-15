@@ -216,6 +216,57 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
     }
 }
 
+/// Whether a running lifecycle can still be cancelled. A graceful close has a
+/// point of no return: once the durable state says `Destroying`, the verified
+/// checkpoint is sealed and the record has already committed to losing its
+/// target, so stopping the teardown only strands the target. Every other
+/// lifecycle stays cancellable while it runs.
+fn lifecycle_cancellable(kind: LifecycleKind, state: Option<SessionState>) -> bool {
+    !(kind == LifecycleKind::Close && state == Some(SessionState::Destroying))
+}
+
+/// How a stop request has to be carried out, given the durable record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseRoute {
+    /// Run the graceful close from the start.
+    Graceful,
+    /// A previous close stopped partway; finish it from its checkpoint.
+    RecoverInterrupted,
+    /// Already stopped, but the target still has to be removed.
+    DeferredCleanup,
+    /// Already stopped with nothing left to do.
+    Done,
+}
+
+/// A record mid-close with a live target cannot be closed again from the start:
+/// its worker socket is gone, so a fresh checkpoint attempt only fails on
+/// connect. Recovery finishes it from the checkpoint the first close verified.
+fn close_route(session: Option<&SessionRecord>) -> CloseRoute {
+    let Some(session) = session else {
+        return CloseRoute::Graceful;
+    };
+    if crate::pollers::is_interrupted_close(session) {
+        CloseRoute::RecoverInterrupted
+    } else if session.state == SessionState::Stopped {
+        if session.target.is_some() {
+            CloseRoute::DeferredCleanup
+        } else {
+            CloseRoute::Done
+        }
+    } else {
+        CloseRoute::Graceful
+    }
+}
+
+/// The durable state of one record as the locked controller holds it.
+fn durable_session_state(controller: &Controller, session_id: &str) -> Option<SessionState> {
+    controller
+        .state
+        .sessions
+        .get(session_id)
+        .map(|session| session.state)
+}
+
 struct ActiveLifecycle {
     operation_id: String,
     create_control: Option<CreateSessionControl>,
@@ -695,7 +746,11 @@ impl RuntimeState {
             })
             .map(|(session_id, active)| RuntimeLifecycleView {
                 operation_id: active.operation_id.clone(),
-                cancellable: active.is_cancellable(),
+                cancellable: active.is_cancellable()
+                    && lifecycle_cancellable(
+                        active.kind,
+                        durable_session_state(&controller, session_id),
+                    ),
                 session_id: session_id.clone(),
                 kind: active.kind.into(),
                 started_at_epoch_seconds: active.started_at_epoch_seconds,
@@ -1278,35 +1333,28 @@ impl RuntimeState {
 
     async fn close_requested_session(self: &Arc<Self>, session_id: String) -> Result<()> {
         self.wait_before_close(&session_id).await?;
-        let (already_stopped, needs_cleanup) = blocking({
+        let route = blocking({
             let session_id = session_id.clone();
             move || {
                 let controller = Controller::load()?;
-                Ok(controller
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .map_or((false, false), |session| {
-                        (
-                            session.state == SessionState::Stopped,
-                            session.state == SessionState::Stopped && session.target.is_some(),
-                        )
-                    }))
+                Ok(close_route(controller.state.sessions.get(&session_id)))
             }
         })
         .await?;
-        if already_stopped {
-            if needs_cleanup {
+        match route {
+            CloseRoute::Done => return Ok(()),
+            CloseRoute::DeferredCleanup => {
                 self.start_deferred_cleanup(session_id)?;
+                return Ok(());
             }
-            return Ok(());
+            CloseRoute::Graceful | CloseRoute::RecoverInterrupted => {}
         }
         let operation_session_id = session_id.clone();
         let result = self
             .run_lifecycle(
                 operation_session_id,
                 LifecycleKind::Close,
-                |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled| async move {
                     let _recovery_reservation = tokio::task::spawn_blocking({
                         let observer = state.recovery_observer.clone();
                         let session_id = session_id.clone();
@@ -1323,13 +1371,23 @@ impl RuntimeState {
                         state.clone(),
                         session_id.clone(),
                     );
-                    let deferred = controller
-                        .close_session_managed_controlled(
-                            &session_id,
-                            &executor,
-                            &state.session_manager,
-                        )
-                        .await?;
+                    let deferred = if route == CloseRoute::RecoverInterrupted {
+                        controller
+                            .recover_interrupted_close_managed(
+                                &session_id,
+                                &executor,
+                                &state.session_manager,
+                            )
+                            .await?
+                    } else {
+                        controller
+                            .close_session_managed_controlled(
+                                &session_id,
+                                &executor,
+                                &state.session_manager,
+                            )
+                            .await?
+                    };
                     Ok(if deferred {
                         DaemonLifecycleResult::DeferredCleanup
                     } else {
@@ -1815,6 +1873,11 @@ impl RuntimeState {
     }
 
     fn cancel_lifecycle(&self, session_id: &str) -> Result<()> {
+        // Controller before lifecycle, the order worker polling takes.
+        let controller = self
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let lifecycle = self
             .lifecycle
             .lock()
@@ -1823,9 +1886,16 @@ impl RuntimeState {
             format!("no lifecycle operation is running for session {session_id}")
         })?;
         ensure!(
+            lifecycle_cancellable(active.kind, durable_session_state(&controller, session_id)),
+            "stop of {session_id} has passed its verified checkpoint and is removing the target; \
+             it cannot be cancelled"
+        );
+        ensure!(
             active.request_cancel(),
             "lifecycle operation is no longer cancellable"
         );
+        drop(lifecycle);
+        drop(controller);
         self.publish_revision();
         Ok(())
     }
@@ -1921,6 +1991,13 @@ impl RuntimeState {
     /// and it happens once per published snapshot, so it never blocks the
     /// loop the way an await on the async snapshot path would.
     pub fn active_lifecycles(&self) -> Vec<RuntimeLifecycleView> {
+        // Controller before lifecycle, the order worker polling takes. Both are
+        // plain mutex acquisitions over small maps, so a render loop calling
+        // this never awaits.
+        let controller = self
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.lifecycle
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1928,7 +2005,11 @@ impl RuntimeState {
             .filter(|(_, active)| active.is_visible())
             .map(|(session_id, active)| RuntimeLifecycleView {
                 operation_id: active.operation_id.clone(),
-                cancellable: active.is_cancellable(),
+                cancellable: active.is_cancellable()
+                    && lifecycle_cancellable(
+                        active.kind,
+                        durable_session_state(&controller, session_id),
+                    ),
                 session_id: session_id.clone(),
                 kind: active.kind.into(),
                 started_at_epoch_seconds: active.started_at_epoch_seconds,
@@ -3694,6 +3775,65 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
+        assert!(lifecycle_cancellable(
+            LifecycleKind::Close,
+            Some(SessionState::Running)
+        ));
+        assert!(lifecycle_cancellable(
+            LifecycleKind::Close,
+            Some(SessionState::Checkpointing)
+        ));
+        assert!(lifecycle_cancellable(
+            LifecycleKind::Close,
+            Some(SessionState::Closing)
+        ));
+        assert!(lifecycle_cancellable(LifecycleKind::Close, None));
+        assert!(!lifecycle_cancellable(
+            LifecycleKind::Close,
+            Some(SessionState::Destroying)
+        ));
+        // Only a graceful close has this gate; a forced teardown keeps none.
+        assert!(lifecycle_cancellable(
+            LifecycleKind::ForceStop,
+            Some(SessionState::Destroying)
+        ));
+        assert!(lifecycle_cancellable(
+            LifecycleKind::Create,
+            Some(SessionState::Destroying)
+        ));
+        assert!(lifecycle_cancellable(
+            LifecycleKind::Move,
+            Some(SessionState::Destroying)
+        ));
+    }
+
+    #[test]
+    fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
+        let target = Some(mj_core::state::TargetLocator::LocalPodman {
+            container_id: "a".repeat(64),
+            workspace_storage: Default::default(),
+        });
+        for state in [SessionState::Closing, SessionState::Destroying] {
+            let mut session = runtime_test_session("session", "workspace", state);
+            session.target = target.clone();
+            assert_eq!(close_route(Some(&session)), CloseRoute::RecoverInterrupted);
+            // Without a target there is nothing left for recovery to finish.
+            session.target = None;
+            assert_eq!(close_route(Some(&session)), CloseRoute::Graceful);
+        }
+
+        let running = runtime_test_session("session", "workspace", SessionState::Running);
+        assert_eq!(close_route(Some(&running)), CloseRoute::Graceful);
+        assert_eq!(close_route(None), CloseRoute::Graceful);
+
+        let mut stopped = runtime_test_session("session", "workspace", SessionState::Stopped);
+        assert_eq!(close_route(Some(&stopped)), CloseRoute::Done);
+        stopped.target = target;
+        assert_eq!(close_route(Some(&stopped)), CloseRoute::DeferredCleanup);
+    }
+
     /// A process that has exited but has not been reaped still answers
     /// `kill(pid, 0)`. The daemon-specific probe may reap its own child;
     /// platform process tables do not all expose a reliable Zombie status.
@@ -5288,6 +5428,66 @@ mod tests {
         assert!(state.cancel_lifecycle("committed").is_err());
         state.cancel_lifecycle_if_active("committed");
         assert!(!control.cancelled.load(Ordering::Acquire));
+        release.notify_one();
+        RuntimeState::wait_lifecycle_result(result).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_close_removing_the_target_stops_offering_cancellation() {
+        let state = test_runtime_state();
+        let mut session = runtime_test_session("destroying", "workspace", SessionState::Closing);
+        session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+            container_id: "a".repeat(64),
+            workspace_storage: Default::default(),
+        });
+        state
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .sessions
+            .insert(session.id.clone(), session.clone());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let result = state
+            .start_or_join_lifecycle("destroying".into(), LifecycleKind::Close, {
+                let release = release.clone();
+                move |_state, _session_id, _cancelled| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .unwrap();
+
+        // Before the checkpoint gate the stop is still cancellable.
+        assert!(state.active_lifecycles()[0].cancellable);
+
+        session.state = SessionState::Destroying;
+        state
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .sessions
+            .insert(session.id.clone(), session);
+
+        assert!(!state.active_lifecycles()[0].cancellable);
+        let error = state.cancel_lifecycle("destroying").unwrap_err();
+        assert!(
+            error.to_string().contains("cannot be cancelled"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            !state
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get("destroying")
+                .expect("lifecycle entry")
+                .cancelled
+                .load(Ordering::Acquire),
+            "a refused cancel must not reach the running teardown"
+        );
+
         release.notify_one();
         RuntimeState::wait_lifecycle_result(result).await.unwrap();
     }

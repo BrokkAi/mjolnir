@@ -1986,17 +1986,22 @@ pub struct LifecycleUpdate {
     pub deferred_cleanup: bool,
 }
 
+/// Whether a close stopped partway and left the record mid-close with its
+/// target still present. Such a record cannot be closed again from the start:
+/// its worker is gone, so only recovery can finish it.
+pub fn is_interrupted_close(session: &SessionRecord) -> bool {
+    matches!(
+        session.state,
+        SessionState::Closing | SessionState::Destroying
+    ) && session.target.is_some()
+}
+
 pub fn interrupted_close_session_ids(controller: &Controller) -> Vec<String> {
     controller
         .state
         .sessions
         .values()
-        .filter(|session| {
-            matches!(
-                session.state,
-                SessionState::Closing | SessionState::Destroying
-            ) && session.target.is_some()
-        })
+        .filter(|session| is_interrupted_close(session))
         .map(|session| session.id.clone())
         .collect()
 }

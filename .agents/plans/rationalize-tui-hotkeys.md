@@ -316,6 +316,18 @@ The proof that it works is direct: run `mj`, read the bottom row, press `F1`, re
   keeps the rendering toggle, which is not a readline key.
   Date/Author: 2026-09-01, implementation of M3.6.
 
+- Decision: the dashboard no longer binds any key that starts a session
+  transition. `s` (stop), `r` (restart), and `d` / `Del` (delete) are removed;
+  Move never had one. All four commands stay reachable from the `F2` palette
+  and from a session row's ⋯ menu, and their footer words are gone with their
+  keys.
+  Rationale: a mis-hit key stopped a live session. A single letter on the
+  Sessions pane is one typo away from tearing down running work, and the
+  palette and row menu already name each command in full, so the keys bought
+  speed that was not worth the loss. The delete confirmation was no protection
+  either, because `d` followed by a stray `y` still destroys the session.
+  Date/Author: 2026-09-14, hotkey removal follow-up.
+
 ## Outcomes & Retrospective
 
 M1 is complete and shipped green. What exists now that did not before: one table (`mj-tui/src/actions.rs`) that key handling, the footer, and the help overlay all read; an `F1` key reference that opens over anything and restores it; and a footer that names only the keys that apply. The user-visible gain from M1 alone is real but modest — the mislabelled `Ctrl+X` advice is gone, `x cancel launch` only appears when it can be used, and `F1` finally answers.

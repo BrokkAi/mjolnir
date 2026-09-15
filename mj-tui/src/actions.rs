@@ -12,6 +12,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use mj_chat::components::{EventResult, Outcome};
+use mj_core::state::SessionTransitionKind;
 
 use crate::dialogs::{ConfirmDialog, Confirmation};
 use crate::{DashboardAction, DashboardState, Focus};
@@ -272,6 +273,21 @@ fn stop_session_available(dashboard: &DashboardState) -> Availability {
     if !session.state.is_active() {
         return Availability::Hidden;
     }
+    // A close or destroy that failed part-way is exactly what Stop should be
+    // able to retry: the daemon re-runs the interrupted close when it gets a
+    // Close for a Closing or Destroying record. `transition_failure_kind` is
+    // already None while an operation is in flight, so the only other gate
+    // that still applies here is move queue admission.
+    if matches!(
+        dashboard.transition_failure_kind(&session.id),
+        Some(SessionTransitionKind::Stopping | SessionTransitionKind::Destroying)
+    ) {
+        return if dashboard.move_queue_admission_incomplete(&session.id) {
+            Availability::Blocked("Move queue admission is incomplete; retry Move first")
+        } else {
+            Availability::Ready
+        };
+    }
     session_idle(dashboard)
 }
 
@@ -392,8 +408,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Restart session",
         description: "Restart with the same profile, target, and mounts, without confirmation.",
         scope: Scope::Session,
-        keys: &[KeyHint::plain(KeyCode::Char('r'), "r")],
-        footer: footer_word!("restart"),
+        // No key: a mis-hit must not restart a live session. Reachable from
+        // the palette and the row menu.
+        keys: &[],
+        footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 2,
         available: restart_session_available,
@@ -467,10 +485,12 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::StopSession,
         label: "Stop session",
-        description: "Stop the selected session without confirmation.",
+        description: "Stop the selected session without confirmation, or retry a stop that failed part-way.",
         scope: Scope::Session,
-        keys: &[KeyHint::plain(KeyCode::Char('s'), "s")],
-        footer: footer_word!("stop"),
+        // No key: a mis-hit must not stop a live session. Reachable from the
+        // palette and the row menu.
+        keys: &[],
+        footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: stop_session_available,
@@ -491,11 +511,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Delete session",
         description: "Permanently remove the selected session, its target, and its recovery archive.",
         scope: Scope::Session,
-        keys: &[
-            KeyHint::plain(KeyCode::Delete, "Del"),
-            KeyHint::plain(KeyCode::Char('d'), "d"),
-        ],
-        footer: footer_word!("delete"),
+        // No key: a mis-hit must not begin deleting a session. Reachable from
+        // the palette and the row menu.
+        keys: &[],
+        footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         // Deliberately available while an operation runs: preempting a wedged
@@ -1021,6 +1040,53 @@ mod tests {
     use super::*;
     use crate::SessionOperationKind;
     use crate::test_support::{dashboard_with_session, key, operation, running_session};
+
+    /// A mis-hit key once stopped a live session, so no command that starts a
+    /// session transition may claim one. They stay reachable from the palette
+    /// and the row's ⋯ menu.
+    #[test]
+    fn session_transition_commands_bind_no_key() {
+        for id in [
+            CommandId::StopSession,
+            CommandId::RestartSession,
+            CommandId::MoveSession,
+            CommandId::ForceDestroySession,
+        ] {
+            assert!(
+                spec(id).keys.is_empty(),
+                "{id:?} must not bind a dashboard key"
+            );
+        }
+    }
+
+    /// A close that failed part-way leaves a durable Closing/Destroying
+    /// record. Stop is how the person retries it, so it stays available even
+    /// though every other session command is blocked on the failure.
+    #[test]
+    fn stop_retries_a_close_that_failed_part_way() {
+        let mut session = running_session();
+        session.state = mj_core::state::SessionState::Destroying;
+        session.last_error = Some("archive unavailable".into());
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.focus_sessions();
+        assert_eq!(
+            (spec(CommandId::StopSession).available)(&dashboard),
+            Availability::Ready
+        );
+
+        // An ordinary running session with an operation in flight is not a
+        // failed close, and Stop stays blocked behind that operation.
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.session_operations.insert(
+            "session-1".into(),
+            operation(SessionOperationKind::Launching, None),
+        );
+        assert!(matches!(
+            (spec(CommandId::StopSession).available)(&dashboard),
+            Availability::Blocked(_)
+        ));
+    }
 
     #[test]
     fn workspace_manager_runs_from_its_button_without_a_key_or_palette_row() {

@@ -4150,7 +4150,7 @@ mod tests {
         dashboard.focus_sessions();
         assert_eq!(
             combined_footer_text(&dashboard, 200),
-            "Enter open · s stop · Del delete · Tab pane · r restart │ Alt-N create · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
+            "Enter open · Tab pane │ Alt-N create · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
              · Alt-Q detach │ F2 palette · F4 web · F5 refresh · F7 setup · F1 help"
         );
 
