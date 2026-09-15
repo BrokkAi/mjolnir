@@ -369,7 +369,9 @@ fn scp_command(ssh: &SshTarget, remote: &str, local: &str) -> CommandSpec {
     }
     args.push(format!("{}:{remote}", ssh.destination));
     args.push(local.into());
-    CommandSpec::new("scp", args)
+    // `scp` opens its own connection to the same host, so it competes for the
+    // same pre-auth budget and is admitted and retried the same way.
+    CommandSpec::new("scp", args).ssh_destination(ssh.destination.clone())
 }
 
 fn ssh_command(ssh: &SshTarget, args: impl IntoIterator<Item = impl AsRef<str>>) -> CommandSpec {
@@ -380,7 +382,7 @@ fn ssh_command(ssh: &SshTarget, args: impl IntoIterator<Item = impl AsRef<str>>)
     let mut command = ssh.ssh_args.clone();
     command.push(ssh.destination.clone());
     command.push(join_remote_command(&remote));
-    CommandSpec::new("ssh", command)
+    CommandSpec::new("ssh", command).ssh_destination(ssh.destination.clone())
 }
 
 fn container_exec(
@@ -426,6 +428,21 @@ mod tests {
     use mj_core::targets::CommandOutput;
 
     const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+
+    /// A checkpoint download opens its own connection to the host, so it has
+    /// to be admitted and retried the same way an `ssh` invocation is.
+    #[test]
+    fn a_checkpoint_scp_is_tagged_with_the_connection_destination() {
+        let ssh = SshTarget {
+            destination: "build@10.0.0.1".into(),
+            ssh_args: vec!["-p".into(), "2222".into()],
+        };
+
+        let download = scp_command(&ssh, "remote/archive.zip", "/tmp/local.zip");
+
+        assert_eq!(download.program, "scp");
+        assert_eq!(download.ssh_destination.as_deref(), Some("build@10.0.0.1"));
+    }
     const NATIVE: &str = "0190aabb-ccdd-7eef-9000-abcdef012345";
 
     fn ssh() -> SshTarget {

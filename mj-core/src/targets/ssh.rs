@@ -1,5 +1,9 @@
 use super::*;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
+
 /// The connectivity probe `mj doctor` runs against an SSH target.
 ///
 /// It reuses the provisioning argument order so the probe fails exactly where
@@ -38,7 +42,7 @@ pub fn ssh_command_owned(ssh: &SshTarget, remote_args: Vec<String>) -> CommandSp
     let mut args = ssh.ssh_args.clone();
     args.push(ssh.destination.clone());
     args.push(join_remote_command(&remote_args));
-    CommandSpec::new("ssh", args)
+    CommandSpec::new("ssh", args).ssh_destination(ssh.destination.clone())
 }
 
 pub fn join_remote_command(args: &[String]) -> String {
@@ -75,8 +79,11 @@ pub fn ssh_directory_completions(
         ssh.destination.clone(),
         remote_command,
     ]);
-    let output = executor
-        .execute(&CommandSpec::new("ssh", args).purpose("complete remote mount directory"))?;
+    let output = executor.execute(
+        &CommandSpec::new("ssh", args)
+            .ssh_destination(ssh.destination.clone())
+            .purpose("complete remote mount directory"),
+    )?;
     if output.status != 0 {
         return Ok(Vec::new());
     }
@@ -187,7 +194,9 @@ pub fn ssh_validation_command(
         ssh.destination.clone(),
         join_remote_command(&remote_args),
     ]);
-    CommandSpec::new("ssh", args).purpose(purpose)
+    CommandSpec::new("ssh", args)
+        .ssh_destination(ssh.destination.clone())
+        .purpose(purpose)
 }
 
 /// Wrap a value so a POSIX shell reads it as one literal argument. Used at the
@@ -363,4 +372,289 @@ pub fn valid_ec2_instance_id(value: &str) -> bool {
 
 pub fn is_runtime_container_id(value: &str) -> bool {
     value.len() >= 12 && value.len() <= 128 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// `ssh` reserves exit status 255 for its own transport failures; a remote
+/// command never produces it, so the remote side provably never ran.
+pub const SSH_TRANSPORT_EXIT_STATUS: i32 = 255;
+
+/// Stderr fragments OpenSSH prints when the server hangs up before
+/// authentication. `sshd`'s `MaxStartups` produces exactly these when it drops
+/// an unauthenticated connection, and so does a server that is still starting.
+const TRANSPORT_REJECTION_MARKERS: [&str; 4] = [
+    "Connection closed by",
+    "Connection reset by",
+    "kex_exchange_identification",
+    "Connection timed out during banner exchange",
+];
+
+/// Whether a finished `ssh` process was turned away by the transport rather
+/// than by the remote command.
+///
+/// The remote command never started in this case, so the caller may retry the
+/// whole invocation without worrying about repeating a side effect.
+pub fn is_transport_rejection(status: i32, stderr: &str) -> bool {
+    status == SSH_TRANSPORT_EXIT_STATUS
+        && TRANSPORT_REJECTION_MARKERS
+            .iter()
+            .any(|marker| stderr.contains(marker))
+}
+
+/// Default number of `ssh` processes this daemon will have in flight against
+/// one destination at a time.
+///
+/// `sshd` counts *unauthenticated* connections against `MaxStartups`, whose
+/// stock value is `10:30:100`: from the eleventh concurrent pre-auth connection
+/// it starts dropping them, and past a hundred it drops all of them. A daemon
+/// that spawns one fresh `ssh` per operation reaches that during startup, so it
+/// admits its own connections instead of letting the server refuse them.
+const DEFAULT_MAX_CONCURRENT_SSH: usize = 6;
+
+/// Environment override for [`DEFAULT_MAX_CONCURRENT_SSH`].
+pub const MAX_CONCURRENT_SSH_ENV: &str = "MJ_SSH_MAX_CONCURRENT";
+
+fn max_concurrent_ssh() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        let Some(raw) = std::env::var_os(MAX_CONCURRENT_SSH_ENV) else {
+            return DEFAULT_MAX_CONCURRENT_SSH;
+        };
+        match raw
+            .to_str()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+        {
+            Some(limit) if limit > 0 => limit,
+            _ => {
+                tracing::warn!(
+                    variable = MAX_CONCURRENT_SSH_ENV,
+                    value = %raw.to_string_lossy(),
+                    default = DEFAULT_MAX_CONCURRENT_SSH,
+                    "ignoring invalid SSH concurrency limit"
+                );
+                DEFAULT_MAX_CONCURRENT_SSH
+            }
+        }
+    })
+}
+
+/// A counting semaphore per SSH destination.
+///
+/// Deliberately built on `std::sync` rather than a runtime primitive: the
+/// blocking process executors are called from plain threads as well as from
+/// `spawn_blocking`, and both must share one gate.
+struct DestinationGate {
+    limit: usize,
+    in_flight: Mutex<usize>,
+    released: Condvar,
+}
+
+impl DestinationGate {
+    fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            in_flight: Mutex::new(0),
+            released: Condvar::new(),
+        })
+    }
+
+    fn acquire(self: &Arc<Self>) -> SshPermit {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *in_flight >= self.limit {
+            in_flight = self
+                .released
+                .wait(in_flight)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *in_flight += 1;
+        drop(in_flight);
+        SshPermit {
+            gate: Arc::clone(self),
+        }
+    }
+}
+
+/// One admitted `ssh` connection. The slot is returned on drop.
+pub struct SshPermit {
+    gate: Arc<DestinationGate>,
+}
+
+impl std::fmt::Debug for SshPermit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SshPermit")
+    }
+}
+
+impl Drop for SshPermit {
+    fn drop(&mut self) {
+        let mut in_flight = self
+            .gate
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *in_flight = in_flight.saturating_sub(1);
+        drop(in_flight);
+        self.gate.released.notify_one();
+    }
+}
+
+/// Process-wide admission control for outbound `ssh` connections.
+pub struct SshAdmission;
+
+impl SshAdmission {
+    /// Block until this process may open another `ssh` connection to
+    /// `destination`. The returned permit holds the slot until it is dropped.
+    pub fn acquire(destination: &str) -> SshPermit {
+        Self::gate(destination).acquire()
+    }
+
+    fn gate(destination: &str) -> Arc<DestinationGate> {
+        static GATES: OnceLock<Mutex<BTreeMap<String, Arc<DestinationGate>>>> = OnceLock::new();
+        let mut gates = GATES
+            .get_or_init(|| Mutex::new(BTreeMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            gates
+                .entry(destination.to_owned())
+                .or_insert_with(|| DestinationGate::new(max_concurrent_ssh())),
+        )
+    }
+}
+
+/// How many times a transport-rejected `ssh` invocation is tried in total.
+pub const SSH_RETRY_ATTEMPTS: usize = 3;
+
+/// Inclusive millisecond bounds the jittered delay is drawn from, indexed by
+/// the number of attempts already made. `sshd` sheds load for as long as its
+/// pre-auth queue stays full, so the second wait is a multiple of the first.
+const SSH_RETRY_BACKOFF_MS: [(u64, u64); SSH_RETRY_ATTEMPTS - 1] = [(500, 2_000), (2_000, 4_000)];
+
+/// Test override collapsing every retry delay to this many milliseconds.
+/// `u64::MAX` means "no override".
+static SSH_RETRY_BACKOFF_OVERRIDE_MS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Shorten the retry backoff so tests can drive the retry path without
+/// sleeping for seconds. Not part of the daemon's behaviour.
+#[doc(hidden)]
+pub fn set_ssh_retry_backoff_for_test(delay: Option<Duration>) {
+    SSH_RETRY_BACKOFF_OVERRIDE_MS.store(
+        delay.map_or(u64::MAX, |delay| delay.as_millis() as u64),
+        Ordering::Relaxed,
+    );
+}
+
+/// The jittered wait before retry number `attempts_made + 1`.
+///
+/// Jitter matters more than the mean here: every session's reconnect fails at
+/// the same instant, so an unjittered schedule would simply re-send the whole
+/// burst into the same full queue.
+pub fn ssh_retry_delay(attempts_made: usize) -> Duration {
+    let override_ms = SSH_RETRY_BACKOFF_OVERRIDE_MS.load(Ordering::Relaxed);
+    if override_ms != u64::MAX {
+        return Duration::from_millis(override_ms);
+    }
+    let (low, high) = SSH_RETRY_BACKOFF_MS
+        .get(attempts_made.saturating_sub(1))
+        .copied()
+        .unwrap_or(*SSH_RETRY_BACKOFF_MS.last().expect("non-empty schedule"));
+    let mut bytes = [0_u8; 8];
+    // A failed draw only costs jitter, so fall back to the lower bound.
+    let spread = if getrandom::fill(&mut bytes).is_ok() {
+        u64::from_le_bytes(bytes) % (high - low + 1)
+    } else {
+        0
+    };
+    Duration::from_millis(low + spread)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn transport_rejection_matches_only_sshd_hangups() {
+        let cases: [(i32, &str, bool); 7] = [
+            (255, "Connection closed by 192.168.1.77 port 22", true),
+            (
+                255,
+                "kex_exchange_identification: read: Connection reset by peer",
+                true,
+            ),
+            (255, "ssh: Connection reset by 10.0.0.1 port 22", true),
+            (255, "Connection timed out during banner exchange", true),
+            (255, "Permission denied (publickey).", false),
+            (
+                255,
+                "ssh: connect to host h port 22: Connection refused",
+                false,
+            ),
+            (1, "Connection closed by 192.168.1.77 port 22", false),
+        ];
+        for (status, stderr, expected) in cases {
+            assert_eq!(
+                is_transport_rejection(status, stderr),
+                expected,
+                "status {status} stderr {stderr:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admission_never_admits_more_than_the_limit() {
+        let gate = DestinationGate::new(2);
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..12)
+            .map(|_| {
+                let gate = Arc::clone(&gate);
+                let in_flight = Arc::clone(&in_flight);
+                let peak = Arc::clone(&peak);
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        let permit = gate.acquire();
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        std::thread::yield_now();
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                        drop(permit);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("admission worker must not panic");
+        }
+        assert!(
+            peak.load(Ordering::SeqCst) <= 2,
+            "admission let {} connections run against a 2-permit gate",
+            peak.load(Ordering::SeqCst)
+        );
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn admission_blocks_once_every_permit_is_held() {
+        let gate = DestinationGate::new(2);
+        let first = gate.acquire();
+        let second = gate.acquire();
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                let permit = gate.acquire();
+                drop(permit);
+            })
+        };
+        // The third acquire has nothing to take until a permit comes back.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!waiter.is_finished());
+        drop(first);
+        waiter
+            .join()
+            .expect("waiter must be admitted once a permit frees");
+        drop(second);
+    }
 }

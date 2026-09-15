@@ -13,7 +13,9 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, watch};
 
-use crate::targets::CommandSpec;
+use crate::targets::{
+    CommandSpec, SSH_RETRY_ATTEMPTS, SshAdmission, SshPermit, is_transport_rejection,
+};
 use mj_core::config::harness_authentication_marker;
 use mj_core::credentials::{
     CredentialSnapshot, CredentialSyncAction, CredentialSyncHandle, CredentialSyncOutcome,
@@ -206,6 +208,28 @@ enum ExchangeKind {
     Call,
 }
 
+/// Why one relay proxy launch failed, and whether the SSH server refused the
+/// connection before authentication rather than the worker being unreachable.
+struct ConnectFailure {
+    error: anyhow::Error,
+    transport_rejected: bool,
+}
+
+impl ConnectFailure {
+    fn plain(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            transport_rejected: false,
+        }
+    }
+}
+
+impl From<anyhow::Error> for ConnectFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::plain(error)
+    }
+}
+
 /// Controller-side connection to the durable ACP relay protocol.
 ///
 /// This type does not construct transcript state or request unbounded history.
@@ -252,12 +276,98 @@ impl RelayClient {
             .await
     }
 
+    /// Start a relay proxy and complete its handshake, retrying while the
+    /// remote `sshd` is turning fresh connections away before authentication.
+    ///
+    /// The whole daemon reconnects at once after a restart, which is exactly
+    /// when a host at its `MaxStartups` ceiling drops the surplus. Those
+    /// rejections say nothing about the worker, so escalating one to worker
+    /// recovery would destroy a healthy session.
     async fn connect_with_timeouts(
         spec: &CommandSpec,
         expected_session_id: &str,
         request_timeout: Duration,
         handshake_timeout: Duration,
     ) -> Result<Self> {
+        for attempt in 1..=SSH_RETRY_ATTEMPTS {
+            let outcome = Self::connect_attempt(
+                spec,
+                expected_session_id,
+                request_timeout,
+                handshake_timeout,
+            )
+            .await;
+            let error = match outcome {
+                Ok(client) => return Ok(client),
+                Err(ConnectFailure {
+                    error,
+                    transport_rejected,
+                }) => {
+                    if attempt == SSH_RETRY_ATTEMPTS || !transport_rejected {
+                        return Err(error);
+                    }
+                    error
+                }
+            };
+            let delay = mj_core::targets::ssh_retry_delay(attempt);
+            tracing::warn!(
+                session_id = %expected_session_id,
+                destination = spec.ssh_destination.as_deref().unwrap_or_default(),
+                purpose = %spec.purpose,
+                attempt,
+                attempts = SSH_RETRY_ATTEMPTS,
+                delay_ms = delay.as_millis() as u64,
+                error = %error,
+                "relay proxy was refused by the SSH server before authentication; retrying"
+            );
+            tokio::time::sleep(delay).await;
+        }
+        unreachable!("the final attempt always returns");
+    }
+
+    /// One proxy launch and handshake.
+    ///
+    /// An admission permit is taken before the proxy is spawned and released
+    /// once hello completes: `sshd` counts only unauthenticated connections
+    /// against `MaxStartups`, so the long-lived relay stops occupying a slot
+    /// as soon as it is authenticated and talking.
+    async fn connect_attempt(
+        spec: &CommandSpec,
+        expected_session_id: &str,
+        request_timeout: Duration,
+        handshake_timeout: Duration,
+    ) -> std::result::Result<Self, ConnectFailure> {
+        let permit = match spec.ssh_destination.clone() {
+            Some(destination) => {
+                match tokio::task::spawn_blocking(move || SshAdmission::acquire(&destination)).await
+                {
+                    Ok(permit) => Some(permit),
+                    Err(error) => {
+                        return Err(ConnectFailure::plain(anyhow!(
+                            "SSH admission for the relay proxy was cancelled: {error}"
+                        )));
+                    }
+                }
+            }
+            None => None,
+        };
+        Self::spawn_and_handshake(
+            spec,
+            expected_session_id,
+            request_timeout,
+            handshake_timeout,
+            permit,
+        )
+        .await
+    }
+
+    async fn spawn_and_handshake(
+        spec: &CommandSpec,
+        expected_session_id: &str,
+        request_timeout: Duration,
+        handshake_timeout: Duration,
+        permit: Option<SshPermit>,
+    ) -> std::result::Result<Self, ConnectFailure> {
         let mut child = Command::new(&spec.program)
             .args(&spec.args)
             .envs(&spec.env)
@@ -347,39 +457,68 @@ impl RelayClient {
             .await
         {
             Ok(()) => {
+                // Hello succeeded, so this connection is past authentication
+                // and no longer counts against the server's startup budget.
+                drop(permit);
                 // The drain task keeps logging for the life of the connection.
                 Ok(client)
             }
             Err(error) => {
-                // Stop the proxy so it closes stderr; otherwise a proxy that
-                // is merely slow would hold the drain task open past its
-                // grace period and the tail would be lost. The child stays
-                // in place so dropping `client` reaps it as usual.
-                if let Some(child) = client.child.as_mut() {
-                    let _ = child.start_kill();
-                }
-                Err(Self::with_proxy_stderr(error, stderr_tail).await)
+                // Read the proxy's exit status before killing it: a connection
+                // the server dropped has already exited 255, and that status
+                // is what separates a refused connection from a broken worker.
+                let status = match client.child.as_mut() {
+                    Some(child) => {
+                        match tokio::time::timeout(RELAY_PROXY_DETACH_GRACE, child.wait()).await {
+                            Ok(Ok(status)) => status.code(),
+                            // Still running, or unwaitable. Stop the proxy so
+                            // it closes stderr; otherwise a proxy that is
+                            // merely slow would hold the drain task open past
+                            // its grace period and the tail would be lost. The
+                            // child stays in place so dropping `client` reaps
+                            // it as usual.
+                            _ => {
+                                let _ = child.start_kill();
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                let tail = Self::proxy_stderr_tail(stderr_tail).await;
+                let transport_rejected = permit.is_some()
+                    && status
+                        .is_some_and(|status| is_transport_rejection(status, &tail.join("\n")));
+                drop(permit);
+                Err(ConnectFailure {
+                    error: Self::attach_proxy_stderr(error, tail),
+                    transport_rejected,
+                })
             }
+        }
+    }
+
+    /// Collect the proxy's trailing stderr, or nothing if it is still open
+    /// past its detach grace period.
+    async fn proxy_stderr_tail(
+        stderr_tail: Option<tokio::task::JoinHandle<VecDeque<String>>>,
+    ) -> Vec<String> {
+        let Some(handle) = stderr_tail else {
+            return Vec::new();
+        };
+        match tokio::time::timeout(RELAY_PROXY_DETACH_GRACE, handle).await {
+            Ok(Ok(lines)) => lines.into(),
+            _ => Vec::new(),
         }
     }
 
     /// Attach the proxy's own stderr tail to a failed connect. The proxy
     /// explains failures the controller cannot see any other way, such as a
     /// worker socket path longer than `sun_path`.
-    async fn with_proxy_stderr(
-        error: anyhow::Error,
-        stderr_tail: Option<tokio::task::JoinHandle<VecDeque<String>>>,
-    ) -> anyhow::Error {
-        let Some(handle) = stderr_tail else {
-            return error;
-        };
-        let Ok(Ok(lines)) = tokio::time::timeout(RELAY_PROXY_DETACH_GRACE, handle).await else {
-            return error;
-        };
+    fn attach_proxy_stderr(error: anyhow::Error, lines: Vec<String>) -> anyhow::Error {
         if lines.is_empty() {
             return error;
         }
-        let lines: Vec<String> = lines.into();
         error.context(format!(
             "relay proxy stderr (last {} lines):\n{}",
             lines.len(),
@@ -2156,6 +2295,94 @@ mod tests {
             RelayVersionRange::CURRENT.negotiate(RelayVersionRange { min: 1, max: 1 }),
             Some(1)
         );
+    }
+
+    /// A host at its `MaxStartups` ceiling drops the surplus connection before
+    /// authentication. That says nothing about the worker, so connect retries
+    /// instead of reporting a dead relay and triggering worker recovery.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relay_proxy_refused_by_sshd_is_retried_rather_than_reported_dead() {
+        mj_core::targets::set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let directory = tempfile::tempdir().expect("temp dir");
+        let counter = directory.path().join("attempts");
+        let script = format!(
+            r#"
+count=$(cat {counter} 2>/dev/null || echo 0)
+echo $((count + 1)) > {counter}
+if [ "$count" -eq 0 ]; then
+  echo 'kex_exchange_identification: read: Connection reset by peer' >&2
+  exit 255
+fi
+IFS= read -r hello
+id=$(printf '%s' "$hello" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{{"request_id":"%s","protocol_version":1,"result":"ok","payload":{{"type":"hello","data":{{"negotiated":1,"relay_version":"retry-fixture","session_id":"{session}"}}}}}}\n' "$id"
+sh -c 'while :; do sleep 30; done'
+"#,
+            counter = counter.display(),
+            session = SESSION_ID
+        );
+        let spec = CommandSpec::new("sh", ["-c".to_owned(), script])
+            .ssh_destination("build@10.0.0.1")
+            .purpose("refused relay fixture");
+
+        let client = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10))
+            .await
+            .expect("a refused connection must be retried, not reported as a dead relay");
+
+        assert_eq!(client.relay_version(), "retry-fixture");
+        assert_eq!(
+            std::fs::read_to_string(&counter)
+                .expect("the fixture records its attempts")
+                .trim(),
+            "2"
+        );
+        mj_core::targets::set_ssh_retry_backoff_for_test(None);
+    }
+
+    /// A proxy that fails for its own reasons is reported on the first
+    /// attempt, keeping the existing hello error and its stderr tail.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relay_proxy_that_fails_for_another_reason_is_not_retried() {
+        mj_core::targets::set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let directory = tempfile::tempdir().expect("temp dir");
+        let counter = directory.path().join("attempts");
+        let script = format!(
+            r#"
+count=$(cat {counter} 2>/dev/null || echo 0)
+echo $((count + 1)) > {counter}
+echo 'worker socket path is too long' >&2
+exit 1
+"#,
+            counter = counter.display()
+        );
+        let spec = CommandSpec::new("sh", ["-c".to_owned(), script])
+            .ssh_destination("build@10.0.0.1")
+            .purpose("broken relay fixture");
+
+        let Err(error) =
+            RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10)).await
+        else {
+            panic!("a proxy that exits 1 is a real failure");
+        };
+
+        let reported = format!("{error:#}");
+        assert!(
+            reported.contains("relay proxy disconnected during hello"),
+            "unexpected error: {reported}"
+        );
+        assert!(
+            reported.contains("worker socket path is too long"),
+            "the stderr tail must survive: {reported}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&counter)
+                .expect("the fixture records its attempts")
+                .trim(),
+            "1"
+        );
+        mj_core::targets::set_ssh_retry_backoff_for_test(None);
     }
 
     #[cfg(unix)]

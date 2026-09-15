@@ -47,7 +47,7 @@ impl CacheHost {
                 let mut args = ssh.ssh_args.clone();
                 args.push(ssh.destination.clone());
                 args.push(targets::join_remote_command(&remote));
-                CommandSpec::new("ssh", args)
+                CommandSpec::new("ssh", args).ssh_destination(ssh.destination.clone())
             }
         };
         command.purpose(purpose).stage(ProvisionStage::Cloning)

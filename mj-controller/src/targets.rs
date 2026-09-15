@@ -341,6 +341,9 @@ fn execute_podman_preflight(
             ),
         },
     };
+    // `ssh` reserves this status for its own connection failures; the Podman
+    // probes never produce it. Reporting that case separately keeps an
+    // unreachable host from being mistaken for a broken Podman installation.
     if output.status == SSH_TRANSPORT_EXIT_STATUS
         && let Some(message) =
             ssh_transport_failure(host, String::from_utf8_lossy(&output.stderr).trim())
@@ -355,11 +358,6 @@ fn execute_podman_preflight(
     }
     Ok(output)
 }
-
-/// `ssh` reserves exit status 255 for its own connection failures; the Podman
-/// probes never produce it. Reporting that case separately keeps an
-/// unreachable host from being mistaken for a broken Podman installation.
-const SSH_TRANSPORT_EXIT_STATUS: i32 = 255;
 
 fn ssh_transport_failure(host: PodmanHost<'_>, reported: &str) -> Option<String> {
     let PodmanHost::Ssh(ssh) = host else {

@@ -101,6 +101,12 @@ pub struct CommandSpec {
     /// already exists, so a later failure owes that target's teardown.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub creates_target: bool,
+    /// The SSH destination this command opens a connection to, when it does.
+    /// Tagged commands pass through [`SshAdmission`] so the daemon never
+    /// exceeds the remote `sshd`'s `MaxStartups` budget, and a transport
+    /// rejection is retried rather than reported as a command failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_destination: Option<String>,
     /// Input that must reach the child without becoming part of its arguments,
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
@@ -122,6 +128,7 @@ impl CommandSpec {
             stage: None,
             parallel_group: None,
             creates_target: false,
+            ssh_destination: None,
             sensitive_stdin: None,
         }
     }
@@ -140,6 +147,13 @@ impl CommandSpec {
     /// plan-adjacent siblings that share the same group.
     pub fn parallel_group(mut self, group: u32) -> Self {
         self.parallel_group = Some(group);
+        self
+    }
+
+    /// Record that this command opens an `ssh` connection to `destination`,
+    /// which is the host (or `user@host`) argument, never an option value.
+    pub fn ssh_destination(mut self, destination: impl Into<String>) -> Self {
+        self.ssh_destination = Some(destination.into());
         self
     }
 
@@ -413,6 +427,66 @@ impl<E: CommandExecutor + ?Sized> Drop for ProvisionStageGuard<'_, E> {
 
 pub struct ProcessExecutor;
 
+/// Run one `ssh` invocation under process-wide admission control, retrying it
+/// when the server turned the connection away before authentication.
+///
+/// A permit is held only while a child is actually running and is released
+/// between attempts, because a waiting retry occupies no connection slot. A
+/// transport rejection means the remote command never started, so re-running
+/// the whole invocation cannot repeat a side effect.
+///
+/// Commands that are not tagged with a destination run untouched.
+fn with_ssh_admission(
+    command: &CommandSpec,
+    is_cancelled: &dyn Fn() -> bool,
+    mut run: impl FnMut() -> Result<CommandOutput>,
+) -> Result<CommandOutput> {
+    let Some(destination) = command.ssh_destination.as_deref() else {
+        return run();
+    };
+    for attempt in 1..=SSH_RETRY_ATTEMPTS {
+        let output = {
+            let _permit = SshAdmission::acquire(destination);
+            run()?
+        };
+        if attempt == SSH_RETRY_ATTEMPTS
+            || !is_transport_rejection(output.status, &String::from_utf8_lossy(&output.stderr))
+        {
+            return Ok(output);
+        }
+        let delay = ssh_retry_delay(attempt);
+        tracing::warn!(
+            destination,
+            purpose = command.purpose.as_str(),
+            attempt,
+            attempts = SSH_RETRY_ATTEMPTS,
+            delay_ms = delay.as_millis() as u64,
+            stderr = String::from_utf8_lossy(&output.stderr).trim(),
+            "ssh was refused by the server before authentication; retrying"
+        );
+        if !sleep_unless_cancelled(delay, is_cancelled) {
+            bail!("operation cancelled while {}", command.purpose);
+        }
+    }
+    unreachable!("the final attempt always returns");
+}
+
+/// Wait out `delay`, giving up early if the supervising operation is
+/// cancelled. Returns whether the wait completed.
+fn sleep_unless_cancelled(delay: Duration, is_cancelled: &dyn Fn() -> bool) -> bool {
+    let deadline = Instant::now() + delay;
+    loop {
+        if is_cancelled() {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
+}
+
 /// One debug line per finished target command, so a slow launch or resume
 /// phase can be attributed from logs instead of re-profiled by hand.
 pub fn trace_command_duration(command: &CommandSpec, started: Instant, status: i32) {
@@ -425,11 +499,18 @@ pub fn trace_command_duration(command: &CommandSpec, started: Instant, status: i
     );
 }
 
-impl CommandExecutor for ProcessExecutor {
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+impl ProcessExecutor {
+    /// One attempt, with no admission or retry of its own.
+    fn run_once(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if let Some(input) = &command.sensitive_stdin {
             let mut input = std::io::Cursor::new(input.0.as_slice());
-            return self.execute_with_stdin(command, &mut input);
+            // Owned bytes, so each attempt gets its own reader.
+            return stream_command_with_stdin(
+                configured_command(command),
+                command,
+                &mut input,
+                &|| false,
+            );
         }
         let started = Instant::now();
         let output = configured_command(command)
@@ -444,12 +525,24 @@ impl CommandExecutor for ProcessExecutor {
             stderr: output.stderr,
         })
     }
+}
+
+impl CommandExecutor for ProcessExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        with_ssh_admission(command, &|| false, || self.run_once(command))
+    }
 
     fn execute_with_stdin(
         &self,
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
+        // A caller's stream cannot be replayed, so this path takes a permit
+        // but never retries.
+        let _permit = command
+            .ssh_destination
+            .as_deref()
+            .map(SshAdmission::acquire);
         let process = configured_command(command);
         // Plain process execution is not cancellable, so the transfer only
         // ends when the child does.
@@ -670,15 +763,18 @@ fn terminate_cancellable_child(child: &mut std::process::Child) {
     }
 }
 
-impl CommandExecutor for CancellableProcessExecutor {
-    fn cancellation_requested(&self) -> bool {
-        self.is_cancelled()
-    }
-
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+impl CancellableProcessExecutor {
+    /// One attempt, with no admission or retry of its own.
+    fn run_once(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if let Some(input) = &command.sensitive_stdin {
             let mut input = std::io::Cursor::new(input.0.as_slice());
-            return self.execute_with_stdin(command, &mut input);
+            // Owned bytes, so each attempt gets its own reader.
+            return stream_command_with_stdin(
+                cancellable_command(command),
+                command,
+                &mut input,
+                &|| self.is_cancelled(),
+            );
         }
         let started = Instant::now();
         self.check_cancelled()?;
@@ -742,12 +838,28 @@ impl CommandExecutor for CancellableProcessExecutor {
             stderr,
         })
     }
+}
+
+impl CommandExecutor for CancellableProcessExecutor {
+    fn cancellation_requested(&self) -> bool {
+        self.is_cancelled()
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        with_ssh_admission(command, &|| self.is_cancelled(), || self.run_once(command))
+    }
 
     fn execute_with_stdin(
         &self,
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
+        // A caller's stream cannot be replayed, so this path takes a permit
+        // but never retries.
+        let _permit = command
+            .ssh_destination
+            .as_deref()
+            .map(SshAdmission::acquire);
         // The child runs in its own process group so cancellation can kill the
         // whole group, which is what releases a writer blocked on a full pipe.
         stream_command_with_stdin(cancellable_command(command), command, input, &|| {
@@ -1526,4 +1638,82 @@ pub fn container_exec(
     let mut command_args = vec!["exec".to_owned(), "-i".to_owned(), container_id.to_owned()];
     command_args.extend(args.into_iter().map(Into::into));
     CommandSpec::new(engine, command_args)
+}
+
+#[cfg(all(test, unix))]
+mod executor_tests {
+    use super::*;
+
+    /// A stand-in for `ssh` that is refused by the server on its first call and
+    /// connects on the next, the way a host at its `MaxStartups` ceiling
+    /// behaves once the daemon's burst drains.
+    fn flaky_ssh_script(directory: &Path) -> CommandSpec {
+        let counter = directory.join("attempts");
+        let script = format!(
+            "count=$(cat {counter} 2>/dev/null || echo 0)\n\
+             echo $((count + 1)) > {counter}\n\
+             if [ \"$count\" -eq 0 ]; then\n\
+             echo 'kex_exchange_identification: Connection closed by 10.0.0.1 port 22' >&2\n\
+             exit 255\n\
+             fi\n\
+             echo connected\n",
+            counter = counter.display()
+        );
+        CommandSpec::new("sh", ["-c".to_owned(), script])
+            .ssh_destination("build@10.0.0.1")
+            .purpose("run the flaky SSH fixture")
+    }
+
+    fn attempts(directory: &Path) -> u32 {
+        fs::read_to_string(directory.join("attempts"))
+            .expect("the fixture records its attempts")
+            .trim()
+            .parse()
+            .expect("attempt count is a number")
+    }
+
+    #[test]
+    fn a_transport_rejected_ssh_command_is_retried_once_and_then_succeeds() {
+        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let directory = tempfile::tempdir().expect("temp dir");
+        let command = flaky_ssh_script(directory.path());
+
+        let output = ProcessExecutor
+            .execute(&command)
+            .expect("the retry must reach the successful attempt");
+
+        assert_eq!(output.status, 0);
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "connected");
+        assert_eq!(attempts(directory.path()), 2);
+        set_ssh_retry_backoff_for_test(None);
+    }
+
+    #[test]
+    fn an_untagged_command_is_not_retried_after_the_same_failure() {
+        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut command = flaky_ssh_script(directory.path());
+        command.ssh_destination = None;
+
+        let output = ProcessExecutor.execute(&command).expect("runs once");
+
+        assert_eq!(output.status, 255);
+        assert_eq!(attempts(directory.path()), 1);
+        set_ssh_retry_backoff_for_test(None);
+    }
+
+    #[test]
+    fn the_cancellable_executor_also_retries_a_transport_rejection() {
+        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let directory = tempfile::tempdir().expect("temp dir");
+        let command = flaky_ssh_script(directory.path());
+
+        let output = CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
+            .execute(&command)
+            .expect("the retry must reach the successful attempt");
+
+        assert_eq!(output.status, 0);
+        assert_eq!(attempts(directory.path()), 2);
+        set_ssh_retry_backoff_for_test(None);
+    }
 }

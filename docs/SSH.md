@@ -12,6 +12,32 @@ Mjolnir has two target kinds that run a session on a remote machine over SSH:
 Both shell out to the local `ssh` CLI. Mjolnir does not use an SSH library or
 persistent connection multiplexing of its own.
 
+## Limiting concurrent connections
+
+Mjolnir starts one `ssh` or `scp` process per remote operation, so a daemon
+restart with many sessions opens a burst of connections to the same host at
+once. To keep that burst from being refused, Mjolnir admits at most **6
+concurrent connections per destination** and makes the rest wait. Set
+`MJ_SSH_MAX_CONCURRENT` in the daemon's environment to change the limit; an
+unset or invalid value falls back to 6.
+
+The number to compare it to is the remote `sshd`'s `MaxStartups`, which counts
+*unauthenticated* connections. Its stock value, `10:30:100`, starts randomly
+dropping connections at the eleventh concurrent pre-auth connection and drops
+all of them past a hundred. Keep `MJ_SSH_MAX_CONCURRENT` comfortably below the
+first number, or raise `MaxStartups` on the host. A dropped connection exits
+255 with `Connection closed by <host> port 22` or
+`kex_exchange_identification: read: Connection reset by peer`; Mjolnir
+recognizes those and retries the invocation rather than reporting a failure,
+because the remote command never ran.
+
+As extra mitigation, enable connection sharing for the host in your
+`~/.ssh/config` with `ControlMaster auto` and a `ControlPersist` interval
+(plus a `ControlPath`), so later invocations reuse one authenticated
+connection instead of opening their own. Note that channels multiplexed over a
+single master connection are capped by the server's `MaxSessions`, which is
+`10` by default.
+
 ## Prerequisites you set up by hand
 
 - **Key-based SSH that works non-interactively.** Mjolnir runs `ssh` without a
