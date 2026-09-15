@@ -4233,3 +4233,80 @@ async fn a_zcode_turn_records_the_credit_delta_measured_around_the_prompt() {
     driver.await.unwrap().unwrap();
     bridge.await.unwrap();
 }
+
+#[test]
+fn an_out_of_spec_tool_status_is_coerced_to_failed_so_the_card_settles() {
+    // Muse's adapter can send an ACP-illegal `cancelled` status; the whole
+    // notification used to be dropped, stranding the tool card in_progress.
+    let mut update = serde_json::json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "item-1",
+        "status": "cancelled",
+    });
+    let replaced = coerce_tool_call_status(&mut update);
+    assert_eq!(replaced.as_deref(), Some("cancelled"));
+    assert_eq!(update["status"], "failed");
+    // And it now parses into a real v1 update rather than being discarded.
+    serde_json::from_value::<SessionUpdate>(update).expect("coerced update parses");
+}
+
+#[test]
+fn a_legal_tool_status_and_a_non_tool_update_are_left_untouched() {
+    let mut legal = serde_json::json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "item-1",
+        "status": "in_progress",
+    });
+    assert_eq!(coerce_tool_call_status(&mut legal), None);
+    assert_eq!(legal["status"], "in_progress");
+
+    let mut message = serde_json::json!({
+        "sessionUpdate": "agent_message_chunk",
+        "content": {"type": "text", "text": "hi"},
+    });
+    assert_eq!(coerce_tool_call_status(&mut message), None);
+}
+
+#[test]
+fn salvage_settles_a_named_tool_and_ignores_the_rest() {
+    // When a tool update cannot be represented at all, we still settle the
+    // named tool as failed rather than drop it and strand the card.
+    let raw = serde_json::json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "item-2",
+        "status": "completed",
+        "content": [{"type": "from_the_future", "payload": 7}],
+    });
+    let salvaged = salvage_tool_call_update(&raw).expect("a named tool update is salvageable");
+    match salvaged {
+        SessionUpdate::ToolCallUpdate(update) => {
+            assert_eq!(update.tool_call_id.0.as_ref(), "item-2");
+        }
+        other => panic!("expected a tool_call_update, got {other:?}"),
+    }
+
+    // Without a tool id there is nothing to settle, and a non-tool update is
+    // left for the caller to drop.
+    let no_id = serde_json::json!({"sessionUpdate": "tool_call_update", "status": "completed"});
+    assert!(salvage_tool_call_update(&no_id).is_none());
+    let message = serde_json::json!({"sessionUpdate": "agent_message_chunk"});
+    assert!(salvage_tool_call_update(&message).is_none());
+}
+
+#[test]
+fn the_stall_watchdog_covers_only_harnesses_whose_turn_ends_on_the_reply() {
+    assert!(turn_ends_only_on_prompt_reply(HarnessKind::Muse));
+    assert!(turn_ends_only_on_prompt_reply(HarnessKind::Zcode));
+    assert!(!turn_ends_only_on_prompt_reply(HarnessKind::Claude));
+    assert!(!turn_ends_only_on_prompt_reply(HarnessKind::Codex));
+}
+
+#[test]
+fn the_stall_message_says_what_happened_and_what_to_do() {
+    let message = turn_stall_message(HarnessKind::Muse, 630_000);
+    assert!(message.contains("stopped responding"));
+    assert!(message.contains("10 minute"), "reports the silence in minutes: {message}");
+    assert!(message.contains("git log"), "points the user at the workspace");
+    assert!(message.contains("Resend"), "tells the user how to continue");
+    assert!(message.contains("#1007"), "names the known issue");
+}

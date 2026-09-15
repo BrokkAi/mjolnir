@@ -41,7 +41,7 @@ impl TokenUsage {
             (HarnessKind::Codex, Some("turn")) => UsageScope::Turn,
             (HarnessKind::Codex, Some(_)) => UsageScope::Unspecified,
             (HarnessKind::Codex, None) => UsageScope::LastRequest,
-            // Any other adapter that declares its scope is believed. Muse 0.4.2
+            // Any other adapter that declares its scope is believed. Muse 0.4.3
             // and later declare `turn` on the prompt response; an undeclared
             // Muse report stays unspecified.
             (_, Some("turn")) => UsageScope::Turn,

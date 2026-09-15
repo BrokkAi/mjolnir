@@ -687,7 +687,7 @@ impl Controller {
         error: anyhow::Error,
         executor: &impl CommandExecutor,
     ) -> Result<anyhow::Error> {
-        let original = format!("{error:#}");
+        let original = provisioning::note_new_session_launch_failure(session_id, &error);
         let cleanup_error = self
             .cleanup_new_session_worktree_after_failure(session_id, executor)
             .err()

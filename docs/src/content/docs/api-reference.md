@@ -535,7 +535,7 @@ prompt-ledger metadata and matching completion notifications report whole-turn
 consumption; explicitly incomplete reports retain `unspecified` scope. The
 managed ZCode adapter reports the backend's merged whole-turn usage on the
 prompt response and omits the report when the backend reported none. Kimi and
-Deepseek reports retain `unspecified` scope. The managed Muse adapter 0.4.2 and
+Deepseek reports retain `unspecified` scope. The managed Muse adapter 0.4.3 and
 later report whole-turn usage on the prompt response and omit the report when the
 backend reported no model legs; older Muse adapters produce no token reports.
 Only known whole-turn reports contribute to `totals`. Each counter includes

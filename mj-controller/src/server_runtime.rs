@@ -2013,12 +2013,18 @@ pub async fn run_server(
                             action_id,
                             workspace_id,
                             session_id.clone(),
+                            result.as_ref().err().cloned(),
                         );
                         revision = daemon_runtime.allocate_revision();
                         publish_snapshot!(revision);
                     }
                     if let Err(error) = &result {
-                        tracing::warn!(action_id, %error, "phone action failed");
+                        tracing::warn!(
+                            action_id,
+                            session_id = session_id.as_deref(),
+                            %error,
+                            "phone action failed"
+                        );
                     }
                     record_action_result(
                         &mut pending_action_errors,
@@ -2559,11 +2565,13 @@ fn record_launch_failure(
     action_id: u64,
     workspace_id: String,
     session_id: Option<String>,
+    error: Option<String>,
 ) {
     failures.push(crate::server::ViewerLaunchFailure {
         id: format!("{}-{action_id}", std::process::id()),
         workspace_id,
         session_id,
+        error,
     });
     if failures.len() > 16 {
         failures.remove(0);
@@ -4845,6 +4853,7 @@ mod tests {
                 index,
                 format!("workspace-{index}"),
                 Some(format!("session-{index}")),
+                Some(format!("worker bootstrap failed for {index}")),
             );
         }
         let snapshot = viewer_snapshot(
@@ -4880,7 +4889,12 @@ mod tests {
         );
         let json = serde_json::to_value(snapshot).unwrap();
         assert_eq!(json["launch_failures"][15]["workspace_id"], "workspace-19");
-        assert_eq!(json["launch_failures"][15].as_object().unwrap().len(), 3);
+        assert_eq!(
+            json["launch_failures"][15]["error"],
+            "worker bootstrap failed for 19",
+            "the recorded failure carries its reason so a client can show it"
+        );
+        assert_eq!(json["launch_failures"][15].as_object().unwrap().len(), 4);
     }
 
     #[test]

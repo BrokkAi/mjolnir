@@ -576,6 +576,9 @@ pub(crate) async fn sessions(
             return print_json(&session);
         }
         println!("{}  {}  {}", session.id, session.state, session.title);
+        if let Some(error) = &session.error {
+            println!("error: {error}");
+        }
         if let Some(outcome) = &session.last_turn_outcome {
             println!("last turn {:?}", outcome.outcome);
         }
