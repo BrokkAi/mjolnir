@@ -1581,7 +1581,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.begin_settings_section("profiles", None);
         dashboard.handle_key(key(KeyCode::Char('a')));
-        dashboard.handle_paste("deepseek-account");
+        dashboard.handle_paste("muse-account");
         dashboard.handle_key(key(KeyCode::Enter));
         choose(&mut dashboard, "kind");
         let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
@@ -1589,13 +1589,13 @@ mod tests {
         let selected = editor
             .choices
             .iter()
-            .position(|value| value == "deepseek")
+            .position(|value| value == "muse")
             .unwrap();
         editor.combo.preview(SetupControl::Choices, selected);
         dialog.prepare();
         dashboard.handle_key(key(KeyCode::Enter));
         choose(&mut dashboard, "home");
-        dashboard.handle_paste("/profiles/deepseek");
+        dashboard.handle_paste("/profiles/muse");
         dashboard.handle_key(key(KeyCode::Enter));
         let DashboardAction::SaveSetup { updated, .. } =
             dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
@@ -1607,8 +1607,8 @@ mod tests {
         };
         let saved: Config = serde_json::from_str(&updated).unwrap();
         assert_eq!(
-            saved.profiles["deepseek-account"].kind,
-            mj_core::config::HarnessKind::Deepseek
+            saved.profiles["muse-account"].kind,
+            mj_core::config::HarnessKind::Muse
         );
     }
 

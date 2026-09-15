@@ -246,7 +246,6 @@ pub enum HarnessKind {
     Claude,
     Kimi,
     Grok,
-    Deepseek,
     Muse,
 }
 
@@ -397,7 +396,6 @@ pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf 
         HarnessKind::Claude => ".credentials.json",
         HarnessKind::Kimi => "credentials/kimi-code.json",
         HarnessKind::Grok => "auth.json",
-        HarnessKind::Deepseek => ".credentials.yaml",
         HarnessKind::Muse => "auth.json",
     })
 }
@@ -437,12 +435,11 @@ impl HarnessKind {
         !matches!(self, Self::Muse)
     }
 
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::Codex,
         Self::Claude,
         Self::Kimi,
         Self::Grok,
-        Self::Deepseek,
         Self::Muse,
     ];
 
@@ -453,7 +450,6 @@ impl HarnessKind {
             Self::Claude => "CLAUDE_CONFIG_DIR",
             Self::Kimi => "KIMI_CODE_HOME",
             Self::Grok => "GROK_HOME",
-            Self::Deepseek => "DSH_HOME",
             Self::Muse => "XDG_CONFIG_HOME",
         }
     }
@@ -466,7 +462,6 @@ impl HarnessKind {
             Self::Claude => ".claude",
             Self::Kimi => ".kimi-code",
             Self::Grok => ".grok",
-            Self::Deepseek => ".dsh",
             Self::Muse => ".config/muse",
         }
     }
@@ -478,7 +473,6 @@ impl HarnessKind {
             Self::Claude => "claude",
             Self::Kimi => "kimi",
             Self::Grok => "grok",
-            Self::Deepseek => "deepseek",
             Self::Muse => "muse",
         }
     }
@@ -490,7 +484,6 @@ impl HarnessKind {
             Self::Claude => "Claude Code",
             Self::Kimi => "Kimi Code",
             Self::Grok => "Grok Build",
-            Self::Deepseek => "DSH",
             Self::Muse => "Muse Code",
         }
     }
@@ -578,15 +571,6 @@ impl HarnessKind {
                 session_sandbox: None,
                 staged_setting: None,
             }),
-            (Self::Deepseek, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
-                label: "danger-full-access",
-                acp_mode: None,
-                launch_flag: None,
-                launch_environment: Some(("DSH_PERMISSION_MODE", "danger-full-access")),
-                launch_argument: None,
-                session_sandbox: None,
-                staged_setting: None,
-            }),
         }
     }
 
@@ -659,7 +643,6 @@ impl HarnessKind {
         let flag = self.launch_flag_for(policy);
         match self {
             Self::Codex | Self::Claude | Self::Muse => Vec::new(),
-            Self::Deepseek => vec!["--profile", "acp"],
             Self::Kimi => vec!["acp"],
             Self::Grok => ["agent"].into_iter().chain(flag).chain(["stdio"]).collect(),
         }
@@ -2855,15 +2838,6 @@ mod tests {
             .unwrap();
         assert_eq!(claude.acp_mode(), Some("bypassPermissions"));
         assert_eq!(claude.label(), "bypassPermissions / sandbox-off");
-        let deepseek = HarnessKind::Deepseek
-            .execution_enforcement(ExecutionPolicy::Unconstrained)
-            .unwrap();
-        assert_eq!(deepseek.acp_mode(), None);
-        assert_eq!(deepseek.launch_flag(), None);
-        assert_eq!(
-            deepseek.launch_environment(),
-            Some(("DSH_PERMISSION_MODE", "danger-full-access"))
-        );
         let muse = HarnessKind::Muse
             .execution_enforcement(ExecutionPolicy::Unconstrained)
             .unwrap();
@@ -2901,7 +2875,7 @@ mod tests {
         assert_eq!(claude.session_sandbox(), None);
         assert_eq!(claude.staged_setting(), None);
 
-        for kind in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::Deepseek] {
+        for kind in [HarnessKind::Kimi, HarnessKind::Grok] {
             assert_eq!(
                 kind.execution_enforcement(ExecutionPolicy::ConfiguredApprovals),
                 None,
@@ -2924,9 +2898,14 @@ mod tests {
         assert_eq!(HarnessKind::Grok.id(), "grok");
         assert_eq!(HarnessKind::Grok.display_name(), "Grok Build");
         assert_eq!(HarnessKind::Grok.default_home_leaf(), ".grok");
-        assert_eq!(HarnessKind::Deepseek.display_name(), "DSH");
-        assert_eq!(HarnessKind::Deepseek.home_env(), "DSH_HOME");
         assert!("nope".parse::<HarnessKind>().is_err());
+        // The DSH harness was removed; a stored `deepseek` value must be
+        // rejected rather than silently resolving to another harness.
+        assert!("deepseek".parse::<HarnessKind>().is_err());
+        assert!(
+            serde_json::from_value::<HarnessKind>(serde_json::Value::String("deepseek".into()))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2938,10 +2917,6 @@ mod tests {
             assert!(HarnessKind::Codex.bridge_args(policy).is_empty());
             assert!(HarnessKind::Claude.bridge_args(policy).is_empty());
             assert_eq!(HarnessKind::Kimi.bridge_args(policy), ["acp"]);
-            assert_eq!(
-                HarnessKind::Deepseek.bridge_args(policy),
-                ["--profile", "acp"]
-            );
             assert_eq!(
                 HarnessKind::Grok.bridge_args(policy),
                 if policy.is_unconstrained() {
@@ -2964,12 +2939,7 @@ mod tests {
             HarnessKind::Grok.launch_flag_for(ExecutionPolicy::Unconstrained),
             Some("--always-approve")
         );
-        for kind in [
-            HarnessKind::Codex,
-            HarnessKind::Claude,
-            HarnessKind::Kimi,
-            HarnessKind::Deepseek,
-        ] {
+        for kind in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Kimi] {
             for policy in [
                 ExecutionPolicy::ConfiguredApprovals,
                 ExecutionPolicy::Unconstrained,
@@ -2984,7 +2954,7 @@ mod tests {
         for kind in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Grok] {
             assert!(kind.supports_guardian_approvals(), "{kind:?}");
         }
-        for kind in [HarnessKind::Kimi, HarnessKind::Deepseek, HarnessKind::Muse] {
+        for kind in [HarnessKind::Kimi, HarnessKind::Muse] {
             assert!(!kind.supports_guardian_approvals(), "{kind:?}");
         }
     }

@@ -2337,35 +2337,41 @@ fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
     );
 }
 
-/// The ZCode harness is gone but its rows remain readable, so a store that
-/// still holds one must list every other session instead of failing outright.
+/// The ZCode and DSH harnesses are gone but their rows remain readable, so a
+/// store that still holds one must list every other session instead of failing
+/// outright.
 #[test]
 fn a_session_for_a_removed_harness_is_skipped_without_hiding_the_others() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("mj.sqlite3");
     save_session_to(&database, &session("supported", "project")).unwrap();
-    save_session_to(&database, &session("legacy", "project")).unwrap();
+    save_session_to(&database, &session("legacy-zcode", "project")).unwrap();
+    save_session_to(&database, &session("legacy-deepseek", "project")).unwrap();
     let connection = open(&database).unwrap();
-    connection
-        .execute(
-            "UPDATE sessions SET harness_kind='zcode' WHERE session_id='legacy'",
-            [],
-        )
-        .expect("the CHECK constraint still tolerates the stored value");
-    connection
-        .execute(
-            "INSERT INTO hidden_native_sessions VALUES ('zcode','native-legacy','now')",
-            [],
-        )
-        .unwrap();
+    for (session_id, harness) in [("legacy-zcode", "zcode"), ("legacy-deepseek", "deepseek")] {
+        connection
+            .execute(
+                "UPDATE sessions SET harness_kind=?2 WHERE session_id=?1",
+                [session_id, harness],
+            )
+            .expect("the CHECK constraint still tolerates the stored value");
+        connection
+            .execute(
+                "INSERT INTO hidden_native_sessions VALUES (?1,?2,'now')",
+                [harness, &format!("native-{harness}")],
+            )
+            .unwrap();
+    }
     drop(connection);
 
     let state = load_state_from(&database).expect("the listing must not fail");
     assert!(state.sessions.contains_key("supported"));
-    assert!(
-        !state.sessions.contains_key("legacy"),
-        "a session whose harness was removed cannot be resumed, so it is not listed"
-    );
+    for legacy in ["legacy-zcode", "legacy-deepseek"] {
+        assert!(
+            !state.sessions.contains_key(legacy),
+            "a session whose harness was removed cannot be resumed, so it is not listed"
+        );
+    }
     assert!(
         hidden_native_sessions_from(&database)
             .expect("hidden sessions must not fail")

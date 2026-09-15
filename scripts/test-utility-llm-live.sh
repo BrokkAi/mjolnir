@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# MJ_UTILITY_LIVE_DEEPSEEK_PROFILE names a Codex profile pointed at the
+# DeepSeek API; the dedicated DSH harness no longer exists.
 required=(
   MJ_UTILITY_LIVE_CODEX_PROFILE
   MJ_UTILITY_LIVE_GROK_PROFILE

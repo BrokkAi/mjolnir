@@ -27,7 +27,6 @@ pub enum PlanControl {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanControlError {
-    DeepseekUnsupported,
     CodexIncompatible,
     GrokIncompatible,
     Incompatible,
@@ -189,7 +188,6 @@ impl AcpSessionSurface {
     pub fn plan_control(&self, active: bool) -> Result<PlanControl, PlanControlError> {
         let value = if active { "plan" } else { "default" };
         match self.harness_kind {
-            Some(HarnessKind::Deepseek) => Err(PlanControlError::DeepseekUnsupported),
             // Muse has no plan mode over ACP; see `forwards_plan_command`.
             Some(HarnessKind::Muse) => Err(PlanControlError::Incompatible),
             Some(HarnessKind::Codex) => self

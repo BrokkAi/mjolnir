@@ -203,7 +203,7 @@ mod tests {
     const CLAUDE: &str = include_str!("testdata/step_clock/claude.jsonl");
     const KIMI: &str = include_str!("testdata/step_clock/kimi.jsonl");
     const GROK: &str = include_str!("testdata/step_clock/grok.jsonl");
-    const DEEPSEEK: &str = include_str!("testdata/step_clock/deepseek.jsonl");
+    const PARALLEL_TOOL_CALLS: &str = include_str!("testdata/step_clock/parallel_tool_calls.jsonl");
 
     #[test]
     fn codex_streams_a_message_and_a_tool_call_as_four_steps() {
@@ -264,16 +264,16 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_runs_parallel_tool_calls_as_separate_steps() {
+    fn parallel_tool_calls_each_become_separate_steps() {
         // Three calls are announced, started and completed as interleaved
         // runs. Each call's own status changes are steps, and the thought
         // that follows them is another.
         assert_eq!(
-            step_starts(DEEPSEEK),
+            step_starts(PARALLEL_TOOL_CALLS),
             [
                 0, 1633, 1678, 1709, 2437, 4601, 4602, 4603, 4613, 4619, 4621, 4623, 5636, 5788
             ],
-            "deepseek step starts"
+            "parallel tool call step starts"
         );
     }
 

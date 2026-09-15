@@ -807,12 +807,14 @@ mod tests {
         config_mode.set_config_options(&[mode_config_option("default", &["default", "plan"])]);
         assert!(lists_plan(&config_mode));
 
-        let mut deepseek = grok_chat();
-        deepseek.set_harness_kind(mj_core::config::HarnessKind::Deepseek);
-        advertise(&mut deepseek, 2, &["plan", "implement"]);
-        assert!(!lists_plan(&deepseek));
+        // A Codex adapter with no plan/default config pair cannot enter plan
+        // mode, so neither Hel's own commands nor the adapter's are listed.
+        let mut without_plan_mode = ChatState::new(&snapshot(), &[]);
+        without_plan_mode.set_harness_kind(mj_core::config::HarnessKind::Codex);
+        advertise(&mut without_plan_mode, 2, &["plan", "implement"]);
+        assert!(!lists_plan(&without_plan_mode));
         assert!(
-            !deepseek
+            !without_plan_mode
                 .command_choices
                 .iter()
                 .any(|command| { matches!(command.name.as_str(), "plan" | "implement") })

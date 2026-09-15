@@ -49,9 +49,6 @@ enum ImportCommand {
     Kimi(NativeImportArgs),
     /// Import a session created by vanilla Grok Build.
     Grok(NativeImportArgs),
-    /// Import a session created by DeepSeek Harness.
-    #[command(alias = "dsh")]
-    Deepseek(NativeImportArgs),
     /// Import a session created by Muse Code.
     Muse(NativeImportArgs),
 }
@@ -93,7 +90,6 @@ impl ImportCommand {
             ImportCommand::Codex(args) => (HarnessKind::Codex, args),
             ImportCommand::Kimi(args) => (HarnessKind::Kimi, args),
             ImportCommand::Grok(args) => (HarnessKind::Grok, args),
-            ImportCommand::Deepseek(args) => (HarnessKind::Deepseek, args),
             ImportCommand::Muse(args) => (HarnessKind::Muse, args),
         }
     }
@@ -111,7 +107,6 @@ const fn import_label(harness: HarnessKind) -> &'static str {
         HarnessKind::Codex => "Codex",
         HarnessKind::Kimi => "Kimi",
         HarnessKind::Grok => "Grok Build",
-        HarnessKind::Deepseek => "DeepSeek Harness",
         HarnessKind::Muse => "Muse Code",
     }
 }
@@ -148,7 +143,7 @@ fn locate_for_import(
 ) -> Result<LocatedImport> {
     let archives = sessions_dir();
     Ok(match harness {
-        HarnessKind::Muse | HarnessKind::Deepseek => {
+        HarnessKind::Muse => {
             let source = locate_native_session(harness, &home, selection)?;
             LocatedImport {
                 native_session_id: source.native_session_id.clone(),
@@ -823,8 +818,6 @@ mod tests {
             ("codex", HarnessKind::Codex),
             ("kimi", HarnessKind::Kimi),
             ("grok", HarnessKind::Grok),
-            ("deepseek", HarnessKind::Deepseek),
-            ("dsh", HarnessKind::Deepseek),
             ("muse", HarnessKind::Muse),
         ] {
             let (harness, args) = parse_import(&[

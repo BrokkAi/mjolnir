@@ -210,13 +210,10 @@ fn create_owner_only_directory(directory: &Path) -> Result<()> {
 ///   value holding `{ "key", "refresh_token", "expires_at", ... }`.
 ///   `expires_at` is an RFC3339 string with nanosecond precision and a `Z`
 ///   suffix. A file may hold several grants, so the latest expiry wins.
-/// * DeepSeek Harness `~/.dsh/.credentials.yaml`: a versioned credential store
-///   without refresh timestamps. Divergent live copies are therefore never
-///   ordered by a guessed freshness value.
 ///
 /// Anything unparseable is `None` rather than a guess.
 pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
-    if matches!(kind, HarnessKind::Deepseek | HarnessKind::Muse) {
+    if kind == HarnessKind::Muse {
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -242,7 +239,6 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
                     .map(|expiry| expiry.timestamp_millis())
             })
             .max(),
-        HarnessKind::Deepseek => unreachable!("handled before JSON parsing"),
         HarnessKind::Muse => unreachable!("handled before JSON parsing"),
     }
 }
@@ -253,15 +249,12 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
 /// This is not [`credential_freshness`]. Freshness orders two copies of the
 /// same grant; expiry says when the grant runs out. Claude states the same
 /// number for both, but Codex orders copies by `last_refresh` and expires by
-/// the `exp` claim of the access token in `tokens.access_token`. Grok and
-/// DeepSeek have no proactive-refresh path, so they report nothing here.
+/// the `exp` claim of the access token in `tokens.access_token`. Grok and Muse
+/// have no proactive-refresh path, so they report nothing here.
 ///
 /// Anything unparseable is `None` rather than a guess.
 pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
-    if matches!(
-        kind,
-        HarnessKind::Grok | HarnessKind::Deepseek | HarnessKind::Muse
-    ) {
+    if matches!(kind, HarnessKind::Grok | HarnessKind::Muse) {
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -274,7 +267,7 @@ pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
             .get("expires_at")?
             .as_i64()
             .and_then(|seconds| seconds.checked_mul(1000)),
-        HarnessKind::Grok | HarnessKind::Deepseek | HarnessKind::Muse => {
+        HarnessKind::Grok | HarnessKind::Muse => {
             unreachable!("handled before JSON parsing")
         }
     }
@@ -298,7 +291,7 @@ fn jwt_expiry_millis(token: &str) -> Option<i64> {
 
 /// Reject anything that is not a plausible credential document before it
 /// replaces a canonical file or lands in a session home.
-pub fn validate_credential_payload(kind: HarnessKind, bytes: &[u8]) -> Result<()> {
+pub fn validate_credential_payload(_kind: HarnessKind, bytes: &[u8]) -> Result<()> {
     if bytes.is_empty() {
         bail!("credential payload is empty");
     }
@@ -309,135 +302,7 @@ pub fn validate_credential_payload(kind: HarnessKind, bytes: &[u8]) -> Result<()
         );
     }
     let text = std::str::from_utf8(bytes).context("credential payload is not valid UTF-8")?;
-    if kind == HarnessKind::Deepseek {
-        validate_deepseek_credentials(text)?;
-    } else {
-        serde_json::from_str::<serde_json::Value>(text)
-            .context("credential payload is not JSON")?;
-    }
-    Ok(())
-}
-
-fn validate_deepseek_credentials(text: &str) -> Result<()> {
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(text).context("DeepSeek credential payload is not YAML")?;
-    let document = value
-        .as_mapping()
-        .context("DeepSeek credential payload must be a mapping")?;
-    let key = |name: &str| serde_yaml::Value::String(name.to_owned());
-    if document
-        .get(key("version"))
-        .and_then(serde_yaml::Value::as_u64)
-        != Some(1)
-    {
-        bail!("DeepSeek credential payload must have version 1");
-    }
-    for name in document.keys().filter_map(serde_yaml::Value::as_str) {
-        if !matches!(name, "version" | "refs" | "records") {
-            bail!("DeepSeek credential payload has unknown top-level key {name:?}");
-        }
-    }
-    if document.keys().any(|name| name.as_str().is_none()) {
-        bail!("DeepSeek credential payload has a non-string top-level key");
-    }
-    if let Some(refs) = document.get(key("refs")) {
-        let refs = refs
-            .as_mapping()
-            .context("DeepSeek credential refs must be a mapping")?;
-        for (name, value) in refs {
-            let name = name
-                .as_str()
-                .context("DeepSeek credential ref name must be a string")?;
-            ensure_posix_credential_name(name)?;
-            if value.as_str().is_none_or(str::is_empty) {
-                bail!("DeepSeek credential ref {name:?} must be a non-empty string");
-            }
-        }
-    }
-    if let Some(records) = document.get(key("records")) {
-        let records = records
-            .as_mapping()
-            .context("DeepSeek credential records must be a mapping")?;
-        for (name, record) in records {
-            let name = name
-                .as_str()
-                .context("DeepSeek credential record name must be a string")?;
-            let (scope, id) = name
-                .split_once('/')
-                .context("DeepSeek credential record name must be <scope>/<id>")?;
-            if scope.is_empty() || id.is_empty() || id.contains('/') {
-                bail!("DeepSeek credential record name must be <scope>/<id>");
-            }
-            validate_deepseek_credential_record(name, record)?;
-        }
-    }
-    Ok(())
-}
-
-fn ensure_posix_credential_name(name: &str) -> Result<()> {
-    let mut bytes = name.bytes();
-    if !bytes
-        .next()
-        .is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic())
-        || !bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
-    {
-        bail!("DeepSeek credential ref {name:?} is not a POSIX identifier");
-    }
-    Ok(())
-}
-
-fn validate_deepseek_credential_record(name: &str, value: &serde_yaml::Value) -> Result<()> {
-    let record = value
-        .as_mapping()
-        .with_context(|| format!("DeepSeek credential record {name:?} must be a mapping"))?;
-    let key = |field: &str| serde_yaml::Value::String(field.to_owned());
-    let kind = record
-        .get(key("kind"))
-        .and_then(serde_yaml::Value::as_str)
-        .with_context(|| format!("DeepSeek credential record {name:?} has no string kind"))?;
-    let allowed: &[&str] = match kind {
-        "api-key" => &["kind", "key", "env"],
-        "grant" => &["kind", "payload"],
-        _ => bail!("DeepSeek credential record {name:?} has an unknown kind"),
-    };
-    for field in record.keys() {
-        let field = field.as_str().with_context(|| {
-            format!("DeepSeek credential record {name:?} has a non-string field")
-        })?;
-        if !allowed.contains(&field) {
-            bail!("DeepSeek credential record {name:?} has unknown field {field:?}");
-        }
-    }
-    if kind == "api-key" {
-        if let Some(value) = record.get(key("key"))
-            && value.as_str().is_none_or(str::is_empty)
-        {
-            bail!("DeepSeek credential record {name:?} key must be a non-empty string");
-        }
-        if let Some(env) = record.get(key("env")) {
-            let env = env.as_mapping().with_context(|| {
-                format!("DeepSeek credential record {name:?} env must be a mapping")
-            })?;
-            for (env_name, value) in env {
-                let env_name = env_name.as_str().with_context(|| {
-                    format!("DeepSeek credential record {name:?} env name must be a string")
-                })?;
-                ensure_posix_credential_name(env_name)?;
-                if value.as_str().is_none_or(str::is_empty) {
-                    bail!(
-                        "DeepSeek credential record {name:?} env {env_name:?} must be a non-empty string"
-                    );
-                }
-            }
-        }
-    } else {
-        let payload = record
-            .get(key("payload"))
-            .with_context(|| format!("DeepSeek credential record {name:?} has no payload"))?;
-        serde_json::to_value(payload).with_context(|| {
-            format!("DeepSeek credential record {name:?} payload is not JSON-compatible")
-        })?;
-    }
+    serde_json::from_str::<serde_json::Value>(text).context("credential payload is not JSON")?;
     Ok(())
 }
 
@@ -647,7 +512,7 @@ pub fn events_report_auth_failure(_kind: HarnessKind, events: &[RelayEvent]) -> 
 ///
 /// Verified against the locally installed CLIs with `--help`: `codex login`,
 /// `claude auth login` (there is no bare `claude login`), `kimi login`,
-/// `grok login`, and DeepSeek's `dsh web` credential settings UI.
+/// `grok login`, and `muse login`.
 ///
 pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> {
     if let AuthScheme::ApiKey { env_key } = profile.auth_scheme() {
@@ -673,7 +538,6 @@ pub fn native_login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
         ),
         HarnessKind::Kimi => ("kimi".to_owned(), vec!["login".to_owned()]),
         HarnessKind::Grok => ("grok".to_owned(), vec!["login".to_owned()]),
-        HarnessKind::Deepseek => ("dsh".to_owned(), vec!["web".to_owned()]),
         HarnessKind::Muse => ("muse".to_owned(), vec!["login".to_owned()]),
     }
 }
@@ -1022,7 +886,7 @@ mod tests {
         ];
         for kind in HarnessKind::ALL
             .into_iter()
-            .filter(|kind| !matches!(kind, HarnessKind::Deepseek | HarnessKind::Muse))
+            .filter(|kind| *kind != HarnessKind::Muse)
         {
             let (_, bytes) = fixtures
                 .iter()
@@ -1058,7 +922,6 @@ mod tests {
                 grok_credentials(&["2026-08-17T02:19:01.724226598Z"]),
                 None,
             ),
-            (HarnessKind::Deepseek, b"version: 1\n".to_vec(), None),
             (HarnessKind::Muse, b"{}".to_vec(), None),
         ];
         for kind in HarnessKind::ALL {
@@ -1129,25 +992,6 @@ mod tests {
                 .is_err()
         );
         assert!(validate_credential_payload(HarnessKind::Claude, &claude_credentials(1)).is_ok());
-        assert!(
-            validate_credential_payload(
-                HarnessKind::Deepseek,
-                b"version: 1\nrefs:\n  DEEPSEEK_API_KEY: secret\n"
-            )
-            .is_ok()
-        );
-        assert!(validate_credential_payload(HarnessKind::Deepseek, b"version: 2\n").is_err());
-        for malformed in [
-            "version: 1\nsecret: value\n",
-            "version: 1\nrefs:\n  bad-name: secret\n",
-            "version: 1\nrefs:\n  DEEPSEEK_API_KEY: ''\n",
-            "version: 1\nrecords:\n  owner/model:\n    kind: mystery\n",
-        ] {
-            assert!(
-                validate_credential_payload(HarnessKind::Deepseek, malformed.as_bytes()).is_err(),
-                "accepted malformed DeepSeek credentials: {malformed}"
-            );
-        }
     }
 
     #[test]
@@ -1422,10 +1266,6 @@ mod tests {
         assert_eq!(
             command(HarnessKind::Grok),
             ("grok".to_owned(), vec!["login".to_owned()])
-        );
-        assert_eq!(
-            command(HarnessKind::Deepseek),
-            ("dsh".to_owned(), vec!["web".to_owned()])
         );
     }
 

@@ -7,7 +7,6 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anvil_client::codex_client::CodexClient;
-use anvil_client::discovery::DEEPSEEK_BASE_URL;
 use anvil_client::grok_client::{GrokClient, GrokClientConfig};
 use anvil_client::infer::{
     InferErrorKind, InferMessage, InferOptions, StructuredInferRequest, infer_structured,
@@ -15,7 +14,7 @@ use anvil_client::infer::{
 use anvil_client::kimi_auth::KimiBackendConfig;
 use anvil_client::llm_client::{LlmBackend, ModelMetadata, OpenAiClient};
 use anvil_client::meta_client::{MetaClient, MetaClientConfig};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -99,7 +98,7 @@ impl UtilityLlmRuntime {
             .collect::<Vec<_>>();
         if supported.is_empty() {
             bail!(
-                "no enabled utility model is configured; enable or add a Codex, Muse, Grok, Kimi, or DeepSeek profile"
+                "no enabled utility model is configured; enable or add a Codex, Muse, Grok, or Kimi profile"
             )
         }
         let quotas = self.quotas(config, &supported).await;
@@ -519,7 +518,6 @@ fn utility_family(profile: &HarnessProfile) -> Option<UtilityFamily> {
         HarnessKind::Muse => Some(UtilityFamily::Muse),
         HarnessKind::Grok => Some(UtilityFamily::Grok),
         HarnessKind::Kimi => Some(UtilityFamily::Kimi),
-        HarnessKind::Deepseek => Some(UtilityFamily::DeepSeek),
         HarnessKind::Claude => None,
     }
 }
@@ -632,20 +630,6 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
             }
             config.build()
         }
-        HarnessKind::Deepseek => {
-            let key = profile
-                .environment
-                .get("DEEPSEEK_API_KEY")
-                .cloned()
-                .or_else(|| deepseek_key(&profile.home).ok().flatten());
-            Ok(key.filter(|key| !key.trim().is_empty()).map(|key| {
-                Arc::new(OpenAiClient::with_deepseek_reasoning_support(
-                    DEEPSEEK_BASE_URL.to_string(),
-                    Some(key),
-                    reqwest::header::HeaderMap::new(),
-                )) as Arc<dyn LlmBackend>
-            }))
-        }
         HarnessKind::Muse => {
             let mut config = MetaClientConfig::from_home(&profile.home);
             if let Some(base_url) = profile.environment.get("TBH_MINT_BASE_URL") {
@@ -659,21 +643,6 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
         // coding-agent session.
         HarnessKind::Claude => Ok(None),
     }
-}
-
-fn deepseek_key(home: &std::path::Path) -> Result<Option<String>> {
-    let path = home.join(".credentials.yaml");
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let value: serde_yaml::Value = serde_yaml::from_slice(
-        &std::fs::read(&path).with_context(|| format!("read {}", path.display()))?,
-    )?;
-    Ok(value
-        .get("refs")
-        .and_then(|refs| refs.get("DEEPSEEK_API_KEY"))
-        .and_then(serde_yaml::Value::as_str)
-        .map(str::to_string))
 }
 
 fn now_seconds() -> u64 {
@@ -1006,7 +975,8 @@ mod tests {
             ("MJ_UTILITY_LIVE_CODEX_PROFILE", HarnessKind::Codex),
             ("MJ_UTILITY_LIVE_GROK_PROFILE", HarnessKind::Grok),
             ("MJ_UTILITY_LIVE_KIMI_PROFILE", HarnessKind::Kimi),
-            ("MJ_UTILITY_LIVE_DEEPSEEK_PROFILE", HarnessKind::Deepseek),
+            // DeepSeek is served by a Codex profile pointed at its API.
+            ("MJ_UTILITY_LIVE_DEEPSEEK_PROFILE", HarnessKind::Codex),
         ]
         .map(|(variable, kind)| {
             (

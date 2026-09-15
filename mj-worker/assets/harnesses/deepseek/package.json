@@ -1,8 +1,0 @@
-{
-  "name": "mjolnir-managed-deepseek",
-  "private": true,
-  "version": "1.0.0",
-  "dependencies": {
-    "@deepseek-ai/dsh": "0.1.2-rc.1"
-  }
-}

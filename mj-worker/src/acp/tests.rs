@@ -8,12 +8,12 @@ use agent_client_protocol::schema::v1::{
 };
 
 #[test]
-fn deepseek_new_session_sends_required_empty_mcp_list() {
+fn a_new_session_states_an_empty_mcp_set_and_resume_never_sends_one() {
     let spec = LaunchSpec {
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
-        command: "dsh".into(),
-        args: vec!["--profile".into(), "acp".into()],
+        command: "codex-acp".into(),
+        args: Vec::new(),
         environment: BTreeMap::new(),
         cwd: "/workspace/app".into(),
         additional_directories: Vec::new(),
@@ -21,13 +21,17 @@ fn deepseek_new_session_sends_required_empty_mcp_list() {
         project_memory: None,
         resume_session: None,
         accepted_config: Default::default(),
-        harness: HarnessKind::Deepseek,
+        harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
     };
     let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
-    assert_eq!(request.get("mcpServers"), Some(&serde_json::json!([])));
+    assert_eq!(
+        request.get("mcpServers"),
+        Some(&serde_json::json!([])),
+        "a new session always states its MCP set, even when it is empty"
+    );
     let resumed =
         serde_json::to_value(resume_session_request(&spec, SessionId::from("native"))).unwrap();
     assert!(

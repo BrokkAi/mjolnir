@@ -815,7 +815,7 @@ fn raw_localhost_warns_for_harnesses_without_guardian_approvals() {
             .collect::<String>()
     };
 
-    for kind in [HarnessKind::Kimi, HarnessKind::Deepseek, HarnessKind::Muse] {
+    for kind in [HarnessKind::Kimi, HarnessKind::Muse] {
         let warning = review_text(kind);
         assert!(warning.contains("DANGER"), "{kind:?}: {warning}");
         assert!(

@@ -339,14 +339,6 @@ async fn refresh_profile(
                 })
                 .map_err(|error| anyhow::anyhow!(error.to_string()))
         }
-        HarnessKind::Deepseek => Ok(ProfileQuota {
-            profile_id: profile_id.clone(),
-            harness,
-            windows: Vec::new(),
-            extra: Some(API_LABEL.to_owned()),
-            error: None,
-            refreshed_at_epoch_seconds,
-        }),
         HarnessKind::Muse => crate::muse_usage::query(&source_home, &environment)
             .await
             .map(|report| ProfileQuota {
@@ -2028,28 +2020,6 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
         manager.shutdown().await;
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
-    }
-
-    #[tokio::test]
-    async fn deepseek_reports_api_instead_of_inventing_quota() {
-        let directory = tempfile::tempdir().unwrap();
-        let (outcome, _) = refresh_profile(
-            QuotaRefreshRequest {
-                profile_id: "deepseek".into(),
-                harness: HarnessKind::Deepseek,
-                source_home: directory.path().to_path_buf(),
-                environment: BTreeMap::new(),
-                cwd: directory.path().to_path_buf(),
-                provider: None,
-            },
-            None,
-        )
-        .await;
-
-        assert!(outcome.report.windows.is_empty());
-        assert_eq!(outcome.report.error, None);
-        assert_eq!(outcome.report.extra.as_deref(), Some(API_LABEL));
-        assert_eq!(outcome.report.compact(), API_LABEL);
     }
 
     #[tokio::test]

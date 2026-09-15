@@ -365,11 +365,10 @@ fi
         "{filled}"
     );
 
-    // DeepSeek Harness spawns each tool with the parent environment scrubbed of
-    // every name matching `KEY|PASSWORD|SECRET|TOKEN`
-    // (`@deepseek-ai/dsh-subprocess`). That dropped `GIT_CONFIG_KEY_*`, kept
-    // `GIT_CONFIG_COUNT`, and left every git command in the session failing
-    // with "missing config key GIT_CONFIG_KEY_0".
+    // A harness may spawn each tool with the parent environment scrubbed of
+    // every name matching `KEY|PASSWORD|SECRET|TOKEN`. That drops
+    // `GIT_CONFIG_KEY_*` while keeping `GIT_CONFIG_COUNT`, which left every git
+    // command in the session failing with "missing config key GIT_CONFIG_KEY_0".
     let scrubbed: BTreeMap<String, String> = environment
         .iter()
         .filter(|(name, _)| {
@@ -377,7 +376,6 @@ fi
             !["KEY", "PASSWORD", "SECRET", "TOKEN"]
                 .iter()
                 .any(|shape| upper.contains(shape))
-                && !upper.starts_with("DSH_")
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();

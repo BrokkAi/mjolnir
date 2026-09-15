@@ -1,6 +1,5 @@
 //! Native harness storage shared by import and checkpoint restoration.
 
-pub mod deepseek;
 pub mod muse;
 
 use std::path::{Path, PathBuf};

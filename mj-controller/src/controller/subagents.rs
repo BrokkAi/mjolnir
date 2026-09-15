@@ -81,7 +81,7 @@ impl Controller {
             .with_context(|| {
                 format!("sub-agent profile {:?} is unavailable", request.profile_id)
             })?;
-        if matches!(profile.kind, HarnessKind::Deepseek | HarnessKind::Muse) {
+        if profile.kind == HarnessKind::Muse {
             let multiple_roots = !parent.additional_mounts.is_empty()
                 || (parent.project_directory.is_none()
                     && self

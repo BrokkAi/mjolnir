@@ -1429,6 +1429,13 @@ fn migrate_stopped_session_state(connection: &Connection) -> Result<()> {
 }
 
 /// Preserve existing data and dependent indexes while admitting Muse sessions.
+///
+/// The widened constraint this builds still lists `'deepseek'`, carried over
+/// from migration 11. The DSH harness has since been removed; the value is
+/// retained only so session rows written by earlier releases stay readable.
+/// No code accepts it, `HarnessKind::from_str` rejects it, and `load_state_from`
+/// skips such a row with a warning. Dropping the value would need another
+/// breaking migration that rewrote or deleted those rows.
 fn migrate_muse_harness_kind(connection: &Connection) -> Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
     let migration = (|| -> Result<()> {

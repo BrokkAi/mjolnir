@@ -21,9 +21,6 @@ const CODEX_PACKAGE_LOCK: &[u8] = include_bytes!("../../assets/harnesses/codex/p
 const CLAUDE_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/claude/package.json");
 const CLAUDE_PACKAGE_LOCK: &[u8] =
     include_bytes!("../../assets/harnesses/claude/package-lock.json");
-const DEEPSEEK_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/deepseek/package.json");
-const DEEPSEEK_PACKAGE_LOCK: &[u8] =
-    include_bytes!("../../assets/harnesses/deepseek/package-lock.json");
 
 #[derive(Debug)]
 pub(crate) struct ManagedHarness {
@@ -225,12 +222,6 @@ fn install_into(
             staging.path(),
             CLAUDE_PACKAGE_JSON,
             CLAUDE_PACKAGE_LOCK,
-            environment,
-        )?,
-        HarnessKind::Deepseek => install_npm(
-            staging.path(),
-            DEEPSEEK_PACKAGE_JSON,
-            DEEPSEEK_PACKAGE_LOCK,
             environment,
         )?,
         HarnessKind::Kimi => install_kimi(staging.path(), environment)?,
@@ -847,7 +838,6 @@ INSTALLER
     }
     use mj_core::harness_runtime::{
         CLAUDE_ACP_VERSION, CODEX_ACP_PACKAGE, CODEX_ACP_VERSION, CODEX_CLI_VERSION,
-        DEEPSEEK_DSH_VERSION,
     };
 
     fn executable(path: &Path, body: &str) {
@@ -904,24 +894,12 @@ INSTALLER
                 CLAUDE_PACKAGE_JSON,
                 vec![("@agentclientprotocol/claude-agent-acp", CLAUDE_ACP_VERSION)],
             ),
-            (
-                DEEPSEEK_PACKAGE_JSON,
-                vec![("@deepseek-ai/dsh", DEEPSEEK_DSH_VERSION)],
-            ),
         ] {
             let package: serde_json::Value = serde_json::from_slice(body).unwrap();
             for (name, version) in dependencies {
                 assert_eq!(package["dependencies"][name], version);
             }
         }
-        let deepseek: serde_json::Value = serde_json::from_slice(DEEPSEEK_PACKAGE_JSON).unwrap();
-        assert_eq!(
-            deepseek["dependencies"]
-                .as_object()
-                .map(|dependencies| dependencies.len()),
-            Some(1),
-            "the bundled DSH ACP profile must not carry a separately pinned bridge"
-        );
     }
 
     #[test]

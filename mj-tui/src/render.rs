@@ -10,7 +10,7 @@ use ratatui::widgets::{
     Block, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap,
 };
 
-use mj_core::config::{Config, HarnessKind, PermissionMode};
+use mj_core::config::{Config, PermissionMode};
 use mj_core::state::{SessionRecord, SessionState, SessionTransitionKind};
 
 use mj_chat::chat::render_agent_message_head;
@@ -1963,15 +1963,10 @@ pub(crate) fn minimized_quota_line(
     let readings = dashboard
         .config
         .enabled_profiles()
-        .filter_map(|(id, profile)| {
+        .filter_map(|(id, _profile)| {
             let quota = dashboard.quotas.get(id);
-            // The report says for itself that it is usage-priced. Before the
-            // first refresh there is no report to ask, so the profile's kind
-            // stands in until one arrives.
-            let usage_priced = match quota {
-                Some(quota) => quota.is_usage_priced(),
-                None => profile.kind == HarnessKind::Deepseek,
-            };
+            // The report says for itself that it is usage-priced.
+            let usage_priced = quota.is_some_and(|quota| quota.is_usage_priced());
             if usage_priced {
                 return None;
             }
@@ -2296,7 +2291,11 @@ fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<QuotaTableRow> 
         .enabled_profiles()
         .map(|(id, profile)| {
             let (weekly, weekly_reset, five_hour, five_hour_reset, weekly_chart, five_hour_chart) =
-                if profile.kind == HarnessKind::Deepseek {
+                if dashboard
+                    .quotas
+                    .get(id)
+                    .is_some_and(|quota| quota.is_usage_priced())
+                {
                     (
                         api_quota_bar(),
                         String::new(),
@@ -4501,7 +4500,7 @@ mod tests {
     fn api_quota(profile_id: &str) -> ProfileQuota {
         ProfileQuota {
             profile_id: profile_id.into(),
-            harness: HarnessKind::Deepseek,
+            harness: HarnessKind::Codex,
             windows: Vec::new(),
             extra: Some(API_LABEL.into()),
             error: None,
@@ -4511,15 +4510,15 @@ mod tests {
 
     /// Adds a usage-priced profile to the dashboard's configuration, since the
     /// shared fixture only carries subscription profiles.
-    fn add_deepseek_profile(dashboard: &mut DashboardState) {
+    fn add_api_priced_profile(dashboard: &mut DashboardState) {
         dashboard.config.profiles.insert(
-            "deepseek".into(),
+            "api-priced".into(),
             mj_core::config::HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
                 guardian_review_model: None,
-                kind: HarnessKind::Deepseek,
-                home: std::path::PathBuf::from("/profiles/deepseek"),
+                kind: HarnessKind::Codex,
+                home: std::path::PathBuf::from("/profiles/api-priced"),
                 environment: BTreeMap::new(),
             },
         );
@@ -5322,14 +5321,13 @@ mod tests {
         assert_eq!(colour_of(targets_row, "morannon"), theme::palette().text);
     }
 
-    /// A usage-priced profile has no window to summarise, so it is left out of
-    /// the minimized row rather than spending width on a placeholder - both
-    /// once its own report says it is API-priced and before that report has
-    /// arrived.
+    /// A usage-priced profile has no window to summarise, so once its report
+    /// says it is API-priced it is left out of the minimized row rather than
+    /// spending width on a placeholder.
     #[test]
     fn a_usage_priced_profile_is_absent_from_the_minimized_row() {
         let mut dashboard = dashboard_with_session(running_session());
-        add_deepseek_profile(&mut dashboard);
+        add_api_priced_profile(&mut dashboard);
         minimize_all_panes(&mut dashboard);
 
         let row = |dashboard: &mut DashboardState| {
@@ -5339,15 +5337,10 @@ mod tests {
                 .expect("the minimized Quota row")
         };
 
-        // Before any refresh, the profile's kind is the only signal there is.
-        let before = row(&mut dashboard);
-        assert!(!before.contains("deepseek"), "{before:?}");
-
-        // And once the report arrives, the report itself says so.
-        dashboard.apply_quota(api_quota("deepseek"));
+        dashboard.apply_quota(api_quota("api-priced"));
         let after = row(&mut dashboard);
-        assert!(!after.contains("deepseek"), "{after:?}");
-        assert!(!after.contains("api"), "{after:?}");
+        assert!(!after.contains("api-priced"), "{after:?}");
+        assert!(!after.contains("API"), "{after:?}");
         // The subscription profiles still read normally.
         assert!(after.contains("claude-1"), "{after:?}");
     }
@@ -6253,11 +6246,9 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_quota_row_shows_api_without_bars_or_reset_dates() {
-        let mut config = config();
-        config.profiles.get_mut("codex-1").unwrap().kind = HarnessKind::Deepseek;
-        let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-        dashboard.quota_refreshing.insert("codex-1".into());
+    fn a_usage_priced_quota_row_shows_api_without_bars_or_reset_dates() {
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+        dashboard.apply_quota(api_quota("codex-1"));
         let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
         terminal
             .draw(|frame| render(frame, &mut dashboard))
@@ -6273,8 +6264,6 @@ mod tests {
         assert!(rendered.contains("API"));
         assert!(rendered.contains("▕   API    ▏"));
         assert!(!rendered.contains("API Pricing"));
-        assert!(rendered.contains("DSH"));
-        assert!(!rendered.contains("DeepSeek Harness"));
         assert!(!rendered.contains("unavailable"));
         assert!(!rendered.contains('%'));
     }

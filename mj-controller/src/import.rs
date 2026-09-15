@@ -1,7 +1,6 @@
 //! Import native harness sessions into Hel's durable archive format.
 //
 
-mod deepseek;
 mod muse;
 #[cfg(test)]
 mod native_tests;
@@ -407,7 +406,6 @@ pub fn locate_native_session(
             let located = locate_grok_session(home, selection)?;
             (located.native_session_id, located.session_path)
         }
-        HarnessKind::Deepseek => return deepseek::locate(home, selection),
     };
     Ok(LocatedNativeSession {
         native_session_id,
@@ -426,7 +424,6 @@ pub fn read_native_transcript(
         HarnessKind::Claude => read_claude_transcript(source_path),
         HarnessKind::Kimi => read_kimi_transcript(source_path),
         HarnessKind::Grok => read_grok_transcript(source_path),
-        HarnessKind::Deepseek => deepseek::read_transcript(source_path),
     }
 }
 
@@ -501,9 +498,6 @@ pub fn scan_native_sessions(
                 natively_archived: false,
             });
             forward(progress.scanned, progress.total, session);
-        }),
-        HarnessKind::Deepseek => deepseek::scan(home, |progress| {
-            forward(progress.scanned, progress.total, progress.session);
         }),
     }
 }
@@ -2768,7 +2762,7 @@ pub fn import_native_session(
         collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
     let native_artifacts =
         collect_import_native_artifacts(harness, harness_home, native_session_id, source_path)?;
-    if matches!(harness, HarnessKind::Deepseek | HarnessKind::Muse) {
+    if harness == HarnessKind::Muse {
         // The preview may precede a user's confirmation by minutes. Never
         // pair its old transcript with a newer native conversation.
         if let Some(control) = control {

@@ -605,9 +605,6 @@ impl AcpSessionFacts {
     /// this harness cannot.
     pub fn plan_control(&self, active: bool) -> Result<PlanControl, &'static str> {
         self.0.plan_control(active).map_err(|error| match error {
-            crate::acp::surface::PlanControlError::DeepseekUnsupported => {
-                "Plan mode is unsupported in DSH."
-            }
             crate::acp::surface::PlanControlError::CodexIncompatible => {
                 "This Codex ACP version does not expose collaboration_mode with plan/default values."
             }

@@ -21,9 +21,7 @@ use crate::targets::{
 use mj_core::config::{
     HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write, data_dir,
 };
-use mj_core::harness_runtime::{
-    CLAUDE_ACP_VERSION, CODEX_ACP_PACKAGE, CODEX_ACP_VERSION, DEEPSEEK_DSH_VERSION,
-};
+use mj_core::harness_runtime::{CLAUDE_ACP_VERSION, CODEX_ACP_PACKAGE, CODEX_ACP_VERSION};
 use mj_core::project_memory::{ProjectMemoryIdentity, RepositoryMemoryIdentity};
 use mj_core::worker_launch::{
     HarnessRuntimePolicy, ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery, WorkerLaunchConfig,
@@ -452,11 +450,7 @@ fn worker_launch_config(
             .iter()
             .map(|resource| resource.destination.clone()),
     );
-    if matches!(
-        profile.kind,
-        mj_core::config::HarnessKind::Deepseek | mj_core::config::HarnessKind::Muse
-    ) && !additional_directories.is_empty()
-    {
+    if profile.kind == mj_core::config::HarnessKind::Muse && !additional_directories.is_empty() {
         bail!(
             "{} ACP does not support multiple workspace roots; use a single-repository bundle",
             profile.kind.display_name()
@@ -1515,21 +1509,10 @@ fn workspace_paths(
 // replacing it with an equivalent connection, leaving a false failed-tool
 // event at the beginning of every session.
 /// Stage shown after the worker is reachable and while its ACP bridge becomes
-/// ready. Default launchers that can fetch their own harness name that work;
-/// explicit executables and DSH only have a process to start.
+/// ready. Every remaining harness launches through a default launcher that can
+/// fetch it, so the stage names the harness being installed.
 pub(super) fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage {
-    if matches!(
-        profile.kind,
-        HarnessKind::Codex
-            | HarnessKind::Claude
-            | HarnessKind::Kimi
-            | HarnessKind::Grok
-            | HarnessKind::Muse
-    ) {
-        ProvisionStage::Installing(profile.kind)
-    } else {
-        ProvisionStage::Starting
-    }
+    ProvisionStage::Installing(profile.kind)
 }
 
 pub(super) fn bridge_launch(
@@ -1573,21 +1556,6 @@ pub(super) fn bridge_launch(
                 ],
             )
         }
-        mj_core::config::HarnessKind::Deepseek => {
-            let acp = mj_core::config::HarnessKind::Deepseek
-                .bridge_args(policy)
-                .join(" ");
-            (
-                "sh".into(),
-                vec![
-                    "-c".into(),
-                    format!(
-                        "{}; if command -v dsh >/dev/null 2>&1 && [ \"$(dsh --version 2>/dev/null)\" = \"{DEEPSEEK_DSH_VERSION}\" ]; then exec dsh {acp}; fi; echo 'Mjolnir needs @deepseek-ai/dsh@{DEEPSEEK_DSH_VERSION} installed on PATH' >&2; exit 127",
-                        ensure_node_22_script(),
-                    ),
-                ],
-            )
-        }
     }
 }
 
@@ -1597,10 +1565,7 @@ pub(super) fn preflight_harness(
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     use mj_core::config::TargetTemplate;
-    if !matches!(
-        profile.kind,
-        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Deepseek
-    ) {
+    if !matches!(profile.kind, HarnessKind::Codex | HarnessKind::Claude) {
         return Ok(());
     }
     if !matches!(
@@ -1636,13 +1601,6 @@ pub(super) fn preflight_harness(
 
 fn ensure_node_script() -> &'static str {
     "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi"
-}
-
-fn ensure_node_22_script() -> String {
-    format!(
-        "{}; if ! node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)'; then echo 'DeepSeek Harness requires Node.js 22 or newer' >&2; exit 127; fi",
-        ensure_node_script()
-    )
 }
 
 const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nEverything outside `/workspace`, including installed packages, `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
@@ -1697,13 +1655,6 @@ pub(super) fn stage_profile(
             "agent_id",
             "skills",
             "plugins",
-        ],
-        mj_core::config::HarnessKind::Deepseek => &[
-            ".credentials.yaml",
-            "settings.yaml",
-            "AGENTS.md",
-            "skills",
-            ".agent-presets",
         ],
     };
     // Allowlist entries (and, within each, a copied directory's children) are
@@ -1956,7 +1907,6 @@ fn append_hel_target_environment(
         mj_core::config::HarnessKind::Claude => "CLAUDE.md",
         mj_core::config::HarnessKind::Kimi => "AGENTS.md",
         mj_core::config::HarnessKind::Grok => "AGENTS.md",
-        mj_core::config::HarnessKind::Deepseek => "AGENTS.md",
         mj_core::config::HarnessKind::Muse => "AGENTS.md",
     };
     let path = destination.join(instructions);
@@ -4642,19 +4592,6 @@ mod tests {
         assert_eq!(claude_command, "sh");
         assert_eq!(claude_arguments[0], "-c");
         assert!(claude_arguments[1].contains("@agentclientprotocol/claude-agent-acp@0.73.0"));
-
-        let (deepseek_command, deepseek_arguments) = bridge_launch(
-            mj_core::config::HarnessKind::Deepseek,
-            ExecutionPolicy::Unconstrained,
-        );
-        assert_eq!(deepseek_command, "sh");
-        assert_eq!(deepseek_arguments[0], "-c");
-        assert!(deepseek_arguments[1].contains("@deepseek-ai/dsh@0.1.2-rc.1"));
-        assert!(deepseek_arguments[1].contains("dsh --profile acp"));
-        assert!(deepseek_arguments[1].contains("dsh --version"));
-        assert!(!deepseek_arguments[1].contains("npx -y -p @deepseek-ai/dsh"));
-        assert!(deepseek_arguments[1].contains("Mjolnir needs @deepseek-ai/dsh"));
-        assert!(!deepseek_arguments[1].contains("Hel"));
     }
 
     #[test]
@@ -4668,21 +4605,12 @@ mod tests {
             guardian_review_model: None,
         };
 
-        for harness in [
-            HarnessKind::Codex,
-            HarnessKind::Claude,
-            HarnessKind::Kimi,
-            HarnessKind::Grok,
-        ] {
+        for harness in HarnessKind::ALL {
             assert_eq!(
                 bridge_readiness_stage(&profile(harness)),
                 ProvisionStage::Installing(harness)
             );
         }
-        assert_eq!(
-            bridge_readiness_stage(&profile(HarnessKind::Deepseek)),
-            ProvisionStage::Starting
-        );
     }
     #[test]
     fn codex_execution_environment_follows_the_target_policy() {
@@ -4801,13 +4729,6 @@ mod tests {
                  bridge_launch() npx fallbacks have to stay in lockstep, otherwise a container \
                  session and an npx session run different adapter versions."
         );
-
-        let deepseek = format!("@deepseek-ai/dsh@{DEEPSEEK_DSH_VERSION}");
-        assert!(
-            CONTAINERFILE.contains(&deepseek),
-            "containers/Containerfile.agent-dev must install {deepseek}"
-        );
-        assert!(!CONTAINERFILE.contains("dsh-acp-server"));
     }
     #[test]
     fn kimi_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
@@ -5659,35 +5580,6 @@ mod tests {
         );
     }
     #[test]
-    fn stage_deepseek_profile_copies_only_portable_configuration() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::write(
-            home.path().join(".credentials.yaml"),
-            "version: 1\nrefs: {}\n",
-        )
-        .unwrap();
-        std::fs::write(home.path().join("settings.yaml"), "models: {}\n").unwrap();
-        std::fs::create_dir(home.path().join("sessions")).unwrap();
-        std::fs::write(home.path().join("sessions/native-session"), "private state").unwrap();
-        std::fs::create_dir(home.path().join("profiles")).unwrap();
-        let staged = tempfile::tempdir().unwrap();
-        let profile = mj_core::config::HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Deepseek,
-            home: home.path().to_path_buf(),
-            environment: BTreeMap::new(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-        };
-
-        stage_profile(&profile, staged.path()).unwrap();
-
-        assert!(staged.path().join(".credentials.yaml").is_file());
-        assert!(staged.path().join("settings.yaml").is_file());
-        assert!(!staged.path().join("sessions").exists());
-        assert!(!staged.path().join("profiles").exists());
-    }
-    #[test]
     fn disposable_container_guidance_reaches_each_harness_without_touching_home() {
         let target = targets::TargetLocator::LocalPodman {
             container_id: "container".into(),
@@ -5698,7 +5590,6 @@ mod tests {
             (mj_core::config::HarnessKind::Claude, "CLAUDE.md"),
             (mj_core::config::HarnessKind::Kimi, "AGENTS.md"),
             (mj_core::config::HarnessKind::Grok, "AGENTS.md"),
-            (mj_core::config::HarnessKind::Deepseek, "AGENTS.md"),
             (mj_core::config::HarnessKind::Muse, "AGENTS.md"),
         ] {
             let home = tempfile::tempdir().unwrap();

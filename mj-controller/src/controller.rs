@@ -766,11 +766,9 @@ impl Controller {
         if project_directory.is_none() && bundle.is_none() {
             bail!("unknown bundle {bundle_id:?}");
         }
-        if matches!(
-            profile.kind,
-            mj_core::config::HarnessKind::Deepseek | mj_core::config::HarnessKind::Muse
-        ) && (!additional_mounts.is_empty()
-            || bundle.is_some_and(|bundle| bundle.repositories.len() > 1))
+        if profile.kind == mj_core::config::HarnessKind::Muse
+            && (!additional_mounts.is_empty()
+                || bundle.is_some_and(|bundle| bundle.repositories.len() > 1))
         {
             bail!(
                 "{} ACP supports one workspace root; use a single-repository bundle without attached directories",
@@ -1784,9 +1782,9 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_registration_rejects_more_than_one_workspace_root_before_persisting() {
+    fn muse_registration_rejects_more_than_one_workspace_root_before_persisting() {
         let mut config = registration_config();
-        config.profiles.get_mut("codex").unwrap().kind = HarnessKind::Deepseek;
+        config.profiles.get_mut("codex").unwrap().kind = HarnessKind::Muse;
         let second = config.bundles["project"].repositories[0].clone();
         config
             .bundles

@@ -12,7 +12,6 @@ pub const CODEX_CLI_VERSION: &str = "0.153.4";
 pub const CLAUDE_ACP_VERSION: &str = "0.73.0";
 pub const KIMI_VERSION: &str = "0.41.0";
 pub const GROK_VERSION: &str = "1.0.13";
-pub const DEEPSEEK_DSH_VERSION: &str = "0.1.2-rc.1";
 pub const MUSE_ACP_VERSION: &str = "0.4.3";
 pub const MUSE_VERSION: &str = "1.2.1-R2847.1";
 
@@ -49,11 +48,6 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             install_id: "grok-1.0.13",
             display_version: "Grok 1.0.13",
             entrypoint: "bin/grok",
-        },
-        HarnessKind::Deepseek => HarnessPin {
-            install_id: "dsh-0.1.2-rc.1",
-            display_version: "dsh 0.1.2-rc.1 (bundled ACP)",
-            entrypoint: "node_modules/.bin/dsh",
         },
     }
 }

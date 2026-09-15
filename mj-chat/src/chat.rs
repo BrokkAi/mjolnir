@@ -3763,7 +3763,6 @@ impl ChatState {
 
 fn plan_control_error_message(error: PlanControlError) -> &'static str {
     match error {
-        PlanControlError::DeepseekUnsupported => "Plan mode is unsupported in DSH.",
         PlanControlError::CodexIncompatible => {
             "This Codex ACP version does not expose collaboration_mode with plan/default values."
         }
@@ -5859,9 +5858,9 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_rejects_plan_and_implement_locally() {
+    fn a_harness_without_plan_mode_rejects_plan_and_implement_locally() {
         let mut chat = grok_chat();
-        chat.set_harness_kind(HarnessKind::Deepseek);
+        chat.set_harness_kind(HarnessKind::Muse);
         for command in ["/plan design it", "/implement"] {
             chat.set_input(command.into());
             assert_eq!(chat.submit_input(), ChatAction::None);
@@ -5870,7 +5869,7 @@ mod tests {
                 chat.notices
                     .current()
                     .unwrap()
-                    .contains("unsupported in DSH")
+                    .contains("does not expose compatible plan/default modes")
             );
         }
     }

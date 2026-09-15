@@ -2737,10 +2737,10 @@ fi
 /// global configuration file named by `GIT_CONFIG_GLOBAL`.
 ///
 /// The environment form those settings used to take cannot survive a harness
-/// that drops credential-shaped variable names. DeepSeek Harness spawns every
+/// that drops credential-shaped variable names. A harness that spawns every
 /// tool with a parent environment scrubbed of names matching
-/// `KEY|PASSWORD|SECRET|TOKEN`, which removed `GIT_CONFIG_KEY_*` and kept
-/// `GIT_CONFIG_COUNT`, so each git command in the session failed with
+/// `KEY|PASSWORD|SECRET|TOKEN` removes `GIT_CONFIG_KEY_*` while keeping
+/// `GIT_CONFIG_COUNT`, so each git command in the session fails with
 /// "missing config key GIT_CONFIG_KEY_0". One path variable carries no
 /// credential-shaped name, and a file cannot be partly delivered.
 fn configure_git_config_file(
