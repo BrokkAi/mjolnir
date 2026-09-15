@@ -126,6 +126,28 @@ impl ChatState {
         self.config_picker.is_some()
     }
 
+    /// The config key of the prompt-title chip at this cell, if any.
+    pub(super) fn prompt_config_chip_at(&self, column: u16, row: u16) -> Option<&'static str> {
+        self.config_chip_areas
+            .iter()
+            .find(|(_, area)| area.contains((column, row).into()))
+            .map(|(key, _)| *key)
+    }
+
+    /// Opens the selector for a model or effort chip in the prompt title,
+    /// reporting the same conditions as the bare `/{key}` command.
+    pub(super) fn open_prompt_config_picker(&mut self, key: &'static str) {
+        if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
+            self.set_notice("The worker is closing; this configuration change was not sent");
+            return;
+        }
+        if !self.open_config_picker(key) {
+            self.set_notice(format!(
+                "The agent does not advertise {key} values; usage: /{key} <value>"
+            ));
+        }
+    }
+
     pub(super) fn config_picker_handles_mouse(&self, column: u16, row: u16) -> bool {
         self.config_picker.as_ref().is_some_and(|picker| {
             picker.form.captures_pointer() || picker.form.contains(column, row)
@@ -429,6 +451,49 @@ mod tests {
             effort_option("high", &["low", "medium", "high", "max"]),
         ]);
         chat
+    }
+
+    #[test]
+    fn clicking_a_prompt_title_chip_opens_that_keys_selector() {
+        let mut chat = chat_with_models();
+        let rows = drawn_transcript(&mut chat, 100, 24);
+        let chips = chat.config_chip_areas.clone();
+        let (column, row) = chips
+            .iter()
+            .find(|(key, _)| *key == "model")
+            .map(|(_, area)| (area.x, area.y))
+            .expect("the model chip is registered");
+        assert!(
+            chips.iter().any(|(key, _)| *key == "effort"),
+            "the effort chip is registered too: {chips:?}"
+        );
+        // The hitbox covers the model text drawn in the prompt's top border.
+        let title = &rows[usize::from(row)];
+        let covered = title
+            .chars()
+            .skip(usize::from(column))
+            .take(usize::from(
+                chips
+                    .iter()
+                    .find(|(key, _)| *key == "model")
+                    .map(|(_, area)| area.width)
+                    .unwrap_or(0),
+            ))
+            .collect::<String>();
+        assert!(
+            covered.trim_start().starts_with("gpt-5.6-luna"),
+            "chip covers {covered:?} in {title:?}"
+        );
+
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(chat.component_handles_mouse(press));
+        assert_eq!(chat.handle_mouse(press), ChatAction::None);
+        assert!(chat.config_picker_active());
     }
 
     #[test]

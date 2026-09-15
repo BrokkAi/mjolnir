@@ -598,6 +598,9 @@ pub struct ChatState {
     /// upper-left border rather than inside its selectable text surface.
     voice_button_area: Option<Rect>,
     voice_form: Form<VoiceControl>,
+    /// The last frame's model and effort chips on the prompt's top border.
+    /// Each entry pairs the config key its click opens with its hitbox.
+    config_chip_areas: Vec<(&'static str, Rect)>,
     /// The embedded background-task control and its dialog.
     task_control_focused: bool,
     task_dialog_open: bool,
@@ -746,6 +749,7 @@ impl ChatState {
             voice_active: false,
             voice_button_area: None,
             voice_form: voice_form(),
+            config_chip_areas: Vec::new(),
             task_control_focused: false,
             task_dialog_open: false,
             task_dialog_scroll: 0,
@@ -3079,6 +3083,12 @@ impl ChatState {
         {
             return true;
         }
+        if self
+            .prompt_config_chip_at(mouse.column, mouse.row)
+            .is_some()
+        {
+            return true;
+        }
         if self.config_picker_handles_mouse(mouse.column, mouse.row) {
             return true;
         }
@@ -3124,6 +3134,7 @@ impl ChatState {
         self.task_dialog_form.reset_geometry();
         self.voice_form.reset_geometry();
         self.voice_button_area = None;
+        self.config_chip_areas.clear();
         self.task_control_area = None;
         self.subagent_control_area = None;
         self.task_dialog_area = None;
@@ -3357,6 +3368,14 @@ impl ChatState {
         // own the frame and must not expose a stale prompt hitbox from the
         // preceding draw.
         if self.second_opinion_active() || self.turn_review_active() {
+            return ChatAction::None;
+        }
+        // The model and effort chips sit on the prompt border next to the
+        // microphone; a click opens that key's value selector.
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(key) = self.prompt_config_chip_at(mouse.column, mouse.row)
+        {
+            self.open_prompt_config_picker(key);
             return ChatAction::None;
         }
         let voice_result = self.voice_form.handle(&Event::Mouse(mouse));

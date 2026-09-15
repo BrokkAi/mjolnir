@@ -2743,6 +2743,7 @@ pub(super) fn render_in(
         let upper_transcript = Rect::new(combined.x, combined.y, combined.width, transcript_height);
 
         chat.voice_button_area = None;
+        chat.config_chip_areas.clear();
         chat.task_control_area = None;
         chat.subagent_control_area = None;
         chat.task_dialog_area = None;
@@ -2787,6 +2788,7 @@ pub(super) fn render_in(
     // the selectable prompt interior. Clear the hitbox first because a split
     // view or modal may replace the composer for this frame.
     chat.voice_button_area = None;
+    chat.config_chip_areas.clear();
     chat.task_control_area = None;
     chat.subagent_control_area = None;
     chat.task_dialog_area = None;
@@ -2864,7 +2866,8 @@ pub(super) fn render_in(
     } else {
         chat.split_action_areas.clear();
         chat.turn_review_action_areas.clear();
-        let (prompt_title, activity_title) = prompt_title_line(chat, prompt_area.width);
+        let (prompt_title, activity_title, config_chips) = prompt_title_line(chat, prompt_area);
+        chat.config_chip_areas = config_chips;
         let mut prompt_block = theme::panel(prompt_focused)
             .padding(Padding::new(2, 1, 0, 0))
             .title(prompt_title);
@@ -3322,19 +3325,63 @@ fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
 /// The microphone chip owns the prompt border's upper-left corner, followed by
 /// model, effort, and state. Activity owns the upper-right corner. A full
 /// configured spinner is used when both titles fit; the one-column frame keeps
-/// narrow prompts readable.
+/// narrow prompts readable. The model and effort spans are returned as
+/// clickable chips that open their value selector.
 fn prompt_title_line(
     chat: &ChatState,
-    prompt_width: u16,
-) -> (Line<'static>, Option<Line<'static>>) {
+    prompt_area: Rect,
+) -> (
+    Line<'static>,
+    Option<Line<'static>>,
+    Vec<(&'static str, Rect)>,
+) {
     let parts = prompt_title_parts(chat);
-    let prefix_count =
-        usize::from(chat.current_model().is_some()) + usize::from(chat.current_effort().is_some());
-    let prefix = parts[..prefix_count.min(parts.len())].join(" · ");
+    let model = chat.current_model();
+    let effort = chat.current_effort();
+    let prefix_count = usize::from(model.is_some()) + usize::from(effort.is_some());
     let suffix = parts[prefix_count.min(parts.len())..].join(" · ");
     let mut spans = vec![Span::raw(format!(" {VOICE_BUTTON_GLYPH} "))];
-    if !prefix.is_empty() {
-        spans.push(Span::raw(format!(" {prefix} ")));
+    // The title begins just inside the border corner; each chip keeps the exact
+    // cells of its span, and only a chip that fits inside the border is kept.
+    let mut chip_x = usize::from(prompt_area.x.saturating_add(1)) + spans[0].width();
+    let chip_limit = usize::from(prompt_area.right().saturating_sub(1));
+    let mut chips = Vec::new();
+    if let Some(model) = model {
+        let text = format!(" {model} ");
+        let width = display_width(&text);
+        if chip_x.saturating_add(width) <= chip_limit {
+            chips.push((
+                "model",
+                Rect::new(
+                    u16::try_from(chip_x).unwrap_or(u16::MAX),
+                    prompt_area.y,
+                    u16::try_from(width).unwrap_or(u16::MAX),
+                    1,
+                ),
+            ));
+        }
+        spans.push(Span::styled(text, theme::selection(false)));
+        chip_x = chip_x.saturating_add(width);
+    }
+    if let Some(effort) = effort {
+        let text = if model.is_some() {
+            format!("· {effort} ")
+        } else {
+            format!(" {effort} ")
+        };
+        let width = display_width(&text);
+        if chip_x.saturating_add(width) <= chip_limit {
+            chips.push((
+                "effort",
+                Rect::new(
+                    u16::try_from(chip_x).unwrap_or(u16::MAX),
+                    prompt_area.y,
+                    u16::try_from(width).unwrap_or(u16::MAX),
+                    1,
+                ),
+            ));
+        }
+        spans.push(Span::styled(text, theme::selection(false)));
     }
     if !suffix.is_empty() {
         spans.push(Span::raw(format!(" {suffix} ")));
@@ -3342,7 +3389,7 @@ fn prompt_title_line(
     let left_width = spans.iter().map(Span::width).sum::<usize>();
     let activity_title = chat.needs_animation().then(|| {
         let full = chat.activity_spinner();
-        let max_title_width = usize::from(prompt_width.saturating_sub(2));
+        let max_title_width = usize::from(prompt_area.width.saturating_sub(2));
         let spinner =
             if left_width.saturating_add(full.width()).saturating_add(3) <= max_title_width {
                 full
@@ -3357,7 +3404,7 @@ fn prompt_title_line(
         title.push(Span::raw(" "));
         Line::from(title)
     });
-    (Line::from(spans), activity_title)
+    (Line::from(spans), activity_title, chips)
 }
 
 /// Queue state and the hint for controlling the current turn live together

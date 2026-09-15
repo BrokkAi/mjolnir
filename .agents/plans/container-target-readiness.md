@@ -25,7 +25,7 @@ Apply this to every target kind. Supply standard local candidates in Config::loa
 
 ## Outcomes & Retrospective
 
-Implementation pending. Apple was started successfully and passed its disposable run/exec/remove smoke test. Docker is stopped. The user expanded scope to remove every CLI-setup-only configuration dependency and requested a release when complete.
+UI Settings and live target availability are implemented and behavior-tested. Release publication remains. Apple was started successfully and passed its disposable run/exec/remove smoke test. Docker is stopped. The user expanded scope to remove every CLI-setup-only configuration dependency and requested a release when complete.
 
 ## Context and Orientation
 
@@ -73,3 +73,6 @@ Validation discoveries: installer tests needed fake Cargo to emit every artifact
 
 
 Feature validation: all unit suites passed; the final PTY test initially exposed a changed first-run selection caused by automatic candidates. New sessions now preserve localhost as the default when there is no recent session, and the real-terminal regression passes. Local bare readiness is immediate because it uses the running host and has no external runtime to probe. TUI suite: 453 passed, 2 ignored. Strict clippy and formatting passed; documentation checks/build and npm/web tests passed; Linux ELF tests passed in a disposable Linux container. Documentation screenshots were regenerated and Settings was visually inspected.
+
+
+Release integration: upstream added clickable model/effort controls, a pinned New bundle action, contextual worktree options, and portable disk-measurement assertions during release preparation. Merge preserves those changes and target-readiness gating. The added upstream wizard tests use the same successful availability fake as existing wizard behavior tests. Release build, strict Clippy, license policy/report comparison, and workspace crate packaging passed before integration; validate the combined commit before tagging.

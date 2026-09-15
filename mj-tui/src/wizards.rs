@@ -699,6 +699,12 @@ pub(crate) struct PickerNavigation {
     pub(crate) selected: usize,
     pub(crate) control: WizardControl,
     pub(crate) next_enabled: bool,
+    /// A secondary action pinned to the right edge of the action row, e.g. the
+    /// bundle step's "New bundle…" opener.
+    pub(crate) pinned_action: Option<(WizardControl, &'static str, bool)>,
+    /// Muted line drawn in place of an empty list, so the step never renders a
+    /// blank picker.
+    pub(crate) empty_hint: Option<&'static str>,
 }
 
 /// One picker row. A disabled row stays in the list so row numbers keep
@@ -744,6 +750,9 @@ pub(crate) fn render_picker(
     });
     let list_height = u16::try_from(choices.len())
         .unwrap_or(u16::MAX)
+        .max(u16::from(
+            choices.is_empty() && navigation.empty_hint.is_some(),
+        ))
         .min(content.height.saturating_sub(help.len() as u16 + 2));
     let list_area = Rect::new(content.x, content.y, content.width, list_height);
     let rows = choices
@@ -771,6 +780,17 @@ pub(crate) fn render_picker(
         form,
         navigation.control,
     );
+    if choices.is_empty()
+        && let Some(hint) = navigation.empty_hint
+    {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                hint,
+                Style::default().fg(theme::palette().muted),
+            )),
+            list_area,
+        );
+    }
     frame.render_widget(
         Paragraph::new(
             help.iter()
@@ -784,7 +804,36 @@ pub(crate) fn render_picker(
         buttons.push((WizardControl::Back, "Back", true));
     }
     buttons.push((WizardControl::Next, "Next", navigation.next_enabled));
-    Dialog::render_actions(frame, button_area, &buttons, form);
+    let row_width = |buttons: &[(WizardControl, &str, bool)]| {
+        buttons
+            .iter()
+            .map(|(_, label, _)| Line::raw(*label).width() + 4)
+            .sum::<usize>()
+            .saturating_add(buttons.len().saturating_sub(1))
+    };
+    match navigation.pinned_action {
+        // The pinned action keeps its own right-aligned row when it fits next
+        // to the navigation buttons, matching the Workspaces action row.
+        Some(pinned)
+            if row_width(&buttons) + 1 + Line::raw(pinned.1).width() + 4
+                <= usize::from(button_area.width) =>
+        {
+            Dialog::render_actions(frame, button_area, &buttons, form);
+            mj_chat::components::ButtonRow::render_aligned(
+                frame,
+                button_area,
+                &[pinned],
+                form,
+                mj_chat::components::RowAlign::Right,
+            );
+        }
+        pinned => {
+            if let Some(pinned) = pinned {
+                buttons.insert(buttons.len() - 1, pinned);
+            }
+            Dialog::render_actions(frame, button_area, &buttons, form);
+        }
+    }
 }
 
 fn step_initial(step: WizardStep) -> WizardControl {
@@ -826,13 +875,16 @@ pub(crate) fn render_new_wizard(
                 subagents: wizard
                     .subagent_choice_applies(&dashboard.config)
                     .then_some(wizard.mjolnir_subagents),
-                worktree: Some((
-                    wizard.create_managed_worktree,
-                    raw_project
-                        && wizard
+                // Isolated targets always provide the workspace, so the choice
+                // only exists for a bare project directory.
+                worktree: raw_project.then(|| {
+                    (
+                        wizard.create_managed_worktree,
+                        wizard
                             .selected_worktree_options(&dashboard.config)
                             .is_some_and(|options| options.available),
-                )),
+                    )
+                }),
                 profile_id: &nth_enabled_profile(&dashboard.config, wizard.profile),
                 project_label: if raw_project {
                     "Project directory"
@@ -1184,7 +1236,6 @@ pub(crate) fn render_new_wizard(
                     let bundle = &dashboard.config.bundles[id];
                     format!("{id}  {} repositories", bundle.repositories.len())
                 })
-                .chain(["New bundle…".to_owned()])
                 .collect(),
             wizard.bundle,
         ),
@@ -1251,18 +1302,35 @@ pub(crate) fn render_new_wizard(
                 WizardStep::Target => WizardControl::TargetList,
                 _ => unreachable!("picker step has a list control"),
             },
-            next_enabled: wizard.step != WizardStep::Target
-                || (dashboard
-                    .target_readiness_rejection(&nth_key(&dashboard.config.targets, wizard.target))
-                    .is_none()
-                    && (wizard.resource_allocation.is_some()
-                        || !matches!(
-                            dashboard
-                                .config
-                                .targets
-                                .get(&nth_key(&dashboard.config.targets, wizard.target)),
-                            Some(TargetTemplate::AwsEc2 { .. })
-                        ))),
+            next_enabled: match wizard.step {
+                WizardStep::Target => {
+                    dashboard
+                        .target_readiness_rejection(&nth_key(
+                            &dashboard.config.targets,
+                            wizard.target,
+                        ))
+                        .is_none()
+                        && (wizard.resource_allocation.is_some()
+                            || !matches!(
+                                dashboard
+                                    .config
+                                    .targets
+                                    .get(&nth_key(&dashboard.config.targets, wizard.target)),
+                                Some(TargetTemplate::AwsEc2 { .. })
+                            ))
+                }
+                // Without a bundle there is nothing to review; the pinned
+                // action is the only way forward.
+                WizardStep::Bundle => !dashboard.config.bundles.is_empty(),
+                _ => true,
+            },
+            pinned_action: (wizard.step == WizardStep::Bundle).then_some((
+                WizardControl::Add,
+                "New bundle…",
+                true,
+            )),
+            empty_hint: (wizard.step == WizardStep::Bundle && dashboard.config.bundles.is_empty())
+                .then_some("No bundles yet."),
         },
         &mut form,
         surfaces,
@@ -1454,9 +1522,7 @@ fn render_review_wizard(
         let row = lines.len() as u16;
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            if !is_bare_project_target(target) {
-                "The target provides its own isolated workspace."
-            } else if checked && available {
+            if checked && available {
                 "Create a separate session-owned checkout from the selected checkout's HEAD."
             } else {
                 "Use the selected directory directly."
@@ -2159,6 +2225,8 @@ pub(crate) fn render_resume_wizard(
                 _ => unreachable!("resume picker step has a list control"),
             },
             next_enabled: wizard.step != WizardStep::Target || wizard.can_advance_target(dashboard),
+            pinned_action: None,
+            empty_hint: None,
         },
         &mut form,
         surfaces,

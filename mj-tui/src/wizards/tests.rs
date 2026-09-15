@@ -395,6 +395,87 @@ fn type_source(dashboard: &mut DashboardState, source: &str) {
     }
 }
 
+/// The bundle list holds real bundles only; the creator is a button pinned to
+/// the action row's right side, the way Workspaces pins its actions.
+#[test]
+fn bundle_step_pins_the_new_bundle_action_beside_the_list() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(matches!(
+        &dashboard.mode,
+        Mode::New(wizard) if wizard.step == WizardStep::Bundle
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let lines = buffer_lines(terminal.backend().buffer());
+    let list = lines.join("\n");
+    assert!(list.contains("hel  1 repositories"), "{list}");
+    let action_row = lines
+        .iter()
+        .find(|line| line.contains("New bundle…"))
+        .unwrap_or_else(|| panic!("the creator is pinned in the dialog: {list}"));
+    assert!(
+        action_row.contains("Cancel") && action_row.contains("Next"),
+        "the creator belongs to the action row, not the list: {list}"
+    );
+    let after_next = action_row
+        .split("Next")
+        .nth(1)
+        .unwrap_or_default()
+        .contains("New bundle…");
+    assert!(
+        after_next,
+        "the creator sits right of the navigation buttons: {action_row}"
+    );
+
+    // Activating the pinned action opens the bundle editor.
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::Add);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(matches!(
+        &dashboard.mode,
+        Mode::New(wizard) if wizard.step == WizardStep::NewBundle
+    ));
+}
+
+/// Without bundles there is nothing to select, so the creator is the only way
+/// forward: the list is a hint, Next is disabled, and Enter opens the editor.
+#[test]
+fn bundle_step_without_bundles_routes_everything_to_the_creator() {
+    let mut configuration = config();
+    configuration.bundles.clear();
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(matches!(
+        &dashboard.mode,
+        Mode::New(wizard) if wizard.step == WizardStep::Bundle
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(text.contains("No bundles yet."), "{text}");
+    assert!(text.contains("New bundle…"), "{text}");
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::None,
+        "Enter falls through the empty list to the creator"
+    );
+    assert!(matches!(
+        &dashboard.mode,
+        Mode::New(wizard) if wizard.step == WizardStep::NewBundle
+    ));
+}
+
 fn focus_create_bundle(dashboard: &mut DashboardState, tabs: usize) {
     for _ in 0..tabs {
         ready_key(dashboard, key(KeyCode::Tab));
@@ -2724,6 +2805,61 @@ fn raw_review_waits_for_worktree_inspection_and_preserves_explicit_selection() {
         create_managed_worktree: Some(false), project_directory: Some(directory), ..
     } if directory == std::path::Path::new("/work/main"))
     );
+}
+
+/// Isolated targets provide the workspace themselves, so the review must not
+/// show a disabled worktree checkbox at all; a bare project keeps the choice.
+#[test]
+fn review_hides_the_worktree_choice_for_isolated_targets() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(matches!(
+        &dashboard.mode,
+        Mode::New(wizard) if wizard.step == WizardStep::Review
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let isolated = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(!isolated.contains("Create managed worktree"), "{isolated}");
+    assert!(
+        !isolated.contains("isolated workspace"),
+        "the checkbox and its explanation are gone together: {isolated}"
+    );
+
+    let mut configuration = config();
+    configuration.targets.clear();
+    configuration
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.step = WizardStep::Review;
+    wizard.project_directory = "/work/main".into();
+    dashboard.apply_resolved_project_directory(
+        &dashboard.path_input_context(),
+        "/work/main",
+        Ok((
+            PathBuf::from("/work/main"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: true,
+            },
+        )),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let bare = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(bare.contains("Create managed worktree"), "{bare}");
 }
 
 /// Only Claude and Codex can receive Mjolnir's delegation tools, so only they

@@ -772,7 +772,15 @@ mod tests {
         std::fs::create_dir_all(&recent).unwrap();
         std::fs::write(recent.join("objects"), vec![b'n'; 16 * 1024]).unwrap();
         std::fs::write(recent.join("last-used"), []).unwrap();
-        let limit = directory_kib(&recent) + 4;
+        // `du` counts allocated blocks, which FUSE or compressed development
+        // mounts can report far below the written bytes, so a fixed offset
+        // from one entry may never exceed the soft cap. Place the cap between
+        // "both mirrors" and "only the newest mirror", measured with the same
+        // du the garbage collector uses.
+        let total = directory_kib(&mirrors);
+        let oldest = directory_kib(&old);
+        assert!(oldest > 0, "du must see the older mirror's blocks");
+        let limit = total - oldest.div_ceil(2);
 
         collect_garbage_with_limit(
             &CacheHost::LocalPodman,

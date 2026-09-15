@@ -12,6 +12,8 @@ Standard local targets are supplied automatically without running setup. New, re
 - Stop claiming that launch cleanup failed merely because a failed session remains in the list.
 - Allow adding Zcode profiles from Settings.
 - Keep ZCode sessions lazy until the first prompt.
+- Make model and effort controls clickable in the prompt pane.
+- Put New bundle in the wizard action row and show worktree options only where applicable.
 - Correct Settings shortcuts, guidance, and documentation screenshots.
 - Update installer test fixtures for grouped Cargo builds.
 

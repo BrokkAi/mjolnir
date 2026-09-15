@@ -1759,7 +1759,20 @@ fn the_ec2_disk_probe_fails_instead_of_undercounting_an_unreadable_path() {
     let measured_only = disk_probe(&[&measured]);
     assert_eq!(measured_only.status, 0);
     let bytes = parse_disk_usage(&measured_only.stdout).unwrap();
-    assert!(bytes >= 64 * 1024, "{bytes}");
+    // `du -sk` counts allocated blocks, which sparse, compressed, or FUSE
+    // development filesystems can report far below a file's apparent size.
+    // Compare against the same measurement instead of assuming block
+    // granularity, so the probe is checked on what it aggregates.
+    let du = CommandSpec::new("du", ["-sk", measured.to_str().unwrap()])
+        .purpose("measure the disk-probe fixture");
+    let du_output = ProcessExecutor.execute(&du).unwrap();
+    let measured_kib: u64 = String::from_utf8_lossy(&du_output.stdout)
+        .split_whitespace()
+        .next()
+        .and_then(|kib| kib.parse().ok())
+        .expect("du reports the fixture's KiB");
+    assert!(bytes > 0, "the probe must see the written file");
+    assert_eq!(bytes, measured_kib * 1024);
 
     // One unreadable path must fail the probe rather than quietly reporting
     // the total of the paths that did answer.
