@@ -213,11 +213,19 @@ async fn refresh_profile(
                         refreshed_at_epoch_seconds,
                     })
             } else {
-                Err(anyhow::anyhow!(
-                    "quota reporting is not available for model provider {:?} at {}",
-                    provider.id,
-                    provider.host
-                ))
+                // A provider that publishes no quota endpoint bills by usage,
+                // so there is no allowance to report. Saying "API" rather than
+                // raising an error keeps the dashboard from showing the profile
+                // as unavailable and lets the utility ranker treat it as
+                // healthy, which matches how it actually behaves.
+                Ok(ProfileQuota {
+                    profile_id: profile_id.clone(),
+                    harness,
+                    windows: Vec::new(),
+                    extra: Some(API_LABEL.to_owned()),
+                    error: None,
+                    refreshed_at_epoch_seconds,
+                })
             }
         }
         HarnessKind::Codex => {
@@ -1462,7 +1470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_provider_without_a_quota_endpoint_reports_that_plainly() {
+    async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
         let home = tempfile::tempdir().unwrap();
         let request = QuotaRefreshRequest::for_profile(
             "other",
@@ -1470,12 +1478,10 @@ mod tests {
             home.path().to_path_buf(),
         );
         let (outcome, _) = refresh_profile(request, None).await;
-        let error = outcome
-            .report
-            .error
-            .expect("an unsupported provider errors");
-        assert!(error.contains("zai"), "{error}");
-        assert!(error.contains("example.invalid"), "{error}");
+        assert_eq!(outcome.report.error, None);
+        assert!(outcome.report.windows.is_empty());
+        assert!(outcome.report.is_usage_priced());
+        assert_eq!(outcome.report.compact(), API_LABEL);
     }
 
     #[test]

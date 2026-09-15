@@ -23,6 +23,7 @@ use crate::compaction::{
     CompactionBackend, CompactionFailure, DEFAULT_CONTEXT_BYTES, MIN_CONTEXT_BYTES,
 };
 use crate::quota::{ProfileQuota, QuotaManager, QuotaRefreshRequest};
+use mj_core::codex_provider::CodexProviderKind;
 use mj_core::config::{Config, HarnessKind, HarnessProfile};
 
 const QUOTA_FRESH_SECONDS: u64 = 20 * 60;
@@ -49,6 +50,9 @@ pub struct UtilityCandidate {
     pub reasoning_effort: Option<String>,
     /// How much transcript this model can read in one compaction request.
     pub page_bytes: usize,
+    /// Resolved once when the candidate is built, because a Codex profile with
+    /// a custom provider serves a family its harness alone does not name.
+    family: UtilityFamily,
     backend: Arc<dyn LlmBackend>,
 }
 
@@ -105,6 +109,9 @@ impl UtilityLlmRuntime {
         let mut candidates = Vec::new();
         let mut reasons = Vec::new();
         for (profile_id, profile) in supported {
+            let Some(family) = utility_family(profile) else {
+                continue;
+            };
             let (quota_class, quota_score) = match quotas
                 .get(profile_id)
                 .map(classify_quota)
@@ -134,7 +141,7 @@ impl UtilityLlmRuntime {
                     continue;
                 }
             };
-            let Some(metadata) = newest_family_model(profile.kind, &catalog) else {
+            let Some(metadata) = newest_family_model(family, &catalog) else {
                 reasons.push(format!(
                     "{profile_id}: no matching utility model was discovered"
                 ));
@@ -153,6 +160,7 @@ impl UtilityLlmRuntime {
                 quota_score,
                 reasoning_effort,
                 page_bytes: page_bytes_for(profile.kind, metadata),
+                family,
                 backend,
             });
         }
@@ -443,63 +451,99 @@ fn classify_quota(report: &ProfileQuota) -> Option<(UtilityQuotaClass, u8)> {
     }
 }
 
-/// Whether this profile may be ranked as a utility model, the backend Mjolnir
-/// uses for its own inference such as compacting a transcript.
-///
-/// A Codex profile that authenticates with an API key against a custom provider
-/// is excluded: the utility path speaks chat completions through the shared
-/// OpenAI client, whose URL joining cannot reach such a provider's chat
-/// endpoint. Those profiles still run sessions; they just never serve Mjolnir's
-/// own inference.
-fn profile_serves_as_utility(profile: &HarnessProfile) -> bool {
-    utility_precedence(profile.kind).is_some() && !profile.auth_scheme().is_api_key()
+/// Which model family a profile offers Mjolnir for its own inference. A
+/// profile's harness usually decides this, but a Codex profile pointed at a
+/// custom provider serves that provider's family instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UtilityFamily {
+    Codex,
+    Muse,
+    Grok,
+    Kimi,
+    DeepSeek,
 }
 
-fn utility_precedence(kind: HarnessKind) -> Option<u8> {
-    match kind {
-        HarnessKind::Codex => Some(5),
-        HarnessKind::Muse => Some(4),
-        HarnessKind::Grok => Some(3),
-        HarnessKind::Kimi => Some(2),
-        HarnessKind::Deepseek => Some(1),
+impl UtilityFamily {
+    /// Preference between families when several have healthy quota. A higher
+    /// number is tried first.
+    fn precedence(self) -> u8 {
+        match self {
+            Self::Codex => 5,
+            Self::Muse => 4,
+            Self::Grok => 3,
+            Self::Kimi => 2,
+            Self::DeepSeek => 1,
+        }
+    }
+
+    /// Whether a catalog model id belongs to this family's small, fast model.
+    fn matches(self, id: &str) -> bool {
+        let id = id.to_ascii_lowercase();
+        match self {
+            Self::Codex => {
+                id.starts_with("gpt-") && id.split(['-', '_', '.']).any(|part| part == "luna")
+            }
+            Self::Grok => id.starts_with("grok-"),
+            Self::Kimi => {
+                id.starts_with("kimi-")
+                    || id
+                        .strip_prefix('k')
+                        .and_then(|tail| tail.chars().next())
+                        .is_some_and(|character| character.is_ascii_digit())
+            }
+            Self::DeepSeek => id.starts_with("deepseek-") && id.contains("flash"),
+            Self::Muse => muse_spark_model(&id),
+        }
+    }
+}
+
+/// The family this profile offers, or `None` when it serves no utility work.
+///
+/// Claude exposes no direct inference client, so it never serves. A Codex
+/// profile that authenticates with an API key against a custom provider serves
+/// only when that provider is DeepSeek: DeepSeek's `/v1` base URL is the same
+/// chat-completions endpoint the shared OpenAI client speaks, so the client can
+/// reach it verbatim. Z.ai's Coding Plan key serves chat completions under a
+/// different path, and an unknown provider is not known to serve them at all,
+/// so both stay excluded. Those profiles still run sessions; they just never
+/// serve Mjolnir's own inference.
+fn utility_family(profile: &HarnessProfile) -> Option<UtilityFamily> {
+    if profile.auth_scheme().is_api_key() {
+        return match profile.codex_provider().ok().flatten()?.kind() {
+            CodexProviderKind::DeepSeek => Some(UtilityFamily::DeepSeek),
+            CodexProviderKind::Zai | CodexProviderKind::Other => None,
+        };
+    }
+    match profile.kind {
+        HarnessKind::Codex => Some(UtilityFamily::Codex),
+        HarnessKind::Muse => Some(UtilityFamily::Muse),
+        HarnessKind::Grok => Some(UtilityFamily::Grok),
+        HarnessKind::Kimi => Some(UtilityFamily::Kimi),
+        HarnessKind::Deepseek => Some(UtilityFamily::DeepSeek),
         HarnessKind::Claude => None,
     }
+}
+
+/// Whether this profile may be ranked as a utility model, the backend Mjolnir
+/// uses for its own inference such as compacting a transcript.
+fn profile_serves_as_utility(profile: &HarnessProfile) -> bool {
+    utility_family(profile).is_some()
 }
 
 fn candidate_order(left: &UtilityCandidate, right: &UtilityCandidate) -> Ordering {
     right
         .quota_class
         .cmp(&left.quota_class)
-        .then_with(|| utility_precedence(right.harness).cmp(&utility_precedence(left.harness)))
+        .then_with(|| right.family.precedence().cmp(&left.family.precedence()))
         .then_with(|| right.quota_score.cmp(&left.quota_score))
         .then_with(|| left.profile_id.cmp(&right.profile_id))
 }
 
-fn newest_family_model(kind: HarnessKind, catalog: &[ModelMetadata]) -> Option<&ModelMetadata> {
+fn newest_family_model(family: UtilityFamily, catalog: &[ModelMetadata]) -> Option<&ModelMetadata> {
     catalog
         .iter()
-        .filter(|model| family_matches(kind, &model.id))
+        .filter(|model| family.matches(&model.id))
         .max_by(|left, right| model_version_cmp(&left.id, &right.id))
-}
-
-fn family_matches(kind: HarnessKind, id: &str) -> bool {
-    let id = id.to_ascii_lowercase();
-    match kind {
-        HarnessKind::Codex => {
-            id.starts_with("gpt-") && id.split(['-', '_', '.']).any(|part| part == "luna")
-        }
-        HarnessKind::Grok => id.starts_with("grok-"),
-        HarnessKind::Kimi => {
-            id.starts_with("kimi-")
-                || id
-                    .strip_prefix('k')
-                    .and_then(|tail| tail.chars().next())
-                    .is_some_and(|character| character.is_ascii_digit())
-        }
-        HarnessKind::Deepseek => id.starts_with("deepseek-") && id.contains("flash"),
-        HarnessKind::Muse => muse_spark_model(&id),
-        HarnessKind::Claude => false,
-    }
 }
 
 fn muse_spark_model(id: &str) -> bool {
@@ -535,6 +579,26 @@ fn numeric_parts(id: &str) -> Vec<u64> {
 fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBackend>>> {
     if !profile_serves_as_utility(profile) {
         return Ok(None);
+    }
+    // A Codex profile pointed at DeepSeek talks to the same chat-completions
+    // endpoint the shared OpenAI client speaks, with the key from the profile
+    // environment variable the provider names.
+    if let Some(provider) = profile.codex_provider().ok().flatten()
+        && provider.kind() == CodexProviderKind::DeepSeek
+    {
+        let key = provider
+            .env_key
+            .as_deref()
+            .and_then(|env_key| profile.environment.get(env_key))
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty());
+        return Ok(key.map(|key| {
+            Arc::new(OpenAiClient::with_deepseek_reasoning_support(
+                provider.base_url.clone(),
+                Some(key),
+                reqwest::header::HeaderMap::new(),
+            )) as Arc<dyn LlmBackend>
+        }));
     }
     match profile.kind {
         HarnessKind::Codex => Ok(Some(Arc::new(CodexClient::with_auth_path(
@@ -624,34 +688,48 @@ mod tests {
     use super::*;
     use futures::{StreamExt, stream};
 
-    #[test]
-    fn an_api_key_codex_profile_never_serves_as_the_utility_model() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::write(
-            home.path().join("config.toml"),
-            "model = \"glm-5.3\"\n\
-             model_provider = \"zai\"\n\
-             [model_providers.zai]\n\
-             base_url = \"https://api.z.ai/api/v1\"\n\
-             env_key = \"ZAI_API_KEY\"\n\
-             wire_api = \"responses\"\n",
-        )
-        .unwrap();
-        let profile = HarnessProfile {
+    const ZAI_CONFIG: &str = "model = \"glm-5.3\"\n\
+                              model_provider = \"zai\"\n\
+                              [model_providers.zai]\n\
+                              base_url = \"https://api.z.ai/api/v1\"\n\
+                              env_key = \"ZAI_API_KEY\"\n\
+                              wire_api = \"responses\"\n";
+
+    const DEEPSEEK_CONFIG: &str = "model = \"deepseek-v4-pro\"\n\
+                                   model_provider = \"deepseek\"\n\
+                                   [model_providers.deepseek]\n\
+                                   base_url = \"https://api.deepseek.com/v1\"\n\
+                                   env_key = \"DEEPSEEK_API_KEY\"\n\
+                                   wire_api = \"responses\"\n";
+
+    fn provider_profile(
+        home: &std::path::Path,
+        config: &str,
+        environment: &[(&str, &str)],
+    ) -> HarnessProfile {
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        HarnessProfile {
             enabled: true,
             kind: HarnessKind::Codex,
-            home: home.path().to_path_buf(),
-            environment: [("ZAI_API_KEY".to_owned(), "key".to_owned())]
-                .into_iter()
+            home: home.to_path_buf(),
+            environment: environment
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
                 .collect(),
             context_window_bytes: None,
             guardian_review_model: None,
-        };
+        }
+    }
+
+    #[test]
+    fn a_zai_codex_profile_never_serves_as_the_utility_model() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = provider_profile(home.path(), ZAI_CONFIG, &[("ZAI_API_KEY", "key")]);
 
         assert!(!profile_serves_as_utility(&profile));
         assert!(
             backend_for_profile(&profile).unwrap().is_none(),
-            "the utility client cannot reach a custom provider's chat endpoint"
+            "the utility client cannot reach the Coding Plan chat endpoint"
         );
         // A Codex profile using its own login still serves.
         let native = HarnessProfile {
@@ -660,23 +738,54 @@ mod tests {
             ..profile
         };
         assert!(profile_serves_as_utility(&native));
+        assert_eq!(utility_family(&native), Some(UtilityFamily::Codex));
+    }
+
+    #[test]
+    fn a_deepseek_codex_profile_serves_the_deepseek_utility_family() {
+        let home = tempfile::tempdir().unwrap();
+        let profile =
+            provider_profile(home.path(), DEEPSEEK_CONFIG, &[("DEEPSEEK_API_KEY", "key")]);
+
+        assert!(profile_serves_as_utility(&profile));
+        let family = utility_family(&profile).expect("a DeepSeek utility family");
+        assert_eq!(family, UtilityFamily::DeepSeek);
+        assert_eq!(family.precedence(), 1);
+        assert!(family.matches("deepseek-flash"));
+        assert!(!family.matches("deepseek-v4-pro"));
+        assert!(
+            backend_for_profile(&profile).unwrap().is_some(),
+            "the provider key builds the shared OpenAI client"
+        );
+    }
+
+    #[test]
+    fn a_deepseek_codex_profile_without_its_key_has_no_backend() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = provider_profile(home.path(), DEEPSEEK_CONFIG, &[]);
+
+        assert!(backend_for_profile(&profile).unwrap().is_none());
     }
 
     #[test]
     fn utility_families_never_include_claude() {
-        assert!(!family_matches(HarnessKind::Claude, "claude-sonnet-5"));
-        assert!(utility_precedence(HarnessKind::Claude).is_none());
-        assert!(family_matches(HarnessKind::Codex, "gpt-5.7-luna"));
-        assert!(family_matches(HarnessKind::Grok, "grok-4.6"));
-        assert!(family_matches(HarnessKind::Kimi, "k3"));
-        assert!(family_matches(HarnessKind::Deepseek, "deepseek-v4-flash"));
-        assert!(family_matches(HarnessKind::Muse, "muse-spark-1.3"));
-        assert!(!family_matches(
-            HarnessKind::Muse,
-            "muse-spark-1.3-contributor"
-        ));
-        assert!(!family_matches(HarnessKind::Muse, "muse-spark-1.3-image"));
-        assert!(!family_matches(HarnessKind::Muse, "muse-spark-1.3-voice"));
+        let claude = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Claude,
+            home: tempfile::tempdir().unwrap().path().to_path_buf(),
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+        assert_eq!(utility_family(&claude), None);
+        assert!(UtilityFamily::Codex.matches("gpt-5.7-luna"));
+        assert!(UtilityFamily::Grok.matches("grok-4.6"));
+        assert!(UtilityFamily::Kimi.matches("k3"));
+        assert!(UtilityFamily::DeepSeek.matches("deepseek-v4-flash"));
+        assert!(UtilityFamily::Muse.matches("muse-spark-1.3"));
+        assert!(!UtilityFamily::Muse.matches("muse-spark-1.3-contributor"));
+        assert!(!UtilityFamily::Muse.matches("muse-spark-1.3-image"));
+        assert!(!UtilityFamily::Muse.matches("muse-spark-1.3-voice"));
     }
 
     #[tokio::test]
@@ -721,7 +830,7 @@ mod tests {
             model_with_window("muse-spark-1.4-image", None),
         ];
         assert_eq!(
-            newest_family_model(HarnessKind::Muse, &catalog)
+            newest_family_model(UtilityFamily::Muse, &catalog)
                 .expect("regular Muse Spark model")
                 .id,
             "muse-spark-1.3"
@@ -731,6 +840,7 @@ mod tests {
     fn candidate_for(
         profile_id: &str,
         harness: HarnessKind,
+        family: UtilityFamily,
         quota_class: UtilityQuotaClass,
         quota_score: u8,
     ) -> UtilityCandidate {
@@ -742,6 +852,7 @@ mod tests {
             quota_score,
             reasoning_effort: None,
             page_bytes: DEFAULT_CONTEXT_BYTES,
+            family,
             backend: Arc::new(CodexClient::with_auth_path(PathBuf::from("auth.json"))),
         }
     }
@@ -749,17 +860,33 @@ mod tests {
     #[test]
     fn utility_order_keeps_quota_class_then_provider_priority() {
         let mut candidates = [
+            // A Codex profile pointed at DeepSeek ranks with DeepSeek, not with
+            // the Codex harness it runs under.
             candidate_for(
                 "deepseek",
-                HarnessKind::Deepseek,
+                HarnessKind::Codex,
+                UtilityFamily::DeepSeek,
                 UtilityQuotaClass::Healthy,
                 99,
             ),
-            candidate_for("muse", HarnessKind::Muse, UtilityQuotaClass::Healthy, 20),
-            candidate_for("codex", HarnessKind::Codex, UtilityQuotaClass::Healthy, 20),
+            candidate_for(
+                "muse",
+                HarnessKind::Muse,
+                UtilityFamily::Muse,
+                UtilityQuotaClass::Healthy,
+                20,
+            ),
+            candidate_for(
+                "codex",
+                HarnessKind::Codex,
+                UtilityFamily::Codex,
+                UtilityQuotaClass::Healthy,
+                20,
+            ),
             candidate_for(
                 "grok-reserve",
                 HarnessKind::Grok,
+                UtilityFamily::Grok,
                 UtilityQuotaClass::Reserve,
                 10,
             ),
@@ -819,6 +946,7 @@ mod tests {
                 quota_score: 100,
                 reasoning_effort: None,
                 page_bytes,
+                family: UtilityFamily::Codex,
                 backend: Arc::new(CodexClient::with_auth_path(PathBuf::from("auth.json"))),
             }
         }
@@ -979,7 +1107,7 @@ mod tests {
         let candidate = candidates.remove(0);
         assert_eq!(candidate.profile_id, profile_id);
         assert_eq!(candidate.harness, HarnessKind::Muse);
-        assert!(family_matches(HarnessKind::Muse, &candidate.model));
+        assert!(UtilityFamily::Muse.matches(&candidate.model));
         assert!(candidate.model.starts_with("muse-spark-"));
         assert!(!candidate.model.contains("contributor"));
         assert!(!candidate.model.contains("image"));

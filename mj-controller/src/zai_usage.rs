@@ -9,18 +9,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
+use mj_core::codex_provider::CodexProviderKind;
 use serde::Deserialize;
 
 const QUOTA_PATH: &str = "/api/monitor/usage/quota/limit";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
-/// Hosts that serve the Coding Plan quota endpoint: Z.ai's international
-/// service and Zhipu's mainland China service.
-pub const QUOTA_HOSTS: [&str; 2] = ["api.z.ai", "open.bigmodel.cn"];
-
-/// Whether `host` serves the Coding Plan quota endpoint.
+/// Whether `host` serves the Coding Plan quota endpoint. Only the Z.ai family
+/// of hosts does, so the answer follows the provider kind.
 pub fn serves_quota(host: &str) -> bool {
-    QUOTA_HOSTS.contains(&host)
+    CodexProviderKind::from_host(host) == CodexProviderKind::Zai
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

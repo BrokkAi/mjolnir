@@ -33,12 +33,42 @@ pub struct CodexProvider {
     pub model_catalog_json: Option<PathBuf>,
 }
 
+/// Which service a custom provider points at, as far as Mjolnir needs to
+/// treat it differently: Z.ai publishes a Coding Plan quota endpoint, DeepSeek
+/// serves usage-priced chat completions under the same `/v1` base URL, and
+/// everything else is an unknown usage-priced service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexProviderKind {
+    Zai,
+    DeepSeek,
+    Other,
+}
+
+impl CodexProviderKind {
+    /// Classifies a lowercased host name. An unrecognized host is `Other`.
+    pub fn from_host(host: &str) -> Self {
+        match host.to_ascii_lowercase().as_str() {
+            "api.z.ai" | "open.bigmodel.cn" => Self::Zai,
+            "api.deepseek.com" => Self::DeepSeek,
+            _ => Self::Other,
+        }
+    }
+}
+
 impl CodexProvider {
     /// Host component of `base_url`, lowercased, when the URL parses.
     pub fn host(&self) -> Option<String> {
         url::Url::parse(&self.base_url)
             .ok()
             .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+    }
+
+    /// Which service this provider points at. A base URL that does not parse
+    /// as a URL with a host is `Other`.
+    pub fn kind(&self) -> CodexProviderKind {
+        self.host()
+            .as_deref()
+            .map_or(CodexProviderKind::Other, CodexProviderKind::from_host)
     }
 }
 
@@ -234,5 +264,33 @@ mod tests {
             provider.model_catalog_json.as_deref(),
             Some(Path::new("mine.json"))
         );
+    }
+
+    #[test]
+    fn provider_kind_follows_the_base_url_host() {
+        let provider = |base_url: &str| CodexProvider {
+            id: "p".to_owned(),
+            base_url: base_url.to_owned(),
+            env_key: None,
+            inline_bearer_token: true,
+            model_catalog_json: None,
+        };
+        assert_eq!(
+            provider("https://api.z.ai/api/v1").kind(),
+            CodexProviderKind::Zai
+        );
+        assert_eq!(
+            provider("https://open.bigmodel.cn/api/coding/paas/v4").kind(),
+            CodexProviderKind::Zai
+        );
+        assert_eq!(
+            provider("https://api.deepseek.com/v1").kind(),
+            CodexProviderKind::DeepSeek
+        );
+        assert_eq!(
+            provider("https://example.invalid/v1").kind(),
+            CodexProviderKind::Other
+        );
+        assert_eq!(provider("not a url").kind(), CodexProviderKind::Other);
     }
 }
