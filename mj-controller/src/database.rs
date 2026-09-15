@@ -1318,7 +1318,21 @@ pub fn load_state_from(path: &Path) -> Result<State> {
          ORDER BY s.session_id",
     )?;
     let rows = statement.query_map([], |row| {
-        Ok(SessionRecord {
+        // A harness Mjolnir no longer supports can still own rows an earlier
+        // release wrote. Skip such a session with a warning rather than
+        // failing the whole listing and hiding every other session with it.
+        let harness_text: String = row.get(2)?;
+        let Ok(harness_kind) = harness_text.parse() else {
+            let session_id: String = row.get(0)?;
+            tracing::warn!(
+                session_id,
+                harness = %harness_text,
+                "session harness is no longer supported; the session is not listed"
+            );
+            return Ok(None);
+        };
+        Ok(Some(SessionRecord {
+            harness_kind,
             create_managed_worktree: row.get(23)?,
             mjolnir_subagents: row.get(24)?,
             workspace_id: row.get(22)?,
@@ -1327,13 +1341,6 @@ pub fn load_state_from(path: &Path) -> Result<State> {
             container_memory: row.get(20)?,
             id: row.get(0)?,
             title: row.get(1)?,
-            harness_kind: row.get::<_, String>(2)?.parse().map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Text,
-                    Box::<dyn std::error::Error + Send + Sync>::from(format!("{error:#}")),
-                )
-            })?,
             last_profile: row.get(3)?,
             bundle_id: row.get(4)?,
             project_directory: row.get_ref(16)?.blob_or_null()?.map(blob_to_path),
@@ -1376,11 +1383,12 @@ pub fn load_state_from(path: &Path) -> Result<State> {
             last_error: row.get(13)?,
             last_checkpoint_error: row.get(15)?,
             checkpoint: None,
-        })
+        }))
     })?;
     for row in rows {
-        let session = row?;
-        state.sessions.insert(session.id.clone(), session);
+        if let Some(session) = row? {
+            state.sessions.insert(session.id.clone(), session);
+        }
     }
     let mut statement = connection.prepare(
         "SELECT child_session_id, record_json FROM subagent_sessions ORDER BY child_session_id",
@@ -1758,10 +1766,17 @@ fn hidden_native_sessions_from(
     let mut hidden = BTreeSet::new();
     for row in rows {
         let (harness, native_session_id) = row?;
-        let harness = harness
-            .parse::<mj_core::config::HarnessKind>()
-            .with_context(|| format!("unknown harness {harness:?} in the hidden session set"))?;
-        hidden.insert((harness, native_session_id));
+        // Rows for a harness this release no longer supports are ignored, not
+        // fatal; they simply hide nothing.
+        match harness.parse::<mj_core::config::HarnessKind>() {
+            Ok(harness) => {
+                hidden.insert((harness, native_session_id));
+            }
+            Err(_) => tracing::warn!(
+                harness = %harness,
+                "ignoring a hidden native session for a harness that is no longer supported"
+            ),
+        }
     }
     Ok(hidden)
 }
@@ -1947,12 +1962,9 @@ pub fn mark_session_worker_connected(
     })
 }
 
-/// Point a session at a native session its worker opened on its own.
-///
-/// A harness whose checkpoint captures no native session (zcode) cannot always
-/// reload the one the record names; the worker opens a fresh session and
-/// reports it. Only that column moves: the session's lifecycle state belongs to
-/// whatever operation is running.
+/// Point a session at a native session its worker opened on its own. Only that
+/// column moves: the session's lifecycle state belongs to whatever operation is
+/// running.
 pub fn adopt_native_session_id(session_id: &str, native_session_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let native_session_id = native_session_id.to_owned();
@@ -4783,7 +4795,11 @@ fn load_targets(connection: &Connection, state: &mut State) -> Result<()> {
     })?;
     for row in rows {
         let (session_id, target) = row?;
-        state.sessions.get_mut(&session_id).unwrap().target = Some(target);
+        // A session skipped for an unsupported harness has no entry to attach
+        // its target, mounts, or checkpoint to.
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.target = Some(target);
+        }
     }
     Ok(())
 }
@@ -4805,12 +4821,9 @@ fn load_mounts(connection: &Connection, state: &mut State) -> Result<()> {
     })?;
     for row in rows {
         let (session_id, mount) = row?;
-        state
-            .sessions
-            .get_mut(&session_id)
-            .unwrap()
-            .additional_mounts
-            .push(mount);
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.additional_mounts.push(mount);
+        }
     }
     Ok(())
 }
@@ -4832,7 +4845,9 @@ fn load_checkpoints(connection: &Connection, state: &mut State) -> Result<()> {
     })?;
     for row in rows {
         let (session_id, checkpoint) = row?;
-        state.sessions.get_mut(&session_id).unwrap().checkpoint = Some(checkpoint);
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.checkpoint = Some(checkpoint);
+        }
     }
     Ok(())
 }

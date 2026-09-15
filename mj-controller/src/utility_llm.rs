@@ -463,7 +463,6 @@ fn utility_precedence(kind: HarnessKind) -> Option<u8> {
         HarnessKind::Kimi => Some(2),
         HarnessKind::Deepseek => Some(1),
         HarnessKind::Claude => None,
-        HarnessKind::Zcode => None,
     }
 }
 
@@ -500,7 +499,6 @@ fn family_matches(kind: HarnessKind, id: &str) -> bool {
         HarnessKind::Deepseek => id.starts_with("deepseek-") && id.contains("flash"),
         HarnessKind::Muse => muse_spark_model(&id),
         HarnessKind::Claude => false,
-        HarnessKind::Zcode => false,
     }
 }
 
@@ -593,10 +591,9 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
             }
             MetaClient::load_with_config(config)
         }
-        // Neither harness exposes a direct utility inference client
-        // independent of its coding-agent session.
+        // Claude exposes no direct utility inference client independent of its
+        // coding-agent session.
         HarnessKind::Claude => Ok(None),
-        HarnessKind::Zcode => Ok(None),
     }
 }
 
@@ -665,12 +662,9 @@ mod tests {
     }
 
     #[test]
-    fn utility_families_never_include_claude_or_zcode() {
+    fn utility_families_never_include_claude() {
         assert!(!family_matches(HarnessKind::Claude, "claude-sonnet-5"));
         assert!(utility_precedence(HarnessKind::Claude).is_none());
-        assert!(!family_matches(HarnessKind::Zcode, "glm-flash"));
-        assert!(!family_matches(HarnessKind::Zcode, "glm-5.3"));
-        assert!(utility_precedence(HarnessKind::Zcode).is_none());
         assert!(family_matches(HarnessKind::Codex, "gpt-5.7-luna"));
         assert!(family_matches(HarnessKind::Grok, "grok-4.6"));
         assert!(family_matches(HarnessKind::Kimi, "k3"));

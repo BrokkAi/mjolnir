@@ -18,7 +18,6 @@ pub use kimi_tasks::*;
 mod plan_tests;
 #[cfg(test)]
 mod session_config_tests;
-mod zcode_usage;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
@@ -249,40 +248,6 @@ struct GrokUsageNotification {
     #[serde(rename = "sessionId")]
     session_id: SessionId,
     update: serde_json::Value,
-}
-
-/// zcode-acp's pull-only account quota method. It needs no session and is
-/// callable any time after `initialize`.
-#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcRequest)]
-#[request(method = "account/usage_stats", response = AccountUsageStatsResponse)]
-struct AccountUsageStatsRequest {}
-
-#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcResponse)]
-#[serde(transparent)]
-struct AccountUsageStatsResponse(serde_json::Value);
-
-/// The quota endpoint is an accounting nicety reached over the network. A turn
-/// waits this long for it and no longer.
-const ZCODE_QUOTA_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Read the account's GLM credit counter. Every failure mode reports as an
-/// error string the caller can drop or warn about; none of them fails a turn.
-async fn read_zcode_credits(
-    connection: &ConnectionTo<Agent>,
-) -> std::result::Result<zcode_usage::CreditReading, String> {
-    match tokio::time::timeout(
-        ZCODE_QUOTA_TIMEOUT,
-        connection
-            .send_request(AccountUsageStatsRequest {})
-            .block_task(),
-    )
-    .await
-    {
-        Ok(Ok(response)) => zcode_usage::credit_reading(&response.0)
-            .ok_or_else(|| "the plan reported no usable credit window".to_owned()),
-        Ok(Err(error)) => Err(format!("{error}")),
-        Err(_) => Err("the quota request timed out".to_owned()),
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcNotification)]
@@ -1166,10 +1131,6 @@ const CANCEL_UNACKED_WARNING: &str =
 const ACP_BRIDGE_LOST_WARNING: &str = "ACP bridge exited; reloading the native session";
 const ACP_BRIDGE_RESTART_WARNING: &str = "ACP bridge restarting; reloading the native session";
 
-/// Shown when a harness that keeps no restorable native session files could
-/// not reload the recorded one and the worker opened a fresh session instead.
-const NATIVE_SESSION_LOST_WARNING: &str = "The previous native session is gone; continuing in a fresh one with the transcript as context.";
-
 /// Give up if a freshly opened session dies this many times in a row before it
 /// has lived for [`RAPID_BRIDGE_WINDOW`]. A later crash of a healthy session
 /// resets the count.
@@ -1412,12 +1373,11 @@ where
                     };
                     return responder.respond(response);
                 }
-                // Muse and ZCode have always answered every permission ask with
-                // the generic form, plan requests included; keep that order for
-                // them and route every other harness through plan review first.
-                let prefer_form_over_plan_review =
-                    matches!(permission_harness, HarnessKind::Muse | HarnessKind::Zcode)
-                        && !permission_policy.is_unconstrained();
+                // Muse has always answered every permission ask with the
+                // generic form, plan requests included; keep that order for it
+                // and route every other harness through plan review first.
+                let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
+                    && !permission_policy.is_unconstrained();
                 if !prefer_form_over_plan_review && is_plan_permission(&request) {
                     let id = format!(
                         "plan-review-{}",
@@ -2515,7 +2475,9 @@ async fn serve_session(
     )
     .await?;
 
-    let mut native_continuity_lost = false;
+    // Kept on the wire for older workers; no harness can lose native
+    // continuity this way any more.
+    let native_continuity_lost = false;
     let loaded_session = if let Some(existing) = &spec.resume_session {
         let session_id = SessionId::from(existing.clone());
         // The relay already owns the transcript. Prefer resuming without
@@ -2545,36 +2507,10 @@ async fn serve_session(
                 .with_context(|| format!("load ACP session {existing}"))
                 .map(|loaded| (loaded.meta, loaded.config_options, loaded.modes))
         };
-        let reloaded = match reloaded {
-            Ok(reloaded) => Some(reloaded),
-            // A harness whose checkpoints carry no native session files keeps
-            // its conversations only in a live backend store, so there is no
-            // native state a reload could preserve and nothing is lost by
-            // opening a fresh one. The relay still owns the transcript. Do
-            // not read the bridge's error text: the rule is the harness, not
-            // the wording. Harnesses that do capture native session files
-            // keep the hard failure, because starting fresh there would
-            // discard state the checkpoint restored.
-            Err(error) if !spec.harness.captures_native_session() => {
-                tracing::warn!(
-                    error = format!("{error:#}"),
-                    harness = spec.harness.id(),
-                    native_session_id = %existing,
-                    "native session could not be reloaded; opening a fresh one"
-                );
-                native_continuity_lost = true;
-                emit_runtime_event(
-                    events,
-                    RuntimeEvent::Warning {
-                        message: NATIVE_SESSION_LOST_WARNING.to_owned(),
-                    },
-                )
-                .await?;
-                session_updates_enabled.store(true, Ordering::Release);
-                None
-            }
-            Err(error) => return Err(error),
-        };
+        // Every harness captures per-session native files in its checkpoint, so
+        // a failed reload means state the checkpoint restored would be
+        // discarded by starting fresh. Fail instead.
+        let reloaded = Some(reloaded?);
         match reloaded {
             Some((loaded_meta, config_options, modes)) => {
                 if let Some(state) = grok_models.as_mut()
@@ -2630,19 +2566,10 @@ async fn serve_session(
     // Launch flags and environment are applied before the bridge starts. ACP
     // modes are selected after the session exists, before any prompt can run.
     //
-    // A harness that pins its startup config by launch environment (ZCode)
-    // must skip this ACP write. Its backend session is lazy: the first
-    // session-scoped request materializes a draft the backend later evicts,
-    // and a mode enforcement here would create that draft before any prompt,
-    // stranding the next resume with "Session not found". The ZCODE_ACP_MODE
-    // env pin already selects the same mode inside session/create.
     let enforcement = spec.harness.execution_enforcement(spec.execution_policy);
     let mut config_options = config_options.unwrap_or_default();
     let mut modes = modes;
-    if let Some(desired_mode) = enforcement
-        .filter(|_| !spec.harness.pins_startup_config_by_environment())
-        .and_then(ExecutionEnforcement::acp_mode)
-    {
+    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
         enforce_execution_mode(
             connection,
             &session_id,
@@ -2660,17 +2587,8 @@ async fn serve_session(
     }
     // Model selection can replace the effort catalogue. Both must be
     // restored before SessionConfigured releases queued prompts.
-    //
-    // Skipped for a harness that pins its startup config by launch environment
-    // (ZCode): reapplying a selector here materializes its lazy backend
-    // session before the first prompt, which the backend then evicts (see the
-    // mode-enforcement note above). ZCODE_MODEL pins the model inside
-    // session/create, and the first prompt persists the session, so nothing is
-    // lost by deferring. A hand-changed model/effort simply reverts to the
-    // env-pinned default across a worker restart, which for ZCode already
-    // starts a fresh native session regardless.
     let mut dropped_selectors: Vec<(&'static str, String)> = Vec::new();
-    if !spec.harness.pins_startup_config_by_environment() {
+    {
         let accepted = spec
             .accepted_config
             .lock()
@@ -2861,19 +2779,6 @@ async fn serve_session(
                 if spec.harness == HarnessKind::Grok {
                     grok_usage.begin(session_id.to_string());
                 }
-                // Credits are counted per account, so the turn's consumption is a
-                // before/after delta taken around the prompt. A missing baseline
-                // simply measures nothing.
-                let mut credits_before = None;
-                if spec.harness == HarnessKind::Zcode {
-                    match read_zcode_credits(connection).await {
-                        Ok(reading) => credits_before = Some(reading),
-                        Err(error) => tracing::debug!(
-                            %error,
-                            "ZCode credit baseline unavailable; this turn records no credits"
-                        ),
-                    }
-                }
                 // Start the stall clock at send time so the watchdog measures
                 // silence within this turn, not idle time carried from before.
                 spec.acp_activity.mark();
@@ -2968,25 +2873,6 @@ async fn serve_session(
                                     usage = response.usage.map(|usage| mj_core::usage::TokenUsage::from_acp(spec.harness, usage));
                                     if spec.harness == HarnessKind::Muse {
                                         usage = usage.map(|usage| muse_usage::attach_provider_details(usage, usage_meta.as_ref()));
-                                    }
-                                    if spec.harness == HarnessKind::Zcode {
-                                        let mut credits = None;
-                                        match (&credits_before, usage.is_some()) {
-                                            (Some(before), true) => match read_zcode_credits(connection).await {
-                                                Ok(after) => credits = zcode_usage::credit_delta(before, &after, mj_core::clock::epoch_millis()),
-                                                Err(error) => emit_runtime_event(events, RuntimeEvent::Warning {
-                                                    message: format!("ZCode credit usage was not recorded: {error}"),
-                                                }).await?,
-                                            },
-                                            // Without a token report there is nothing to
-                                            // hang the credits on, and inventing one would
-                                            // put an unreported turn into the totals.
-                                            (Some(_), false) => tracing::debug!(
-                                                "ZCode reported no usage for this turn; the credit delta is dropped"
-                                            ),
-                                            (None, _) => {}
-                                        }
-                                        usage = usage.map(|usage| zcode_usage::attach_provider_details(usage, response.meta.as_ref(), credits));
                                     }
                                     if spec.harness == HarnessKind::Grok {
                                         match grok_usage.complete(response.meta.as_ref(), usage.clone()).await {

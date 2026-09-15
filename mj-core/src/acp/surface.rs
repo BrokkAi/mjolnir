@@ -199,12 +199,7 @@ impl AcpSessionSurface {
                     value: value.into(),
                 })
                 .ok_or(PlanControlError::CodexIncompatible),
-            Some(HarnessKind::Claude | HarnessKind::Kimi | HarnessKind::Zcode) => {
-                let value = if self.harness_kind == Some(HarnessKind::Zcode) && !active {
-                    "build"
-                } else {
-                    value
-                };
+            Some(HarnessKind::Claude | HarnessKind::Kimi) => {
                 if self.exact_config_has_plan_pair("mode") {
                     Ok(PlanControl::SetConfig {
                         key: "mode".into(),

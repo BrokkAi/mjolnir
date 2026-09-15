@@ -206,9 +206,9 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "kind" if path.iter().any(|key| key == "workspace_storage") => {
             &["podman-volume", "host-helper", "container-layer"]
         }
-        "kind" if path.first().is_some_and(|key| key == "profiles") => &[
-            "codex", "claude", "kimi", "grok", "deepseek", "muse", "zcode",
-        ],
+        "kind" if path.first().is_some_and(|key| key == "profiles") => {
+            &["codex", "claude", "kimi", "grok", "deepseek", "muse"]
+        }
         "kind" => &[
             "local-bare",
             "local-podman",

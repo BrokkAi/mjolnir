@@ -1944,13 +1944,8 @@ fn execute_joined_cross_harness_work<A: Send, B: Send>(
 /// Whether the restored native session can carry the conversation into the
 /// resumed session.
 ///
-/// A harness whose checkpoint captures no native session — zcode keeps every
-/// conversation in one shared live database — cannot reload the session the
-/// archive names, so even a same-harness resume opens a fresh native session
-/// and has to hand the transcript over as its first context, exactly as a
-/// cross-harness resume does.
 fn native_continuity_preserved(profile_kind: HarnessKind, archived_kind: HarnessKind) -> bool {
-    profile_kind == archived_kind && profile_kind.captures_native_session()
+    profile_kind == archived_kind
 }
 
 /// Discover a utility model and compact the cross-harness handoff while still
@@ -3647,17 +3642,12 @@ mod tests {
         );
     }
 
-    /// A zcode checkpoint carries repository state and Hel's transcript only,
-    /// so resuming one cannot assume the archived native session comes back.
-    /// Every harness that does capture its own session still can.
+    /// Resuming into a different harness cannot reload the archived native
+    /// session, so the transcript is handed over as the first context instead.
     #[test]
-    fn only_a_harness_that_captures_its_native_session_keeps_continuity_on_resume() {
+    fn only_the_same_harness_keeps_native_continuity_on_resume() {
         use mj_core::config::HarnessKind;
 
-        assert!(!super::native_continuity_preserved(
-            HarnessKind::Zcode,
-            HarnessKind::Zcode
-        ));
         assert!(super::native_continuity_preserved(
             HarnessKind::Codex,
             HarnessKind::Codex
@@ -3666,14 +3656,8 @@ mod tests {
             HarnessKind::Claude,
             HarnessKind::Claude
         ));
-        // A different harness has never been able to reload the archived
-        // session, whether or not it captures one.
         assert!(!super::native_continuity_preserved(
             HarnessKind::Claude,
-            HarnessKind::Codex
-        ));
-        assert!(!super::native_continuity_preserved(
-            HarnessKind::Zcode,
             HarnessKind::Codex
         ));
     }

@@ -1,6 +1,0 @@
-{
-  "private": true,
-  "dependencies": {
-    "@brokkai/zcode-acp": "0.37.4"
-  }
-}

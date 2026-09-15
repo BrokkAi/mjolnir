@@ -15,9 +15,6 @@ pub const GROK_VERSION: &str = "1.0.13";
 pub const DEEPSEEK_DSH_VERSION: &str = "0.1.2-rc.1";
 pub const MUSE_ACP_VERSION: &str = "0.4.3";
 pub const MUSE_VERSION: &str = "1.2.1-R2847.1";
-pub const ZCODE_ACP_VERSION: &str = "0.37.4";
-pub const ZCODE_VERSION: &str = "3.11.2";
-pub const ZCODE_CLI_VERSION: &str = "0.16.5";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HarnessPin {
@@ -57,11 +54,6 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             install_id: "dsh-0.1.2-rc.1",
             display_version: "dsh 0.1.2-rc.1 (bundled ACP)",
             entrypoint: "node_modules/.bin/dsh",
-        },
-        HarnessKind::Zcode => HarnessPin {
-            install_id: "brokkai-zcode-acp-0.37.4_zcode-3.11.2-cli-0.16.5",
-            display_version: "@brokkai/zcode-acp 0.37.4 + ZCode 3.11.2 (CLI 0.16.5)",
-            entrypoint: "node_modules/.bin/zcode-acp-server",
         },
     }
 }

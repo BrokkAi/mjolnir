@@ -85,7 +85,6 @@ fn normalize(report: Report, elapsed_ms: Option<u64>, models: bool) -> Result<To
             api_duration_ms: report.api_duration_ms,
             elapsed_ms,
             model_usage,
-            credits: None,
         })),
     })
 }

@@ -138,7 +138,6 @@ mod tests {
                         api_duration_ms: Some(1700),
                         elapsed_ms: Some(2377),
                         model_usage: BTreeMap::new(),
-                        credits: None,
                     })),
                     scope,
                     total_tokens: 30,

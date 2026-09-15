@@ -882,7 +882,15 @@ fn migrate_subagent_sessions(connection: &Connection) -> Result<()> {
 }
 
 /// Breaking migration: older controllers cannot deserialize the new harness
-/// enum and their table constraints reject ZCode rows written by this build.
+/// enum and their table constraints reject ZCode rows written by that build.
+///
+/// The ZCode harness has since been removed. The `'zcode'` value is retained in
+/// the `harness_kind` CHECK constraint only so session rows written by earlier
+/// releases stay readable; no code accepts it, `HarnessKind::from_str` rejects
+/// it, and `load_state_from` skips such a row with a warning. Removing the
+/// value would need another breaking migration that rewrote or deleted those
+/// rows, so it is left in place. Never rewrite this migration; give any later
+/// schema change a new revision.
 fn migrate_zcode_harness_kind(connection: &Connection) -> Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
     let migration = (|| -> Result<()> {

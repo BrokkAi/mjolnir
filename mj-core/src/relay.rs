@@ -46,9 +46,11 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// version in [`RELAY_MIN_PROTOCOL_VERSION`]..=this range still connect.
 /// Protocol 0 is the retired pre-relay worker protocol and is rejected.
 pub const RELAY_PROTOCOL_VERSION: u32 = 13;
-/// New writers require readers that preserve per-turn plan credits in event
-/// digests. An older reader drops the unknown field when it re-serializes an
-/// observation, so its recomputed digest would not match.
+/// Historical note: protocol 13 was required because writers emitted per-turn
+/// plan credits, and an older reader dropped that unknown field when it
+/// re-serialized an observation, so its recomputed digest would not match. The
+/// field is gone with the harness that produced it, but the floor stays: a
+/// worker pinned to it is still the contract this release writes.
 /// Controllers still read older workers using RELAY_MIN_PROTOCOL_VERSION.
 pub const RELAY_WRITER_MIN_PROTOCOL_VERSION: u32 = 13;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;

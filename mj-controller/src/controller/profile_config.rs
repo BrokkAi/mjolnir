@@ -246,11 +246,7 @@ fn probe_profile(
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ProfileConfig> {
     let root = tempfile::tempdir().context("create private profile discovery directory")?;
-    let home = if profile.kind == mj_core::config::HarnessKind::Zcode {
-        root.path().join("profile/.zcode")
-    } else {
-        root.path().join("profile")
-    };
+    let home = root.path().join("profile");
     super::worker_binary::stage_profile(profile, &home)?;
     super::worker_binary::stage_codex_catalog(
         profile_id,

@@ -1525,7 +1525,6 @@ pub(super) fn bridge_readiness_stage(profile: &HarnessProfile) -> ProvisionStage
             | HarnessKind::Kimi
             | HarnessKind::Grok
             | HarnessKind::Muse
-            | HarnessKind::Zcode
     ) {
         ProvisionStage::Installing(profile.kind)
     } else {
@@ -1589,17 +1588,6 @@ pub(super) fn bridge_launch(
                 ],
             )
         }
-        mj_core::config::HarnessKind::Zcode => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "if [ -z \"${{ZCODE_BIN:-}}\" ] || [ ! -f \"$ZCODE_BIN\" ]; then echo 'Mjolnir target image lacks the ZCode backend; rebuild it from containers/Containerfile.agent-dev or set ZCODE_BIN to the headless zcode.cjs runtime' >&2; exit 127; fi; if command -v zcode-acp-server >/dev/null 2>&1; then exec zcode-acp-server; fi; {}; exec npx -y @brokkai/zcode-acp@{}",
-                    ensure_node_22_script(),
-                    mj_core::harness_runtime::ZCODE_ACP_VERSION,
-                ),
-            ],
-        ),
     }
 }
 
@@ -1611,7 +1599,7 @@ pub(super) fn preflight_harness(
     use mj_core::config::TargetTemplate;
     if !matches!(
         profile.kind,
-        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Deepseek | HarnessKind::Zcode
+        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Deepseek
     ) {
         return Ok(());
     }
@@ -1716,14 +1704,6 @@ pub(super) fn stage_profile(
             "AGENTS.md",
             "skills",
             ".agent-presets",
-        ],
-        mj_core::config::HarnessKind::Zcode => &[
-            "v2/config.json",
-            "v2/credentials.json",
-            "v2/setting.json",
-            "cli/config.json",
-            "AGENTS.md",
-            "skills",
         ],
     };
     // Allowlist entries (and, within each, a copied directory's children) are
@@ -1904,7 +1884,6 @@ fn append_hel_target_environment(
         mj_core::config::HarnessKind::Grok => "AGENTS.md",
         mj_core::config::HarnessKind::Deepseek => "AGENTS.md",
         mj_core::config::HarnessKind::Muse => "AGENTS.md",
-        mj_core::config::HarnessKind::Zcode => "AGENTS.md",
     };
     let path = destination.join(instructions);
     let separator = match std::fs::read_to_string(&path) {
@@ -4753,24 +4732,6 @@ mod tests {
             "containers/Containerfile.agent-dev must install {deepseek}"
         );
         assert!(!CONTAINERFILE.contains("dsh-acp-server"));
-
-        let zcode = format!(
-            "@brokkai/zcode-acp@{}",
-            mj_core::harness_runtime::ZCODE_ACP_VERSION
-        );
-        assert!(
-            CONTAINERFILE.contains(&zcode),
-            "containers/Containerfile.agent-dev must install {zcode}"
-        );
-        assert!(CONTAINERFILE.contains(mj_core::harness_runtime::ZCODE_VERSION));
-        assert!(CONTAINERFILE.contains(mj_core::harness_runtime::ZCODE_CLI_VERSION));
-        let (command, arguments) = bridge_launch(
-            mj_core::config::HarnessKind::Zcode,
-            ExecutionPolicy::Unconstrained,
-        );
-        assert_eq!(command, "sh");
-        assert!(arguments[1].contains("target image lacks the ZCode backend"));
-        assert!(arguments[1].contains("[ ! -f \"$ZCODE_BIN\" ]"));
     }
     #[test]
     fn kimi_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {

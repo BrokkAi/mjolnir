@@ -47,9 +47,6 @@ impl TokenUsage {
             (_, Some("turn")) => UsageScope::Turn,
             (_, Some(_)) => UsageScope::Unspecified,
             (HarnessKind::Claude, None) => UsageScope::Turn,
-            // The ZCode adapter reports the backend's merged whole-turn usage on
-            // the prompt response, and omits it when the backend reported none.
-            (HarnessKind::Zcode, None) => UsageScope::Turn,
             _ => UsageScope::Unspecified,
         };
         Self {
@@ -92,15 +89,13 @@ mod tests {
     }
 
     #[test]
-    fn zcode_reports_are_whole_turn_and_other_adapters_stay_unspecified() {
-        let zcode = TokenUsage::from_acp(HarnessKind::Zcode, Usage::new(100, 80, 20));
-        assert_eq!(zcode.scope, UsageScope::Turn);
-        assert_eq!(
-            (zcode.total_tokens, zcode.input_tokens, zcode.output_tokens),
-            (100, 80, 20)
-        );
+    fn an_undeclared_report_from_an_ordinary_adapter_stays_unspecified() {
         let kimi = TokenUsage::from_acp(HarnessKind::Kimi, Usage::new(100, 80, 20));
         assert_eq!(kimi.scope, UsageScope::Unspecified);
+        assert_eq!(
+            (kimi.total_tokens, kimi.input_tokens, kimi.output_tokens),
+            (100, 80, 20)
+        );
     }
 
     fn declared(harness: HarnessKind, scope: &str) -> UsageScope {
@@ -130,11 +125,12 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_scope_overrides_the_claude_and_zcode_defaults() {
-        for harness in [HarnessKind::Claude, HarnessKind::Zcode] {
-            assert_eq!(declared(harness, "turn"), UsageScope::Turn);
-            assert_eq!(declared(harness, "unspecified"), UsageScope::Unspecified);
-        }
+    fn a_declared_scope_overrides_the_claude_default() {
+        assert_eq!(declared(HarnessKind::Claude, "turn"), UsageScope::Turn);
+        assert_eq!(
+            declared(HarnessKind::Claude, "unspecified"),
+            UsageScope::Unspecified
+        );
     }
 }
 
@@ -159,27 +155,6 @@ pub struct ProviderTurnUsage {
     pub elapsed_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub model_usage: std::collections::BTreeMap<String, TokenUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credits: Option<ProviderTurnCredits>,
-}
-
-/// Plan credits a turn consumed, measured as an account-level before/after
-/// delta around the prompt. The provider counts credits per account, not per
-/// session, so the delta is only as clean as the account is idle.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderTurnCredits {
-    /// `after - before`. Negative when the window reset between the reads.
-    pub used: i64,
-    /// Which quota window was measured, as the provider names it.
-    pub window: String,
-    pub before: i64,
-    pub after: i64,
-    /// The window's reset time fell between the two reads, so `used` counts
-    /// against two different windows and is unreliable.
-    pub window_reset_crossed: bool,
-    /// The counter is per account: concurrent sessions on the same key land in
-    /// the same delta.
-    pub account_shared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

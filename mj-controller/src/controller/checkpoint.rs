@@ -1128,13 +1128,6 @@ impl Controller {
                     reused_native = captured.reused_native,
                     "checkpoint target state captured; releasing ACP dispatch"
                 );
-                if !session.harness_kind.captures_native_session() {
-                    tracing::info!(
-                        session_id,
-                        harness = %session.harness_kind.display_name(),
-                        "checkpoint holds repository state only; this harness keeps no per-session native files"
-                    );
-                }
                 completion = release_checkpoint_after_capture(
                     &mut relay,
                     session_id,

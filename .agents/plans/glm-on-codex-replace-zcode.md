@@ -17,7 +17,7 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 - [x] (2026-09-15 15:40Z) Confirmed Z.ai `GET /api/v1/models` returns a Codex-format catalog (`glm-5.3`, `glm-5.3-flash`, `glm-5-turbo`) and that Codex reads the reviewer model from the catalog field `auto_review_model_override`.
 - [x] (2026-09-15 17:20Z) Milestone 1: provider descriptor and per-profile capabilities in `mj-core`. Added `mj-core/src/codex_provider.rs`, `mj-core/src/codex_catalog.rs`, `HarnessProfile::{codex_provider, auth_scheme, authentication_marker, credential_freshness, credential_expiry, supports_guardian_approvals}`, the `AuthScheme` enum, provider validation, and `login_command` returning `Result`.
 - [x] (2026-09-15 18:40Z) Milestone 2: controller, worker, and CLI consumers use the per-profile capabilities. Auth gate takes the profile; `QuotaRefreshRequest::for_profile` resolves the provider and key and routes Z.ai hosts to the renamed `mj-controller/src/zai_usage.rs`; credential sync skips the file exchange for an API-key profile; `WorkerLaunchConfig::authentication_marker` carries the marker name to the worker; API-key profiles are excluded from utility duty; staging fetches, stamps, and installs `models.json` with a cached fallback.
-- [ ] Milestone 3: remove the ZCode harness from code, assets, container image, and docs.
+- [x] (2026-09-15 20:10Z) Milestone 3: the ZCode harness is gone from code, assets, the container image, and the documentation. `HarnessKind` has six variants; `captures_native_session`, `pins_startup_config_by_environment`, the `account/usage_stats` credit probe, `mj-worker/src/acp/zcode_usage.rs`, the `credits` turn-usage field, the AppImage installer, the assets, and the Containerfile layer are all removed. Migration 32 and the tolerated `'zcode'` CHECK value stay, with a comment saying why.
 - [ ] Milestone 4: documentation (in scope) and live validation on the user's install (out of scope for the implementing agent; the real Z.ai key is the user's, so every behavioural step in `Validation and Acceptance` remains unperformed and must be run by the user).
 
 ## Surprises & Discoveries
@@ -55,6 +55,12 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
   Evidence: the test `a_custom_provider_session_carries_its_key_and_runs_from_a_private_home` asserts `CODEX_HOME` is `/home/me/.local/share/hel/worker/profile`, and `staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from` asserts the user's home keeps no `models.json`.
 
 - Observation: The catalog cache reuses the existing `profile_config_cache` table, whose rows are treated as stale after 24 hours (`load_profile_config_cache_from` in `mj-controller/src/database.rs`). A provider outage longer than a day therefore fails the launch rather than staging a very old catalog. That is the table's existing behaviour and this plan does not change it.
+
+- Observation: Removing `captures_native_session` made three further things dead rather than merely simpler. `native_continuity_lost` could only ever be set by the ZCode-only reload-fallback arm in `mj-worker/src/acp.rs`, so `mj-controller/src/native_continuity.rs` and its two callers could never fire; `Controller::install_adopted_native_session_id` existed only for that path. All three are removed. The wire field `native_continuity_lost` stays on the relay protocol so older workers still deserialize.
+  Evidence: `grep -rn native_continuity_lost` showed the only assignment was inside the removed arm; `cargo clippy --all-targets -- -D warnings` reported `install_adopted_native_session_id` as never used once the caller went.
+
+- Observation: A `zcode` session row used to fail the whole session listing, because `load_state_from` in `mj-controller/src/database.rs` turned an unknown harness into a `FromSqlConversionFailure`. It now skips such a row with a warning, and `load_targets`, `load_mounts`, and `load_checkpoints` no longer unwrap on the missing session. `hidden_native_sessions_from` ignores unknown rows the same way.
+  Evidence: the test `a_session_for_a_removed_harness_is_skipped_without_hiding_the_others` fails on an `Option::unwrap` in `load_targets` before that change and passes after.
 
 - Observation: The Coding Plan key is rejected by the chat-completions path under `https://api.z.ai/api/v1` but accepted under `https://api.z.ai/api/coding/paas/v4`. This matters only for Mjolnir's utility model (anvil's client speaks chat completions and appends `/v1` to its base URL), not for Codex.
   Evidence: `POST /api/v1/chat/completions` returned `403 model_access_denied` for `glm-5.3`; `POST /api/coding/paas/v4/chat/completions` returned 200 `pong`.
@@ -111,6 +117,14 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 
 - Decision: Exclusion from utility duty is decided by `profile_serves_as_utility(profile)` rather than by making `utility_precedence` take a profile.
   Rationale: `utility_precedence` ranks candidates by harness kind inside `candidate_order`, where only the kind is available. One profile-aware predicate at the two places that select a profile keeps the ranking logic unchanged.
+  Date/Author: 2026-09-15, Claude.
+
+- Decision: Delete `mj-controller/src/native_continuity.rs` and `Controller::install_adopted_native_session_id` rather than rewire them to a new condition.
+  Rationale: Their only trigger was a worker reporting lost native continuity, which only the ZCode reload fallback produced. Rewiring them to fire for every harness would change behaviour for Codex and Claude, where a native-session mismatch is already handled by the checkpoint restore's own identity check. Deleting unreachable code changes nothing a user can observe.
+  Date/Author: 2026-09-15, Claude.
+
+- Decision: A session row for a harness this release no longer supports is skipped from the listing with a warning instead of failing the listing.
+  Rationale: The plan keeps `'zcode'` readable in the CHECK constraint so old rows survive. That is only useful if a store holding one still opens. Such a session cannot be resumed either way, so omitting it is the honest result.
   Date/Author: 2026-09-15, Claude.
 
 ## Outcomes & Retrospective

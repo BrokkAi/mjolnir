@@ -360,9 +360,6 @@ async fn refresh_profile(
                 error: None,
                 refreshed_at_epoch_seconds,
             }),
-        // Removed with the ZCode harness in the next milestone; the value is
-        // still reachable from session rows written by earlier releases.
-        HarnessKind::Zcode => Err(anyhow::anyhow!("the ZCode harness is no longer supported")),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
         profile_id,

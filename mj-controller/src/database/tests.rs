@@ -2337,6 +2337,42 @@ fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
     );
 }
 
+/// The ZCode harness is gone but its rows remain readable, so a store that
+/// still holds one must list every other session instead of failing outright.
+#[test]
+fn a_session_for_a_removed_harness_is_skipped_without_hiding_the_others() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("mj.sqlite3");
+    save_session_to(&database, &session("supported", "project")).unwrap();
+    save_session_to(&database, &session("legacy", "project")).unwrap();
+    let connection = open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET harness_kind='zcode' WHERE session_id='legacy'",
+            [],
+        )
+        .expect("the CHECK constraint still tolerates the stored value");
+    connection
+        .execute(
+            "INSERT INTO hidden_native_sessions VALUES ('zcode','native-legacy','now')",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let state = load_state_from(&database).expect("the listing must not fail");
+    assert!(state.sessions.contains_key("supported"));
+    assert!(
+        !state.sessions.contains_key("legacy"),
+        "a session whose harness was removed cannot be resumed, so it is not listed"
+    );
+    assert!(
+        hidden_native_sessions_from(&database)
+            .expect("hidden sessions must not fail")
+            .is_empty()
+    );
+}
+
 #[test]
 fn zcode_migration_preserves_revision_31_rows_indexes_and_foreign_keys() {
     let directory = tempfile::tempdir().unwrap();

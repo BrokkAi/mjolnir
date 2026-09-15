@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::native_continuity::{NativeContinuityInputs, recover_native_continuity};
 use crate::session_manager::{SessionManagerControl, StandaloneSession};
 use crate::targets::{self, CommandExecutor, CommandSpec};
 use mj_core::relay::RelayExecutionState;
@@ -333,60 +332,7 @@ impl Controller {
         }
         .await
         .map_err(mark_if_transport_died)?;
-        // A harness that keeps no per-session native state may have opened a
-        // fresh native session while recovering. The worker reports that; the
-        // record has to follow it and the conversation has to be handed over,
-        // or the session talks to an agent that has never seen it.
-        let inputs = self
-            .state
-            .sessions
-            .get(session_id)
-            .map(|record| NativeContinuityInputs::from_record(&self.config, record));
-        if let Some(inputs) = inputs {
-            match recover_native_continuity(session_id, &inputs, &mut connection).await {
-                // The worker adopted a native session the installed launch.json
-                // no longer names. launch.json is observability on this path --
-                // recovery reads the journal, not this id -- so keep it truthful
-                // for the next debugger and let a failure only warn.
-                Ok(Some(adopted_id)) => {
-                    if let Err(error) = self.install_adopted_native_session_id(
-                        session_id,
-                        backend,
-                        executor,
-                        &adopted_id,
-                    ) {
-                        tracing::warn!(
-                            session_id,
-                            error = format!("{error:#}"),
-                            "could not update the worker launch config with the adopted native session id"
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    session_id,
-                    error = format!("{error:#}"),
-                    "could not reconcile the native session after a worker restart"
-                ),
-            }
-        }
         Ok(connection)
-    }
-
-    /// Rewrite the installed worker launch configuration so its recorded native
-    /// session id matches the one the restarted worker adopted. launch.json is
-    /// an observability record on this path -- the worker recovers from its
-    /// journal, not from this id -- so the caller treats a failure as a warning.
-    fn install_adopted_native_session_id(
-        &self,
-        session_id: &str,
-        backend: &targets::TargetLocator,
-        executor: &impl CommandExecutor,
-        adopted_id: &str,
-    ) -> Result<()> {
-        let mut launch = self.current_worker_launch_config(session_id, backend)?;
-        launch.native_session_id = Some(adopted_id.to_owned());
-        replace_installed_worker_launch_config(executor, backend, session_id, &launch)
     }
 }
 
@@ -575,78 +521,6 @@ mod tests {
         assert!(
             !worker_runs_installed_build(None, &installed),
             "a worker too old to report a build is older than this controller"
-        );
-    }
-
-    /// After the worker adopts a fresh native session, the reinstalled
-    /// launch.json names that adopted id, not the stale one the record still
-    /// carries, so a later debugger reads the live session.
-    #[cfg(unix)]
-    #[test]
-    fn launch_config_rewrite_names_the_adopted_native_session() {
-        use crate::targets::ProcessExecutor;
-        use mj_core::config::{HarnessKind, HarnessProfile};
-        use mj_core::state::{SessionState, State, TargetLocator};
-        use std::collections::BTreeMap;
-
-        let _writer = crate::database::install_isolated_test_writer();
-        let directory = tempfile::tempdir().unwrap();
-
-        let mut session = crate::controller::test_support::raw_session_on(
-            "local-bare",
-            directory.path().to_str().unwrap(),
-        );
-        session.state = SessionState::Stopped;
-        // A local bare worker root must be absolute and end with the session id.
-        let worker_root = directory.path().join(&session.id);
-        std::fs::create_dir_all(&worker_root).unwrap();
-        session.target = Some(TargetLocator::LocalBare {
-            worker_root: worker_root.clone(),
-        });
-        // The record still names the native session the worker abandoned.
-        let stale_id = session
-            .native_session_id
-            .clone()
-            .expect("the fixture records a native session id");
-
-        let mut config = crate::controller::test_support::resume_compatibility_config();
-        config.profiles.insert(
-            "codex".into(),
-            HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Codex,
-                home: directory.path().to_path_buf(),
-                environment: BTreeMap::new(),
-                context_window_bytes: None,
-            },
-        );
-
-        let controller = Controller {
-            config,
-            state: State {
-                sessions: BTreeMap::from([(session.id.clone(), session.clone())]),
-                ..State::default()
-            },
-        };
-
-        let (backend, _) = controller.worker_placement(&session.id).unwrap();
-        controller
-            .install_adopted_native_session_id(
-                &session.id,
-                &backend,
-                &ProcessExecutor,
-                "adopted-native-id",
-            )
-            .unwrap();
-
-        let installed: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(worker_root.join("launch.json")).unwrap())
-                .unwrap();
-        assert_eq!(installed["native_session_id"], "adopted-native-id");
-        assert_ne!(
-            installed["native_session_id"],
-            serde_json::Value::from(stale_id),
-            "the rewrite must replace the stale recorded id, not keep it"
         );
     }
 }
