@@ -4333,19 +4333,24 @@ mod tests {
     }
 
     /// Attaching is asynchronous, and until it lands the chat still loaded
-    /// belongs to the row the selection has moved off. The band says the
-    /// session is opening rather than showing the previous transcript under
-    /// the new highlight.
+    /// belongs to the row the selection has moved off. The transcript says
+    /// the session is opening, and the prompt band is the real composer
+    /// parked until the attach lands.
     #[test]
-    fn an_attach_in_flight_draws_an_empty_conversation_that_says_the_session_is_opening() {
+    fn an_attach_in_flight_draws_an_opening_transcript_and_the_standby_composer() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.set_opening_session(Some("session-1"));
+        dashboard.focus_prompt();
 
         let lines = drawn(&mut dashboard, 120, 44).join("\n");
-        assert!(lines.contains("Opening session"), "{lines}");
-        assert!(lines.contains("Opening session"), "{lines}");
+        // The transcript hero says the conversation is opening...
         assert!(
-            lines.contains("Esc cancels · select another session to switch · Alt-Q quits"),
+            lines.contains("Bringing your conversation into focus…"),
+            "{lines}"
+        );
+        // ...while the prompt band is the real composer, parked.
+        assert!(
+            lines.contains("Type a draft · sending opens when the session is live"),
             "{lines}"
         );
         assert!(!lines.contains("No conversation open"), "{lines}");

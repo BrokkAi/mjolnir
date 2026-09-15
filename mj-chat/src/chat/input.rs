@@ -52,6 +52,11 @@ impl ChatState {
         ChatAction::None
     }
 
+    /// Host-facing paste: bracketed-paste text lands in the composer draft.
+    pub fn paste(&mut self, pasted: &str) {
+        self.handle_paste(pasted);
+    }
+
     pub(super) fn handle_paste(&mut self, pasted: &str) {
         if let Some(dialog) = self.elicitation.as_mut() {
             dialog.paste(pasted);

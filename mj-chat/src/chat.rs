@@ -36,6 +36,7 @@ use crossterm::event::{
     MouseEventKind,
 };
 use rat_event::{ConsumedEvent, Outcome};
+use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 use ratatui::text::Line;
@@ -488,6 +489,12 @@ pub struct ChatState {
     /// Empty transcripts render a loading marker until that connection attempt
     /// either yields a snapshot or fails.
     transcript_loading: bool,
+    /// A composer parked in front of a session that is not attached yet: a
+    /// Starting/Resuming transition or an in-flight attach. It is the real
+    /// composer — same key handling, same rendering — but nothing can be sent
+    /// while no session is live, and no command completion is offered because
+    /// no session can answer commands.
+    standby: bool,
     input: String,
     input_cursor: usize,
     /// Image bytes belong to tracked marker ranges in the composer text.
@@ -678,6 +685,7 @@ impl ChatState {
             unconverted_prefix: 0,
             prefix_seam: None,
             transcript_loading: false,
+            standby: false,
             input: String::new(),
             input_cursor: 0,
             input_images: Vec::new(),
@@ -801,6 +809,71 @@ impl ChatState {
             .collect();
         state.latest_seq = state.latest_seq.max(snapshot.latest_seq);
         state
+    }
+
+    /// The real composer for a session that is not attached yet: parked
+    /// behind a Starting/Resuming transition or an in-flight attach. It edits
+    /// exactly like the attached composer — the whole readline chord set —
+    /// but `Enter` keeps the draft and explains instead of sending, because
+    /// there is no session to send to, and command completion stays off
+    /// because no session can answer commands. The draft survives until the
+    /// host carries it into the attached chat.
+    pub fn standby(
+        session_id: &str,
+        config: &Config,
+        header: SessionHeaderIdentity,
+        notices: Notices,
+    ) -> Self {
+        let snapshot = WorkerSnapshot::summary(session_id.to_owned(), WorkerPhase::Idle, 0);
+        let mut state = Self::new(&snapshot, &[]);
+        state.notices = notices;
+        state.standby = true;
+        state.set_subagent_count(header.subagent_count);
+        state.set_header_summary(header.target, header.profile, header.title);
+        if let Some(harness_kind) = header.harness_kind {
+            state.set_harness_kind(harness_kind);
+        }
+        state.set_review_config(config.review.clone());
+        state.set_spinner_style(config.spinner);
+        state.set_detailed_activity_clocks(config.advanced.detailed_activity_clocks);
+        state
+    }
+
+    /// Replaces the draft with `draft`, cursor at the end. An empty draft
+    /// leaves the composer alone.
+    pub fn set_draft(&mut self, draft: String) {
+        self.restore_draft(draft);
+    }
+
+    /// The composer's current draft, including any embedded image markers.
+    pub fn draft(&self) -> String {
+        self.encoded_draft()
+    }
+
+    /// Rows the composer wants at `width`: the wrapped input, up to three
+    /// queued-prompt previews, and the block's own border rows.
+    pub fn desired_prompt_height(&self, width: u16) -> u16 {
+        let content_width = active::prompt_content_width(width);
+        let input_rows =
+            u16::try_from(input::input_visual_rows(&self.input, content_width)).unwrap_or(u16::MAX);
+        let queued = u16::try_from(self.queued_prompts.len().min(3)).unwrap_or(3);
+        input_rows.saturating_add(queued).saturating_add(2).max(4)
+    }
+
+    /// Draws only the composer band into `area`, for hosts that show the real
+    /// prompt while the session is not attached. Clears and re-registers this
+    /// band's chat surfaces; the host merges them into its own frame
+    /// surfaces. `note` adds a left-aligned line to the bottom border.
+    pub fn draw_prompt_band(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        prompt_focused: bool,
+        note: Option<Line<'static>>,
+    ) {
+        self.frame_surfaces.clear();
+        self.footer_command_areas.borrow_mut().clear();
+        active::render_composer_band(frame, area, self, prompt_focused, note);
     }
 
     pub fn from_tail(
@@ -1207,7 +1280,7 @@ impl ChatState {
         self.visible_revision
     }
 
-    pub(super) fn take_render_changed(&mut self) -> bool {
+    pub fn take_render_changed(&mut self) -> bool {
         std::mem::take(&mut self.render_changed)
     }
 
@@ -2215,6 +2288,13 @@ impl ChatState {
         };
         let parsed_command = parse_local_command(&command_input);
         if prompt.is_empty() && self.input_images.is_empty() {
+            return ChatAction::None;
+        }
+        // No session is attached, so nothing can be sent. Keep the draft and
+        // say so; it becomes the attached composer's input when the chat
+        // opens.
+        if self.standby {
+            self.set_notice("Sending opens when the session is live; the draft is kept.");
             return ChatAction::None;
         }
         if self.plan_command_pending
@@ -3968,6 +4048,44 @@ mod tests {
         chat.session_activity.execution = Some(mj_core::relay::RelayExecutionState::Running);
         chat.session_activity.foreground_tool_started_at_ms = Some(1);
         assert!(!chat.needs_animation());
+    }
+
+    /// A standby composer edits exactly like the attached one — the readline
+    /// chords, paste with normalized line endings — but Enter keeps the draft
+    /// and explains instead of sending, and command completion stays closed.
+    #[test]
+    fn a_standby_composer_edits_like_the_real_one_but_never_sends() {
+        let config: Config = serde_json::from_str(r#"{"version": 0}"#).expect("default config");
+        let mut chat = ChatState::standby(
+            "session-1",
+            &config,
+            SessionHeaderIdentity::default(),
+            Notices::default(),
+        );
+        chat.set_draft("alpha beta".into());
+        assert_eq!(chat.input_cursor, "alpha beta".len());
+
+        // The readline set the type-ahead pane never answered.
+        chat.handle_key(ctrl('a'));
+        chat.handle_key(ctrl('k'));
+        assert_eq!(chat.input, "");
+        chat.handle_key(ctrl('y'));
+        assert_eq!(chat.input, "alpha beta");
+
+        chat.paste("…\r\nsecond");
+        assert_eq!(chat.input, "alpha beta…\nsecond");
+
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::None,
+            "Enter must not produce a prompt while no session is attached"
+        );
+        assert!(chat.notice().is_some());
+        assert_eq!(chat.draft(), "alpha beta…\nsecond");
+
+        chat.set_input("/mod".into());
+        chat.update_autocomplete();
+        assert!(chat.autocomplete.is_none());
     }
 
     #[test]

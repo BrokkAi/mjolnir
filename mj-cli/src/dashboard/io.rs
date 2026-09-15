@@ -1775,7 +1775,14 @@ impl DashboardContext {
                             self.record_detach(ordinal);
                         }
                         self.save_active_question_draft();
-                        let chat = if let Some(draft) = self.composer_drafts.get(&session_id) {
+                        // Whatever the user typed into the standby composer
+                        // while this attach ran is the newest draft, so it
+                        // wins over the copy captured when the open started.
+                        let chat = if let Some(text) =
+                            self.dashboard.take_standby_prompt_draft(&session_id)
+                        {
+                            chat.with_draft(text)
+                        } else if let Some(draft) = self.composer_drafts.get(&session_id) {
                             chat.with_draft(draft.text.clone())
                         } else {
                             chat
