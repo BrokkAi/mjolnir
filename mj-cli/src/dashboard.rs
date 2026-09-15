@@ -1703,7 +1703,7 @@ impl DashboardContext {
         let bundle_id = session_record.bundle_id.clone();
         // A draft typed while the session's transition ran belongs to this
         // composer now; it wins over the warm chat's older captured text.
-        if let Some(text) = self.dashboard.take_transition_composer_draft(&session_id) {
+        if let Some(text) = self.dashboard.take_standby_prompt_draft(&session_id) {
             self.composer_drafts
                 .capture(&session_id, text, &session_record.draft_input);
         }

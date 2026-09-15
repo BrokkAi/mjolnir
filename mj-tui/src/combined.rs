@@ -6,16 +6,14 @@
 //! to switch to, so nothing is ever hidden behind a navigation step.
 
 use mj_chat::chat::{ActiveChat, ChatFooter, ChatRegions};
-use mj_chat::components::{input_cursor_visual_position, input_visual_rows, set_input_cursor};
 use mj_chat::selection::{SurfaceFrame, SurfaceId};
-use mj_chat::text_input::TextInput;
 use mj_chat::{spinner, theme};
 use mj_core::state::SessionTransitionKind;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::render::{
     MINIMUM_TERMINAL_WIDTH, SESSION_ACTIONS_HEIGHT, TerminalSizeRequirement, capacity_table_width,
@@ -404,11 +402,32 @@ fn render_combined_themed(
     });
     // With no conversation the prompt band holds the two-line guidance that
     // stands in for a composer, so it asks for the rows to show both. A
-    // retiring transition uses only the compact status panel, while a
-    // Starting/Resuming one offers the type-ahead composer, whose band grows
-    // with the wrapped draft exactly like the chat's.
-    let desired_prompt = if selected_transition.is_some() {
-        transition_prompt_height(dashboard, content_area.width).unwrap_or(PROMPT_MINIMUM)
+    // retiring transition uses only the compact status panel. A
+    // Starting/Resuming transition or an in-flight attach parks the real
+    // composer in the band (the standby prompt), whose height grows with the
+    // wrapped draft exactly like an attached chat's.
+    let selected_session_id = dashboard.selected_session_id().map(str::to_owned);
+    let standby_drawn = match &selected_transition {
+        Some((_, kind, failed)) => {
+            !failed
+                && matches!(
+                    kind,
+                    SessionTransitionKind::Starting | SessionTransitionKind::Resuming
+                )
+        }
+        None => {
+            chat.is_none()
+                && selected_session_id
+                    .as_deref()
+                    .is_some_and(|session_id| dashboard.opening_session() == Some(session_id))
+        }
+    };
+    let desired_prompt = if standby_drawn && let Some(session_id) = selected_session_id.as_deref() {
+        dashboard
+            .standby_prompt_mut(session_id)
+            .desired_prompt_height(content_area.width)
+    } else if selected_transition.is_some() {
+        PROMPT_MINIMUM
     } else {
         chat.as_ref().map_or(EMPTY_PROMPT_HEIGHT, |chat| {
             chat.desired_prompt_height(content_area.width)
@@ -708,21 +727,25 @@ fn render_combined_themed(
                 prompt_focused
             }
             None => {
-                let reason = if dashboard.opening_session().is_some() {
+                let opening = dashboard.opening_session().is_some();
+                let reason = if opening {
                     EmptyConversation::Opening
                 } else if dashboard.ordered_sessions().is_empty() {
                     EmptyConversation::NoLiveSession
                 } else {
                     EmptyConversation::NoConversationOpen
                 };
-                render_empty_conversation(
-                    frame,
-                    transcript_area,
-                    prompt_area,
-                    prompt_focused,
-                    reason,
-                    dashboard.config.spinner,
-                );
+                render_empty_transcript(frame, transcript_area, reason, dashboard.config.spinner);
+                if opening {
+                    // The real composer parks in the prompt band while the
+                    // attach runs, so anything typed lands in the chat that
+                    // opens.
+                    if let Some(session_id) = selected_session_id.as_deref() {
+                        draw_standby_prompt(frame, prompt_area, dashboard, session_id, None);
+                    }
+                } else {
+                    render_empty_prompt_advice(frame, prompt_area, prompt_focused, reason);
+                }
                 false
             }
         }
@@ -737,6 +760,7 @@ fn render_combined_themed(
 
 /// Why the conversation band is empty, which is what decides the advice it
 /// gives.
+#[derive(Clone, Copy)]
 enum EmptyConversation {
     /// The workspace has no live session at all.
     NoLiveSession,
@@ -746,21 +770,132 @@ enum EmptyConversation {
     Opening,
 }
 
+/// The bordered chrome that stands in for a conversation when none is on
+/// screen. The three reasons for an empty band need different advice: a
+/// workspace with no live session needs one created or resumed, a workspace
+/// that has live sessions just needs one opened, and an attach that is still
+/// running needs nothing but a moment. Telling the second user there is no
+/// live session would be a plain lie — the pane above is listing them.
+fn render_empty_transcript(
+    frame: &mut Frame,
+    transcript_area: Rect,
+    reason: EmptyConversation,
+    spinner_style: spinner::SpinnerStyle,
+) {
+    let mut panel = theme::panel(false).title(" Conversation ");
+    if matches!(reason, EmptyConversation::Opening) {
+        panel = panel.title(
+            Line::from(vec![
+                Span::raw(" "),
+                spinner::compact_span(spinner_style, spinner::elapsed_ms()),
+                Span::raw(" "),
+            ])
+            .right_aligned(),
+        );
+    }
+    frame.render_widget(panel, transcript_area);
+    if transcript_area.height >= 7 {
+        let hero = Rect::new(
+            transcript_area.x.saturating_add(1),
+            transcript_area.y + (transcript_area.height.saturating_sub(5) / 2).max(1),
+            transcript_area.width.saturating_sub(2),
+            4,
+        );
+        let invitation = match reason {
+            EmptyConversation::NoLiveSession => "A little spark. Something extraordinary.",
+            EmptyConversation::NoConversationOpen => "Your next idea starts here.",
+            EmptyConversation::Opening => "Bringing your conversation into focus…",
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled("✦  M J O L N I R", theme::title(true)),
+                Line::default(),
+                Line::styled(invitation, theme::muted()),
+            ])
+            .alignment(ratatui::layout::Alignment::Center),
+            hero,
+        );
+    }
+}
+
+/// The prompt-band advice that accompanies [`render_empty_transcript`] for
+/// the two reasons where there is nothing to type toward yet. While an attach
+/// runs the standby composer fills the band instead, so `Opening` never
+/// reaches here.
+fn render_empty_prompt_advice(
+    frame: &mut Frame,
+    prompt_area: Rect,
+    prompt_focused: bool,
+    reason: EmptyConversation,
+) {
+    let (title, lines) = match reason {
+        EmptyConversation::NoLiveSession => (
+            " No live session ",
+            [
+                "No live session in this workspace.",
+                "Press Alt-N to create one, or Alt-S to resume one.",
+            ],
+        ),
+        EmptyConversation::NoConversationOpen => (
+            " No conversation open ",
+            [
+                "No conversation open.",
+                "Press Tab for Sessions, then Enter on the one to open.",
+            ],
+        ),
+        EmptyConversation::Opening => (
+            " Opening session ",
+            [
+                "Opening session…",
+                "Esc cancels · select another session to switch · Alt-Q quits",
+            ],
+        ),
+    };
+    frame.render_widget(
+        Paragraph::new(lines.map(Line::raw).to_vec())
+            .style(theme::muted())
+            .wrap(Wrap { trim: true })
+            .block(theme::panel(prompt_focused).title(title)),
+        prompt_area,
+    );
+}
+
+/// Draws the session's standby composer — the real chat prompt — into the
+/// prompt band, and merges its surfaces into the dashboard's so clicks and
+/// selections inside the band behave like an attached chat's. `note` adds a
+/// left-aligned line to the band's bottom border.
+fn draw_standby_prompt(
+    frame: &mut Frame,
+    prompt_area: Rect,
+    dashboard: &mut DashboardState,
+    session_id: &str,
+    note: Option<Line<'static>>,
+) {
+    let focused = dashboard.prompt_has_focus();
+    let surfaces = {
+        let standby = dashboard.standby_prompt_mut(session_id);
+        standby.draw_prompt_band(frame, prompt_area, focused, note);
+        standby.frame_surfaces().clone()
+    };
+    dashboard.frame_surfaces.append(&surfaces);
+}
+
 /// Draws the conversation replacement shown while a lifecycle owns the
 /// selected session. The warm chat remains alive off-screen so its draft,
-/// read cursor, and history survive the operation, but neither transcript nor
-/// composer input can be mistaken for a session that is being retired.
+/// read cursor, and history survive the operation, but the transcript cannot
+/// be mistaken for a session that is being retired.
 ///
-/// Starting and Resuming keep a prompt on screen: the type-ahead composer
-/// below the transition panel accepts the first message before the session is
-/// live, holds it as a draft (Enter does not send), and carries it into the
-/// real composer when the chat opens. Retiring and failed transitions have no
+/// Starting and Resuming keep the real composer on screen: the standby prompt
+/// below the transition panel is the chat's own composer, so the first
+/// message can be drafted with the usual readline keys before the session is
+/// live (Enter holds the draft and explains), and the draft carries into the
+/// conversation when the chat opens. Retiring and failed transitions have no
 /// conversation to type toward, so they keep the plain status panel.
 fn render_transition_surface(
     frame: &mut Frame,
     transcript_area: Rect,
     prompt_area: Rect,
-    dashboard: &DashboardState,
+    dashboard: &mut DashboardState,
     session_id: &str,
     transition: SessionTransitionKind,
     failed: bool,
@@ -850,14 +985,16 @@ fn render_transition_surface(
         transcript_area,
     );
     if type_ahead {
-        render_type_ahead_composer(
-            frame,
-            prompt_area,
-            dashboard,
-            session_id,
-            transition,
-            operation.is_some_and(|operation| operation.cancellable),
-        );
+        let note = operation
+            .is_some_and(|operation| operation.cancellable)
+            .then(|| {
+                Line::styled(
+                    format!(" Alt-X to cancel {} ", transition.label().to_lowercase()),
+                    theme::muted(),
+                )
+                .left_aligned()
+            });
+        draw_standby_prompt(frame, prompt_area, dashboard, session_id, note);
         return;
     }
     let cancel_line = if !failed && operation.is_some_and(|operation| operation.cancellable) {
@@ -887,173 +1024,6 @@ fn render_transition_surface(
         .style(theme::muted())
         .wrap(Wrap { trim: true })
         .block(theme::panel(false).title(" Status ")),
-        prompt_area,
-    );
-}
-
-/// The composer that stands in for the conversation while a Starting or
-/// Resuming transition runs. It draws like the chat's prompt pane — same
-/// padding, wrap, gutter marker, and cursor — except its bottom border carries
-/// the cancel chord and nothing it edits can be sent yet.
-fn render_type_ahead_composer(
-    frame: &mut Frame,
-    prompt_area: Rect,
-    dashboard: &DashboardState,
-    session_id: &str,
-    transition: SessionTransitionKind,
-    cancellable: bool,
-) {
-    let focused = dashboard.prompt_has_focus();
-    let input = dashboard.transition_composer(session_id);
-    let text = input.map_or("", TextInput::value);
-    let cursor = input.map_or(0, TextInput::cursor);
-    let mut prompt_block = theme::panel(focused)
-        .padding(Padding::new(2, 1, 0, 0))
-        .title(" Prompt ");
-    if cancellable {
-        prompt_block = prompt_block.title_bottom(
-            Line::styled(
-                format!(" Alt-X to cancel {} ", transition.label().to_lowercase()),
-                theme::muted(),
-            )
-            .left_aligned(),
-        );
-    }
-    let prompt_inner = prompt_block.inner(prompt_area);
-    let content_width = prompt_content_width(prompt_area.width);
-    let lines = if text.is_empty() {
-        vec![Line::styled(
-            "Type ahead · sending opens when the session is live",
-            theme::muted(),
-        )]
-    } else {
-        text.split('\n')
-            .map(|line| Line::raw(line.to_owned()))
-            .collect()
-    };
-    let cursor_row = input_cursor_visual_position(text, cursor, content_width).1;
-    let content_height = usize::from(prompt_inner.height).max(1);
-    let input_scroll = cursor_row.saturating_add(1).saturating_sub(content_height);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(theme::base())
-            .wrap(Wrap { trim: false })
-            .scroll((u16::try_from(input_scroll).unwrap_or(u16::MAX), 0))
-            .block(prompt_block),
-        prompt_area,
-    );
-    if input_scroll == 0 {
-        frame.render_widget(
-            Line::styled(">", theme::title(focused)),
-            Rect::new(prompt_inner.x.saturating_sub(2), prompt_inner.y, 1, 1),
-        );
-    }
-    // The cursor belongs to whatever has focus, so the pane only shows one
-    // while the keyboard is driving it.
-    if focused {
-        set_input_cursor(frame, prompt_inner, text, cursor, 0, input_scroll);
-    }
-}
-
-/// Rows the type-ahead composer asks for at `width`: the wrapped draft plus
-/// the pane's border rows, with the same floor as an empty chat composer so
-/// the band does not jump when the conversation replaces the draft.
-fn transition_prompt_height(dashboard: &DashboardState, width: u16) -> Option<u16> {
-    let (session_id, _) = dashboard.type_ahead_session()?;
-    let rows = dashboard
-        .transition_composer(session_id)
-        .map_or(1, |input| {
-            input_visual_rows(input.value(), prompt_content_width(width))
-        });
-    Some(
-        u16::try_from(rows)
-            .unwrap_or(u16::MAX)
-            .saturating_add(2)
-            .max(EMPTY_PROMPT_HEIGHT),
-    )
-}
-
-/// The wrap width inside the composer pane: its borders plus the left-2,
-/// right-1 padding, matching the chat composer's content column.
-fn prompt_content_width(width: u16) -> usize {
-    usize::from(width.saturating_sub(5)).max(1)
-}
-
-/// The bordered chrome that stands in for a conversation when none is on
-/// screen, and the thing the user can do about it.
-///
-/// The three reasons for an empty band need different advice: a workspace
-/// with no live session needs one created or resumed, a workspace that has
-/// live sessions just needs one opened, and an attach that is still running
-/// needs nothing but a moment. Telling the second user there is no live
-/// session would be a plain lie — the pane above is listing them.
-fn render_empty_conversation(
-    frame: &mut Frame,
-    transcript_area: Rect,
-    prompt_area: Rect,
-    prompt_focused: bool,
-    reason: EmptyConversation,
-    spinner_style: spinner::SpinnerStyle,
-) {
-    frame.render_widget(theme::panel(false).title(" Conversation "), transcript_area);
-    if transcript_area.height >= 7 {
-        let hero = Rect::new(
-            transcript_area.x.saturating_add(1),
-            transcript_area.y + (transcript_area.height.saturating_sub(5) / 2).max(1),
-            transcript_area.width.saturating_sub(2),
-            4,
-        );
-        let invitation = match reason {
-            EmptyConversation::NoLiveSession => "A little spark. Something extraordinary.",
-            EmptyConversation::NoConversationOpen => "Your next idea starts here.",
-            EmptyConversation::Opening => "Bringing your conversation into focus…",
-        };
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::styled("✦  M J O L N I R", theme::title(true)),
-                Line::default(),
-                Line::styled(invitation, theme::muted()),
-            ])
-            .alignment(ratatui::layout::Alignment::Center),
-            hero,
-        );
-    }
-    let (title, lines) = match reason {
-        EmptyConversation::NoLiveSession => (
-            " No live session ",
-            [
-                "No live session in this workspace.",
-                "Press Alt-N to create one, or Alt-S to resume one.",
-            ],
-        ),
-        EmptyConversation::NoConversationOpen => (
-            " No conversation open ",
-            [
-                "No conversation open.",
-                "Press Tab for Sessions, then Enter on the one to open.",
-            ],
-        ),
-        EmptyConversation::Opening => (
-            " Opening session ",
-            [
-                "Opening session…",
-                "Esc cancels · select another session to switch · Alt-Q quits",
-            ],
-        ),
-    };
-    let mut lines = lines.map(Line::raw).to_vec();
-    if matches!(reason, EmptyConversation::Opening) {
-        lines[0].spans.insert(0, Span::raw(" "));
-        lines[0].spans.insert(
-            0,
-            spinner::compact_span(spinner_style, spinner::elapsed_ms()),
-        );
-    }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(theme::muted())
-            .wrap(Wrap { trim: true })
-            .block(theme::panel(prompt_focused).title(title)),
         prompt_area,
     );
 }
@@ -1099,11 +1069,11 @@ mod tests {
         assert_eq!(prompt_target(50, 60), 20);
     }
 
-    /// A Starting transition turns the prompt band into the type-ahead
-    /// composer: the draft is on screen, the cancel chord moved onto the
-    /// pane's bottom border, and the old status panel is gone.
+    /// A Starting transition turns the prompt band into the standby composer —
+    /// the real chat prompt: the draft is on screen, the cancel chord moved
+    /// onto the pane's bottom border, and the old status panel is gone.
     #[test]
-    fn a_starting_transition_draws_the_type_ahead_composer_with_the_cancel_chord_at_its_bottom() {
+    fn a_starting_transition_draws_the_standby_composer_with_the_cancel_chord_at_its_bottom() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_session_operation(
             "session-1".into(),
@@ -1141,9 +1111,7 @@ mod tests {
             lines
         );
         assert_eq!(
-            dashboard
-                .take_transition_composer_draft("session-1")
-                .as_deref(),
+            dashboard.take_standby_prompt_draft("session-1").as_deref(),
             Some("first message ahead")
         );
         // The keystrokes were input, not actions.
@@ -1153,10 +1121,10 @@ mod tests {
         );
     }
 
-    /// An empty draft still shows a composer, with the placeholder that says
-    /// what typing ahead means.
+    /// An empty standby composer still shows a composer, with the placeholder
+    /// that says what typing ahead means.
     #[test]
-    fn an_empty_type_ahead_composer_shows_the_placeholder() {
+    fn an_empty_standby_composer_shows_the_placeholder() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
         dashboard.focus_prompt();
@@ -1171,7 +1139,7 @@ mod tests {
         assert!(
             content
                 .iter()
-                .any(|line| line.contains("Type ahead · sending opens when the session is live")),
+                .any(|line| line.contains("Type a draft · sending opens when the session is live")),
             "placeholder missing from {content:?}"
         );
     }
@@ -1200,10 +1168,10 @@ mod tests {
         );
     }
 
-    /// The composer band keeps the empty chat composer's floor and grows with
-    /// the wrapped draft, and retiring transitions ask for none of it.
+    /// The standby composer keeps the empty chat composer's floor and grows
+    /// with the wrapped draft, and retiring transitions ask for none of it.
     #[test]
-    fn transition_prompt_height_follows_the_wrapped_draft() {
+    fn standby_prompt_height_follows_the_wrapped_draft() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_session_operation(
             "session-1".into(),
@@ -1211,22 +1179,32 @@ mod tests {
             None,
         );
         assert_eq!(
-            transition_prompt_height(&dashboard, 100),
-            Some(EMPTY_PROMPT_HEIGHT)
+            dashboard
+                .standby_prompts
+                .get("session-1")
+                .map(|standby| standby.desired_prompt_height(100)),
+            None
         );
 
-        dashboard.seed_transition_composer("session-1", "a\nb\nc\nd\ne\nf\ng".into());
+        dashboard.seed_standby_prompt("session-1", "a\nb\nc\nd\ne\nf\ng".into());
         assert_eq!(
             dashboard
-                .transition_composer("session-1")
-                .map(|input| input.value()),
-            Some("a\nb\nc\nd\ne\nf\ng")
+                .standby_prompts
+                .get("session-1")
+                .map(|standby| standby.draft()),
+            Some("a\nb\nc\nd\ne\nf\ng".into())
         );
-        assert_eq!(transition_prompt_height(&dashboard, 100), Some(9));
+        assert_eq!(
+            dashboard
+                .standby_prompts
+                .get("session-1")
+                .map(|standby| standby.desired_prompt_height(100)),
+            Some(9)
+        );
 
         dashboard.finish_session_operation("session-1");
         dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
-        assert_eq!(transition_prompt_height(&dashboard, 100), None);
+        assert_eq!(dashboard.standby_prompt_session(), None);
     }
 
     #[test]

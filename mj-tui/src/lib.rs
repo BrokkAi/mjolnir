@@ -23,10 +23,9 @@ use mj_core::state::{
     SessionResourceAllocation, SessionState, SessionTransitionKind, State,
 };
 
-use mj_chat::chat::Notices;
+use mj_chat::chat::{ChatAction, ChatState, Notices, SessionHeaderIdentity};
 use mj_chat::components::{EventResult, Outcome};
 use mj_chat::selection::FrameSurfaces;
-use mj_chat::text_input::{EditOutcome, TextInput};
 use mj_client::quota::ProfileQuota;
 use mj_client::review::RuntimeReviewView;
 use mj_core::targets::AdditionalMount;
@@ -542,11 +541,11 @@ pub struct DashboardState {
     pub(crate) project_sources: BTreeMap<String, ProjectSourceIdentity>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
     pub(crate) session_operations: BTreeMap<String, SessionOperationDisplay>,
-    /// Composer text typed while a Starting/Resuming transition parks the
-    /// selected session's conversation. Keyed per session so each draft stays
-    /// with its row; the controller hands it to the real composer when the
-    /// chat opens.
-    pub(crate) transition_composers: BTreeMap<String, TextInput>,
+    /// The real composers parked in front of sessions that are not attached
+    /// yet: a Starting/Resuming transition or an in-flight attach. Keyed per
+    /// session so each draft stays with its row; the controller hands the
+    /// draft to the real composer when the chat opens.
+    pub(crate) standby_prompts: BTreeMap<String, ChatState>,
     /// Durable move intents retained by the daemon, including failed and
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: BTreeMap<String, MoveOperation>,
@@ -719,7 +718,7 @@ impl DashboardState {
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             session_operations: BTreeMap::new(),
-            transition_composers: BTreeMap::new(),
+            standby_prompts: BTreeMap::new(),
             move_operations: BTreeMap::new(),
             capacity_details: BTreeMap::new(),
             target_readiness: BTreeMap::new(),
@@ -1308,75 +1307,115 @@ impl DashboardState {
         }
     }
 
-    /// The selected session whose conversation is parked behind a Starting or
-    /// Resuming transition, and therefore offers the type-ahead composer.
-    /// Retiring transitions (Moving/Stopping/Destroying) and failed ones keep
-    /// the status panel instead: there is no conversation to type toward.
-    pub(crate) fn type_ahead_session(&self) -> Option<(&str, SessionTransitionKind)> {
+    /// The selected session whose prompt band shows the standby composer: a
+    /// Starting or Resuming transition parks the conversation behind it, or
+    /// an attach for the session is in flight. Retiring transitions (Moving/
+    /// Stopping/Destroying) and failed ones keep the status panel instead:
+    /// there is no conversation to type toward.
+    pub(crate) fn standby_prompt_session(&self) -> Option<&str> {
         let session_id = self.selected_session_id()?;
-        let kind = self.transition_kind(session_id).filter(|kind| {
+        let parked = self.transition_kind(session_id).is_some_and(|kind| {
             matches!(
                 kind,
                 SessionTransitionKind::Starting | SessionTransitionKind::Resuming
             )
-        })?;
-        Some((session_id, kind))
+        }) || self.opening_session.as_deref() == Some(session_id);
+        parked.then_some(session_id)
     }
 
-    /// The type-ahead draft a session's prompt pane is editing.
-    pub fn transition_composer(&self, session_id: &str) -> Option<&TextInput> {
-        self.transition_composers.get(session_id)
+    /// The standby composer a session's prompt band is editing, creating it on
+    /// first use so every host path (seeding, keys, paste, render) shares one
+    /// instance.
+    pub(crate) fn standby_prompt_mut(&mut self, session_id: &str) -> &mut ChatState {
+        if !self.standby_prompts.contains_key(session_id) {
+            let standby = self.build_standby_prompt(session_id);
+            self.standby_prompts.insert(session_id.to_owned(), standby);
+        }
+        self.standby_prompts
+            .get_mut(session_id)
+            .expect("standby prompt was just inserted")
     }
 
-    /// Seeds the type-ahead composer from a warm chat's input, so a restart
+    fn build_standby_prompt(&self, session_id: &str) -> ChatState {
+        let session = self.state.sessions.get(session_id);
+        let header = SessionHeaderIdentity {
+            target: session.as_ref().map_or(String::new(), |session| {
+                session.project_target(&self.config, &session.target_template_id)
+            }),
+            profile: session
+                .as_ref()
+                .map_or(String::new(), |session| session.last_profile.clone()),
+            title: session
+                .as_ref()
+                .map_or(String::new(), |session| session.display_title().to_owned()),
+            harness_kind: session.as_ref().map(|session| session.harness_kind),
+            subagent_count: self
+                .state
+                .subagents
+                .values()
+                .filter(|record| record.parent_session_id == session_id)
+                .count(),
+        };
+        ChatState::standby(session_id, &self.config, header, self.notices.clone())
+    }
+
+    /// Seeds the standby composer from a warm chat's input, so a restart
     /// carries the text on screen through the transition instead of blanking
     /// it.
-    pub fn seed_transition_composer(&mut self, session_id: &str, text: String) {
-        if !text.is_empty() {
-            let mut input = TextInput::multiline();
-            input.set_value(text);
-            self.transition_composers
-                .insert(session_id.to_owned(), input);
+    pub fn seed_standby_prompt(&mut self, session_id: &str, text: String) {
+        if text.is_empty() {
+            return;
         }
+        self.standby_prompt_mut(session_id).set_draft(text);
     }
 
-    /// Removes and returns the type-ahead draft, for the chat open that
-    /// adopts it as the composer's starting input.
-    pub fn take_transition_composer_draft(&mut self, session_id: &str) -> Option<String> {
-        self.transition_composers
+    /// Removes a session's standby composer and returns its draft, for the
+    /// chat open that adopts it as the composer's starting input.
+    pub fn take_standby_prompt_draft(&mut self, session_id: &str) -> Option<String> {
+        self.standby_prompts
             .remove(session_id)
-            .map(TextInput::into_value)
+            .map(|standby| standby.draft())
     }
 
-    /// Keys for the type-ahead composer shown while a Starting/Resuming
-    /// transition owns the selected session. Editing keys land in the draft;
-    /// `Enter` deliberately does not send, because the session is not live
-    /// yet. `Some` means the key was consumed, including as a no-op.
-    fn handle_type_ahead_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
+    /// Keys for the standby composer shown while a Starting/Resuming
+    /// transition or an in-flight attach owns the selected session. It is the
+    /// real composer, so the whole readline chord set edits the draft; only
+    /// the dashboard's own chords are reserved, which keeps, say, Alt-X
+    /// cancel working while typing. `Enter` never sends while the session is
+    /// offline: the standby keeps the draft and explains. `Some` means the
+    /// key was consumed, including as a no-op.
+    fn handle_standby_prompt_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
         if self.focus != Focus::Prompt {
             return None;
         }
-        let (session_id, kind) = self.type_ahead_session()?;
-        if key.code == KeyCode::Enter {
-            self.set_notice(match kind {
-                SessionTransitionKind::Resuming => {
-                    "Sending opens when the session has resumed; the draft is kept."
-                }
-                _ => "Sending opens when the session is live; the draft is kept.",
-            });
-            self.record_event_handled();
-            return Some(DashboardAction::None);
+        let session_id = self.standby_prompt_session()?.to_owned();
+        // Chords the dashboard answers from every surface — the palette, the
+        // pane keys, canceling an operation — still belong to it.
+        if crate::actions::spec_for_key(key, self.focus).is_some() {
+            return None;
         }
-        let composer = self
-            .transition_composers
-            .entry(session_id.to_owned())
-            .or_insert_with(TextInput::multiline);
-        match composer.handle_key(key) {
-            EditOutcome::Changed => self.mark_render_changed(),
-            EditOutcome::Handled => {}
-            // Tab, F-keys, and anything the field does not edit still belong
-            // to the ordinary dashboard handling.
-            EditOutcome::Unhandled => return None,
+        let (action, changed) = {
+            let standby = self.standby_prompt_mut(&session_id);
+            let action = standby.handle_key(key);
+            let changed = standby.take_render_changed();
+            (action, changed)
+        };
+        match action {
+            ChatAction::CycleFocus { reverse } => {
+                self.cycle_focus(reverse);
+            }
+            ChatAction::PasteFromClipboard => {
+                // Clipboard reads and image attachments belong to the attached
+                // chat; until then the chord is answered honestly instead of
+                // silently doing nothing.
+                self.set_notice(
+                    "Pasting from the clipboard opens when the session is live; the draft is kept.",
+                );
+            }
+            _ => {}
+        }
+        if changed {
+            self.mark_render_changed();
         }
         self.record_event_handled();
         Some(DashboardAction::None)
@@ -1551,14 +1590,13 @@ impl DashboardState {
             return;
         }
         if self.focus == Focus::Prompt
-            && let Some((session_id, _)) = self.type_ahead_session()
+            && let Some(session_id) = self.standby_prompt_session()
         {
+            let session_id = session_id.to_owned();
             let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
-            let composer = self
-                .transition_composers
-                .entry(session_id.to_owned())
-                .or_insert_with(TextInput::multiline);
-            if composer.insert_str(&normalized) {
+            let standby = self.standby_prompt_mut(&session_id);
+            standby.paste(&normalized);
+            if standby.take_render_changed() {
                 self.mark_render_changed();
             }
         }
@@ -1798,9 +1836,10 @@ impl DashboardState {
             }
             _ => {}
         }
-        // The type-ahead composer answers the same keys the focused prompt
-        // would, before list navigation can claim the arrows.
-        if plain && let Some(action) = self.handle_type_ahead_key(key) {
+        // The standby composer answers the same keys the focused prompt
+        // would — the full readline set — before list navigation can claim
+        // the arrows.
+        if let Some(action) = self.handle_standby_prompt_key(key) {
             return action;
         }
         if plain
@@ -3371,7 +3410,7 @@ mod tests {
     /// A launching session parks its conversation behind a composer the user
     /// can type into; the draft survives to be taken by the chat that opens.
     #[test]
-    fn typing_during_a_launching_transition_edits_the_type_ahead_draft() {
+    fn typing_during_a_launching_transition_edits_the_standby_draft() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
@@ -3393,17 +3432,52 @@ mod tests {
 
         assert_eq!(
             dashboard
-                .transition_composer("session-1")
-                .map(|input| input.value()),
-            Some("helll")
+                .standby_prompts
+                .get("session-1")
+                .map(|standby| standby.draft()),
+            Some("helll".into())
         );
         assert_eq!(
-            dashboard
-                .take_transition_composer_draft("session-1")
-                .as_deref(),
+            dashboard.take_standby_prompt_draft("session-1").as_deref(),
             Some("helll")
         );
-        assert_eq!(dashboard.take_transition_composer_draft("session-1"), None);
+        assert_eq!(dashboard.take_standby_prompt_draft("session-1"), None);
+    }
+
+    /// The standby composer is the real one, so its readline chords edit the
+    /// draft instead of falling through to the dashboard.
+    #[test]
+    fn readline_chords_edit_the_standby_draft() {
+        let mut session = stopped_session();
+        session.state = SessionState::Running;
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
+        dashboard.focus_prompt();
+
+        for character in "alpha beta".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        // Ctrl-A to line start, then Ctrl-K kills the whole line…
+        dashboard.handle_key(ctrl_key('a'));
+        dashboard.handle_key(ctrl_key('k'));
+        assert_eq!(
+            dashboard
+                .standby_prompts
+                .get("session-1")
+                .map(|standby| standby.draft()),
+            Some(String::new())
+        );
+        // …Ctrl-Y yanks it back, and Alt-B walks back a word.
+        dashboard.handle_key(ctrl_key('y'));
+        dashboard.handle_key(alt_key('b'));
+        assert_eq!(
+            dashboard
+                .standby_prompts
+                .get("session-1")
+                .map(|standby| standby.draft()),
+            Some("alpha beta".into())
+        );
+        assert!(dashboard.take_standby_prompt_draft("session-1").is_some());
     }
 
     /// Enter must not send while the session is not live: it is consumed with
@@ -3428,16 +3502,17 @@ mod tests {
         assert!(dashboard.notice().is_some());
         assert_eq!(
             dashboard
-                .transition_composer("session-1")
-                .map(|input| input.value()),
-            Some("h")
+                .standby_prompts
+                .get("session-1")
+                .map(|standby| standby.draft()),
+            Some("h".into())
         );
     }
 
     /// Retiring transitions have no conversation to type toward, so their
     /// keys keep falling through to the ordinary dashboard handling.
     #[test]
-    fn a_stopping_transition_offers_no_type_ahead_composer() {
+    fn a_stopping_transition_offers_no_standby_composer() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
@@ -3448,13 +3523,13 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Char('h'))),
             DashboardAction::None
         );
-        assert!(dashboard.transition_composer("session-1").is_none());
+        assert!(!dashboard.standby_prompts.contains_key("session-1"));
     }
 
     /// A paste into the parked composer lands in the draft with terminal line
     /// endings normalized, the way the chat composer normalizes them.
     #[test]
-    fn a_paste_during_a_starting_transition_joins_the_type_ahead_draft() {
+    fn a_paste_during_a_starting_transition_joins_the_standby_draft() {
         let mut session = stopped_session();
         session.state = SessionState::Running;
         let mut dashboard = dashboard_with_session(session);
@@ -3465,9 +3540,10 @@ mod tests {
 
         assert_eq!(
             dashboard
-                .transition_composer("session-1")
-                .map(|input| input.value()),
-            Some("first\nsecond\nthird")
+                .standby_prompts
+                .get("session-1")
+                .map(|standby| standby.draft()),
+            Some("first\nsecond\nthird".into())
         );
     }
 
