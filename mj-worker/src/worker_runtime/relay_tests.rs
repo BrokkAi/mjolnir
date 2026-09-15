@@ -48,6 +48,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         run_mode: Default::default(),
         session_id: SESSION_ID.into(),
         harness: HarnessKind::Codex,
+        authentication_marker: None,
         bridge_command: "codex-acp".into(),
         bridge_args: Vec::new(),
         harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,

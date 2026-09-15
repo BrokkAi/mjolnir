@@ -119,10 +119,15 @@ fn credential_endpoint(
         format!("worker launch config has no {key} entry, so it cannot locate harness credentials")
     })?;
     let home = config.harness.home_from_environment(home);
+    let marker = match config.authentication_marker.as_deref() {
+        Some(name) => home.join(name),
+        // Configs persisted before the controller stated the marker.
+        None => mj_core::config::harness_authentication_marker(config.harness, &home),
+    };
     Ok(CredentialEndpoint {
         harness: config.harness,
         home: home.clone(),
-        marker: mj_core::config::harness_authentication_marker(config.harness, &home),
+        marker,
     })
 }
 

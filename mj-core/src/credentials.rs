@@ -699,6 +699,10 @@ pub struct CredentialSyncTarget {
     pub harness: HarnessKind,
     /// Controller-side canonical home for the profile.
     pub profile_home: PathBuf,
+    /// True when the profile authenticates with an API key from its own
+    /// `environment`. Such a profile has no credential file to exchange with
+    /// the session, so only skills and the GitHub token are reconciled.
+    pub authenticates_with_api_key: bool,
     /// GitHub CLI credentials are pushed to every target except raw localhost.
     pub sync_github_token: bool,
     /// Reconnect command for the session's worker proxy.

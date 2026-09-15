@@ -16,7 +16,7 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 - [x] (2026-09-15 15:05Z) Confirmed codex-acp advertises exactly the models in `models.json`, and that a relative `model_catalog_json` resolves against `CODEX_HOME`.
 - [x] (2026-09-15 15:40Z) Confirmed Z.ai `GET /api/v1/models` returns a Codex-format catalog (`glm-5.3`, `glm-5.3-flash`, `glm-5-turbo`) and that Codex reads the reviewer model from the catalog field `auto_review_model_override`.
 - [x] (2026-09-15 17:20Z) Milestone 1: provider descriptor and per-profile capabilities in `mj-core`. Added `mj-core/src/codex_provider.rs`, `mj-core/src/codex_catalog.rs`, `HarnessProfile::{codex_provider, auth_scheme, authentication_marker, credential_freshness, credential_expiry, supports_guardian_approvals}`, the `AuthScheme` enum, provider validation, and `login_command` returning `Result`.
-- [ ] Milestone 2: controller and CLI consumers use the per-profile capabilities (auth gate, credential sync, login, quota, utility model, staging).
+- [x] (2026-09-15 18:40Z) Milestone 2: controller, worker, and CLI consumers use the per-profile capabilities. Auth gate takes the profile; `QuotaRefreshRequest::for_profile` resolves the provider and key and routes Z.ai hosts to the renamed `mj-controller/src/zai_usage.rs`; credential sync skips the file exchange for an API-key profile; `WorkerLaunchConfig::authentication_marker` carries the marker name to the worker; API-key profiles are excluded from utility duty; staging fetches, stamps, and installs `models.json` with a cached fallback.
 - [ ] Milestone 3: remove the ZCode harness from code, assets, container image, and docs.
 - [ ] Milestone 4: documentation (in scope) and live validation on the user's install (out of scope for the implementing agent; the real Z.ai key is the user's, so every behavioural step in `Validation and Acceptance` remains unperformed and must be run by the user).
 
@@ -50,6 +50,11 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 - Observation: The catalog and guardian probe was rerun on the exact pinned stack, Codex 0.153.4 (the `@openai/codex` dependency of `@brokkai/codex-acp` 1.11.4, selected with `CODEX_PATH`) against an unmodified codex-acp 1.11.4. The ACP `model` config option listed only `glm-5.3` and `glm-5.3-flash`; `session/set_mode` to `agent` succeeded; an escalated write under the user's home produced a "Guardian Review" tool call; and with `auto_review_model_override = "glm-5.3-flash"` stamped on every catalog entry, the session rollout recorded only `"model":"glm-5.3"` while the reviewer thread's rollout recorded only `"model":"glm-5.3-flash"`. No change to the Codex fork or the codex-acp fork is required: every feature this plan uses is stock Codex configuration present in 0.153.4.
 
 - Observation: `model_catalog_json` is a top-level key in Codex's `config.toml`, not a key inside the `[model_providers.<id>]` table. Appending it to the end of a staged file would therefore land it inside whatever table comes last and Codex would ignore it. Staging prepends the line instead, which is valid TOML because top-level keys must precede the first table header, and leaves the rest of the user's file byte-identical.
+
+- Observation: On a local bare target a Codex session runs directly from the user's own profile home (`target_profile_home` in `mj-controller/src/controller.rs` returns `profile.home` for `LocalBare`, and `prepare_worker_files` skips staging entirely). A generated catalog would therefore either be missing or written into the user's home. Staging is now forced for any profile with a custom provider, through `requires_private_profile_home`, and the local bare home becomes `<worker_root>/profile` as it already did for Claude.
+  Evidence: the test `a_custom_provider_session_carries_its_key_and_runs_from_a_private_home` asserts `CODEX_HOME` is `/home/me/.local/share/hel/worker/profile`, and `staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from` asserts the user's home keeps no `models.json`.
+
+- Observation: The catalog cache reuses the existing `profile_config_cache` table, whose rows are treated as stale after 24 hours (`load_profile_config_cache_from` in `mj-controller/src/database.rs`). A provider outage longer than a day therefore fails the launch rather than staging a very old catalog. That is the table's existing behaviour and this plan does not change it.
 
 - Observation: The Coding Plan key is rejected by the chat-completions path under `https://api.z.ai/api/v1` but accepted under `https://api.z.ai/api/coding/paas/v4`. This matters only for Mjolnir's utility model (anvil's client speaks chat completions and appends `/v1` to its base URL), not for Codex.
   Evidence: `POST /api/v1/chat/completions` returned `403 model_access_denied` for `glm-5.3`; `POST /api/coding/paas/v4/chat/completions` returned 200 `pong`.
@@ -94,6 +99,18 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 
 - Decision: Keep a `native_login_command` function beside the new `login_command` that returns `Result`.
   Rationale: Setup discovery in `mj-controller/src/setup.rs` calls the login command only to learn which program to run `--version` against, before any profile exists. "This profile needs no login" is not a useful answer there, and an error would make discovery skip an installed Codex. `login_command` is the gate; `native_login_command` is the lookup.
+  Date/Author: 2026-09-15, Claude.
+
+- Decision: A profile with a custom provider always runs from a private staged home, even on a local bare target.
+  Rationale: Mjolnir generates `models.json` and prepends `model_catalog_json` to `config.toml` for each launch. Writing either into the user's own profile home would edit a file the user owns and would leak one session's catalog into every other tool using that home. The controller already had this exception for Claude, so the change is one predicate, `requires_private_profile_home`.
+  Date/Author: 2026-09-15, Claude.
+
+- Decision: The catalog fetch and the catalog cache are both injected into `stage_codex_catalog`, as a `CatalogFetch` function and a `CatalogCache` trait.
+  Rationale: Tests cannot reach Z.ai, and the live cache is a process-global store. The production implementations are `fetch_catalog_over_https` (the same bounded client shape the quota reader uses) and `SharedCatalogCache` (the `profile_config_cache` table). Tests supply a fake body and an isolated SQLite store that still uses the real table and schema, so the fallback path is proven against the real store rather than a stub.
+  Date/Author: 2026-09-15, Claude.
+
+- Decision: Exclusion from utility duty is decided by `profile_serves_as_utility(profile)` rather than by making `utility_precedence` take a profile.
+  Rationale: `utility_precedence` ranks candidates by harness kind inside `candidate_order`, where only the kind is available. One profile-aware predicate at the two places that select a profile keeps the ranking logic unchanged.
   Date/Author: 2026-09-15, Claude.
 
 ## Outcomes & Retrospective

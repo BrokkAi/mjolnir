@@ -335,19 +335,7 @@ pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshReques
     controller
         .config
         .enabled_profiles()
-        .map(|(id, profile)| {
-            let mut environment = profile.environment.clone();
-            profile
-                .kind
-                .configure_home_environment(&profile.home, &mut environment);
-            QuotaRefreshRequest {
-                profile_id: id.to_owned(),
-                harness: profile.kind,
-                source_home: profile.home.clone(),
-                environment,
-                cwd: cwd.clone(),
-            }
-        })
+        .map(|(id, profile)| QuotaRefreshRequest::for_profile(id, profile, cwd.clone()))
         .collect()
 }
 
@@ -669,6 +657,7 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
                 profile_id: session.last_profile.clone(),
                 harness: profile.kind,
                 profile_home: profile.home.clone(),
+                authenticates_with_api_key: profile.auth_scheme().is_api_key(),
                 sync_github_token,
                 spec,
             })

@@ -167,6 +167,7 @@ impl Controller {
                 profile.kind,
                 mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Muse
             )
+            || super::requires_private_profile_home(profile)
         {
             let started = Instant::now();
             let result = stage_profile(profile, &profile_stage);
@@ -176,6 +177,13 @@ impl Controller {
                 "profile staging completed"
             );
             result?;
+            stage_codex_catalog(
+                &session.last_profile,
+                profile,
+                &profile_stage,
+                &fetch_catalog_over_https,
+                &SharedCatalogCache,
+            )?;
             append_hel_target_environment(profile.kind, &profile_stage, backend)?;
             apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
             if launch.subagent_tools && profile.kind == mj_core::config::HarnessKind::Claude {
@@ -495,6 +503,12 @@ fn worker_launch_config(
             session_id: session_id.to_string(),
             subagent_tools: false,
             harness: profile.kind,
+            // The staged home mirrors the profile home, so the controller's
+            // marker file name is the one the worker must check.
+            authentication_marker: profile
+                .authentication_marker()
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
             bridge_command: PathBuf::from(bridge_command),
             bridge_args,
             harness_runtime: harness_runtime_policy(backend),
@@ -1723,6 +1737,145 @@ pub(super) fn stage_profile(
         Ok(())
     })?;
     Ok(())
+}
+
+/// Fetches a provider's model catalog. A function parameter so tests can supply
+/// a body without reaching the network. Takes the catalog URL and the API key;
+/// returns the raw response body.
+pub(super) type CatalogFetch<'a> = &'a dyn Fn(&str, &str) -> Result<Vec<u8>>;
+
+/// The catalog file Mjolnir writes into a staged Codex home, and the key it
+/// points `config.toml` at. Relative to `CODEX_HOME`, so the staged copy works
+/// unchanged on any target.
+const STAGED_CATALOG_FILE: &str = "models.json";
+
+/// Where a fetched catalog is remembered so a provider outage cannot block a
+/// launch. The live store is one implementation; a test can supply another.
+pub(super) trait CatalogCache {
+    fn load(&self, profile_id: &str, fingerprint: &str) -> Option<String>;
+    fn store(&self, profile_id: &str, fingerprint: &str, body: &str);
+}
+
+/// The catalog cache backed by Mjolnir's own `profile_config_cache` table.
+pub(super) struct SharedCatalogCache;
+
+impl CatalogCache for SharedCatalogCache {
+    fn load(&self, profile_id: &str, fingerprint: &str) -> Option<String> {
+        crate::database::load_profile_config_cache(profile_id, "", fingerprint)
+            .ok()
+            .flatten()
+    }
+
+    fn store(&self, profile_id: &str, fingerprint: &str, body: &str) {
+        if let Err(error) = crate::database::save_profile_config_cache(
+            profile_id.to_owned(),
+            String::new(),
+            fingerprint.to_owned(),
+            body.to_owned(),
+        ) {
+            tracing::warn!(profile_id, "could not cache the model catalog: {error:#}");
+        }
+    }
+}
+
+/// Give a staged Codex home the model catalog its provider advertises.
+///
+/// Codex fetches its model list from its own service only for ChatGPT logins.
+/// Without a catalog file a profile pointed at another provider would offer
+/// OpenAI's built-in model names and send them to that provider, so Mjolnir
+/// fetches the provider's own catalog, stamps the Guardian reviewer on every
+/// entry, writes it beside the staged `config.toml`, and points the staged
+/// configuration at it.
+///
+/// Profiles with no custom provider are left alone. A failed fetch falls back to
+/// the last catalog stored for this profile, so a provider outage does not block
+/// a launch; with neither, the launch fails naming the profile and the URL.
+pub(super) fn stage_codex_catalog(
+    profile_id: &str,
+    profile: &mj_core::config::HarnessProfile,
+    destination: &Path,
+    fetch: CatalogFetch<'_>,
+    cache: &dyn CatalogCache,
+) -> Result<()> {
+    let Some(provider) = profile.codex_provider()? else {
+        return Ok(());
+    };
+    let Some(env_key) = provider.env_key.as_deref() else {
+        // An inline `experimental_bearer_token` provider carries its key in the
+        // staged file itself; Mjolnir has no key of its own to authorize a
+        // catalog fetch with.
+        return Ok(());
+    };
+    let api_key = profile.environment.get(env_key).with_context(|| {
+        format!("profile {profile_id:?} has no {env_key} entry to read its model catalog with")
+    })?;
+    let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
+    let fingerprint = format!("catalog:{}", provider.base_url);
+    let body = match fetch(&url, api_key) {
+        Ok(body) => {
+            if let Ok(text) = std::str::from_utf8(&body) {
+                cache.store(profile_id, &fingerprint, text);
+            }
+            body
+        }
+        Err(error) => match cache.load(profile_id, &fingerprint) {
+            Some(body) => {
+                tracing::warn!(
+                    profile_id,
+                    provider = %provider.id,
+                    "could not fetch the model catalog from {url}, using the last cached copy: {error:#}"
+                );
+                body.into_bytes()
+            }
+            None => bail!(
+                "profile {profile_id:?}: could not fetch the model catalog from {url} and no cached copy is available: {error:#}"
+            ),
+        },
+    };
+    let mut catalog = mj_core::codex_catalog::parse(&body)
+        .with_context(|| format!("profile {profile_id:?}: model catalog from {url}"))?;
+    match mj_core::codex_catalog::guardian_review_model(catalog.slugs()) {
+        Some(reviewer) => mj_core::codex_catalog::stamp_reviewer(&mut catalog, &reviewer),
+        // With no small model to review with, Codex falls back to reviewing
+        // with the session model, which still runs Guardian.
+        None => tracing::info!(
+            profile_id,
+            "the model catalog lists no flash model; Guardian reviews run on the session model"
+        ),
+    }
+    std::fs::create_dir_all(destination)?;
+    std::fs::write(destination.join(STAGED_CATALOG_FILE), catalog.to_json())?;
+    point_config_at_catalog(&destination.join("config.toml"))
+}
+
+/// Prepend `model_catalog_json` to a staged Codex `config.toml`.
+///
+/// The key is top-level in Codex's configuration, and TOML puts every top-level
+/// key before the first table header, so the line goes at the front. Appending
+/// would make it a key of whichever table happens to come last, which Codex
+/// ignores. Profile validation guarantees the user wrote no such key.
+fn point_config_at_catalog(path: &Path) -> Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    std::fs::write(
+        path,
+        format!("model_catalog_json = \"{STAGED_CATALOG_FILE}\"\n{existing}"),
+    )
+    .with_context(|| format!("point {} at the staged model catalog", path.display()))
+}
+
+/// Fetch a provider's catalog over HTTPS. Mirrors the bounded client the Coding
+/// Plan quota reader uses: a short timeout and no redirects.
+pub(super) fn fetch_catalog_over_https(url: &str, api_key: &str) -> Result<Vec<u8>> {
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?
+        .get(url)
+        .bearer_auth(api_key)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()?
+        .error_for_status()?;
+    Ok(response.bytes()?.to_vec())
 }
 
 /// Add lifecycle guidance only for targets that Hel destroys as a whole.
@@ -4693,6 +4846,202 @@ mod tests {
             ProjectMemoryMcpDelivery::Acp
         );
     }
+    /// A catalog cache backed by an isolated copy of Mjolnir's own
+    /// `profile_config_cache` table, so the fallback path is exercised against
+    /// the real schema without touching the live store.
+    struct IsolatedCatalogCache(std::path::PathBuf);
+
+    impl CatalogCache for IsolatedCatalogCache {
+        fn load(&self, profile_id: &str, fingerprint: &str) -> Option<String> {
+            crate::database::load_profile_config_cache_from(&self.0, profile_id, "", fingerprint)
+                .ok()
+                .flatten()
+        }
+
+        fn store(&self, profile_id: &str, fingerprint: &str, body: &str) {
+            crate::database::save_profile_config_cache_at(
+                &self.0,
+                profile_id,
+                "",
+                fingerprint,
+                body,
+            )
+            .expect("write the isolated catalog cache");
+        }
+    }
+
+    const ZAI_CONFIG: &str = "model = \"glm-5.3\"\n\
+                              model_provider = \"zai\"\n\
+                              \n\
+                              [model_providers.zai]\n\
+                              base_url = \"https://api.z.ai/api/v1\"\n\
+                              env_key = \"ZAI_API_KEY\"\n\
+                              wire_api = \"responses\"\n";
+
+    const ZAI_CATALOG: &str = r#"{"models":[
+        {"slug":"glm-5.3","supported_reasoning_levels":["low","high","max"]},
+        {"slug":"glm-5.3-flash","supported_reasoning_levels":["low","high","max"]}
+    ]}"#;
+
+    fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
+        std::fs::write(home.join("config.toml"), ZAI_CONFIG).unwrap();
+        mj_core::config::HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: home.to_path_buf(),
+            environment: BTreeMap::from([("ZAI_API_KEY".to_owned(), "coding-plan-key".to_owned())]),
+            context_window_bytes: None,
+        }
+    }
+
+    #[test]
+    fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from() {
+        let home = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let profile = zai_profile(home.path());
+        let cache = IsolatedCatalogCache(cache.path().join("cache.sqlite3"));
+        let asked = std::cell::RefCell::new(Vec::new());
+
+        stage_profile(&profile, staged.path()).unwrap();
+        stage_codex_catalog(
+            "glm",
+            &profile,
+            staged.path(),
+            &|url, key| {
+                asked.borrow_mut().push((url.to_owned(), key.to_owned()));
+                Ok(ZAI_CATALOG.as_bytes().to_vec())
+            },
+            &cache,
+        )
+        .unwrap();
+
+        assert_eq!(
+            asked.into_inner(),
+            vec![(
+                "https://api.z.ai/api/v1/models".to_owned(),
+                "coding-plan-key".to_owned()
+            )],
+            "the provider's own key authorizes its catalog fetch"
+        );
+        let catalog = mj_core::codex_catalog::parse(
+            &std::fs::read(staged.path().join("models.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(catalog.slugs(), ["glm-5.3", "glm-5.3-flash"]);
+        for model in &catalog.models {
+            assert_eq!(
+                model["auto_review_model_override"],
+                serde_json::Value::from("glm-5.3-flash"),
+                "Guardian reviews run on the newest flash model"
+            );
+        }
+        // The key must be top-level, so it precedes the provider table, and the
+        // user's own lines survive unchanged.
+        let config = std::fs::read_to_string(staged.path().join("config.toml")).unwrap();
+        assert!(
+            config.starts_with("model_catalog_json = \"models.json\"\n"),
+            "{config}"
+        );
+        assert!(config.ends_with(ZAI_CONFIG), "{config}");
+        assert_eq!(
+            mj_core::codex_provider::codex_provider(staged.path())
+                .unwrap()
+                .unwrap()
+                .model_catalog_json
+                .as_deref(),
+            Some(Path::new("models.json")),
+            "Codex reads the staged catalog as a top-level key"
+        );
+        // The staged copy is what the session runs from, so a session on a
+        // local bare target must not use the profile home directly.
+        assert!(super::super::requires_private_profile_home(&profile));
+        assert!(
+            !home.path().join("models.json").exists(),
+            "the user's own profile home stays untouched"
+        );
+    }
+
+    #[test]
+    fn a_failed_catalog_fetch_falls_back_to_the_last_cached_catalog() {
+        let home = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let profile = zai_profile(home.path());
+        let cache = IsolatedCatalogCache(store.path().join("cache.sqlite3"));
+
+        stage_codex_catalog(
+            "glm",
+            &profile,
+            staged.path(),
+            &|_, _| Ok(ZAI_CATALOG.as_bytes().to_vec()),
+            &cache,
+        )
+        .unwrap();
+        std::fs::remove_file(staged.path().join("models.json")).unwrap();
+
+        stage_codex_catalog(
+            "glm",
+            &profile,
+            staged.path(),
+            &|_, _| bail!("the provider is unreachable"),
+            &cache,
+        )
+        .expect("a provider outage must not block a launch");
+        let catalog = mj_core::codex_catalog::parse(
+            &std::fs::read(staged.path().join("models.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(catalog.slugs(), ["glm-5.3", "glm-5.3-flash"]);
+
+        // With nothing cached for a different provider, the launch fails and
+        // says which profile and URL could not be reached.
+        let empty = tempfile::tempdir().unwrap();
+        let error = stage_codex_catalog(
+            "glm",
+            &profile,
+            staged.path(),
+            &|_, _| bail!("the provider is unreachable"),
+            &IsolatedCatalogCache(empty.path().join("empty.sqlite3")),
+        )
+        .expect_err("no catalog and no cache cannot launch")
+        .to_string();
+        assert!(error.contains("glm"), "{error}");
+        assert!(error.contains("https://api.z.ai/api/v1/models"), "{error}");
+    }
+
+    #[test]
+    fn a_native_codex_profile_gets_no_generated_catalog() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), "model = \"gpt-5.5\"\n").unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: home.path().to_path_buf(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        };
+
+        stage_profile(&profile, staged.path()).unwrap();
+        stage_codex_catalog(
+            "work",
+            &profile,
+            staged.path(),
+            &|_, _| panic!("a profile with no custom provider must not fetch a catalog"),
+            &IsolatedCatalogCache(store.path().join("cache.sqlite3")),
+        )
+        .unwrap();
+
+        assert!(!staged.path().join("models.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(staged.path().join("config.toml")).unwrap(),
+            "model = \"gpt-5.5\"\n"
+        );
+        assert!(!super::super::requires_private_profile_home(&profile));
+    }
+
     #[test]
     fn stage_grok_profile_copies_authentication_and_agent_identity() {
         let home = tempfile::tempdir().unwrap();
@@ -4920,6 +5269,53 @@ mod tests {
             format!("{error:#}").contains(&path.display().to_string()),
             "error should name the staged file: {error:#}"
         );
+    }
+
+    #[test]
+    fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let profile = zai_profile(home.path());
+        let mut session = crate::controller::test_support::checkpoint_test_session("s-glm");
+        session.harness_kind = HarnessKind::Codex;
+        session.last_profile = "glm".into();
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some(project.path().to_path_buf());
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: "/home/me/.local/share/hel/worker".into(),
+        });
+
+        let (launch, _, target_home) = worker_launch_config(
+            &session,
+            &profile,
+            None,
+            &targets::TargetLocator::LocalBare {
+                worker_root: "/home/me/.local/share/hel/worker".into(),
+            },
+            &session.id,
+            &session.id,
+            &mj_core::config::TargetTemplate::LocalBare,
+        )
+        .unwrap();
+
+        assert_eq!(launch.environment["ZAI_API_KEY"], "coding-plan-key");
+        assert_eq!(launch.environment["CODEX_HOME"], target_home);
+        assert_eq!(
+            target_home, "/home/me/.local/share/hel/worker/profile",
+            "the session runs from the staged copy, not the user's profile home"
+        );
+        assert_eq!(
+            launch.authentication_marker.as_deref(),
+            Some("config.toml"),
+            "the worker checks the Codex configuration, not a ChatGPT auth file"
+        );
+        // Guardian still applies: a raw local target keeps configured approvals.
+        assert_eq!(
+            launch.execution_policy,
+            ExecutionPolicy::ConfiguredApprovals
+        );
+        assert_eq!(launch.environment["INITIAL_AGENT_MODE"], "agent");
+        assert!(profile.supports_guardian_approvals());
     }
 
     /// Muse has no guardian mode, so even a raw local target launches it
@@ -5300,6 +5696,7 @@ mod tests {
             run_mode: Default::default(),
             session_id: session.into(),
             harness: HarnessKind::Codex,
+            authentication_marker: None,
             bridge_command: "ignored".into(),
             bridge_args: Vec::new(),
             harness_runtime: HarnessRuntimePolicy::Managed,
@@ -5397,6 +5794,7 @@ mod tests {
             run_mode: Default::default(),
             session_id: "session-local".into(),
             harness: HarnessKind::Codex,
+            authentication_marker: None,
             bridge_command: "ignored".into(),
             bridge_args: Vec::new(),
             harness_runtime: HarnessRuntimePolicy::Managed,
@@ -5479,6 +5877,7 @@ mod tests {
             run_mode: Default::default(),
             session_id: session.into(),
             harness: HarnessKind::Kimi,
+            authentication_marker: None,
             bridge_command: "ignored".into(),
             bridge_args: Vec::new(),
             harness_runtime: HarnessRuntimePolicy::Managed,

@@ -2089,6 +2089,39 @@ async fn reconcile_connected(
     github_token: Option<&str>,
 ) -> Result<Vec<CredentialSyncAction>> {
     let mut actions = Vec::new();
+    // An API-key profile keeps its key in the profile environment, which the
+    // worker already receives in the launch environment. There is no
+    // credential file on either side to compare or copy.
+    if !target.authenticates_with_api_key {
+        reconcile_credentials(
+            client,
+            target,
+            canonical_path,
+            canonical,
+            canonical_bytes,
+            &mut actions,
+        )
+        .await?;
+    }
+    if reconcile_skills(client, target, canonical_skills).await? {
+        actions.push(CredentialSyncAction::SkillsPushed);
+    }
+    if target.sync_github_token
+        && let Some(action) = reconcile_github_token(client, target, github_token).await?
+    {
+        actions.push(action);
+    }
+    Ok(actions)
+}
+
+async fn reconcile_credentials(
+    client: &mut RelayClient,
+    target: &CredentialSyncTarget,
+    canonical_path: &Path,
+    canonical: &CredentialSnapshot,
+    canonical_bytes: &[u8],
+    actions: &mut Vec<CredentialSyncAction>,
+) -> Result<()> {
     let session = client.credential_state().await?;
     match reconcile(canonical, &session) {
         SyncAction::None => {
@@ -2126,15 +2159,7 @@ async fn reconcile_connected(
             actions.push(CredentialSyncAction::Pulled);
         }
     }
-    if reconcile_skills(client, target, canonical_skills).await? {
-        actions.push(CredentialSyncAction::SkillsPushed);
-    }
-    if target.sync_github_token
-        && let Some(action) = reconcile_github_token(client, target, github_token).await?
-    {
-        actions.push(action);
-    }
-    Ok(actions)
+    Ok(())
 }
 
 async fn reconcile_github_token(
@@ -2694,6 +2719,7 @@ cat > /dev/null
             profile_id: "work".into(),
             harness: mj_core::config::HarnessKind::Codex,
             profile_home: profile.path().to_path_buf(),
+            authenticates_with_api_key: false,
             sync_github_token: false,
             spec: CommandSpec::new("sh", ["-c", "exit 1"]),
         }]);

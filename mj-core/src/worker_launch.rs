@@ -105,6 +105,13 @@ pub struct WorkerLaunchConfig {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub target_environment: std::collections::BTreeMap<String, String>,
     pub harness: HarnessKind,
+    /// File name inside the staged harness home that proves authentication.
+    /// An API-key profile is proven by its harness configuration file rather
+    /// than a credential file, so the controller decides the name and the
+    /// worker does not re-derive it. Configs persisted by older releases omit
+    /// the field; the worker then falls back to the harness kind's own marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_marker: Option<String>,
     pub bridge_command: PathBuf,
     pub bridge_args: Vec<String>,
     #[serde(default, skip_serializing_if = "HarnessRuntimePolicy::is_ambient")]

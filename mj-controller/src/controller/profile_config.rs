@@ -175,8 +175,13 @@ fn discover_blocking(
             .transpose()
         },
         || {
-            let mut choices =
-                probe_profile(profile, environment.clone(), model.clone(), cancelled)?;
+            let mut choices = probe_profile(
+                profile_id,
+                profile,
+                environment.clone(),
+                model.clone(),
+                cancelled,
+            )?;
             enrich_profile_config(profile, &mut choices)?;
             Ok(choices)
         },
@@ -234,6 +239,7 @@ fn resolve_cached(
 }
 
 fn probe_profile(
+    profile_id: &str,
     profile: &HarnessProfile,
     environment: BTreeMap<String, String>,
     model: Option<String>,
@@ -246,6 +252,13 @@ fn probe_profile(
         root.path().join("profile")
     };
     super::worker_binary::stage_profile(profile, &home)?;
+    super::worker_binary::stage_codex_catalog(
+        profile_id,
+        profile,
+        &home,
+        &super::worker_binary::fetch_catalog_over_https,
+        &super::worker_binary::SharedCatalogCache,
+    )?;
     let cwd = root.path().join("workspace");
     std::fs::create_dir(&cwd)?;
     let executor =

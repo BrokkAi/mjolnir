@@ -1180,6 +1180,17 @@ fn target_kind(locator: &targets::TargetLocator) -> &'static str {
     }
 }
 
+/// Whether this profile must run from a private staged copy of its home even on
+/// a local bare target, where a session would otherwise use the profile home
+/// directly.
+///
+/// A Codex profile with a custom model provider qualifies: Mjolnir generates the
+/// provider's model catalog for each launch and points the staged `config.toml`
+/// at it, and it must never write either into the user's own profile home.
+pub(crate) fn requires_private_profile_home(profile: &mj_core::config::HarnessProfile) -> bool {
+    profile.codex_provider().ok().flatten().is_some()
+}
+
 fn target_profile_home(
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -1187,7 +1198,8 @@ fn target_profile_home(
 ) -> String {
     let home = match locator {
         targets::TargetLocator::LocalBare { worker_root }
-            if profile.kind == mj_core::config::HarnessKind::Claude =>
+            if profile.kind == mj_core::config::HarnessKind::Claude
+                || requires_private_profile_home(profile) =>
         {
             Path::new(worker_root)
                 .join("profile")

@@ -5214,7 +5214,7 @@ pub fn load_profile_config_cache(
     load_profile_config_cache_from(&database_path(), profile, model, fingerprint)
 }
 
-fn load_profile_config_cache_from(
+pub(crate) fn load_profile_config_cache_from(
     path: &Path,
     profile: &str,
     model: &str,
@@ -5235,6 +5235,20 @@ pub fn save_profile_config_cache(
     submit_database_write("save profile configuration cache", move |connection| {
         save_profile_config_cache_with(connection, &profile, &model, &fingerprint, &body)
     })
+}
+
+/// Write one cache row into the store at `path`. The queued writer behind
+/// [`save_profile_config_cache`] serves the live store; this names a store
+/// directly so a caller can use an isolated one.
+#[cfg(test)]
+pub(crate) fn save_profile_config_cache_at(
+    path: &Path,
+    profile: &str,
+    model: &str,
+    fingerprint: &str,
+    body: &str,
+) -> Result<()> {
+    save_profile_config_cache_with(&open(path)?, profile, model, fingerprint, body)
 }
 
 fn save_profile_config_cache_with(

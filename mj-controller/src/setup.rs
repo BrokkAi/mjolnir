@@ -17,7 +17,6 @@ use crate::targets::{
     ContainerTemplate as RuntimeContainerTemplate, ProcessExecutor,
     TargetTemplate as RuntimeTargetTemplate, run_setup_smoke_test,
 };
-use mj_core::config::harness_authentication_marker;
 use mj_core::config::{
     AwsAddressSource, Config, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode,
     ProjectBundle, ProjectRepository, SshConnection, TargetTemplate, unique_config_id as unique_id,
@@ -361,34 +360,57 @@ pub(crate) fn discover_harness_homes_with_executor(
         .into_iter()
         .filter(|(kind, path, _)| seen.insert((*kind, path.clone())) && path.is_dir())
         .map(|(kind, path, is_default_home)| DiscoveredHome {
-            authenticated: harness_is_authenticated_with(kind, &path, is_default_home, executor),
+            authenticated: harness_is_authenticated_with(
+                &probe_profile(kind, &path),
+                is_default_home,
+                executor,
+            ),
             kind,
             path,
         })
         .collect()
 }
 
+/// A profile standing in for a home discovery found but the user has not
+/// configured. It carries no environment, which is all the authentication gate
+/// needs: how a profile authenticates is decided by its home, not its key.
+fn probe_profile(kind: HarnessKind, home: &Path) -> HarnessProfile {
+    HarnessProfile {
+        enabled: true,
+        kind,
+        home: home.to_path_buf(),
+        environment: BTreeMap::new(),
+        context_window_bytes: None,
+    }
+}
+
 pub fn harness_is_authenticated(kind: HarnessKind, home: &Path) -> bool {
-    harness_is_authenticated_with_executor(kind, home, &probe_executor())
+    harness_is_authenticated_with_executor(&probe_profile(kind, home), &probe_executor())
 }
 
 pub(crate) fn harness_is_authenticated_with_executor(
-    kind: HarnessKind,
-    home: &Path,
+    profile: &HarnessProfile,
     executor: &impl CommandExecutor,
 ) -> bool {
-    let is_default_home =
-        dirs::home_dir().is_some_and(|user_home| home == user_home.join(kind.default_home_leaf()));
-    harness_is_authenticated_with(kind, home, is_default_home, executor)
+    let is_default_home = dirs::home_dir()
+        .is_some_and(|user_home| profile.home == user_home.join(profile.kind.default_home_leaf()));
+    harness_is_authenticated_with(profile, is_default_home, executor)
 }
 
+/// Whether this profile can talk to its service without a login first.
+///
+/// An API-key profile is proven by its harness configuration file, because its
+/// key lives in the profile's `environment` rather than in a credential file;
+/// [`HarnessProfile::authentication_marker`] already names the right file for
+/// either case.
 fn harness_is_authenticated_with(
-    kind: HarnessKind,
-    home: &Path,
+    profile: &HarnessProfile,
     is_default_home: bool,
     executor: &impl CommandExecutor,
 ) -> bool {
-    if harness_authentication_marker(kind, home).is_file()
+    let kind = profile.kind;
+    let home = profile.home.as_path();
+    if profile.authentication_marker().is_file()
         || (kind == HarnessKind::Kimi && home.join("credentials").is_file())
     {
         return true;
@@ -1452,6 +1474,44 @@ mod tests {
 
     use super::*;
     use crate::targets::CommandOutput;
+
+    #[test]
+    fn an_api_key_codex_profile_is_authenticated_by_its_configuration_file() {
+        let home = tempfile::tempdir().unwrap();
+        let executor = FakeExecutor::succeeds();
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: home.path().to_path_buf(),
+            environment: [("ZAI_API_KEY".to_owned(), "key".to_owned())]
+                .into_iter()
+                .collect(),
+            context_window_bytes: None,
+        };
+
+        assert!(
+            !harness_is_authenticated_with_executor(&profile, &executor),
+            "an empty home is not set up"
+        );
+        fs::write(
+            home.path().join("config.toml"),
+            "model = \"glm-5.3\"\n\
+             model_provider = \"zai\"\n\
+             [model_providers.zai]\n\
+             base_url = \"https://api.z.ai/api/v1\"\n\
+             env_key = \"ZAI_API_KEY\"\n\
+             wire_api = \"responses\"\n",
+        )
+        .unwrap();
+        assert!(
+            harness_is_authenticated_with_executor(&profile, &executor),
+            "the key lives in the profile environment, so the configuration is the proof"
+        );
+        assert!(
+            !home.path().join("auth.json").exists(),
+            "no ChatGPT login is involved"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

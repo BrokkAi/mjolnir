@@ -91,7 +91,7 @@ impl UtilityLlmRuntime {
         self.retain_enabled(config).await;
         let supported = config
             .enabled_profiles()
-            .filter(|(_, profile)| utility_precedence(profile.kind).is_some())
+            .filter(|(_, profile)| profile_serves_as_utility(profile))
             .collect::<Vec<_>>();
         if supported.is_empty() {
             bail!(
@@ -411,17 +411,11 @@ impl CompactionBackend for UtilityCompactionBackend {
 }
 
 fn quota_request(profile_id: &str, profile: &HarnessProfile) -> QuotaRefreshRequest {
-    let mut environment = profile.environment.clone();
-    profile
-        .kind
-        .configure_home_environment(&profile.home, &mut environment);
-    QuotaRefreshRequest {
-        profile_id: profile_id.to_string(),
-        harness: profile.kind,
-        source_home: profile.home.clone(),
-        environment,
-        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    }
+    QuotaRefreshRequest::for_profile(
+        profile_id,
+        profile,
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    )
 }
 
 fn classify_quota(report: &ProfileQuota) -> Option<(UtilityQuotaClass, u8)> {
@@ -447,6 +441,18 @@ fn classify_quota(report: &ProfileQuota) -> Option<(UtilityQuotaClass, u8)> {
     } else {
         Some((UtilityQuotaClass::Reserve, minimum))
     }
+}
+
+/// Whether this profile may be ranked as a utility model, the backend Mjolnir
+/// uses for its own inference such as compacting a transcript.
+///
+/// A Codex profile that authenticates with an API key against a custom provider
+/// is excluded: the utility path speaks chat completions through the shared
+/// OpenAI client, whose URL joining cannot reach such a provider's chat
+/// endpoint. Those profiles still run sessions; they just never serve Mjolnir's
+/// own inference.
+fn profile_serves_as_utility(profile: &HarnessProfile) -> bool {
+    utility_precedence(profile.kind).is_some() && !profile.auth_scheme().is_api_key()
 }
 
 fn utility_precedence(kind: HarnessKind) -> Option<u8> {
@@ -529,6 +535,9 @@ fn numeric_parts(id: &str) -> Vec<u64> {
 }
 
 fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBackend>>> {
+    if !profile_serves_as_utility(profile) {
+        return Ok(None);
+    }
     match profile.kind {
         HarnessKind::Codex => Ok(Some(Arc::new(CodexClient::with_auth_path(
             profile.home.join("auth.json"),
@@ -617,6 +626,43 @@ fn now_seconds() -> u64 {
 mod tests {
     use super::*;
     use futures::{StreamExt, stream};
+
+    #[test]
+    fn an_api_key_codex_profile_never_serves_as_the_utility_model() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "model = \"glm-5.3\"\n\
+             model_provider = \"zai\"\n\
+             [model_providers.zai]\n\
+             base_url = \"https://api.z.ai/api/v1\"\n\
+             env_key = \"ZAI_API_KEY\"\n\
+             wire_api = \"responses\"\n",
+        )
+        .unwrap();
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: home.path().to_path_buf(),
+            environment: [("ZAI_API_KEY".to_owned(), "key".to_owned())]
+                .into_iter()
+                .collect(),
+            context_window_bytes: None,
+        };
+
+        assert!(!profile_serves_as_utility(&profile));
+        assert!(
+            backend_for_profile(&profile).unwrap().is_none(),
+            "the utility client cannot reach a custom provider's chat endpoint"
+        );
+        // A Codex profile using its own login still serves.
+        let native = HarnessProfile {
+            home: tempfile::tempdir().unwrap().path().to_path_buf(),
+            environment: Default::default(),
+            ..profile
+        };
+        assert!(profile_serves_as_utility(&native));
+    }
 
     #[test]
     fn utility_families_never_include_claude_or_zcode() {

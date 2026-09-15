@@ -13,8 +13,7 @@ use serde_json::Value;
 use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
 use crate::grok_usage;
-use mj_core::config::HarnessKind;
-use mj_core::config::harness_authentication_marker;
+use mj_core::config::{HarnessKind, HarnessProfile, harness_authentication_marker};
 use mj_core::credentials::{
     MAX_CREDENTIAL_BYTES, credential_expiry, credential_fingerprint, credential_freshness,
 };
@@ -28,6 +27,56 @@ pub struct QuotaRefreshRequest {
     pub source_home: std::path::PathBuf,
     pub environment: BTreeMap<String, String>,
     pub cwd: std::path::PathBuf,
+    /// The custom model provider this profile authenticates to with an API
+    /// key, when it has one. A profile using its harness's own login has
+    /// `None` here and keeps the harness's native quota path.
+    pub provider: Option<ProviderCredential>,
+}
+
+/// Where a profile's quota lives when the profile authenticates with an API
+/// key against a provider named in its harness configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCredential {
+    /// Provider id from the harness configuration, for error messages.
+    pub id: String,
+    /// Host of the provider's base URL, for example `api.z.ai`.
+    pub host: String,
+    pub api_key: String,
+}
+
+impl QuotaRefreshRequest {
+    /// Build the request for one configured profile. The harness home
+    /// environment is composed here so every caller asks for quota the same
+    /// way, and so a provider key is read from exactly one place.
+    pub fn for_profile(
+        profile_id: &str,
+        profile: &HarnessProfile,
+        cwd: std::path::PathBuf,
+    ) -> Self {
+        let mut environment = profile.environment.clone();
+        profile
+            .kind
+            .configure_home_environment(&profile.home, &mut environment);
+        Self {
+            profile_id: profile_id.to_owned(),
+            harness: profile.kind,
+            source_home: profile.home.clone(),
+            environment,
+            cwd,
+            provider: provider_credential(profile),
+        }
+    }
+}
+
+fn provider_credential(profile: &HarnessProfile) -> Option<ProviderCredential> {
+    let provider = profile.codex_provider().ok().flatten()?;
+    let env_key = provider.env_key.as_deref()?;
+    let api_key = profile.environment.get(env_key)?;
+    Some(ProviderCredential {
+        id: provider.id.clone(),
+        host: provider.host()?,
+        api_key: api_key.clone(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +177,7 @@ async fn refresh_profile(
         source_home,
         environment,
         cwd,
+        provider,
     } = request;
     let environment = environment.into_iter().collect::<HashMap<_, _>>();
     let refreshed_at_epoch_seconds = SystemTime::now()
@@ -135,6 +185,41 @@ async fn refresh_profile(
         .unwrap_or_default()
         .as_secs();
     let result = match harness {
+        // A Codex profile that authenticates with an API key against a custom
+        // provider has no ChatGPT login to refresh and no ChatGPT rate-limit
+        // windows to read. Its quota, when the provider publishes one, comes
+        // from the provider's own endpoint.
+        HarnessKind::Codex if provider.is_some() => {
+            let provider = provider.expect("guarded by the match arm");
+            if crate::zai_usage::serves_quota(&provider.host) {
+                crate::zai_usage::query(&provider.host, &provider.api_key)
+                    .await
+                    .map(|windows| ProfileQuota {
+                        profile_id: profile_id.clone(),
+                        harness,
+                        windows: windows
+                            .into_iter()
+                            .map(|window| QuotaWindow {
+                                label: window.label,
+                                remaining_percent: Some(window.remaining_percent),
+                                used: window.used,
+                                limit: window.limit,
+                                resets: window.resets_at.and_then(format_reset_local_seconds),
+                                resets_at_epoch_seconds: window.resets_at,
+                            })
+                            .collect(),
+                        extra: None,
+                        error: None,
+                        refreshed_at_epoch_seconds,
+                    })
+            } else {
+                Err(anyhow::anyhow!(
+                    "quota reporting is not available for model provider {:?} at {}",
+                    provider.id,
+                    provider.host
+                ))
+            }
+        }
         HarnessKind::Codex => {
             if codex_login_is_near_expiry(&credential_path).await {
                 match codex_usage::refresh_login(
@@ -275,26 +360,9 @@ async fn refresh_profile(
                 error: None,
                 refreshed_at_epoch_seconds,
             }),
-        HarnessKind::Zcode => crate::zcode_usage::query(&source_home)
-            .await
-            .map(|windows| ProfileQuota {
-                profile_id: profile_id.clone(),
-                harness,
-                windows: windows
-                    .into_iter()
-                    .map(|window| QuotaWindow {
-                        label: window.label,
-                        remaining_percent: Some(window.remaining_percent),
-                        used: window.used,
-                        limit: window.limit,
-                        resets: window.resets_at.and_then(format_reset_local_seconds),
-                        resets_at_epoch_seconds: window.resets_at,
-                    })
-                    .collect(),
-                extra: None,
-                error: None,
-                refreshed_at_epoch_seconds,
-            }),
+        // Removed with the ZCode harness in the next milestone; the value is
+        // still reachable from session rows written by earlier releases.
+        HarnessKind::Zcode => Err(anyhow::anyhow!("the ZCode harness is no longer supported")),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
         profile_id,
@@ -1335,6 +1403,82 @@ mod tests {
     use axum::{Json, Router};
     use std::sync::{Arc, Mutex};
 
+    fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
+        std::fs::write(
+            home.join("config.toml"),
+            format!(
+                "model_provider = \"zai\"\n\
+                 [model_providers.zai]\n\
+                 base_url = \"{base_url}\"\n\
+                 env_key = \"ZAI_API_KEY\"\n\
+                 wire_api = \"responses\"\n"
+            ),
+        )
+        .unwrap();
+        HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: home.to_path_buf(),
+            environment: [("ZAI_API_KEY".to_owned(), "coding-plan-key".to_owned())]
+                .into_iter()
+                .collect(),
+            context_window_bytes: None,
+        }
+    }
+
+    #[test]
+    fn a_custom_provider_profile_asks_its_provider_for_quota_not_chatgpt() {
+        let home = tempfile::tempdir().unwrap();
+        let request = QuotaRefreshRequest::for_profile(
+            "glm",
+            &zai_profile(home.path(), "https://api.z.ai/api/v1"),
+            home.path().to_path_buf(),
+        );
+        assert_eq!(
+            request.provider,
+            Some(ProviderCredential {
+                id: "zai".to_owned(),
+                host: "api.z.ai".to_owned(),
+                api_key: "coding-plan-key".to_owned(),
+            })
+        );
+        assert!(crate::zai_usage::serves_quota(
+            &request.provider.unwrap().host
+        ));
+
+        // A Codex profile that uses its own ChatGPT login keeps that path.
+        let native = tempfile::tempdir().unwrap();
+        let request = QuotaRefreshRequest::for_profile(
+            "work",
+            &HarnessProfile {
+                enabled: true,
+                kind: HarnessKind::Codex,
+                home: native.path().to_path_buf(),
+                environment: Default::default(),
+                context_window_bytes: None,
+            },
+            native.path().to_path_buf(),
+        );
+        assert_eq!(request.provider, None);
+    }
+
+    #[tokio::test]
+    async fn a_provider_without_a_quota_endpoint_reports_that_plainly() {
+        let home = tempfile::tempdir().unwrap();
+        let request = QuotaRefreshRequest::for_profile(
+            "other",
+            &zai_profile(home.path(), "https://example.invalid/v1"),
+            home.path().to_path_buf(),
+        );
+        let (outcome, _) = refresh_profile(request, None).await;
+        let error = outcome
+            .report
+            .error
+            .expect("an unsupported provider errors");
+        assert!(error.contains("zai"), "{error}");
+        assert!(error.contains("example.invalid"), "{error}");
+    }
+
     #[test]
     fn parses_kimi_summary_limits_and_booster_without_credentials() {
         let payload = serde_json::json!({
@@ -1501,6 +1645,7 @@ mod tests {
                 source_home: directory.path().to_path_buf(),
                 environment,
                 cwd: directory.path().to_path_buf(),
+                provider: None,
             },
             None,
         )
@@ -1598,6 +1743,7 @@ mod tests {
                 source_home: directory.to_path_buf(),
                 environment,
                 cwd: directory.to_path_buf(),
+                provider: None,
             },
             None,
         )
@@ -1781,6 +1927,7 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
                     directory.path().to_string_lossy().into_owned(),
                 )]),
                 cwd: directory.path().to_path_buf(),
+                provider: None,
             },
             None,
         )
@@ -1842,6 +1989,7 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
                 format!("http://{address}"),
             )]),
             cwd: directory.path().to_path_buf(),
+            provider: None,
         };
         let mut manager = QuotaManager::default();
         manager
@@ -1887,6 +2035,7 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
                 source_home: directory.path().to_path_buf(),
                 environment: BTreeMap::new(),
                 cwd: directory.path().to_path_buf(),
+                provider: None,
             },
             None,
         )
@@ -1920,6 +2069,7 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
                 source_home: directory.path().to_path_buf(),
                 environment: BTreeMap::new(),
                 cwd: directory.path().to_path_buf(),
+                provider: None,
             },
             None,
         )
@@ -2576,6 +2726,7 @@ while IFS= read -r line; do :; done
                 ),
             ]),
             cwd: directory.path().to_path_buf(),
+            provider: None,
         };
 
         let mut quotas = QuotaManager::default();

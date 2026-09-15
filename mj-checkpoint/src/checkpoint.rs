@@ -3886,6 +3886,7 @@ mod tests {
             run_mode: Default::default(),
             session_id: SESSION.into(),
             harness: HarnessKind::Codex,
+            authentication_marker: None,
             bridge_command: "codex-acp".into(),
             bridge_args: Vec::new(),
             harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,

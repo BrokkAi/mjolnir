@@ -1,21 +1,30 @@
-//! GLM Coding Plan quota reported by ZCode's native provider endpoint.
+//! GLM Coding Plan quota, read from the Z.ai provider's monitor endpoint.
+//!
+//! A Codex profile that names Z.ai as its model provider authenticates with a
+//! long-lived Coding Plan key from the profile's `environment`. The same key is
+//! a bearer token for the provider's quota endpoint, so quota reporting needs
+//! only the provider's host and that key.
 
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use serde::Deserialize;
-use tokio::io::AsyncReadExt;
 
-use mj_core::credentials::MAX_CREDENTIAL_BYTES;
-
-const CODING_PLAN_PROVIDER: &str = "builtin:zai-coding-plan";
 const QUOTA_PATH: &str = "/api/monitor/usage/quota/limit";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
+/// Hosts that serve the Coding Plan quota endpoint: Z.ai's international
+/// service and Zhipu's mainland China service.
+pub const QUOTA_HOSTS: [&str; 2] = ["api.z.ai", "open.bigmodel.cn"];
+
+/// Whether `host` serves the Coding Plan quota endpoint.
+pub fn serves_quota(host: &str) -> bool {
+    QUOTA_HOSTS.contains(&host)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ZcodeUsageWindow {
+pub struct ZaiUsageWindow {
     pub label: String,
     pub remaining_percent: u8,
     pub used: Option<i64>,
@@ -36,62 +45,39 @@ struct Limit {
     next_reset_time: Option<i64>,
 }
 
-pub async fn query(home: &Path) -> Result<Vec<ZcodeUsageWindow>> {
-    let config = read_config(home).await?;
-    let provider = config
-        .get("provider")
-        .and_then(|value| value.get(CODING_PLAN_PROVIDER))
-        .context("ZCode Coding Plan provider is not configured")?;
-    if provider.get("enabled").and_then(serde_json::Value::as_bool) != Some(true) {
-        bail!("ZCode Coding Plan provider is disabled")
-    }
-    let options = provider
-        .get("options")
-        .context("ZCode Coding Plan provider options are missing")?;
-    let api_key = options
-        .get("apiKey")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .context("ZCode Coding Plan API key is missing")?;
-    let international = options
-        .get("baseURL")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|url| url.contains("api.z.ai"));
-    let host = if international {
-        "https://api.z.ai"
-    } else {
-        "https://open.bigmodel.cn"
-    };
+/// Ask `host` (a bare host name such as `api.z.ai`) for the Coding Plan windows
+/// belonging to `api_key`.
+pub async fn query(host: &str, api_key: &str) -> Result<Vec<ZaiUsageWindow>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .context("build ZCode quota client")?;
+        .context("build Coding Plan quota client")?;
     let response = client
-        .get(format!("{host}{QUOTA_PATH}"))
+        .get(format!("https://{host}{QUOTA_PATH}"))
         .bearer_auth(api_key)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
         .map_err(|error| {
             if error.is_timeout() {
-                anyhow::anyhow!("ZCode quota request timed out")
+                anyhow::anyhow!("Coding Plan quota request timed out")
             } else {
-                anyhow::anyhow!("ZCode quota request failed")
+                anyhow::anyhow!("Coding Plan quota request failed")
             }
         })?;
     let status = response.status();
     if matches!(status.as_u16(), 401 | 403) {
-        bail!("ZCode Coding Plan login expired")
+        bail!("Coding Plan API key was rejected")
     }
     if !status.is_success() {
-        bail!("ZCode quota request returned HTTP {status}")
+        bail!("Coding Plan quota request returned HTTP {status}")
     }
     let body = read_bounded(response).await?;
     let payload: serde_json::Value =
-        serde_json::from_slice(&body).context("decode ZCode quota response")?;
+        serde_json::from_slice(&body).context("decode Coding Plan quota response")?;
     if payload.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
-        bail!("ZCode quota service rejected the request")
+        bail!("Coding Plan quota service rejected the request")
     }
     let limits: Vec<Limit> = serde_json::from_value(
         payload
@@ -100,33 +86,18 @@ pub async fn query(home: &Path) -> Result<Vec<ZcodeUsageWindow>> {
             .cloned()
             .unwrap_or_default(),
     )
-    .context("decode ZCode quota limits")?;
+    .context("decode Coding Plan quota limits")?;
     let windows = limits
         .into_iter()
         .filter_map(parse_limit)
         .collect::<Vec<_>>();
     if windows.is_empty() {
-        bail!("ZCode quota response contained no inference windows")
+        bail!("Coding Plan quota response contained no inference windows")
     }
     Ok(windows)
 }
 
-async fn read_config(home: &Path) -> Result<serde_json::Value> {
-    let path = home.join("v2/config.json");
-    let file = tokio::fs::File::open(&path)
-        .await
-        .with_context(|| format!("read ZCode configuration {}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_CREDENTIAL_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .await?;
-    if bytes.len() > MAX_CREDENTIAL_BYTES {
-        bail!("ZCode configuration is too large")
-    }
-    serde_json::from_slice(&bytes).context("decode ZCode configuration")
-}
-
-fn parse_limit(limit: Limit) -> Option<ZcodeUsageWindow> {
+fn parse_limit(limit: Limit) -> Option<ZaiUsageWindow> {
     if limit.kind != "CREDIT_LIMIT" && limit.kind != "TOKENS_LIMIT" {
         return None;
     }
@@ -158,7 +129,7 @@ fn parse_limit(limit: Limit) -> Option<ZcodeUsageWindow> {
         Some(number) => format!("{number}"),
         None => "Credits".to_owned(),
     };
-    Some(ZcodeUsageWindow {
+    Some(ZaiUsageWindow {
         label,
         remaining_percent,
         used,
@@ -173,9 +144,9 @@ async fn read_bounded(response: reqwest::Response) -> Result<Vec<u8>> {
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("read ZCode quota response")?;
+        let chunk = chunk.context("read Coding Plan quota response")?;
         if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            bail!("ZCode quota response is too large")
+            bail!("Coding Plan quota response is too large")
         }
         body.extend_from_slice(&chunk);
     }
@@ -216,13 +187,19 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires MJ_ZCODE_TEST_HOME with an authenticated Coding Plan profile"]
+    #[ignore = "requires MJ_ZAI_TEST_KEY with a live Coding Plan key"]
     async fn live_coding_plan_quota_has_inference_windows() {
-        let home = std::env::var_os("MJ_ZCODE_TEST_HOME")
-            .map(std::path::PathBuf::from)
-            .expect("set MJ_ZCODE_TEST_HOME to an authenticated .zcode directory");
-        let windows = query(&home).await.unwrap();
+        let key =
+            std::env::var("MJ_ZAI_TEST_KEY").expect("set MJ_ZAI_TEST_KEY to a Coding Plan API key");
+        let windows = query("api.z.ai", &key).await.unwrap();
         assert!(!windows.is_empty());
         assert!(windows.iter().all(|window| window.remaining_percent <= 100));
+    }
+
+    #[test]
+    fn only_the_coding_plan_hosts_serve_quota() {
+        assert!(serves_quota("api.z.ai"));
+        assert!(serves_quota("open.bigmodel.cn"));
+        assert!(!serves_quota("api.openai.com"));
     }
 }

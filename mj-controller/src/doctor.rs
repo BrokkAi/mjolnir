@@ -429,7 +429,7 @@ fn harness_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> V
                     ),
                 );
             }
-            if !harness_is_authenticated_with_executor(profile.kind, &profile.home, executor) {
+            if !harness_is_authenticated_with_executor(profile, executor) {
                 return DoctorCheck::fixable(
                     format!("harness.{id}"),
                     title,
@@ -2355,7 +2355,8 @@ mod tests {
         );
         // The underlying command is quoted from the one place that verified it,
         // so doctor cannot recommend something `mj login` does not run.
-        let (program, arguments) = login_command(&profile).expect("OAuth profile has a login command");
+        let (program, arguments) =
+            login_command(&profile).expect("OAuth profile has a login command");
         assert!(
             remediation.contains(&format!("`{program} {}`", arguments.join(" "))),
             "{remediation}"
