@@ -91,25 +91,71 @@ mj_container_engine() {
   done
 }
 
+# Build one or more binaries in a single Cargo invocation and print the path
+# Cargo reports for each, one per line, in the order the pairs were given.
+# Arguments: package binary [package binary ...] -- [cargo arguments].
+# One invocation matters when the binaries share a target directory: Cargo
+# locks each output layout for the whole build, so two invocations there run
+# one after the other and each compiles the shared crates again.
+mj_build_executables() {
+  local packages=() binaries=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    if [ "$#" -lt 2 ]; then
+      echo "mj_build_executables needs package and binary pairs" >&2
+      exit 2
+    fi
+    packages+=("$1")
+    binaries+=("$2")
+    shift 2
+  done
+  if [ "$#" -gt 0 ]; then
+    shift
+  fi
+  local selection=() index
+  for index in "${!packages[@]}"; do
+    selection+=(-p "${packages[$index]}" --bin "${binaries[$index]}")
+  done
+  cargo build --locked "${selection[@]}" "$@" --message-format=json-render-diagnostics |
+  node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    const artifacts = readFileSync(0, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
+    const lines = process.argv.slice(1).map(binary => {
+      const paths = new Set(artifacts.filter(item => item.reason === "compiler-artifact" &&
+        item.target?.name === binary && item.target.kind.includes("bin") && item.executable).map(item => item.executable));
+      if (paths.size !== 1) throw new Error(`Cargo did not report exactly one ${binary} executable`);
+      return [...paths][0];
+    });
+    process.stdout.write(lines.join("\n") + "\n");
+  ' "${binaries[@]}"
+}
+
 # Build one binary and print the path Cargo reports for it, so the caller does
 # not have to reconstruct profile and target directory names.
 mj_build_executable() {
   local package=$1 binary=$2
   shift 2
-  cargo build --locked -p "$package" --bin "$binary" "$@" --message-format=json-render-diagnostics |
-  node --input-type=module -e '
-    import { readFileSync } from "node:fs";
-    const artifacts = readFileSync(0, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
-    const paths = new Set(artifacts.filter(item => item.reason === "compiler-artifact" &&
-      item.target?.name === process.argv[1] && item.target.kind.includes("bin") && item.executable).map(item => item.executable));
-    if (paths.size !== 1) throw new Error(`Cargo did not report exactly one ${process.argv[1]} executable`);
-    process.stdout.write([...paths][0]);
-  ' "$binary"
+  mj_build_executables "$package" "$binary" -- "$@"
 }
 
 # Build a worker into its own target directory, so controller-only changes do
 # not invalidate worker artifacts. Only the profile crosses over from the
 # caller's arguments, because the worker has no other build-affecting options.
+# The native and cross-compiled workers use different output layouts under
+# that directory, so their two invocations can run at the same time.
 mj_build_worker() {
   mj_build_executable brokk-mj-worker mj-worker --target-dir target/worker "$@" ${profile_args[@]+"${profile_args[@]}"}
+}
+
+# Wait for background builds started with `&`, then fail if any of them did.
+# Every build is waited for, so a failure never leaves a Cargo process running
+# behind the caller's error.
+mj_wait_builds() {
+  local failed=0 pid
+  for pid in "$@"; do
+    wait "$pid" || failed=1
+  done
+  if [ "$failed" = 1 ]; then
+    echo "A build failed; see the Cargo output above." >&2
+    exit 1
+  fi
 }

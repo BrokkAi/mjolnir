@@ -3,16 +3,26 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Notify;
+use tokio::time::{Instant, sleep_until};
 
-use mj_core::subagent::{SubagentToolRequest, SubagentToolResult};
+use mj_core::subagent::{MAX_WAIT_SECONDS, SubagentToolRequest, SubagentToolResult};
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
 const SUBAGENT_QUEUE: &str = "subagents.json";
+
+/// How long a socket call waits for the daemon's result before giving up and
+/// answering with the "still running" placeholder. The daemon bounds its
+/// longest action (`wait_agents`) to [`MAX_WAIT_SECONDS`], so this ceiling is
+/// only reached if the daemon never answers; it exists so a lost daemon cannot
+/// wedge the socket task forever.
+const SOCKET_WAIT_CEILING: Duration = Duration::from_secs(MAX_WAIT_SECONDS + 60);
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +37,9 @@ struct QueueState {
 pub struct SubagentEndpoint {
     path: PathBuf,
     state: Arc<Mutex<QueueState>>,
+    /// Woken whenever a result lands, so a socket call awaiting its own request
+    /// returns the moment the daemon completes it.
+    completed: Arc<Notify>,
 }
 
 impl SubagentEndpoint {
@@ -44,7 +57,39 @@ impl SubagentEndpoint {
         Ok(Self {
             path,
             state: Arc::new(Mutex::new(state)),
+            completed: Arc::new(Notify::new()),
         })
+    }
+
+    fn cached_result(&self, request_id: &str) -> Option<SubagentToolResult> {
+        self.state
+            .lock()
+            .expect("sub-agent queue lock poisoned")
+            .results
+            .get(request_id)
+            .cloned()
+    }
+
+    /// Wait for the daemon to complete `request_id`, up to `deadline`. Returns
+    /// the result, or `None` at the deadline. Interest is registered before
+    /// each read of the queue, so a completion racing the check is never lost.
+    pub async fn await_result(
+        &self,
+        request_id: &str,
+        deadline: Instant,
+    ) -> Option<SubagentToolResult> {
+        loop {
+            let notified = self.completed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(result) = self.cached_result(request_id) {
+                return Some(result);
+            }
+            tokio::select! {
+                _ = &mut notified => {}
+                _ = sleep_until(deadline) => return self.cached_result(request_id),
+            }
+        }
     }
 
     pub fn snapshot(&self) -> (Vec<SubagentToolRequest>, Vec<SubagentToolResult>) {
@@ -86,7 +131,10 @@ impl SubagentEndpoint {
             };
             state.results.remove(&oldest);
         }
-        self.persist(&state)
+        self.persist(&state)?;
+        drop(state);
+        self.completed.notify_waiters();
+        Ok(())
     }
 
     fn persist(&self, state: &QueueState) -> Result<()> {
@@ -130,6 +178,45 @@ mod tests {
             reopened.enqueue(request("request-1")).unwrap(),
             Some(result)
         );
+    }
+
+    fn done(id: &str) -> SubagentToolResult {
+        SubagentToolResult {
+            request_id: id.into(),
+            completed_at_ms: 2,
+            is_error: false,
+            message: "done".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_waiting_socket_call_returns_the_daemon_result_when_it_lands() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
+        assert_eq!(endpoint.enqueue(request("r1")).unwrap(), None);
+        let waiter = tokio::spawn({
+            let endpoint = endpoint.clone();
+            async move {
+                endpoint
+                    .await_result("r1", Instant::now() + Duration::from_secs(5))
+                    .await
+            }
+        });
+        // Let the waiter register its interest before the result lands.
+        tokio::task::yield_now().await;
+        endpoint.complete(done("r1")).unwrap();
+        assert_eq!(waiter.await.unwrap(), Some(done("r1")));
+    }
+
+    #[tokio::test]
+    async fn a_waiting_socket_call_gives_up_at_its_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
+        assert_eq!(endpoint.enqueue(request("r1")).unwrap(), None);
+        let result = endpoint
+            .await_result("r1", Instant::now() + Duration::from_millis(50))
+            .await;
+        assert_eq!(result, None);
     }
 }
 
@@ -183,7 +270,19 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         .context("read sub-agent request")?;
     let request: SubagentToolRequest =
         serde_json::from_str(line.trim()).context("parse sub-agent request")?;
-    let result = endpoint.enqueue(request)?;
+    // Block until the daemon completes this request and return its result as
+    // the tool's answer. A repeat request id returns the cached result at
+    // once; otherwise wait, so the harness never sees a placeholder while the
+    // real answer is delivered elsewhere.
+    let request_id = request.request_id.clone();
+    let result = match endpoint.enqueue(request)? {
+        Some(cached) => Some(cached),
+        None => {
+            endpoint
+                .await_result(&request_id, Instant::now() + SOCKET_WAIT_CEILING)
+                .await
+        }
+    };
     let mut body = serde_json::to_vec(&SocketReply {
         accepted: true,
         result,

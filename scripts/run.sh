@@ -43,19 +43,28 @@ done
 # Empty-array expansions here also support macOS Bash 3.2 with nounset.
 mj_parse_cargo_args ${build_args[@]+"${build_args[@]}"}
 
+# The worker builds and the host build write to different output layouts, so
+# they run at the same time; the two host binaries share one layout and share
+# one Cargo invocation. Each build's reported paths land in its own file.
+build_output=$(mktemp -d)
+build_pids=()
 case "$(uname -s)" in
   Linux)
     mj_host_musl_triple
-    mj_build_worker >/dev/null
-    mj_build_worker --target "$triple" >/dev/null
+    mj_build_worker >/dev/null &
+    build_pids+=("$!")
+    mj_build_worker --target "$triple" >/dev/null &
+    build_pids+=("$!")
     ;;
   Darwin)
-    mj_build_worker >/dev/null
+    mj_build_worker >/dev/null &
+    build_pids+=("$!")
     # The native macOS worker cannot run in a Linux container. Build through
     # the available engine before the daemon snapshots its worker sources.
     mj_container_engine
     if [ -n "$engine" ]; then
-      "$repo_root/scripts/build-linux-worker.sh" "$engine" ${profile_args[@]+"${profile_args[@]}"} >/dev/null
+      "$repo_root/scripts/build-linux-worker.sh" "$engine" ${profile_args[@]+"${profile_args[@]}"} >/dev/null &
+      build_pids+=("$!")
     else
       echo "No running Docker or Podman engine; built the native worker for local sessions only." >&2
     fi
@@ -66,8 +75,15 @@ case "$(uname -s)" in
     ;;
 esac
 
+mj_build_executables brokk-mj-voice-worker mj-voice-worker brokk-mjolnir mj -- \
+  ${cargo_args[@]+"${cargo_args[@]}"} >"$build_output/host" &
+build_pids+=("$!")
+mj_wait_builds "${build_pids[@]}"
+
 export MJ_DEV_RESTART_STALE_DAEMON=1
-MJ_VOICE_WORKER=$(mj_build_executable brokk-mj-voice-worker mj-voice-worker ${cargo_args[@]+"${cargo_args[@]}"})
+MJ_VOICE_WORKER=$(sed -n 1p "$build_output/host")
 export MJ_VOICE_WORKER
-executable=$(mj_build_executable brokk-mjolnir mj ${cargo_args[@]+"${cargo_args[@]}"})
+executable=$(sed -n 2p "$build_output/host")
+# `exec` never returns, so the temporary directory goes before it.
+rm -rf "$build_output"
 exec "$executable" ${app_args[@]+"${app_args[@]}"}
