@@ -55,12 +55,23 @@ pub(crate) async fn build_handoff_context(
                 error = format!("{error:#}"),
                 "no utility model is available for the handoff; handing over the most recent transcript verbatim"
             );
-            return Ok(crate::compaction::render_recent_snapshot(snapshot, context_bytes));
+            return Ok(crate::compaction::render_recent_snapshot(
+                snapshot,
+                context_bytes,
+            ));
         }
     };
     let backend = crate::utility_llm::UtilityCompactionBackend::new(candidates, cancel.clone());
     let page_bytes = backend.page_bytes();
-    summarize_or_verbatim(session_id, snapshot, context_bytes, &backend, page_bytes, cancel).await
+    summarize_or_verbatim(
+        session_id,
+        snapshot,
+        context_bytes,
+        &backend,
+        page_bytes,
+        cancel,
+    )
+    .await
 }
 
 /// Summarize the snapshot through an already-resolved backend, falling back to
@@ -97,7 +108,10 @@ async fn summarize_or_verbatim(
                 error = format!("{error:#}"),
                 "utility summarizer failed; handing over the most recent transcript verbatim"
             );
-            Ok(crate::compaction::render_recent_snapshot(snapshot, context_bytes))
+            Ok(crate::compaction::render_recent_snapshot(
+                snapshot,
+                context_bytes,
+            ))
         }
     }
 }
@@ -190,7 +204,10 @@ mod tests {
         .unwrap();
 
         assert!(handoff.starts_with(HANDOFF_PREAMBLE), "{handoff}");
-        assert!(handoff.contains("<state_snapshot>kept</state_snapshot>"), "{handoff}");
+        assert!(
+            handoff.contains("<state_snapshot>kept</state_snapshot>"),
+            "{handoff}"
+        );
         assert!(
             !handoff.contains("No summarizer was available"),
             "a summarized handoff must not carry the verbatim preamble: {handoff}"

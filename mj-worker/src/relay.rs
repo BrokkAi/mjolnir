@@ -6084,10 +6084,10 @@ mod tests {
             submit_relay(&mut relay, "memory-prompt", prompt("remember the result"));
             assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
 
-            let mut call = ToolCall::new("memory", "mcp.mj-project-memory.memory_write");
+            let mut call = ToolCall::new("memory", "mcp.mj-memory.write");
             call.kind = ToolKind::Execute;
             call.raw_input = Some(serde_json::json!({
-                "server": "mj-project-memory", "tool": "memory_write",
+                "server": "mj-memory", "tool": "write",
                 "arguments": {"path": "/MEMORY.md", "content": "done"}
             }));
             let output = serde_json::json!({

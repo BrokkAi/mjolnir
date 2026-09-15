@@ -109,9 +109,9 @@ Three kinds of change were unavoidable, and each is marked at its site:
 1. The product name in sentences that tell a model how the user can stop it.
    "The user can cancel it manually through Mjolnir's visible Stop action"
    became "The user can cancel it at any time from Hel's review pane."
-2. The dispatch tool's name: mj's prompt says "the private `mj-review` tool";
-   Hel's says `hel-review`, which is the server name
-   `src/hel_review/mcp.rs` registers.
+2. The dispatch tool's name: both register the server as `mj-review`, but
+   Hel's tool is `spawn_specialist` where mj's is `call_review_subagents`;
+   each prompt names the tool its supervisor actually has.
 3. `PRIORITY_FINDING_CONTRACT`. mj's sentence names its configured automatic
    correction threshold, which Hel does not have. Hel's says the user reads the
    surviving findings and decides whether to send them back.

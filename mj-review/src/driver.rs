@@ -1093,7 +1093,7 @@ mod tests {
         let prompt = prompt_text(&requests, SUPERVISOR_ROLE);
         assert!(prompt.contains("Goal: bound the retry"));
         assert!(prompt.contains("- edited retry()"));
-        assert!(prompt.contains("call_review_subagents"));
+        assert!(prompt.contains("spawn_specialist"));
         let command_id = prompted(&requests, SUPERVISOR_ROLE);
         (driver, command_id)
     }

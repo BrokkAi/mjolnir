@@ -95,8 +95,15 @@ pub struct SubagentRecord {
     pub initial_prompt: String,
     pub request_key: String,
     pub created_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delivered_turn: Option<u64>,
+    /// The child turn whose completion notice the parent's transcript has
+    /// already recorded, so restarts do not repeat the notice. Stored under
+    /// the historical field name `delivered_turn`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "delivered_turn"
+    )]
+    pub noticed_turn: Option<u64>,
 }
 
 /// Lifecycle group used by the tool and both user interfaces.
@@ -116,5 +123,25 @@ impl SubagentRecord {
     #[must_use]
     pub fn is_child(&self, session_id: &str) -> bool {
         self.child_session_id == session_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noticed_turn_keeps_the_stored_delivered_turn_field_name() {
+        let record: SubagentRecord = serde_json::from_str(
+            r#"{"child_session_id":"c","parent_session_id":"p","task_name":"t","profile_id":"pr","working_directory":".","initial_prompt":"i","request_key":"k","created_at":"2026-09-15","delivered_turn":3}"#,
+        )
+        .expect("stored relation payloads remain readable");
+        assert_eq!(record.noticed_turn, Some(3));
+        let encoded = serde_json::to_value(&record).expect("record encodes");
+        assert_eq!(encoded["delivered_turn"], 3);
+        assert!(
+            encoded.get("noticed_turn").is_none(),
+            "the wire field name must stay historical: {encoded}"
+        );
     }
 }

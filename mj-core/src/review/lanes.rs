@@ -59,7 +59,7 @@ pub struct PriorReviewContext {
     pub evidence: ReviewPassEvidence,
 }
 
-/// What the supervisor asked for in one `call_review_subagents` call.
+/// What the supervisor asked for in one `spawn_specialist` call.
 ///
 /// This is also the wire form: the tool sends it to the worker, the worker
 /// hands it to the controller, and the controller renders the lane's prompt
@@ -71,7 +71,7 @@ pub struct ReviewSubagentRequest {
     pub hypothesis: String,
 }
 
-/// One `call_review_subagents` call.
+/// One `spawn_specialist` call.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaneDispatch {

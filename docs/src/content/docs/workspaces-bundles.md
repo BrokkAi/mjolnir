@@ -224,9 +224,9 @@ The Mjolnir project-memory service provides three tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `memory_list` | List documents below an optional virtual path prefix, 50 entries at a time. |
-| `memory_read` | Read one document and its version token. |
-| `memory_write` | Create or replace a whole UTF-8 document using compare-and-swap. |
+| `list` | List documents below an optional virtual path prefix, 50 entries at a time. |
+| `read` | Read one document and its version token. |
+| `write` | Create or replace a whole UTF-8 document using compare-and-swap. |
 
 Virtual paths start at `/`; target and controller filesystem paths never cross
 the tool boundary. `/MEMORY.md` is the concise index automatically supplied as
@@ -244,9 +244,9 @@ workspace root.
 
 ### Writes, limits, and conflicts
 
-`memory_write` replaces a complete document. To create one, the agent passes
+`write` replaces a complete document. To create one, the agent passes
 `if_version = "new"`; to update one, it must pass the version returned by
-`memory_read`. If the document changed meanwhile, the write returns the current
+`read`. If the document changed meanwhile, the write returns the current
 version and content instead of overwriting it.
 
 Project memory has these limits:

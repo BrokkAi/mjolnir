@@ -228,7 +228,7 @@ impl ReviewerSidecar {
         }
     }
 
-    /// Records one `call_review_subagents` dispatch from the supervisor's MCP
+    /// Records one `spawn_specialist` dispatch from the supervisor's MCP
     /// tool, answering with the lanes it accepted.
     ///
     /// The reply says "started" because that is what the supervisor needs to

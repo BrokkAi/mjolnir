@@ -742,14 +742,14 @@ fn configure_kimi_project_memory_mcp(
                 "args": [
                     "-c",
                     "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\"",
-                    "mj-project-memory",
+                    "mj-memory",
                     worker,
                     memory_root
                 ],
                 "runtime_id": "local"
             })
         };
-        servers.insert("mj-project-memory".into(), server);
+        servers.insert("mj-memory".into(), server);
         Ok(())
     })
 }
@@ -771,7 +771,7 @@ fn configure_claude_subagent_mcp(profile_stage: &Path, worker_root: &str) -> Res
                 )
             })?;
         servers.insert(
-            "mj-subagents".into(),
+            "mj-agents".into(),
             serde_json::json!({
                 "type":"stdio",
                 "command":Path::new(worker_root).join("hel"),
@@ -5524,7 +5524,7 @@ mod tests {
             "user-mcp"
         );
         assert_eq!(
-            configured["mcpServers"]["mj-project-memory"],
+            configured["mcpServers"]["mj-memory"],
             serde_json::json!({
                 "transport": "stdio",
                 "command": "/var/lib/hel/workers/session/hel",
@@ -5565,7 +5565,7 @@ mod tests {
         let configured: serde_json::Value =
             serde_json::from_slice(&std::fs::read(staged.path().join("mcp.json")).unwrap())
                 .unwrap();
-        let server = &configured["mcpServers"]["mj-project-memory"];
+        let server = &configured["mcpServers"]["mj-memory"];
         assert_eq!(server["command"], "sh");
         assert_eq!(server["runtime_id"], "local");
         assert_eq!(
@@ -5573,7 +5573,7 @@ mod tests {
             serde_json::json!([
                 "-c",
                 "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\"",
-                "mj-project-memory",
+                "mj-memory",
                 ".local/share/hel/workers/session/hel",
                 ".local/share/hel/profiles/session/projects/project/memory"
             ])

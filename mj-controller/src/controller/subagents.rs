@@ -158,7 +158,7 @@ impl Controller {
             initial_prompt: request.initial_prompt,
             request_key: request.request_key,
             created_at,
-            delivered_turn: None,
+            noticed_turn: None,
         };
         crate::database::save_subagent_session(&session, &relation)?;
         self.state.sessions.insert(child_id, session);
