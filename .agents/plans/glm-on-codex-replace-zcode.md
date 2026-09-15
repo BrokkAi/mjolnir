@@ -46,6 +46,17 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 - Observation: The Guardian reviewer model comes from the parent model's catalog entry. `select_review_model` uses `parent_model.auto_review_model_override`, else the provider's default reviewer slug if it is in the catalog, else the parent model itself. It prefers `low` effort when the reviewer supports it.
   Evidence: `codex-rs/ext/guardian-reviewer/src/model.rs` lines 31 to 66; the probe's reviewer thread ran on `glm-5.3` because no override was set and OpenAI's default reviewer slug is not in the Z.ai catalog.
 
+- Observation: The flash reviewer denied a benign, explicitly requested write outside the workspace, while the `glm-5.3` reviewer allowed the identical action earlier. Its rationale cited "the current review environment's approval policy is never": Codex runs every Guardian review in a read-only session whose own `approval_policy` is `never`, and the flash model mistook that for the session's policy. The Mjolnir session itself ran `approval_policy = on-request` with `approvals_reviewer = auto_review`, identical to the direct probe. A Guardian deny is final in Codex (`GuardianAssessmentOutcome::Deny` maps to not approved in `codex-rs/core/src/guardian/review.rs`); it does not fall through to asking the user.
+  Evidence: reviewer rollout `task_complete` message `{"outcome":"deny","risk_level":"low","user_authorization":"low","rationale":"... the current review environment's approval policy is never, so the require_escalated request cannot be granted here; intrinsically the write itself is benign."}`; reviewer `turn_context` `{'approval_policy': 'never', 'sandbox_policy': {'type': 'read-only'}, 'model': 'glm-5.3-flash'}`; session `turn_context` `{'approval_policy': 'on-request', 'approvals_reviewer': 'auto_review', 'sandbox_policy': {'type': 'workspace-write'}}`.
+
+- Observation: DeepSeek serves the Responses API at `https://api.deepseek.com/v1/responses` (and without `/v1`) for the key stored in `~/.dsh/.credentials.yaml` under `refs.DEEPSEEK_API_KEY`. Codex 0.153.4 with `base_url = "https://api.deepseek.com/v1"`, `env_key = "DEEPSEEK_API_KEY"`, `wire_api = "responses"` answered `pong`, wrote `hello.txt` through its shell tool, and produced reasoning tokens for `deepseek-v4-pro` at `model_reasoning_effort = "high"`. DeepSeek's `GET /models` returns OpenAI's plain list `{"object":"list","data":[{"id":"deepseek-flash",...},{"id":"deepseek-v4-pro",...}]}`, not Codex's catalog format, so Mjolnir must translate it. One first run of `codex exec` completed its turn but did not exit for over seven minutes; three later runs exited in 2 to 3 seconds and the hang did not reproduce.
+  Evidence: `codex exec` transcripts `pong` (1,449 tokens for the file write; 6,712 tokens with `"reasoning_output_tokens":24` for the reasoning run); model list body above.
+
+- Observation: A dev-built controller launches the pinned released worker for local bare targets unless `MJ_WORKER_BINARY` names the dev worker. The released 2.9.0 worker rejects the new `authentication_marker` launch-config field because `WorkerLaunchConfig` is `deny_unknown_fields`. Releases ship matching controller and worker versions, so this is a dev-only mismatch, not a compatibility break.
+  Evidence: two isolated sessions failed with `worker bootstrap failed: unknown field authentication_marker` until the daemon was restarted with `MJ_WORKER_BINARY=target/debug/mj-worker`.
+
+- Observation: A config whose `[subagents.eligible_profiles]` names a profile id that no longer exists fails validation with "is not defined in this config". The user's live config has `zcode = true` there, so deployment must remove that line as well as `[profiles.zcode]`.
+
 - Observation: Codex's workspace-write sandbox allows writes under `/tmp`, so the first escalation probe under the session scratchpad was not an escalation. The valid probe wrote under the user's home directory.
 
 - Observation: The catalog and guardian probe was rerun on the exact pinned stack, Codex 0.153.4 (the `@openai/codex` dependency of `@brokkai/codex-acp` 1.11.4, selected with `CODEX_PATH`) against an unmodified codex-acp 1.11.4. The ACP `model` config option listed only `glm-5.3` and `glm-5.3-flash`; `session/set_mode` to `agent` succeeded; an escalated write under the user's home produced a "Guardian Review" tool call; and with `auto_review_model_override = "glm-5.3-flash"` stamped on every catalog entry, the session rollout recorded only `"model":"glm-5.3"` while the reviewer thread's rollout recorded only `"model":"glm-5.3-flash"`. No change to the Codex fork or the codex-acp fork is required: every feature this plan uses is stock Codex configuration present in 0.153.4.
@@ -127,6 +138,14 @@ The user-visible proof is: add the profile shown in `Concrete Steps`, run `mj do
 - Decision: A session row for a harness this release no longer supports is skipped from the listing with a warning instead of failing the listing.
   Rationale: The plan keeps `'zcode'` readable in the CHECK constraint so old rows survive. That is only useful if a store holding one still opens. Such a session cannot be resumed either way, so omitting it is the honest result.
   Date/Author: 2026-09-15, Claude.
+
+- Decision: Support providers whose `/models` endpoint returns OpenAI's plain list by translating it into Codex catalog entries with conservative defaults, and let the user refine entries with an optional `models.json` in the profile home that Mjolnir merges by slug over the fetched catalog.
+  Rationale: DeepSeek's list carries only ids. Codex needs a full entry per model (context window, reasoning levels, tool style). Defaults make the profile work at once; the override file lets the user add reasoning levels or a larger context window for a specific model without Mjolnir carrying per-vendor tables. The rejection of a user-written `model_catalog_json` in the Codex `config.toml` stays, because Mjolnir writes that key.
+  Date/Author: 2026-09-15, user and Claude.
+
+- Decision: Make the Guardian reviewer choice a profile setting, `guardian_review_model`, with values `newest-flash` (default), `session`, or an explicit catalog slug.
+  Rationale: The flash reviewer denied a benign action that the full model allowed. The user wants flash for cost, but needs a one-line switch to the session model or a named model when a provider's small model reviews badly. An explicit slug that the fetched catalog does not list fails the launch with an error naming the slug, rather than silently reviewing with something else.
+  Date/Author: 2026-09-15, user and Claude.
 
 ## Outcomes & Retrospective
 
@@ -241,6 +260,18 @@ Add a section to `docs/src/content/docs/profiles.md` titled "Codex with a custom
 
 Then follow `Validation and Acceptance`.
 
+### Milestone 5: OpenAI-format model lists, catalog overrides, and the reviewer setting
+
+In `mj-core/src/codex_catalog.rs`, extend `parse` to accept two shapes. The Codex shape is `{"models": [...]}` and is kept as is. The OpenAI shape is `{"object": "list", "data": [{"id": "...", ...}]}`; translate each `data` entry into a Codex catalog entry whose `slug` and `display_name` are the id, whose `description` is the id followed by the `owned_by` value in parentheses when present, and whose remaining fields take these defaults: `default_reasoning_level` absent, `supported_reasoning_levels` empty, `shell_type = "shell_command"`, `visibility = "list"`, `supported_in_api = true`, `priority` = position in the list, `base_instructions = ""`, `supports_reasoning_summaries = false`, `default_reasoning_summary = "none"`, `support_verbosity = false`, `apply_patch_tool_type = "freeform"`, `truncation_policy = {"mode": "bytes", "limit": 10000}`, `context_window = 128000`, `max_context_window = 128000`, `effective_context_window_percent = 95`, `supports_parallel_tool_calls = true`, `experimental_supported_tools = []`, `input_modalities = ["text"]`. A body that matches neither shape is an error naming both.
+
+Add `merge_overrides(catalog, overrides)` to the same module: `overrides` is a parsed Codex-shape catalog; for each override entry, the fetched entry with the same `slug` gets every override field copied over it, and an override slug the fetch did not list is appended as a new entry. In `stage_codex_catalog` (`mj-controller/src/controller/worker_binary.rs`), read `<profile.home>/models.json` when it exists, parse it with the Codex shape only, and merge it before stamping the reviewer. Because staging already copies the Codex allowlist, and `models.json` is on that list from Milestone 2, the user's file also lands in the staged home; that is harmless because Mjolnir then overwrites the staged `models.json` with the merged, stamped catalog.
+
+Add `guardian_review_model: Option<String>` to `HarnessProfile` in `mj-core/src/config.rs` (serde default, skipped when absent). Validation accepts the literal strings `newest-flash` and `session`, or any non-empty slug; it rejects the field on a profile that is not a Codex profile with a custom provider. Replace the fixed rule in `stage_codex_catalog` with: `newest-flash` (or absent) uses `guardian_review_model(slugs)`; `session` skips stamping; a slug must appear in the merged catalog, else fail the launch with an error naming the profile, the slug, and the slugs the catalog does list. Update the TUI settings schema in `mj-tui/src/setup/schema.rs` if profile fields are enumerated there.
+
+Update `docs/src/content/docs/profiles.md`: add a DeepSeek example (`base_url = "https://api.deepseek.com/v1"`, `env_key = "DEEPSEEK_API_KEY"`), explain the override file with an example that gives `deepseek-v4-pro` reasoning levels `low` and `high`, and document `guardian_review_model`. Note that quota reporting is available only for Z.ai hosts and that a DeepSeek profile shows no quota.
+
+Tests: parse both shapes and reject a third; merge overrides by slug including an appended slug; reviewer selection for each of the three settings including the missing-slug error; profile validation of `guardian_review_model`.
+
 ## Concrete Steps
 
 All commands run from `/home/jonathan/Projects/hel` unless stated.
@@ -271,6 +302,20 @@ Add the profile to Mjolnir's config (`~/.config/mjolnir/config.toml`), pasting t
     [profiles.glm.environment]
     ZAI_API_KEY = "<key>"
 
+Optionally add a DeepSeek profile the same way, with a home whose `config.toml` is:
+
+    model = "deepseek-v4-pro"
+    model_provider = "deepseek"
+    model_reasoning_effort = "high"
+
+    [model_providers.deepseek]
+    name = "DeepSeek"
+    base_url = "https://api.deepseek.com/v1"
+    env_key = "DEEPSEEK_API_KEY"
+    wire_api = "responses"
+
+and `DEEPSEEK_API_KEY` (from `~/.dsh/.credentials.yaml`, key `refs.DEEPSEEK_API_KEY`) in `[profiles.deepseek-codex.environment]`. Also remove `zcode = true` from `[subagents.eligible_profiles]`.
+
 Build and check:
 
     cargo test
@@ -288,6 +333,8 @@ Behavioural, on the user's install after Milestone 4:
 1. `mj doctor` shows `glm` authenticated. Editing the profile to remove `ZAI_API_KEY` and rerunning shows a config error naming `ZAI_API_KEY` and profile `glm`.
 2. Starting a session with profile `glm` on the local bare target shows `glm-5.3` and `glm-5.3-flash` as the only model choices, with efforts `low`, `high`, `max` for the former.
 3. Asking the session to create a file inside the project succeeds. Asking it to write a file under `~` produces a Guardian Review entry in the transcript before the write, and the Codex rollout for the reviewer thread (under the staged home's `sessions/` directory) records `"model":"glm-5.3-flash"`.
+9. A second profile `deepseek` with `kind = "codex"`, a home whose `config.toml` names `base_url = "https://api.deepseek.com/v1"`, `env_key = "DEEPSEEK_API_KEY"`, `wire_api = "responses"`, and `DEEPSEEK_API_KEY` in its environment: `mj models --profile deepseek` lists `deepseek-flash` and `deepseek-v4-pro`; with a `models.json` override giving `deepseek-v4-pro` reasoning levels `low` and `high`, discovery lists those efforts; a session on it writes a file; its Guardian reviewer thread runs on `deepseek-flash`.
+10. Setting `guardian_review_model = "session"` on the GLM profile stages a catalog with no `auto_review_model_override`; setting it to `glm-5.3` stamps that slug; setting it to `nonexistent` fails the launch with an error naming the slug.
 8. The staged home contains `models.json` whose entries all carry `"auto_review_model_override": "glm-5.3-flash"`, and its `config.toml` ends with `model_catalog_json = "models.json"`.
 4. The quota panel for `glm` shows the Coding Plan windows (used, remaining, reset time) rather than an error.
 5. Starting a session with profile `glm` inside the default container image works with no ZCode layer present; `podman image inspect` of a freshly built `agent-dev` image shows no `/opt/zcode` path.
@@ -367,6 +414,15 @@ In `mj-core/src/codex_catalog.rs`, define:
     pub fn parse(bytes: &[u8]) -> anyhow::Result<CodexCatalog>;
     pub fn guardian_review_model(slugs: impl IntoIterator<Item = String>) -> Option<String>;
     pub fn stamp_reviewer(catalog: &mut CodexCatalog, reviewer: &str);
+    /// Milestone 5: `parse` accepts the Codex shape and OpenAI's `{"data": [...]}` list.
+    pub fn merge_overrides(catalog: &mut CodexCatalog, overrides: &CodexCatalog);
+
+In `mj-core/src/config.rs`, add to `HarnessProfile`:
+
+    /// Guardian reviewer choice for a Codex profile with a custom provider:
+    /// "newest-flash" (default when absent), "session", or a catalog slug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardian_review_model: Option<String>,
 
 In `mj-core/src/credentials.rs`, change:
 
