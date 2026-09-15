@@ -1018,6 +1018,7 @@ impl DurableRelay {
                     RelayObservation::SessionOpened {
                         native_session_id,
                         resumed,
+                        ..
                     } => {
                         if resumed {
                             return Ok(false);
@@ -3474,6 +3475,7 @@ mod tests {
             .record_observation(RelayObservation::SessionOpened {
                 native_session_id: "unused".into(),
                 resumed: false,
+                native_continuity_lost: false,
             })
             .unwrap();
         assert!(relay.native_session_is_pristine().unwrap());
@@ -3482,6 +3484,64 @@ mod tests {
         drop(relay);
         let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
         assert!(!relay.native_session_is_pristine().unwrap());
+    }
+
+    #[test]
+    fn lost_native_continuity_survives_reopen_and_clears_on_a_normal_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert!(!relay.operational_state().native_continuity_lost);
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "fresh".into(),
+                resumed: false,
+                native_continuity_lost: true,
+            })
+            .unwrap();
+        assert!(relay.operational_state().native_continuity_lost);
+        drop(relay);
+
+        // A controller that reconnects later still sees it.
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert!(relay.operational_state().native_continuity_lost);
+
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "later".into(),
+                resumed: false,
+                native_continuity_lost: false,
+            })
+            .unwrap();
+        assert!(!relay.operational_state().native_continuity_lost);
+    }
+
+    #[test]
+    fn journals_without_lost_native_continuity_default_to_intact() {
+        let observation = serde_json::json!({
+            "type": "session_opened",
+            "data": {"native_session_id": "native", "resumed": false},
+        });
+        let observation: RelayObservation = serde_json::from_value(observation).unwrap();
+        assert_eq!(
+            observation,
+            RelayObservation::SessionOpened {
+                native_session_id: "native".into(),
+                resumed: false,
+                native_continuity_lost: false,
+            }
+        );
+
+        let mut snapshot = RelaySnapshot::new(SESSION.to_owned());
+        snapshot.native_continuity_lost = true;
+        let mut stored = serde_json::to_value(&snapshot).unwrap();
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("native_continuity_lost")
+            .expect("the flag is serialized");
+        let legacy: RelaySnapshot = serde_json::from_value(stored).unwrap();
+        assert!(!legacy.native_continuity_lost);
+        assert!(!legacy.operational_state().native_continuity_lost);
     }
 
     #[test]
@@ -3523,6 +3583,7 @@ mod tests {
             .record_observation(RelayObservation::SessionOpened {
                 native_session_id: "native-session".into(),
                 resumed: false,
+                native_continuity_lost: false,
             })
             .unwrap();
         assert!(!relay.operational_state().native_session_is_ready());
@@ -4898,6 +4959,7 @@ mod tests {
             .record_observation(RelayObservation::SessionOpened {
                 native_session_id: "native".into(),
                 resumed: true,
+                native_continuity_lost: false,
             })
             .unwrap();
         relay

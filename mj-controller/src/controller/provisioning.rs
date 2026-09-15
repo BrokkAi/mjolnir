@@ -1821,8 +1821,8 @@ mod tests {
     fn noting_a_launch_failure_writes_the_diagnostic_and_returns_the_reason() {
         let directory = tempfile::tempdir().unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
-        let error = anyhow::anyhow!("connect worker")
-            .context("Connection closed by 10.0.0.1 port 22");
+        let error =
+            anyhow::anyhow!("connect worker").context("Connection closed by 10.0.0.1 port 22");
 
         let detail = note_new_session_launch_failure_in(directory.path(), session_id, &error);
 
@@ -1834,9 +1834,12 @@ mod tests {
             detail.contains("full diagnostic saved to"),
             "the reason points at the saved diagnostic"
         );
-        let saved =
-            std::fs::read_to_string(directory.path().join(format!("{session_id}-launch-error.txt")))
-                .unwrap();
+        let saved = std::fs::read_to_string(
+            directory
+                .path()
+                .join(format!("{session_id}-launch-error.txt")),
+        )
+        .unwrap();
         assert!(saved.contains("Connection closed by 10.0.0.1 port 22"));
     }
     #[test]

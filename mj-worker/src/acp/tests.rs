@@ -4305,8 +4305,234 @@ fn the_stall_watchdog_covers_only_harnesses_whose_turn_ends_on_the_reply() {
 fn the_stall_message_says_what_happened_and_what_to_do() {
     let message = turn_stall_message(HarnessKind::Muse, 630_000);
     assert!(message.contains("stopped responding"));
-    assert!(message.contains("10 minute"), "reports the silence in minutes: {message}");
-    assert!(message.contains("git log"), "points the user at the workspace");
+    assert!(
+        message.contains("10 minute"),
+        "reports the silence in minutes: {message}"
+    );
+    assert!(
+        message.contains("git log"),
+        "points the user at the workspace"
+    );
     assert!(message.contains("Resend"), "tells the user how to continue");
     assert!(message.contains("#1007"), "names the known issue");
+}
+
+/// Fake bridge that rejects every attempt to reload a recorded session and
+/// answers `session/new` with a fresh id.
+async fn session_reload_rejecting_bridge(
+    stream: tokio::io::DuplexStream,
+    observed: mpsc::UnboundedSender<String>,
+    advertised_resume: bool,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    while let Some(line) = lines.next_line().await.expect("read fake adapter input") {
+        let request: serde_json::Value =
+            serde_json::from_str(&line).expect("fake adapter input is JSON-RPC");
+        let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let _ = observed.send(method.to_owned());
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let response = match method {
+            "initialize" => {
+                let mut result = serde_json::json!({"protocolVersion": 1});
+                if advertised_resume {
+                    result["agentCapabilities"] = serde_json::json!({
+                        "sessionCapabilities": {"resume": {}}
+                    });
+                }
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
+            }
+            "session/load" | "session/resume" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32602,
+                    "message": "Session not found: it no longer exists in the backend",
+                },
+            }),
+            "session/new" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "sessionId": "fresh",
+                    "modes": {
+                        "currentModeId": "build",
+                        "availableModes": [{"id": "build", "name": "Build"}],
+                    },
+                },
+            }),
+            // Anything else session setup sends (mode or config selection)
+            // succeeds trivially.
+            _ if !id.is_null() => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+            _ => continue,
+        };
+        if write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
+    LaunchSpec {
+        subagent_mcp_socket: None,
+        goal_recovery: Default::default(),
+        command: "scripted".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: std::env::current_dir().unwrap(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: Some("gone".into()),
+        accepted_config: Default::default(),
+        harness,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::acp::StepClock::default(),
+    }
+}
+
+#[tokio::test]
+async fn zcode_opens_a_fresh_session_when_the_recorded_one_cannot_be_reloaded() {
+    for advertised_resume in [false, true] {
+        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+        let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+        let bridge = tokio::spawn(session_reload_rejecting_bridge(
+            bridge_stream,
+            observed_tx,
+            advertised_resume,
+        ));
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+        let (request_tx, mut request_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let driver = tokio::spawn(async move {
+            drive(
+                transport,
+                reload_fallback_spec(HarnessKind::Zcode),
+                &mut request_rx,
+                event_tx,
+                Arc::new(Mutex::new(None)),
+                false,
+            )
+            .await
+        });
+
+        let warning = wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(event, RuntimeEvent::Warning { .. })
+        })
+        .await;
+        let RuntimeEvent::Warning { message } = warning else {
+            unreachable!("wait_for_runtime_event matched a warning");
+        };
+        assert_eq!(message, NATIVE_SESSION_LOST_WARNING);
+
+        let started = wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(event, RuntimeEvent::SessionStarted { .. })
+        })
+        .await;
+        let RuntimeEvent::SessionStarted {
+            native_session_id,
+            resumed,
+            native_continuity_lost,
+            ..
+        } = started
+        else {
+            unreachable!("wait_for_runtime_event matched a session start");
+        };
+        assert_eq!(native_session_id, "fresh");
+        assert!(!resumed);
+        assert!(
+            native_continuity_lost,
+            "the fallback must be reported as lost native continuity"
+        );
+
+        drop(request_tx);
+        tokio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("closing the command channel ends the runtime")
+            .expect("the runtime task does not panic")
+            .expect("the fallback session ends cleanly");
+        let mut methods = Vec::new();
+        while let Ok(method) = observed_rx.try_recv() {
+            if matches!(
+                method.as_str(),
+                "session/new" | "session/load" | "session/resume"
+            ) {
+                methods.push(method);
+            }
+        }
+        assert_eq!(
+            methods,
+            vec![
+                if advertised_resume {
+                    "session/resume".to_owned()
+                } else {
+                    "session/load".to_owned()
+                },
+                "session/new".to_owned()
+            ],
+            "the fallback opens exactly one fresh session after one failed reload"
+        );
+        bridge.abort();
+    }
+}
+
+#[tokio::test]
+async fn codex_still_fails_when_the_recorded_session_cannot_be_reloaded() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let bridge = tokio::spawn(session_reload_rejecting_bridge(
+        bridge_stream,
+        observed_tx,
+        false,
+    ));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (_request_tx, mut request_rx) = mpsc::channel(1);
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            reload_fallback_spec(HarnessKind::Codex),
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+
+    let error = tokio::time::timeout(Duration::from_secs(5), driver)
+        .await
+        .expect("a failed load ends the runtime")
+        .expect("the runtime task does not panic")
+        .expect_err("a harness with restorable native state must not start fresh");
+    assert!(
+        format!("{error:#}").contains("load ACP session gone"),
+        "unexpected error: {error:#}"
+    );
+    drop(event_rx.try_recv());
+    let mut methods = Vec::new();
+    while let Ok(method) = observed_rx.try_recv() {
+        if matches!(
+            method.as_str(),
+            "session/new" | "session/load" | "session/resume"
+        ) {
+            methods.push(method);
+        }
+    }
+    assert_eq!(methods, vec!["session/load".to_owned()]);
+    bridge.abort();
 }

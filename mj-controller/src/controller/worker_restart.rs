@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use crate::native_continuity::{NativeContinuityInputs, recover_native_continuity};
 use crate::session_manager::{SessionManagerControl, StandaloneSession};
 use crate::targets::{self, CommandExecutor, CommandSpec};
 use mj_core::relay::RelayExecutionState;
@@ -332,6 +333,22 @@ impl Controller {
         }
         .await
         .map_err(mark_if_transport_died)?;
+        // A harness that keeps no per-session native state may have opened a
+        // fresh native session while recovering. The worker reports that; the
+        // record has to follow it and the conversation has to be handed over,
+        // or the session talks to an agent that has never seen it.
+        if let Some(record) = self.state.sessions.get(session_id) {
+            let inputs = NativeContinuityInputs::from_record(&self.config, record);
+            if let Err(error) =
+                recover_native_continuity(session_id, &inputs, &mut connection).await
+            {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "could not reconcile the native session after a worker restart"
+                );
+            }
+        }
         Ok(connection)
     }
 }

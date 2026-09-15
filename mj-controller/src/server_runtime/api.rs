@@ -1602,6 +1602,7 @@ mod tests {
             recovery_floor_ordinal: 0,
             recovery_floor_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
             native_session_id: Some("native-1".into()),
+            native_continuity_lost: false,
             checkpoint_only: false,
             acp_ready: Some(true),
             agent_capabilities: None,

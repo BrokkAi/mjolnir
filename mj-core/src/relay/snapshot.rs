@@ -403,6 +403,13 @@ pub struct RelayOperationalState {
     pub recovery_floor_ordinal: u64,
     pub recovery_floor_digest: String,
     pub native_session_id: Option<String>,
+    /// Whether this native session replaced one that could not be reloaded.
+    /// Only harnesses whose checkpoints carry no native session files fall
+    /// back this way, so the transcript is the only surviving context. It
+    /// stays set for the life of the native session and clears when a normal
+    /// open records a new native id.
+    #[serde(default)]
+    pub native_continuity_lost: bool,
     /// Whether the current worker process has finished opening its ACP
     /// session. Older workers omit this field and are treated as ready.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -601,6 +608,10 @@ pub enum RelayObservation {
     SessionOpened {
         native_session_id: String,
         resumed: bool,
+        /// This session was opened fresh because the recorded native session
+        /// could not be reloaded. Older journals omit it.
+        #[serde(default)]
+        native_continuity_lost: bool,
     },
     SessionConfigured {
         config_options: Vec<SessionConfigOption>,
@@ -831,6 +842,10 @@ pub struct RelaySnapshot {
     pub recovery_floor_ordinal: u64,
     pub recovery_floor_digest: String,
     pub native_session_id: Option<String>,
+    /// Persisted alongside the native id so a controller that reconnects
+    /// after the fallback still sees that continuity was lost.
+    #[serde(default)]
+    pub native_continuity_lost: bool,
     pub agent_capabilities: Option<Box<AgentCapabilities>>,
     pub agent_info: Option<Implementation>,
     pub config_options: Vec<SessionConfigOption>,
@@ -876,6 +891,7 @@ impl RelaySnapshot {
             recovery_floor_ordinal: 0,
             recovery_floor_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
             native_session_id: None,
+            native_continuity_lost: false,
             agent_capabilities: None,
             agent_info: None,
             config_options: Vec::new(),
@@ -913,6 +929,7 @@ impl RelaySnapshot {
             recovery_floor_ordinal: self.recovery_floor_ordinal,
             recovery_floor_digest: self.recovery_floor_digest.clone(),
             native_session_id: self.native_session_id.clone(),
+            native_continuity_lost: self.native_continuity_lost,
             // Readiness belongs to the current worker process, so durable
             // snapshots must never carry it across a restart.
             checkpoint_only: false,
@@ -1341,8 +1358,14 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             snapshot.agent_info = agent_info.clone();
         }
         RelayObservation::SessionOpened {
-            native_session_id, ..
-        } => snapshot.native_session_id = Some(native_session_id.clone()),
+            native_session_id,
+            native_continuity_lost,
+            ..
+        } => {
+            snapshot.native_session_id = Some(native_session_id.clone());
+            // A normal open clears the flag; only the fallback sets it.
+            snapshot.native_continuity_lost = *native_continuity_lost;
+        }
         RelayObservation::SessionConfigured { config_options } => {
             snapshot.config_options = config_options.clone();
         }

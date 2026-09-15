@@ -2833,6 +2833,7 @@ mod tests {
                 recovery_floor_ordinal: 0,
                 recovery_floor_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
                 native_session_id: Some("native-session".into()),
+                native_continuity_lost: false,
                 agent_capabilities: None,
                 agent_info: None,
                 steering_supported: None,
@@ -3643,6 +3644,7 @@ mod tests {
             relay
                 .record_observation(mj_core::relay::RelayObservation::SessionOpened {
                     native_session_id: "native-session".into(),
+                    native_continuity_lost: false,
                     resumed: true,
                 })
                 .unwrap();
@@ -4493,6 +4495,7 @@ mod tests {
                     .unwrap();
             seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
                 native_session_id: "native-session".into(),
+                native_continuity_lost: false,
                 resumed: true,
             })
             .unwrap();

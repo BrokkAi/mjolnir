@@ -4395,6 +4395,7 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
         .record_observation(RelayObservation::SessionOpened {
             native_session_id: "native-relay".into(),
             resumed: true,
+            native_continuity_lost: false,
         })
         .unwrap();
     let mut config = launch_config("/var/lib/hel/profiles/session");
@@ -4421,6 +4422,7 @@ fn unused_codex_thread_is_recreated_after_worker_restart_without_losing_queued_w
         .record_observation(RelayObservation::SessionOpened {
             native_session_id: "unused".into(),
             resumed: false,
+            native_continuity_lost: false,
         })
         .unwrap();
     // Reproduce the accumulated startup failures in an older worker. Walk
@@ -4462,6 +4464,7 @@ fn a_dispatched_codex_prompt_keeps_its_native_identity_after_restart() {
         .record_observation(RelayObservation::SessionOpened {
             native_session_id: "used".into(),
             resumed: false,
+            native_continuity_lost: false,
         })
         .unwrap();
     submit(&mut relay, "first-prompt", prompt("already sent"));
@@ -4498,6 +4501,7 @@ fn codex_agent_content_prevents_replacing_a_native_session() {
         .record_observation(RelayObservation::SessionOpened {
             native_session_id: "with-content".into(),
             resumed: false,
+            native_continuity_lost: false,
         })
         .unwrap();
     relay
@@ -5106,6 +5110,7 @@ async fn checkpoint_only_daemon_preserves_work_and_seals_without_a_harness() {
         .record_observation(RelayObservation::SessionOpened {
             native_session_id: "saved-native-session".into(),
             resumed: true,
+            native_continuity_lost: false,
         })
         .unwrap();
     submit(&mut durable, "interrupted-turn", prompt("working"));

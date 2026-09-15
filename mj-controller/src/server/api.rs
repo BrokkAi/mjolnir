@@ -936,9 +936,12 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
     if observation.launch_failed {
         return Some(WaitDecision::simple(
             WaitOutcome::Error,
-            Some(observation.launch_error.clone().unwrap_or_else(|| {
-                "the session failed to launch".to_owned()
-            })),
+            Some(
+                observation
+                    .launch_error
+                    .clone()
+                    .unwrap_or_else(|| "the session failed to launch".to_owned()),
+            ),
         ));
     }
     if let Some(StartStatus::Failed { message }) = &observation.start_status {
@@ -3710,23 +3713,25 @@ mod tests {
         // it never puts the raw text on the wire.
         let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
         let running = ApiSession::from(&snapshot.sessions[0]);
-        assert!(running.has_error, "the running session still flags an error");
+        assert!(
+            running.has_error,
+            "the running session still flags an error"
+        );
         assert_eq!(
             running.error, None,
             "a running session does not expose raw error text"
         );
         assert!(
-            serde_json::to_value(&running).unwrap().get("error").is_none(),
+            serde_json::to_value(&running)
+                .unwrap()
+                .get("error")
+                .is_none(),
             "the error field is omitted when there is nothing to show"
         );
 
         // Once the same session has failed to launch, it carries its reason so
         // a client sees why instead of a bare state.
-        state
-            .sessions
-            .get_mut("session-1")
-            .unwrap()
-            .state = mj_core::state::SessionState::Error;
+        state.sessions.get_mut("session-1").unwrap().state = mj_core::state::SessionState::Error;
         let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
         let failed = ApiSession::from(&snapshot.sessions[0]);
         assert_eq!(

@@ -2325,6 +2325,7 @@ mod tests {
             RelayObservation::SessionOpened {
                 native_session_id: "native".into(),
                 resumed: true,
+                native_continuity_lost: false,
             },
         );
         let mutation = project_relay_event(&session, &resumed).unwrap().mutation;
@@ -2336,6 +2337,7 @@ mod tests {
             RelayObservation::SessionOpened {
                 native_session_id: "native".into(),
                 resumed: false,
+                native_continuity_lost: false,
             },
         );
         assert_eq!(

@@ -1166,6 +1166,10 @@ const CANCEL_UNACKED_WARNING: &str =
 const ACP_BRIDGE_LOST_WARNING: &str = "ACP bridge exited; reloading the native session";
 const ACP_BRIDGE_RESTART_WARNING: &str = "ACP bridge restarting; reloading the native session";
 
+/// Shown when a harness that keeps no restorable native session files could
+/// not reload the recorded one and the worker opened a fresh session instead.
+const NATIVE_SESSION_LOST_WARNING: &str = "The previous native session is gone; continuing in a fresh one with the transcript as context.";
+
 /// Give up if a freshly opened session dies this many times in a row before it
 /// has lived for [`RAPID_BRIDGE_WINDOW`]. A later crash of a healthy session
 /// resets the count.
@@ -2006,11 +2010,16 @@ const ACP_TOOL_CALL_STATUSES: [&str; 4] = ["pending", "in_progress", "completed"
 /// stranding in_progress. Returns the replaced status when it coerced one.
 fn coerce_tool_call_status(update: &mut serde_json::Value) -> Option<String> {
     let object = update.as_object_mut()?;
-    let kind = object.get("sessionUpdate").and_then(|value| value.as_str())?;
+    let kind = object
+        .get("sessionUpdate")
+        .and_then(|value| value.as_str())?;
     if kind != "tool_call" && kind != "tool_call_update" {
         return None;
     }
-    let status = object.get("status").and_then(|value| value.as_str())?.to_owned();
+    let status = object
+        .get("status")
+        .and_then(|value| value.as_str())?
+        .to_owned();
     if ACP_TOOL_CALL_STATUSES.contains(&status.as_str()) {
         return None;
     }
@@ -2027,7 +2036,9 @@ fn coerce_tool_call_status(update: &mut serde_json::Value) -> Option<String> {
 /// longer parse does not leave the card running forever.
 fn salvage_tool_call_update(update: &serde_json::Value) -> Option<SessionUpdate> {
     let object = update.as_object()?;
-    let kind = object.get("sessionUpdate").and_then(|value| value.as_str())?;
+    let kind = object
+        .get("sessionUpdate")
+        .and_then(|value| value.as_str())?;
     if kind != "tool_call" && kind != "tool_call_update" {
         return None;
     }
@@ -2048,7 +2059,10 @@ const DEFAULT_TURN_STALL_TIMEOUT_MS: u64 = 600_000;
 
 fn turn_stall_timeout() -> Option<Duration> {
     let millis = match std::env::var("MJ_TURN_STALL_TIMEOUT_MS") {
-        Ok(value) => value.trim().parse::<u64>().unwrap_or(DEFAULT_TURN_STALL_TIMEOUT_MS),
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(DEFAULT_TURN_STALL_TIMEOUT_MS),
         Err(_) => DEFAULT_TURN_STALL_TIMEOUT_MS,
     };
     (millis > 0).then(|| Duration::from_millis(millis))
@@ -2490,11 +2504,12 @@ async fn serve_session(
     )
     .await?;
 
+    let mut native_continuity_lost = false;
     let loaded_session = if let Some(existing) = &spec.resume_session {
         let session_id = SessionId::from(existing.clone());
         // The relay already owns the transcript. Prefer resuming without
         // replay so a large native history cannot delay worker readiness.
-        let (loaded_meta, config_options, modes) = if initialized
+        let reloaded = if initialized
             .agent_capabilities
             .session_capabilities
             .resume
@@ -2506,31 +2521,68 @@ async fn serve_session(
                 .block_task()
                 .await;
             spec.acp_activity.mark();
-            let resumed = resumed.with_context(|| format!("resume ACP session {existing}"))?;
-            (resumed.meta, resumed.config_options, resumed.modes)
+            resumed
+                .with_context(|| format!("resume ACP session {existing}"))
+                .map(|resumed| (resumed.meta, resumed.config_options, resumed.modes))
         } else {
             let loaded = connection
                 .send_request(load_session_request(spec, session_id.clone()))
                 .block_task()
                 .await;
             spec.acp_activity.mark();
-            let loaded = loaded.with_context(|| format!("load ACP session {existing}"))?;
-            (loaded.meta, loaded.config_options, loaded.modes)
+            loaded
+                .with_context(|| format!("load ACP session {existing}"))
+                .map(|loaded| (loaded.meta, loaded.config_options, loaded.modes))
         };
-        if let Some(state) = grok_models.as_mut()
-            && let Some(fresh) = grok::model_state(loaded_meta.as_ref())
-        {
-            *state = fresh;
+        let reloaded = match reloaded {
+            Ok(reloaded) => Some(reloaded),
+            // A harness whose checkpoints carry no native session files keeps
+            // its conversations only in a live backend store, so there is no
+            // native state a reload could preserve and nothing is lost by
+            // opening a fresh one. The relay still owns the transcript. Do
+            // not read the bridge's error text: the rule is the harness, not
+            // the wording. Harnesses that do capture native session files
+            // keep the hard failure, because starting fresh there would
+            // discard state the checkpoint restored.
+            Err(error) if !spec.harness.captures_native_session() => {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    harness = spec.harness.id(),
+                    native_session_id = %existing,
+                    "native session could not be reloaded; opening a fresh one"
+                );
+                native_continuity_lost = true;
+                emit_runtime_event(
+                    events,
+                    RuntimeEvent::Warning {
+                        message: NATIVE_SESSION_LOST_WARNING.to_owned(),
+                    },
+                )
+                .await?;
+                session_updates_enabled.store(true, Ordering::Release);
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        match reloaded {
+            Some((loaded_meta, config_options, modes)) => {
+                if let Some(state) = grok_models.as_mut()
+                    && let Some(fresh) = grok::model_state(loaded_meta.as_ref())
+                {
+                    *state = fresh;
+                }
+                if spec.harness == HarnessKind::Codex
+                    && let Some(meta) = loaded_meta.as_ref()
+                {
+                    goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
+                }
+                // The response is the boundary between provider replay and
+                // future live updates for this connection.
+                session_updates_enabled.store(true, Ordering::Release);
+                Some((session_id, config_options, modes))
+            }
+            None => None,
         }
-        if spec.harness == HarnessKind::Codex
-            && let Some(meta) = loaded_meta.as_ref()
-        {
-            goal::publish(spec, events, serde_json::Value::Object(meta.clone())).await?;
-        }
-        // The response is the boundary between provider replay and future
-        // live updates for this connection.
-        session_updates_enabled.store(true, Ordering::Release);
-        Some((session_id, config_options, modes))
     } else {
         None
     };
@@ -2651,6 +2703,7 @@ async fn serve_session(
             native_session_id: session_id.to_string(),
             resumed,
             execution_mode: enforcement.map(|enforcement| enforcement.label().to_owned()),
+            native_continuity_lost,
         },
     )
     .await?;

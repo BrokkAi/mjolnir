@@ -1016,11 +1016,13 @@ pub(super) fn record_runtime_event(
         RuntimeEvent::SessionStarted {
             native_session_id,
             resumed,
+            native_continuity_lost,
             ..
         } => {
             relay.record_observation(RelayObservation::SessionOpened {
                 native_session_id,
                 resumed,
+                native_continuity_lost,
             })?;
         }
         RuntimeEvent::SessionConfigured { config_options } => {

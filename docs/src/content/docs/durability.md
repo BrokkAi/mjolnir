@@ -92,6 +92,13 @@ files, so Mjolnir does not capture or restore that state. Resuming a ZCode
 session restores the repositories and the canonical transcript Mjolnir holds,
 but not the harness's own conversation history.
 
+Because that history cannot be restored, a resumed ZCode session continues in a
+fresh ZCode session, and so does a ZCode session whose worker restarts and
+cannot reopen the one it was using. Mjolnir hands the conversation so far to the
+new session as its first context, and says so in the session. The conversation
+is preserved by Mjolnir, not by ZCode: the agent reads it as context rather than
+as its own history, so ask it to re-read anything it must act on precisely.
+
 Checkpointing protects project workspaces. Installed packages, the rest of the
 target user's home, `/tmp`, container layers, and other files outside the
 declared project workspace are ephemeral. Directory attachments are not a

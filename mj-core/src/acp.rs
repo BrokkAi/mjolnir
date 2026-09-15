@@ -333,6 +333,11 @@ pub enum RuntimeEvent {
         resumed: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         execution_mode: Option<String>,
+        /// This session opened fresh because the recorded native session
+        /// could not be reloaded and the harness keeps no native state a
+        /// checkpoint could restore. Older workers omit it.
+        #[serde(default)]
+        native_continuity_lost: bool,
     },
     SessionConfigured {
         config_options: Vec<SessionConfigOption>,

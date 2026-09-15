@@ -711,6 +711,79 @@ fn handoff(summary: &str, exact_tail: Option<&str>, handoff_bytes: usize) -> Res
     Ok(result)
 }
 
+/// Build a handoff without a summarizer, from the most recent turns alone.
+///
+/// A resume or a worker restart that has lost the native session still has to
+/// hand the conversation over, and no utility model may be configured or
+/// reachable. Exact recent turns are a worse handoff than a summary, but they
+/// are far better than starting the target with no history at all.
+///
+/// Turns are selected newest-first until the budget is spent and emitted
+/// oldest-first, so the text reads in order.
+pub fn render_recent_snapshot(snapshot: &CanonicalSessionSnapshot, handoff_bytes: usize) -> String {
+    const OPENING: &str = "<exact_recent_conversation>\n";
+    const CLOSING: &str = "</exact_recent_conversation>";
+
+    let preamble = format!(
+        "{HANDOFF_PREAMBLE} The restored workspace is authoritative. No summarizer was available, so the most recent conversation is reproduced verbatim below and earlier turns are omitted. Use it for continuity, and do not repeat completed work unless verification requires it.\n\n"
+    );
+    let turns = match turns_from_snapshot(snapshot) {
+        Ok(turns) => turns,
+        // The handoff is a courtesy to the target harness; an unreadable
+        // transcript must not take the preamble down with it.
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "could not read the transcript for a verbatim handoff"
+            );
+            Vec::new()
+        }
+    };
+    let budget = handoff_bytes
+        .saturating_sub(preamble.len() + OPENING.len() + CLOSING.len())
+        .max(1);
+    let mut start = turns.len();
+    let mut used = 0usize;
+    for index in (0..turns.len()).rev() {
+        let size = rendered_turn_len(&turns[index], index);
+        if used.saturating_add(size) > budget {
+            break;
+        }
+        used += size;
+        start = index;
+    }
+    // Not even the newest turn fits: send its head rather than nothing.
+    let mut body = if start == turns.len() && !turns.is_empty() {
+        truncate_utf8(
+            render_turns(&turns[turns.len() - 1..], turns.len() - 1),
+            budget,
+        )
+    } else {
+        render_turns(&turns[start..], start)
+    };
+    if body.is_empty() {
+        body.push_str("[no transcript was available to hand over]\n");
+    }
+    let mut result = preamble;
+    result.push_str(OPENING);
+    result.push_str(&body);
+    result.push_str(CLOSING);
+    truncate_utf8(result, handoff_bytes)
+}
+
+/// Cut `text` to at most `limit` bytes on a character boundary.
+fn truncate_utf8(mut text: String, limit: usize) -> String {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,6 +927,37 @@ mod tests {
 
     fn completed_tool_output(text: &str) -> TurnEvent {
         TurnEvent::Tool(tool_call("completed", text))
+    }
+
+    /// With no utility model the handoff is built without a model at all:
+    /// newest turns first until the budget is spent, emitted in order.
+    #[test]
+    fn a_verbatim_handoff_keeps_the_newest_turns_that_fit_and_reads_in_order() {
+        let padding = "y".repeat(8 * 1024);
+        let input = exchanges(&[
+            ("oldest question", padding.as_str()),
+            ("middle question", padding.as_str()),
+            ("newest question", padding.as_str()),
+        ]);
+
+        let full = render_recent_snapshot(&input, 64 * 1024);
+        assert!(full.starts_with(HANDOFF_PREAMBLE), "{}", &full[..120]);
+        assert!(full.contains("oldest question"), "{full}");
+        let newest = full.find("newest question").expect("newest turn present");
+        let oldest = full.find("oldest question").expect("oldest turn present");
+        assert!(oldest < newest, "turns must read oldest-first");
+
+        // A budget that fits only the last turn drops the earlier ones.
+        let tight = render_recent_snapshot(&input, 12 * 1024);
+        assert!(tight.len() <= 12 * 1024, "{}", tight.len());
+        assert!(tight.contains("newest question"), "{tight}");
+        assert!(!tight.contains("oldest question"));
+
+        // Even a budget that cannot hold one turn sends what it can rather
+        // than handing the target an empty conversation.
+        let starved = render_recent_snapshot(&input, MIN_CONTEXT_BYTES);
+        assert!(starved.len() <= MIN_CONTEXT_BYTES, "{}", starved.len());
+        assert!(starved.starts_with(HANDOFF_PREAMBLE));
     }
 
     #[tokio::test]

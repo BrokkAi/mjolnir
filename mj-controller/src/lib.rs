@@ -14,6 +14,7 @@ pub mod dictation;
 pub mod doctor;
 pub mod image;
 pub mod import;
+pub(crate) mod native_continuity;
 pub mod quota;
 pub mod readline;
 pub mod recovery;

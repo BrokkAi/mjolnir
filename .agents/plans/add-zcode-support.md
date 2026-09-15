@@ -64,6 +64,8 @@ Decision: do not archive ZCode's shared native SQLite database. Rationale: a ful
 
 Decision: publish Codex ACP `disallowedTools` as `@brokkai/codex-acp` 1.11.4 and pin that registry version directly, replacing the temporary generated patch over 1.11.3. Rationale: the user explicitly authorized publication, and a normal immutable package pin keeps bare installs, ambient fallback, and the container image aligned without commit-specific patch machinery. Date/author: 2026-09-13, user and Codex.
 
+Decision: a ZCode resume, and a ZCode worker restart that cannot reopen the recorded native session, continue in a fresh ZCode session with the conversation handed over as its first context. Rationale: the controller previously assumed native continuity whenever the harness was unchanged, so ZCode resumes failed with "Session not found" and worker restarts crash-looped trying to reload a session the shared database no longer offers. ZCode's checkpoints carry repository state and Mjolnir's own transcript only, so continuity has to come from Mjolnir: the record adopts the id the worker reports, the session says so, and the transcript is installed as prompt context. The handoff is compacted by a utility model when one is available and sent as the most recent turns verbatim when none is. Date/author: 2026-09-15, Claude.
+
 ## Outcomes & Retrospective
 
 

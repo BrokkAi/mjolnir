@@ -921,13 +921,15 @@ impl Controller {
         // that work has been thrown away.
         super::worker_binary::preflight_worker_binary(&target_template)?;
         let same_harness = profile.kind == archive_manifest.session.harness_kind;
+        let native_continuity =
+            native_continuity_preserved(profile.kind, archive_manifest.session.harness_kind);
         let context_bytes = profile
             .context_window_bytes
             .unwrap_or(crate::compaction::DEFAULT_CONTEXT_BYTES);
         // Cross-harness compaction is started alongside destination
         // provisioning below. Clone only the configuration it reads so the
         // controller can continue owning and mutating its session record.
-        let utility_config = (!same_harness).then(|| self.config.clone());
+        let utility_config = (!native_continuity).then(|| self.config.clone());
         let discard_queued_prompts = discard_queue || !same_harness;
         // When this controller archived the session, its durable projection is
         // already the archive's content. Reading one row decides that; a read
@@ -999,7 +1001,7 @@ impl Controller {
         record.additional_mounts = additional_mounts;
         record.target = None;
         record.native_session_id =
-            same_harness.then(|| archive_manifest.session.native_session_id.clone());
+            native_continuity.then(|| archive_manifest.session.native_session_id.clone());
         record.state = SessionState::Provisioning;
         record.updated_at = now();
         record.last_error = None;
@@ -1232,7 +1234,7 @@ impl Controller {
                     && conversion.is_none())
                     || plan == ResumePlan::RawToWorkspace
                     || (recreated_managed_worktree && plan == ResumePlan::InPlace),
-                restore_native: same_harness,
+                restore_native: native_continuity,
                 // A move onto a checkout puts it somewhere the archive could
                 // not have named, so the restored harness session is pointed at
                 // the real working directory instead of the archived one. A
@@ -1366,7 +1368,7 @@ impl Controller {
             .await;
             let (mut relay, native_session_id) = readiness
                 .map_err(|error| worker_probe_diagnosis(executor, &backend, &worker_root, error))?;
-            if same_harness {
+            if native_continuity {
                 if native_session_id != archive_manifest.session.native_session_id {
                     bail!(
                         "ACP loaded native session {native_session_id}, expected {}",
@@ -1378,7 +1380,7 @@ impl Controller {
                     .install_prompt_context(
                         utility_handoff
                             .clone()
-                            .context("cross-harness resume has no utility-model handoff")?,
+                            .context("a resume into a fresh native session has no handoff")?,
                     )
                     .await?;
                 if !discard_queue {
@@ -1941,6 +1943,18 @@ fn execute_joined_cross_harness_work<A: Send, B: Send>(
     })
 }
 
+/// Whether the restored native session can carry the conversation into the
+/// resumed session.
+///
+/// A harness whose checkpoint captures no native session — zcode keeps every
+/// conversation in one shared live database — cannot reload the session the
+/// archive names, so even a same-harness resume opens a fresh native session
+/// and has to hand the transcript over as its first context, exactly as a
+/// cross-harness resume does.
+fn native_continuity_preserved(profile_kind: HarnessKind, archived_kind: HarnessKind) -> bool {
+    profile_kind == archived_kind && profile_kind.captures_native_session()
+}
+
 /// Discover a utility model and compact the cross-harness handoff while still
 /// watching for cancellation. Discovery and compaction can both make several
 /// network requests, so a cancelled resume must not wait them out.
@@ -1959,9 +1973,28 @@ async fn utility_handoff_while_cancellable(
     let _compacting = ProvisionStageGuard::new(executor, ProvisionStage::Compacting);
     let cancel = cancellation.child_token();
     let operation = async {
-        let candidates = crate::utility_llm::UtilityLlmRuntime::shared()
+        let candidates = match crate::utility_llm::UtilityLlmRuntime::shared()
             .resolve(config, &cancel)
-            .await?;
+            .await
+        {
+            Ok(candidates) => candidates,
+            // A cancelled discovery is the caller's own doing; report it.
+            Err(error) if cancel.is_cancelled() => return Err(error),
+            // No utility model is configured, credentialed, or in quota. The
+            // resume still has to hand the conversation over, so send the
+            // recent transcript verbatim instead of failing the resume.
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "no utility model is available for the resume handoff; handing over the most recent transcript verbatim"
+                );
+                return Ok(crate::compaction::render_recent_snapshot(
+                    snapshot,
+                    context_bytes,
+                ));
+            }
+        };
         let backend = crate::utility_llm::UtilityCompactionBackend::new(candidates, cancel.clone());
         // Pages are sized by what the summarizer can read; the handoff is
         // sized by what the target harness accepts. They are unrelated
@@ -3640,5 +3673,36 @@ mod tests {
             "{leftover:?} in {}",
             sessions.display()
         );
+    }
+
+    /// A zcode checkpoint carries repository state and Hel's transcript only,
+    /// so resuming one cannot assume the archived native session comes back.
+    /// Every harness that does capture its own session still can.
+    #[test]
+    fn only_a_harness_that_captures_its_native_session_keeps_continuity_on_resume() {
+        use mj_core::config::HarnessKind;
+
+        assert!(!super::native_continuity_preserved(
+            HarnessKind::Zcode,
+            HarnessKind::Zcode
+        ));
+        assert!(super::native_continuity_preserved(
+            HarnessKind::Codex,
+            HarnessKind::Codex
+        ));
+        assert!(super::native_continuity_preserved(
+            HarnessKind::Claude,
+            HarnessKind::Claude
+        ));
+        // A different harness has never been able to reload the archived
+        // session, whether or not it captures one.
+        assert!(!super::native_continuity_preserved(
+            HarnessKind::Claude,
+            HarnessKind::Codex
+        ));
+        assert!(!super::native_continuity_preserved(
+            HarnessKind::Zcode,
+            HarnessKind::Codex
+        ));
     }
 }

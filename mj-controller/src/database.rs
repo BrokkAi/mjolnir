@@ -1947,6 +1947,36 @@ pub fn mark_session_worker_connected(
     })
 }
 
+/// Point a session at a native session its worker opened on its own.
+///
+/// A harness whose checkpoint captures no native session (zcode) cannot always
+/// reload the one the record names; the worker opens a fresh session and
+/// reports it. Only that column moves: the session's lifecycle state belongs to
+/// whatever operation is running.
+pub fn adopt_native_session_id(session_id: &str, native_session_id: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let native_session_id = native_session_id.to_owned();
+    submit_database_write("adopt_native_session_id", move |_| {
+        adopt_native_session_id_to(&database_path(), &session_id, &native_session_id)
+    })
+}
+
+fn adopt_native_session_id_to(
+    path: &Path,
+    session_id: &str,
+    native_session_id: &str,
+) -> Result<()> {
+    let connection = open(path)?;
+    let changed = connection.execute(
+        "UPDATE sessions SET native_session_id = ?2 WHERE session_id = ?1",
+        params![session_id, native_session_id],
+    )?;
+    if changed != 1 {
+        bail!("unknown session {session_id}");
+    }
+    Ok(())
+}
+
 fn mark_session_worker_connected_to(
     path: &Path,
     session_id: &str,

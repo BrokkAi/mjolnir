@@ -4020,6 +4020,7 @@ mod tests {
             recovery_floor_ordinal: 0,
             recovery_floor_digest: String::new(),
             native_session_id: None,
+            native_continuity_lost: false,
             checkpoint_only: false,
             acp_ready: None,
             agent_capabilities,
@@ -4088,6 +4089,7 @@ mod tests {
             recovery_floor_ordinal: 0,
             recovery_floor_digest: String::new(),
             native_session_id: None,
+            native_continuity_lost: false,
             checkpoint_only: false,
             acp_ready: None,
             agent_capabilities: None,
@@ -4890,8 +4892,7 @@ mod tests {
         let json = serde_json::to_value(snapshot).unwrap();
         assert_eq!(json["launch_failures"][15]["workspace_id"], "workspace-19");
         assert_eq!(
-            json["launch_failures"][15]["error"],
-            "worker bootstrap failed for 19",
+            json["launch_failures"][15]["error"], "worker bootstrap failed for 19",
             "the recorded failure carries its reason so a client can show it"
         );
         assert_eq!(json["launch_failures"][15].as_object().unwrap().len(), 4);

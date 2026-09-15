@@ -2700,13 +2700,47 @@ async fn sync_actor_connection(
     connection: &mut Option<StandaloneSession>,
 ) -> Result<Option<ManagedSessionSnapshot>> {
     if connection.is_none() {
-        *connection = Some(StandaloneSession::connect(target).await?);
-        return Ok(Some(
-            connection
-                .as_ref()
-                .expect("connection was initialized")
-                .snapshot(),
-        ));
+        let mut fresh = StandaloneSession::connect(target).await?;
+        // A worker that recovered without its native session reports that on
+        // the snapshot it hands back here. Reconciling the record and handing
+        // the conversation over is cheap to skip and only runs on that flag.
+        if fresh.snapshot().operational.native_continuity_lost {
+            // The durable read is SQLite work; keep it off the actor thread.
+            let inputs = {
+                let session_id = target.session_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::native_continuity::NativeContinuityInputs::load(&session_id)
+                })
+                .await
+                .context("join the native continuity read")
+                .and_then(|inputs| inputs)
+            };
+            match inputs {
+                Ok(inputs) => {
+                    if let Err(error) = crate::native_continuity::recover_native_continuity(
+                        &target.session_id,
+                        &inputs,
+                        &mut fresh,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            session_id = %target.session_id,
+                            error = format!("{error:#}"),
+                            "could not reconcile the native session after a worker recovery"
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    session_id = %target.session_id,
+                    error = format!("{error:#}"),
+                    "could not read the session record to reconcile a lost native session"
+                ),
+            }
+        }
+        let snapshot = fresh.snapshot();
+        *connection = Some(fresh);
+        return Ok(Some(snapshot));
     }
     let connection = connection.as_mut().expect("connection was initialized");
     if connection.sync_in_place().await? {
@@ -4193,6 +4227,7 @@ mod tests {
                     recovery_floor_ordinal: 0,
                     recovery_floor_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
                     native_session_id: None,
+                    native_continuity_lost: false,
                     checkpoint_only: false,
                     acp_ready: None,
                     agent_capabilities: None,
