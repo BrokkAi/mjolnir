@@ -46,6 +46,7 @@ pub(crate) enum ResumeFocus {
     Search,
     Sessions,
     Cancel,
+    Destroy,
     Open,
 }
 
@@ -198,6 +199,9 @@ impl ResumeDialog {
             !rows.is_empty(),
         );
         form.declare_with_enabled(Cancel, ControlKind::Button, true);
+        if self.tab == ResumeTab::Hel {
+            form.declare_with_enabled(Destroy, ControlKind::Button, self.can_destroy(rows));
+        }
         form.declare_with_enabled(Open, ControlKind::Button, self.can_open(rows));
         form.set_list_identity(
             ResumeFocus::Sessions,
@@ -210,6 +214,14 @@ impl ResumeDialog {
         rows.get(self.row_index).is_some_and(|row| {
             row.status.explanation().is_none() && row.unavailable_reason.is_none()
         })
+    }
+
+    /// Only rows with a Mjolnir session record can be destroyed.
+    fn can_destroy(&self, rows: &[ResumeRow]) -> bool {
+        self.tab == ResumeTab::Hel
+            && rows
+                .get(self.row_index)
+                .is_some_and(|row| row.session_id().is_some())
     }
 
     pub(crate) fn is_scanning(&self) -> bool {
@@ -658,28 +670,8 @@ impl DashboardState {
                         );
                         return DashboardAction::None;
                     }
-                    KeyCode::Char('d') | KeyCode::Delete if focused == Sessions => {
-                        let Some(row) = self.selected_resume_row() else {
-                            return DashboardAction::None;
-                        };
-                        let Some(session_id) = row.session_id().map(ToOwned::to_owned) else {
-                            self.notices
-                                .set("Mjolnir never destroys a harness's own session.");
-                            return DashboardAction::None;
-                        };
-                        self.cancel_component_pointer();
-                        let Mode::ResumeDialog(dialog) =
-                            std::mem::replace(&mut self.mode, Mode::Dashboard)
-                        else {
-                            return DashboardAction::None;
-                        };
-                        self.mode =
-                            Mode::Confirm(ConfirmDialog::new(Confirmation::DestroyStopped {
-                                session_id,
-                                reopen: Some(Box::new(dialog)),
-                            }));
-                        self.rebuild_resume_rows();
-                        return DashboardAction::None;
+                    KeyCode::Delete if focused == Sessions => {
+                        return self.destroy_selected_resume_row();
                     }
                     // Keep list navigation shortcuts; arrows in fields belong to editing.
                     KeyCode::Left | KeyCode::Right if focused == Sessions => {
@@ -746,8 +738,31 @@ impl DashboardState {
                 let row = self.selected_resume_row();
                 return self.activate_selected_resume_row(row);
             }
+            Some(Interaction::Activate(Destroy)) => return self.destroy_selected_resume_row(),
             _ => {}
         }
+        DashboardAction::None
+    }
+
+    /// Asks for confirmation before destroying the selected row's session record.
+    fn destroy_selected_resume_row(&mut self) -> DashboardAction {
+        let Some(row) = self.selected_resume_row() else {
+            return DashboardAction::None;
+        };
+        let Some(session_id) = row.session_id().map(ToOwned::to_owned) else {
+            self.notices
+                .set("Mjolnir never destroys a harness's own session.");
+            return DashboardAction::None;
+        };
+        self.cancel_component_pointer();
+        let Mode::ResumeDialog(dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
+            return DashboardAction::None;
+        };
+        self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::DestroyStopped {
+            session_id,
+            reopen: Some(Box::new(dialog)),
+        }));
+        self.rebuild_resume_rows();
         DashboardAction::None
     }
 
@@ -757,7 +772,7 @@ impl DashboardState {
         };
         if let Some(reason) = row.status.explanation() {
             self.notices.set(format!(
-                "This session was {reason}. Press d to destroy its record."
+                "This session was {reason}. Use Destroy to remove its record."
             ));
             return DashboardAction::None;
         }
@@ -872,7 +887,7 @@ pub(crate) fn render_resume_dialog(
     TabStrip::render(
         frame,
         rows[0],
-        &["Mjolnir", "Import"],
+        &[" Mjolnir ", " Import "],
         dialog.tab.index(),
         &mut form,
         ResumeFocus::Tabs,
@@ -987,7 +1002,7 @@ pub(crate) fn render_resume_dialog(
     }
     footer.push(Line::styled(
         match dialog.tab {
-            ResumeTab::Hel => "Enter resumes · d destroys · ←/→ tabs · / searches · Tab moves",
+            ResumeTab::Hel => "Enter resumes · Delete destroys · ←/→ tabs · / searches · Tab moves",
             ResumeTab::Import => "Enter imports · ←/→ tabs · / searches · Tab moves",
         },
         Style::default().fg(theme::palette().muted),
@@ -1010,23 +1025,24 @@ pub(crate) fn render_resume_dialog(
         rows[3].width,
         u16::from(rows[3].height > 0),
     );
-    Dialog::render_actions(
-        frame,
-        button_area,
-        &[
-            (ResumeFocus::Cancel, "Cancel", true),
-            (
-                ResumeFocus::Open,
-                if dialog.tab == ResumeTab::Hel {
-                    "Resume"
-                } else {
-                    "Import"
-                },
-                dialog.can_open(list_rows),
-            ),
-        ],
-        &mut form,
-    );
+    let mut buttons = vec![(ResumeFocus::Cancel, "Cancel", true)];
+    if dialog.tab == ResumeTab::Hel {
+        buttons.push((
+            ResumeFocus::Destroy,
+            "Destroy",
+            dialog.can_destroy(list_rows),
+        ));
+    }
+    buttons.push((
+        ResumeFocus::Open,
+        if dialog.tab == ResumeTab::Hel {
+            "Resume"
+        } else {
+            "Import"
+        },
+        dialog.can_open(list_rows),
+    ));
+    Dialog::render_actions(frame, button_area, &buttons, &mut form);
     form.end_frame(ResumeFocus::Sessions);
     if dialog.is_scanning() {
         frame.render_widget(
@@ -1283,6 +1299,20 @@ mod tests {
         };
         dialog.search = search.to_owned().into();
         dashboard.rebuild_resume_rows();
+    }
+
+    /// Tabs forward until `control` has keyboard focus.
+    fn focus_resume_control(dashboard: &mut DashboardState, control: ResumeFocus) {
+        for _ in 0..8 {
+            let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+                panic!("expected the resume dialog");
+            };
+            if dialog.focused() == control {
+                return;
+            }
+            dashboard.handle_key(key(KeyCode::Tab));
+        }
+        panic!("{control:?} never received focus");
     }
 
     fn switch_to_import(dashboard: &mut DashboardState) {
@@ -1596,11 +1626,98 @@ mod tests {
             assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
             let notice = dashboard.notices.current().unwrap_or_default();
             assert!(notice.contains(reason), "{notice}");
-            assert!(notice.contains("destroy its record"), "{notice}");
+            assert!(notice.contains("Use Destroy"), "{notice}");
 
-            dashboard.handle_key(key(KeyCode::Char('d')));
+            focus_resume_control(&mut dashboard, ResumeFocus::Destroy);
+            dashboard.handle_key(key(KeyCode::Enter));
             assert!(matches!(dashboard.mode, Mode::Confirm(_)));
         }
+    }
+
+    /// The letter key used to destroy; that job now belongs to the Destroy
+    /// button, which reaches the same confirmation by keyboard or mouse.
+    #[test]
+    fn the_destroy_button_replaces_the_d_key() {
+        let mut dashboard = DashboardState::new(
+            config(),
+            state_with(vec![stopped_session()]),
+            BTreeMap::new(),
+        );
+        dashboard.show_resume_dialog(1, Vec::new());
+
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('d'))),
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 34)).expect("terminal");
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .expect("draw the resume dialog");
+        let lines = buffer_lines(terminal.backend().buffer());
+        let (row, line) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.contains("  Destroy  "))
+            .expect("Destroy button between Cancel and Resume");
+        let cancel = cell_column(line, "Cancel");
+        let destroy = cell_column(line, "Destroy");
+        let resume = cell_column(line, "Resume");
+        assert!(cancel < destroy && destroy < resume, "{line}");
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            dashboard.handle_mouse(crossterm::event::MouseEvent {
+                kind,
+                column: destroy,
+                row: row as u16,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+        }
+        let Mode::Confirm(confirm) = &dashboard.mode else {
+            panic!(
+                "expected the destroy confirmation, got {:?}",
+                dashboard.mode
+            );
+        };
+        assert!(matches!(
+            confirm.confirmation,
+            Confirmation::DestroyStopped { .. }
+        ));
+    }
+
+    /// The active tab is highlighted whether or not the strip has focus, so
+    /// the current tab is visible at a glance.
+    #[test]
+    fn the_active_tab_is_highlighted_without_focus() {
+        let mut dashboard = DashboardState::new(
+            config(),
+            state_with(vec![stopped_session()]),
+            BTreeMap::new(),
+        );
+        dashboard.show_resume_dialog(1, Vec::new());
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert_eq!(dialog.focused(), ResumeFocus::Sessions);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 34)).expect("terminal");
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .expect("draw the resume dialog");
+        let buffer = terminal.backend().buffer();
+        let lines = buffer_lines(buffer);
+        let row = lines
+            .iter()
+            .position(|line| line.contains(" Mjolnir ") && line.contains(" Import "))
+            .expect("tab strip");
+        let y = buffer.area.y + row as u16;
+        let active = buffer.area.x + cell_column(&lines[row], "Mjolnir");
+        let inactive = buffer.area.x + cell_column(&lines[row], "Import");
+        assert_eq!(buffer[(active, y)].bg, theme::palette().accent);
+        assert_eq!(buffer[(inactive, y)].bg, theme::palette().surface_raised);
     }
 
     /// Hel never modifies a harness home, so a native-only row has no destroy action.
@@ -1617,8 +1734,12 @@ mod tests {
         );
         switch_to_import(&mut dashboard);
 
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert!(!dialog.form.borrow().is_enabled(ResumeFocus::Destroy));
         assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('d'))),
+            dashboard.handle_key(key(KeyCode::Delete)),
             DashboardAction::None
         );
         assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
@@ -2204,7 +2325,14 @@ mod tests {
             .draw(|frame| crate::render::render(frame, &mut dashboard))
             .expect("draw the resume dialog");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        for hint in ["Mjolnir", "Import", "d destroys", "←/→ tabs", "/ searches"] {
+        for hint in [
+            "Mjolnir",
+            "Import",
+            "Delete destroys",
+            "  Destroy  ",
+            "←/→ tabs",
+            "/ searches",
+        ] {
             assert!(rendered.contains(hint), "{rendered}");
         }
 
@@ -2214,7 +2342,8 @@ mod tests {
             .expect("draw the Import tab");
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("Enter imports"), "{rendered}");
-        assert!(!rendered.contains("d destroys"), "{rendered}");
+        assert!(!rendered.contains("destroys"), "{rendered}");
+        assert!(!rendered.contains("  Destroy  "), "{rendered}");
         assert!(!rendered.contains("archives"), "{rendered}");
     }
 }
