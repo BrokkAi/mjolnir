@@ -95,8 +95,8 @@ fn call_tool(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let dispatch: LaneDispatch = serde_json::from_value(arguments)
-        .context("spawn_specialist takes a `reviewers` list")?;
+    let dispatch: LaneDispatch =
+        serde_json::from_value(arguments).context("spawn_specialist takes a `reviewers` list")?;
     // Validated here as well as in the worker: a rejected dispatch should read
     // as a tool error the supervisor can correct, not as a silent no-op.
     if let Err(message) = validate_dispatch(&dispatch.reviewers) {

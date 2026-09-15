@@ -3768,7 +3768,7 @@ mod tests {
             initial_prompt: "Inspect the parser".into(),
             request_key: "request-1".into(),
             created_at: child.created_at.clone(),
-            delivered_turn: None,
+            noticed_turn: None,
         };
         let mut dashboard = DashboardState::new(
             config(),

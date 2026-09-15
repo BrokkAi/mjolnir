@@ -10,9 +10,9 @@ The implementation already behaves this way mechanically, but its words and some
 
 ## Progress
 
-- [ ] (date) Milestone 1: truthful model-facing contract text in `mj-worker/src/subagent_mcp.rs`, with tests.
-- [ ] (date) Milestone 2: rename the completion-notice path and remove the dead child-output plumbing, with tests.
-- [ ] (date) Milestone 3: full validation (`cargo fmt`, `cargo test`, `cargo clippy`) and commits.
+- [x] (2026-09-15) Milestone 1: truthful model-facing contract text in `mj-worker/src/subagent_mcp.rs`, with tests. Instructions factored into `SERVER_INSTRUCTIONS`, the degraded-path fallback into `pending_reply`, `request_key` documented in the spawn schema.
+- [x] (2026-09-15) Milestone 2: rename the completion-notice path and remove the dead child-output plumbing, with tests. `record_subagent_completion_notice` (no `output` parameter), `mark_subagent_turn_noticed`, `SubagentRecord::noticed_turn` with the stored name kept as `delivered_turn`, backward transcript scan deleted, serde round-trip test added.
+- [x] (2026-09-15) Milestone 3: full validation (`cargo fmt`, `cargo test`, `cargo clippy`) and commits.
 
 ## Surprises & Discoveries
 
@@ -20,6 +20,8 @@ The implementation already behaves this way mechanically, but its words and some
   Evidence: `mj-worker/src/worker_runtime/subagents.rs` `serve_one` — "Block until the daemon completes this request and return its result as the tool's answer"; the controller-side comment at the `complete_subagent_request` call in `mj-controller/src/server_runtime.rs` says "The result reaches the model as the tool call's own answer… It is not injected as a turn."
 - Observation: `deliver_subagent_completion` accepts the child's final output and immediately drops it (`let _ = output;`), while its caller scans the child transcript backwards to produce that output — dead work on every completed child turn.
   Evidence: `mj-controller/src/server_runtime/api.rs` (`let _ = output;` inside `deliver_subagent_completion`) and the `.transcript.iter().rev().find_map(...)` block in `mj-controller/src/server_runtime.rs` immediately before the `subagent_completion_jobs` spawn.
+- Observation: a TUI test fixture also constructs `SubagentRecord`, so the field rename's reference list spans a crate the initial grep did not cover; a full-repo grep is the reliable check for such renames.
+  Evidence: `mj-tui/src/lib.rs:3771` failed to compile with `struct SubagentRecord has no field named delivered_turn` during the first full-suite run; fixed to `noticed_turn: None`.
 
 ## Decision Log
 
@@ -41,7 +43,9 @@ The implementation already behaves this way mechanically, but its words and some
 
 ## Outcomes & Retrospective
 
-(filled at completion)
+Complete. The `mj-agents` server now tells the model the spawn/wait contract: `SERVER_INSTRUCTIONS` directs result collection through `wait`, the degraded-path `pending_reply` routes retries through `request_key` (and `list_agents` before a keyless re-spawn), and neither string promises a push. The completion path reads as what it is: `record_subagent_completion_notice` posts the unchanged one-line user notice without the dead `output` parameter, `mark_subagent_turn_noticed` persists the ordinal, and `SubagentRecord::noticed_turn` keeps the historical `delivered_turn` wire name so stored relation payloads deserialize unchanged (proved by the serde round-trip test).
+
+Validation: focused suites (worker 9, core 3, controller 1) then the full default-member suite with only the two documented environment-broken tests skipped; `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check` all clean. Behavior is unchanged on the wire apart from the tool prose; the socket mechanics tests passed unmodified.
 
 ## Context and Orientation
 
@@ -150,3 +154,5 @@ No new crates, traits, or wire types. Changed signatures:
 The MCP tool names (`list_profiles`, `spawn`, `list_agents`, `send_input`, `wait`, `interrupt`, `close`), the request/result wire types, the socket protocol (`SocketReply`), and the review MCP server are all out of scope and must remain byte-identical on the wire apart from the prose strings named in Milestone 1.
 
 Revision 2026-09-15: created from the user's direction after auditing the implemented flow — mechanics already follow spawn/wait; this plan removes the reviewer-copied language, the delivery-flavored naming, and the dead child-output plumbing, and records the user's rejection of the original plan's steer/queue continuation idea.
+
+Revision 2026-09-15 (implementation complete): all three milestones delivered and validated; `cargo fmt --all` additionally reflowed one pre-existing over-width line in `mj-worker/src/review/mcp.rs`, included because the workspace check requires a clean format run.

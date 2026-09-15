@@ -388,7 +388,9 @@ impl ApiBackend {
                         .await?;
                 }
                 let deadline = tokio::time::Instant::now()
-                    + Duration::from_secs(timeout_seconds.unwrap_or(300).clamp(1, MAX_WAIT_SECONDS));
+                    + Duration::from_secs(
+                        timeout_seconds.unwrap_or(300).clamp(1, MAX_WAIT_SECONDS),
+                    );
                 loop {
                     let ids = child_session_ids.clone();
                     let summaries = tokio::task::spawn_blocking(move || {
@@ -465,21 +467,20 @@ impl ApiBackend {
         Ok(())
     }
 
-    /// Record that a child finished a turn as a Mjolnir notice in the parent's
-    /// conversation. This is the one unsolicited sub-agent event, so it is a
-    /// notice, not a prompt: it must not forge a user turn or start one. The
-    /// child's output is left for `wait` and the child transcript; the
-    /// notice only says what happened, and `output` is accepted for the log.
-    pub async fn deliver_subagent_completion(
+    /// Record that a child finished a turn as a one-line user-visible notice
+    /// in the parent's conversation. This is the one unsolicited sub-agent
+    /// event, so it is a notice, not a prompt: it must not forge a user turn
+    /// or start one. The child's output is not included — it is collected
+    /// with `wait` and read in the child transcript; the notice only says
+    /// what happened.
+    pub async fn record_subagent_completion_notice(
         &self,
         parent_session_id: String,
         child_session_id: &str,
         task_name: &str,
         turn: u64,
         outcome: &str,
-        output: &str,
     ) -> Result<()> {
-        let _ = output;
         ensure!(
             !matches!(
                 self.start_status(parent_session_id.clone()).await?,
@@ -1713,13 +1714,12 @@ mod tests {
         );
 
         backend
-            .deliver_subagent_completion(
+            .record_subagent_completion_notice(
                 "parent-1".into(),
                 "child-abcdef012345",
                 "audit deps",
                 3,
                 "completed",
-                "the full child output that must not be pasted into the notice",
             )
             .await
             .unwrap();
