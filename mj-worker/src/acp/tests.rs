@@ -4565,6 +4565,85 @@ async fn zcode_opens_a_fresh_session_when_the_recorded_one_cannot_be_reloaded() 
     }
 }
 
+/// ZCode pins its startup mode and model through the launch environment
+/// (`ZCODE_ACP_MODE` / `ZCODE_MODEL`), applied inside `session/create`. Hel
+/// must therefore issue no ACP config write at startup: an eager mode
+/// enforcement or model reapply materializes the lazy backend session before
+/// the first prompt, and the backend evicts that unpersisted draft so the next
+/// `session/resume` fails with "Session not found". The session must still
+/// come up configured. A non-ZCode harness keeps enforcing its mode at startup
+/// (covered by `codex_selects_guardian_for_a_new_session`).
+#[tokio::test]
+async fn zcode_sends_no_startup_config_before_the_first_prompt() {
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+    // ModeSurface::Both makes the bridge advertise a selectable mode option,
+    // so a startup enforcement would have a target to select — the fix, not a
+    // missing option, is what keeps it silent.
+    let bridge = tokio::spawn(mode_change_bridge(
+        bridge_stream,
+        ModeSurface::Both,
+        None,
+        observed_tx,
+    ));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(1);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    // A recorded model would drive the selector reapply on a non-pinned
+    // harness; ZCode must skip that path too.
+    let spec = LaunchSpec {
+        subagent_mcp_socket: None,
+        goal_recovery: Default::default(),
+        command: "scripted".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: std::env::current_dir().unwrap(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        accepted_config: Arc::new(Mutex::new(AcceptedSessionConfig {
+            model: Some("builtin:zai-coding-plan\\GLM-5.3".into()),
+            effort: None,
+        })),
+        harness: HarnessKind::Zcode,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::acp::StepClock::default(),
+    };
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+
+    // The session comes up configured...
+    let _ = wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionConfigured { .. })
+    })
+    .await;
+
+    // ...and no config request reaches the bridge before a prompt.
+    match tokio::time::timeout(Duration::from_millis(500), observed_rx).await {
+        Err(_) => {}
+        Ok(observed) => {
+            let request = observed.expect("bridge oneshot stays open");
+            panic!("ZCode sent a startup config request: {request}");
+        }
+    }
+
+    drop(request_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+    bridge.abort();
+}
+
 #[tokio::test]
 async fn codex_still_fails_when_the_recorded_session_cannot_be_reloaded() {
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();

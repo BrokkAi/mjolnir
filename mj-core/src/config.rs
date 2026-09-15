@@ -651,6 +651,23 @@ impl HarnessKind {
         !matches!(self, Self::Zcode)
     }
 
+    /// Whether the launch environment already pins the session's initial mode
+    /// and model, so Hel must not reapply them over ACP before the first
+    /// prompt.
+    ///
+    /// ZCode creates its backend session lazily on the first `session/send`
+    /// and does not persist a session that was created but never prompted. An
+    /// eager startup config write (mode enforcement or a model/effort
+    /// selector) materializes such a draft; the backend then evicts it after
+    /// its idle timeout, and the next `session/resume` fails with "Session not
+    /// found". The `ZCODE_ACP_MODE` and `ZCODE_MODEL` launch-environment pins
+    /// apply the same mode and model inside `session/create`, so the ACP
+    /// reapply is redundant as well as harmful. Keeping the placeholder lazy
+    /// lets the first prompt both create and persist the session.
+    pub const fn pins_startup_config_by_environment(self) -> bool {
+        matches!(self, Self::Zcode)
+    }
+
     pub const fn supports_guardian_approvals(self) -> bool {
         matches!(self, Self::Codex | Self::Claude | Self::Grok | Self::Zcode)
     }

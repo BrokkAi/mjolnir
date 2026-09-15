@@ -2629,10 +2629,20 @@ async fn serve_session(
 
     // Launch flags and environment are applied before the bridge starts. ACP
     // modes are selected after the session exists, before any prompt can run.
+    //
+    // A harness that pins its startup config by launch environment (ZCode)
+    // must skip this ACP write. Its backend session is lazy: the first
+    // session-scoped request materializes a draft the backend later evicts,
+    // and a mode enforcement here would create that draft before any prompt,
+    // stranding the next resume with "Session not found". The ZCODE_ACP_MODE
+    // env pin already selects the same mode inside session/create.
     let enforcement = spec.harness.execution_enforcement(spec.execution_policy);
     let mut config_options = config_options.unwrap_or_default();
     let mut modes = modes;
-    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
+    if let Some(desired_mode) = enforcement
+        .filter(|_| !spec.harness.pins_startup_config_by_environment())
+        .and_then(ExecutionEnforcement::acp_mode)
+    {
         enforce_execution_mode(
             connection,
             &session_id,
@@ -2648,41 +2658,52 @@ async fn serve_session(
     if let Some(state) = &grok_models {
         grok::merge_config_options(&mut config_options, state);
     }
-    let accepted = spec
-        .accepted_config
-        .lock()
-        .map_err(|_| anyhow!("accepted session configuration lock was poisoned"))?
-        .clone();
     // Model selection can replace the effort catalogue. Both must be
     // restored before SessionConfigured releases queued prompts.
+    //
+    // Skipped for a harness that pins its startup config by launch environment
+    // (ZCode): reapplying a selector here materializes its lazy backend
+    // session before the first prompt, which the backend then evicts (see the
+    // mode-enforcement note above). ZCODE_MODEL pins the model inside
+    // session/create, and the first prompt persists the session, so nothing is
+    // lost by deferring. A hand-changed model/effort simply reverts to the
+    // env-pinned default across a worker restart, which for ZCode already
+    // starts a fresh native session regardless.
     let mut dropped_selectors: Vec<(&'static str, String)> = Vec::new();
-    for (key, value) in [("model", accepted.model), ("effort", accepted.effort)] {
-        let Some(value) = value else { continue };
-        let applied = apply_session_selector(
-            connection,
-            &session_id,
-            &mut config_options,
-            &mut grok_models,
-            spec.harness,
-            key,
-            &value,
-        )
-        .await;
-        if let Err(error) = applied {
-            // A stored value the harness no longer lists is an ordinary
-            // consequence of a model being renamed or withdrawn, and it is
-            // unrepairable from outside: the worker dispatches queued
-            // commands only once the session is configured, so failing here
-            // strands the session forever. Keep the reported configuration
-            // and ask the operator below. Asking the catalogue after
-            // the attempt rather than before keeps every dialect's own
-            // availability rule, including Grok's legacy model list.
-            if selector_value_is_offered(&config_options, key, &value) {
-                return Err(
-                    error.context(format!("restore this session's accepted {key} {value:?}"))
-                );
+    if !spec.harness.pins_startup_config_by_environment() {
+        let accepted = spec
+            .accepted_config
+            .lock()
+            .map_err(|_| anyhow!("accepted session configuration lock was poisoned"))?
+            .clone();
+        for (key, value) in [("model", accepted.model), ("effort", accepted.effort)] {
+            let Some(value) = value else { continue };
+            let applied = apply_session_selector(
+                connection,
+                &session_id,
+                &mut config_options,
+                &mut grok_models,
+                spec.harness,
+                key,
+                &value,
+            )
+            .await;
+            if let Err(error) = applied {
+                // A stored value the harness no longer lists is an ordinary
+                // consequence of a model being renamed or withdrawn, and it is
+                // unrepairable from outside: the worker dispatches queued
+                // commands only once the session is configured, so failing here
+                // strands the session forever. Keep the reported configuration
+                // and ask the operator below. Asking the catalogue after
+                // the attempt rather than before keeps every dialect's own
+                // availability rule, including Grok's legacy model list.
+                if selector_value_is_offered(&config_options, key, &value) {
+                    return Err(
+                        error.context(format!("restore this session's accepted {key} {value:?}"))
+                    );
+                }
+                dropped_selectors.push((key, value));
             }
-            dropped_selectors.push((key, value));
         }
     }
     // Startup failures must retain their cause rather than being classified
