@@ -149,9 +149,8 @@ pub(crate) async fn recover_native_continuity(
     )
     .await;
     let installed = async {
-        let canonical = mj_transcript::projection::canonical_session_from_materialized(
-            &snapshot.materialized,
-        )?;
+        let canonical =
+            mj_transcript::projection::canonical_session_from_materialized(&snapshot.materialized)?;
         // This recovery path carries no external cancellation, so a fresh token
         // that is never cancelled lets the handoff run to completion.
         let cancel = tokio_util::sync::CancellationToken::new();
