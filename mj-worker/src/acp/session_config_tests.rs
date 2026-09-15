@@ -25,7 +25,9 @@ for line in sys.stdin:
     params = request.get('params', {})
     if method == 'initialize': result = {'protocolVersion':1}
     elif method in ('session/new','session/load'):
-        result = {'sessionId':'native','configOptions':options()}
+        result = {'sessionId':'native','configOptions':options(),
+                  'modes':{'currentModeId':'default','availableModes':[
+                      {'id':'default','name':'Default'},{'id':'auto','name':'Auto'}]}}
     elif method == 'session/set_config_option':
         key, value = params['configId'], params['value']
         if key == 'model_id':

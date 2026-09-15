@@ -199,20 +199,24 @@ impl PlanProbe {
                 }}),
             )
             .await;
-        if policy.is_unconstrained() {
-            let mode = probe.message().await;
-            if config {
-                assert_eq!(mode["method"], "session/set_config_option");
-                probe
-                    .result(
-                        &mode,
-                        json!({"configOptions": mode_config("bypassPermissions")}),
-                    )
-                    .await;
-            } else {
-                assert_eq!(mode["method"], "session/set_mode");
-                probe.result(&mode, json!({})).await;
-            }
+        // Claude enforces an execution mode under both policies: guardian
+        // sessions take Auto, unconstrained sessions take bypassPermissions.
+        let enforced = if policy.is_unconstrained() {
+            "bypassPermissions"
+        } else {
+            "auto"
+        };
+        let mode = probe.message().await;
+        if config {
+            assert_eq!(mode["method"], "session/set_config_option");
+            assert_eq!(mode["params"]["value"], enforced);
+            probe
+                .result(&mode, json!({"configOptions": mode_config(enforced)}))
+                .await;
+        } else {
+            assert_eq!(mode["method"], "session/set_mode");
+            assert_eq!(mode["params"]["modeId"], enforced);
+            probe.result(&mode, json!({})).await;
         }
         probe
     }
@@ -705,4 +709,77 @@ async fn close_is_applied_when_the_harness_lacks_session_close() {
                 .is_none()
         );
     }
+}
+
+/// A tool permission request that is not a plan review must reach the user as
+/// a form instead of being cancelled, which the adapter reports to the agent
+/// as "Tool use aborted".
+#[tokio::test]
+async fn a_non_plan_permission_request_is_answered_by_the_user() {
+    let mut probe = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
+    probe
+        .send(json!({
+            "jsonrpc": "2.0", "id": "permission-2", "method": "session/request_permission",
+            "params": {
+                "sessionId": "plan-session",
+                "toolCall": {
+                    "toolCallId": "fetch-1", "kind": "fetch",
+                    "title": "Fetch https://example.com/docs"
+                },
+                "options": [
+                    {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "allow_always", "name": "Always allow", "kind": "allow_always"},
+                    {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"}
+                ]
+            }
+        }))
+        .await;
+    let request = loop {
+        if let RuntimeEvent::ElicitationRequested { request } = probe.event().await {
+            break request;
+        }
+    };
+    assert!(
+        request.id.starts_with("tool-permission-"),
+        "a generic permission form, not a plan review: {}",
+        request.id
+    );
+    assert_eq!(
+        request.message,
+        "Claude Code requests permission:\nFetch https://example.com/docs"
+    );
+    let field = &request.fields[0];
+    assert_eq!(field.id, "choice");
+    let ElicitationFieldKind::SingleSelect { options, .. } = &field.kind else {
+        panic!("a permission form offers the harness options as a select")
+    };
+    assert_eq!(
+        options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect::<Vec<_>>(),
+        ["allow_once", "allow_always", "reject_once"]
+    );
+
+    let (resolved, response) = oneshot::channel();
+    probe
+        .commands
+        .send(CommandRequest::ResolveElicitation {
+            elicitation_id: request.id,
+            response: ElicitationResponse::Accept {
+                content: BTreeMap::from([(
+                    "choice".into(),
+                    ElicitationValue::String("allow_once".into()),
+                )]),
+            },
+            resolved,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    let answer = probe.message().await;
+    assert_eq!(answer["id"], "permission-2");
+    assert_eq!(answer["result"]["outcome"]["outcome"], "selected");
+    assert_eq!(answer["result"]["outcome"]["optionId"], "allow_once");
+    probe.close().await;
 }

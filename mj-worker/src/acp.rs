@@ -897,7 +897,7 @@ async fn run_bridge(
 }
 
 const ACP_STDERR_TAIL_BYTES: usize = 16 * 1024;
-const UNEXPECTED_PERMISSION_REQUEST_WARNING: &str = "The agent made a permission request while configured to run unconstrained; its execution policy is misconfigured.";
+const UNEXPECTED_PERMISSION_REQUEST_WARNING: &str = "The agent made a permission request while configured to run unconstrained; its execution policy is misconfigured. The request is shown for you to answer.";
 /// Chatter the Claude bridge logs for SDK events it does not model, for example
 /// `Unexpected case: {"type":"vcs_state_changed"}`. It arrives often enough to
 /// fill the whole stderr tail and bury the real failure in worker exit records.
@@ -1408,59 +1408,13 @@ where
                     };
                     return responder.respond(response);
                 }
-                if matches!(permission_harness, HarnessKind::Muse | HarnessKind::Zcode)
-                    && !permission_policy.is_unconstrained()
-                {
-                    let id = format!("tool-permission-{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
-                    let options: Vec<_> = request.options.iter().map(|option| serde_json::json!({
-                        "const": option.option_id.to_string(), "title": option.name,
-                    })).collect();
-                    let message = serde_json::to_string_pretty(&request.tool_call)
-                        .map_err(|_| agent_client_protocol::Error::internal_error())?;
-                    let form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
-                        "mode": "form", "sessionId": request.session_id.to_string(),
-                        "message": format!(
-                            "{} requests permission:\n{message}",
-                            permission_harness.display_name()
-                        ),
-                        "requestedSchema": {"type":"object", "required":["choice"], "properties":{
-                            "choice":{"type":"string", "title":"Permission", "oneOf":options}
-                        }}
-                    })).map_err(|_| agent_client_protocol::Error::invalid_params())?;
-                    let (answer, answer_rx) = oneshot::channel();
-                    permission_elicitations.lock().expect("pending elicitation lock poisoned").insert(id.clone(), answer);
-                    let pending = permission_elicitations.clone();
-                    let events = permission_events.clone();
-                    let cancellation = responder.cancellation();
-                    tokio::spawn(async move {
-                        let response = if events.send(RuntimeEvent::ElicitationRequested { request: form }).await.is_ok() {
-                            tokio::select! { response = answer_rx => response.ok(), () = cancellation.cancelled() => None }
-                        } else { None };
-                        pending.lock().expect("pending elicitation lock poisoned").remove(&id);
-                        let selected = match &response {
-                            Some(ElicitationResponse::Accept { content }) if !cancellation.is_cancelled() => {
-                                match content.get("choice") {
-                                    Some(ElicitationValue::String(value)) => request.options.iter().find(|option| option.option_id.to_string() == *value),
-                                    _ => None,
-                                }
-                            }
-                            _ => None,
-                        };
-                        let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option|
-                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone())));
-                        if let Err(error) = responder.respond(RequestPermissionResponse::new(outcome)) {
-                            tracing::debug!(%error, "harness permission responder closed");
-                        }
-                        if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
-                            elicitation_id: id,
-                            action: response.as_ref().map_or("cancel", ElicitationResponse::action_name).into(),
-                        }).await {
-                            tracing::debug!(%error, "harness permission result receiver closed");
-                        }
-                    });
-                    return Ok(());
-                }
-                if is_plan_permission(&request) {
+                // Muse and ZCode have always answered every permission ask with
+                // the generic form, plan requests included; keep that order for
+                // them and route every other harness through plan review first.
+                let prefer_form_over_plan_review =
+                    matches!(permission_harness, HarnessKind::Muse | HarnessKind::Zcode)
+                        && !permission_policy.is_unconstrained();
+                if !prefer_form_over_plan_review && is_plan_permission(&request) {
                     let id = format!(
                         "plan-review-{}",
                         permission_review_ids.fetch_add(1, Ordering::Relaxed)
@@ -1571,9 +1525,9 @@ where
                     return Ok(());
                 }
                 // A permission request that is_plan_permission() did not classify
-                // reaches the deny path below. Log its raw shape so an agent whose
-                // request form we do not yet recognize is diagnosable from
-                // worker.log instead of only surfacing as a silent denial.
+                // is shown as a generic permission form below. Log its raw shape
+                // so an agent whose request form we do not yet recognize stays
+                // diagnosable from worker.log.
                 match serde_json::to_value(&request) {
                     Ok(raw) => tracing::debug!(
                         target: "acp::plan_diag",
@@ -1588,6 +1542,9 @@ where
                         "permission request not classified as a plan review and could not be serialized"
                     ),
                 }
+                // An unconstrained harness must never ask. Report the
+                // misconfiguration, then still let the user answer instead of
+                // failing the tool call.
                 if permission_policy.is_unconstrained() {
                     permission_events
                         .send(RuntimeEvent::Warning {
@@ -1596,13 +1553,67 @@ where
                         .await
                         .map_err(|_| relay_event_channel_error())?;
                 }
-                // Permission escalations are denied safely because Hel has no
-                // per-action human approval surface. An unconstrained harness
-                // must never ask; denying instead of auto-approving makes a
-                // broken mode selection visible rather than masking it.
-                responder.respond(RequestPermissionResponse::new(
-                    RequestPermissionOutcome::Cancelled,
-                ))
+                let id = format!("tool-permission-{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
+                let options: Vec<_> = request.options.iter().map(|option| serde_json::json!({
+                    "const": option.option_id.to_string(), "title": option.name,
+                })).collect();
+                // Prefer the tool call's own title so the card reads like the
+                // action being approved; fall back to the raw payload when a
+                // harness sends no title.
+                let message = match request
+                    .tool_call
+                    .fields
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                {
+                    Some(title) => title.to_owned(),
+                    None => serde_json::to_string_pretty(&request.tool_call)
+                        .map_err(|_| agent_client_protocol::Error::internal_error())?,
+                };
+                let form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
+                    "mode": "form", "sessionId": request.session_id.to_string(),
+                    "message": format!(
+                        "{} requests permission:\n{message}",
+                        permission_harness.display_name()
+                    ),
+                    "requestedSchema": {"type":"object", "required":["choice"], "properties":{
+                        "choice":{"type":"string", "title":"Permission", "oneOf":options}
+                    }}
+                })).map_err(|_| agent_client_protocol::Error::invalid_params())?;
+                let (answer, answer_rx) = oneshot::channel();
+                permission_elicitations.lock().expect("pending elicitation lock poisoned").insert(id.clone(), answer);
+                let pending = permission_elicitations.clone();
+                let events = permission_events.clone();
+                let cancellation = responder.cancellation();
+                tokio::spawn(async move {
+                    let response = if events.send(RuntimeEvent::ElicitationRequested { request: form }).await.is_ok() {
+                        tokio::select! { response = answer_rx => response.ok(), () = cancellation.cancelled() => None }
+                    } else { None };
+                    pending.lock().expect("pending elicitation lock poisoned").remove(&id);
+                    let selected = match &response {
+                        Some(ElicitationResponse::Accept { content }) if !cancellation.is_cancelled() => {
+                            match content.get("choice") {
+                                Some(ElicitationValue::String(value)) => request.options.iter().find(|option| option.option_id.to_string() == *value),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option|
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone())));
+                    if let Err(error) = responder.respond(RequestPermissionResponse::new(outcome)) {
+                        tracing::debug!(%error, "harness permission responder closed");
+                    }
+                    if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
+                        elicitation_id: id,
+                        action: response.as_ref().map_or("cancel", ElicitationResponse::action_name).into(),
+                    }).await {
+                        tracing::debug!(%error, "harness permission result receiver closed");
+                    }
+                });
+                Ok(())
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -2006,11 +2017,16 @@ const ACP_TOOL_CALL_STATUSES: [&str; 4] = ["pending", "in_progress", "completed"
 /// stranding in_progress. Returns the replaced status when it coerced one.
 fn coerce_tool_call_status(update: &mut serde_json::Value) -> Option<String> {
     let object = update.as_object_mut()?;
-    let kind = object.get("sessionUpdate").and_then(|value| value.as_str())?;
+    let kind = object
+        .get("sessionUpdate")
+        .and_then(|value| value.as_str())?;
     if kind != "tool_call" && kind != "tool_call_update" {
         return None;
     }
-    let status = object.get("status").and_then(|value| value.as_str())?.to_owned();
+    let status = object
+        .get("status")
+        .and_then(|value| value.as_str())?
+        .to_owned();
     if ACP_TOOL_CALL_STATUSES.contains(&status.as_str()) {
         return None;
     }
@@ -2027,7 +2043,9 @@ fn coerce_tool_call_status(update: &mut serde_json::Value) -> Option<String> {
 /// longer parse does not leave the card running forever.
 fn salvage_tool_call_update(update: &serde_json::Value) -> Option<SessionUpdate> {
     let object = update.as_object()?;
-    let kind = object.get("sessionUpdate").and_then(|value| value.as_str())?;
+    let kind = object
+        .get("sessionUpdate")
+        .and_then(|value| value.as_str())?;
     if kind != "tool_call" && kind != "tool_call_update" {
         return None;
     }
@@ -2048,7 +2066,10 @@ const DEFAULT_TURN_STALL_TIMEOUT_MS: u64 = 600_000;
 
 fn turn_stall_timeout() -> Option<Duration> {
     let millis = match std::env::var("MJ_TURN_STALL_TIMEOUT_MS") {
-        Ok(value) => value.trim().parse::<u64>().unwrap_or(DEFAULT_TURN_STALL_TIMEOUT_MS),
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(DEFAULT_TURN_STALL_TIMEOUT_MS),
         Err(_) => DEFAULT_TURN_STALL_TIMEOUT_MS,
     };
     (millis > 0).then(|| Duration::from_millis(millis))

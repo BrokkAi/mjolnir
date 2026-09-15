@@ -1,6 +1,6 @@
 //! Worker binary acquisition, profile staging, and worker installation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1774,11 +1774,38 @@ fn append_hel_target_environment(
 }
 
 fn copy_profile_entry(source: &Path, destination: &Path) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(source)
+    copy_profile_entry_within(source, destination, &HashSet::new())
+}
+
+/// Copy one profile entry, following symlinks so a profile home that links its
+/// settings or instructions elsewhere still stages their contents. `entered`
+/// holds the canonical paths of the directories already entered on this branch
+/// of the recursion, which stops a symlinked directory cycle.
+fn copy_profile_entry_within(
+    source: &Path,
+    destination: &Path,
+    entered: &HashSet<PathBuf>,
+) -> Result<()> {
+    std::fs::symlink_metadata(source)
         .with_context(|| format!("read staged profile entry metadata {}", source.display()))?;
-    if metadata.file_type().is_symlink() {
-        return Ok(());
-    }
+    let metadata = match std::fs::metadata(source) {
+        Ok(metadata) => metadata,
+        // The entry exists but its link target does not; staging the rest of
+        // the profile is more useful than failing on a stale link.
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            tracing::warn!(
+                source = %source.display(),
+                "skipping staged profile entry whose symlink target is missing"
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(format!(
+                "read staged profile entry metadata {}",
+                source.display()
+            )));
+        }
+    };
     if metadata.is_file() {
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)
@@ -1794,6 +1821,18 @@ fn copy_profile_entry(source: &Path, destination: &Path) -> Result<()> {
         return Ok(());
     }
     if metadata.is_dir() {
+        let canonical = std::fs::canonicalize(source)
+            .with_context(|| format!("resolve staged profile directory {}", source.display()))?;
+        if entered.contains(&canonical) {
+            tracing::warn!(
+                source = %source.display(),
+                target = %canonical.display(),
+                "skipping staged profile directory that links back into itself"
+            );
+            return Ok(());
+        }
+        let mut entered = entered.clone();
+        entered.insert(canonical);
         std::fs::create_dir_all(destination).with_context(|| {
             format!("create staged profile directory {}", destination.display())
         })?;
@@ -1810,7 +1849,11 @@ fn copy_profile_entry(source: &Path, destination: &Path) -> Result<()> {
         // parallel; this is the level most likely to hold many files (e.g. a
         // skills or plugins tree).
         entries.par_iter().try_for_each(|entry| {
-            copy_profile_entry(&entry.path(), &destination.join(entry.file_name()))
+            copy_profile_entry_within(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                &entered,
+            )
         })?;
         std::fs::set_permissions(destination, metadata.permissions()).with_context(|| {
             format!(
@@ -4708,6 +4751,85 @@ mod tests {
             std::fs::read_to_string(staged.path().join(".claude.json")).unwrap(),
             identity
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_claude_profile_follows_symlinked_entries() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("settings.json"), "{\"model\":\"opus\"}").unwrap();
+        std::fs::write(outside.path().join("CLAUDE.md"), "# linked instructions\n").unwrap();
+        let skills = outside.path().join("skills");
+        std::fs::create_dir_all(skills.join("review")).unwrap();
+        std::fs::write(skills.join("review/SKILL.md"), "review skill\n").unwrap();
+        // A dangling link inside a copied tree must not fail staging.
+        std::os::unix::fs::symlink(outside.path().join("missing"), skills.join("dangling.md"))
+            .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("settings.json"),
+            home.path().join("settings.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("CLAUDE.md"),
+            home.path().join("CLAUDE.md"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&skills, home.path().join("skills")).unwrap();
+
+        let staged = tempfile::tempdir().unwrap();
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Claude,
+            home: home.path().to_path_buf(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        };
+
+        stage_profile(&profile, staged.path()).unwrap();
+
+        for (relative, contents) in [
+            ("settings.json", "{\"model\":\"opus\"}"),
+            ("CLAUDE.md", "# linked instructions\n"),
+            ("skills/review/SKILL.md", "review skill\n"),
+        ] {
+            let path = staged.path().join(relative);
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            assert!(
+                metadata.file_type().is_file(),
+                "{relative} should be staged as a regular file"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        }
+        assert!(!staged.path().join("skills/dangling.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
+        let outside = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("missing"),
+            home.path().join("CLAUDE.md"),
+        )
+        .unwrap();
+        std::fs::write(home.path().join("settings.json"), "{}").unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Claude,
+            home: home.path().to_path_buf(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+        };
+
+        stage_profile(&profile, staged.path()).unwrap();
+
+        assert!(!staged.path().join("CLAUDE.md").exists());
+        assert!(staged.path().join("settings.json").is_file());
     }
 
     fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {

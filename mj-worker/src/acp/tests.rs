@@ -510,8 +510,17 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
                     "session/new" | "session/load" | "session/resume" => serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
-                        "result": {"sessionId": "scripted"},
+                        "result": {"sessionId": "scripted", "modes": {
+                            "currentModeId": "default",
+                            "availableModes": [
+                                {"id": "default", "name": "Default"},
+                                {"id": "auto", "name": "Auto"}
+                            ]
+                        }},
                     }),
+                    "session/set_mode" => {
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})
+                    }
                     _ => continue,
                 };
                 if matches!(method, "session/new" | "session/load" | "session/resume") {
@@ -955,8 +964,15 @@ async fn scripted_bridge(stream: tokio::io::DuplexStream) -> usize {
             "initialize" => {
                 serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}})
             }
-            "session/new" => {
-                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"sessionId": "scripted"}})
+            "session/new" => serde_json::json!({
+                "jsonrpc": "2.0", "id": id,
+                "result": {"sessionId": "scripted", "modes": {
+                    "currentModeId": "default",
+                    "availableModes": [{"id": "default", "name": "Default"}, {"id": "auto", "name": "Auto"}]
+                }}
+            }),
+            "session/set_mode" => {
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})
             }
             "session/prompt" => {
                 prompts += 1;
@@ -1173,8 +1189,12 @@ async fn elicitation_bridge(
             "session/new" => serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": {"sessionId": "scripted"},
+                "result": {"sessionId": "scripted", "modes": {
+                    "currentModeId": "default",
+                    "availableModes": [{"id": "default", "name": "Default"}, {"id": "auto", "name": "Auto"}]
+                }},
             }),
+            "session/set_mode" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
             "session/prompt" => {
                 prompt_id = Some(id);
                 serde_json::json!({
@@ -1577,9 +1597,16 @@ async fn config_change_bridge(
                     "result": {
                         "sessionId": "scripted",
                         "configOptions": config_options,
+                        // Claude's guardian policy selects Auto at startup.
+                        "modes": {"currentModeId": "default", "availableModes": [
+                            {"id": "default", "name": "Default"},
+                            {"id": "auto", "name": "Auto"}
+                        ]},
                     },
                 })
             }
+            // The startup mode enforcement is not the change under test.
+            "session/set_mode" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
             _ => {
                 if let Some(observed) = observed.take() {
                     let _ = observed.send(message.clone());
@@ -1671,9 +1698,12 @@ enum ModeSurface {
     Both,
 }
 
+/// `ignored_mode` is the startup enforcement selection a test treats as setup
+/// rather than as the mode change it is observing.
 async fn mode_change_bridge(
     stream: tokio::io::DuplexStream,
     surface: ModeSurface,
+    ignored_mode: Option<&str>,
     observed: tokio::sync::oneshot::Sender<serde_json::Value>,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1689,6 +1719,8 @@ async fn mode_change_bridge(
                 {"value": "default", "name": "Default"},
                 {"value": "plan", "name": "Plan"},
                 {"value": "agent", "name": "Agent"},
+                {"value": "auto", "name": "Auto"},
+                {"value": "bypassPermissions", "name": "Bypass"},
                 {"value": "agent-full-access", "name": "Full access"}
             ]
         })
@@ -1700,9 +1732,18 @@ async fn mode_change_bridge(
                 {"id": "default", "name": "Default"},
                 {"id": "plan", "name": "Plan"},
                 {"id": "agent", "name": "Agent"},
+                {"id": "auto", "name": "Auto"},
+                {"id": "bypassPermissions", "name": "Bypass"},
                 {"id": "agent-full-access", "name": "Full access"}
         ]
     });
+    let is_ignored = |message: &serde_json::Value| {
+        ignored_mode.is_some_and(|mode| {
+            ["value", "modeId"]
+                .iter()
+                .any(|key| message["params"][key] == mode)
+        })
+    };
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     let mut observed = Some(observed);
@@ -1728,7 +1769,9 @@ async fn mode_change_bridge(
                 serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
             }
             "session/set_config_option" => {
-                if let Some(observed) = observed.take() {
+                if !is_ignored(&message)
+                    && let Some(observed) = observed.take()
+                {
                     let _ = observed.send(message.clone());
                 }
                 let selected = message["params"]["value"].as_str().unwrap_or("default");
@@ -1738,7 +1781,9 @@ async fn mode_change_bridge(
                 })
             }
             _ => {
-                if let Some(observed) = observed.take() {
+                if !is_ignored(&message)
+                    && let Some(observed) = observed.take()
+                {
                     let _ = observed.send(message.clone());
                 }
                 serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})
@@ -1757,7 +1802,13 @@ async fn mode_change_bridge(
 async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
-    let bridge = tokio::spawn(mode_change_bridge(bridge_stream, surface, observed_tx));
+    // Claude selects Auto at startup; the change under test is the plan mode.
+    let bridge = tokio::spawn(mode_change_bridge(
+        bridge_stream,
+        surface,
+        Some("auto"),
+        observed_tx,
+    ));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(4);
@@ -1824,7 +1875,8 @@ async fn set_session_mode_uses_the_mode_protocol_even_when_config_is_available()
     assert_eq!(request["method"], "session/set_mode");
 }
 
-async fn codex_policy_is_enforced_before_session_is_reported(
+async fn policy_is_enforced_before_session_is_reported(
+    harness: HarnessKind,
     execution_policy: ExecutionPolicy,
     resume_session: Option<&str>,
 ) {
@@ -1833,6 +1885,7 @@ async fn codex_policy_is_enforced_before_session_is_reported(
     let bridge = tokio::spawn(mode_change_bridge(
         bridge_stream,
         ModeSurface::Both,
+        None,
         observed_tx,
     ));
     let (client_read, client_write) = tokio::io::split(client_stream);
@@ -1851,7 +1904,7 @@ async fn codex_policy_is_enforced_before_session_is_reported(
         project_memory: None,
         resume_session: resume_session.map(str::to_owned),
         accepted_config: Default::default(),
-        harness: HarnessKind::Codex,
+        harness,
         execution_policy,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -1868,9 +1921,16 @@ async fn codex_policy_is_enforced_before_session_is_reported(
         .await
     });
 
-    let expected_mode = match execution_policy {
-        ExecutionPolicy::ConfiguredApprovals => "agent",
-        ExecutionPolicy::Unconstrained => "agent-full-access",
+    let (expected_mode, expected_label) = match (harness, execution_policy) {
+        (HarnessKind::Codex, ExecutionPolicy::ConfiguredApprovals) => ("agent", "agent / guardian"),
+        (HarnessKind::Codex, ExecutionPolicy::Unconstrained) => {
+            ("agent-full-access", "agent-full-access")
+        }
+        (HarnessKind::Claude, ExecutionPolicy::ConfiguredApprovals) => ("auto", "auto / guardian"),
+        (HarnessKind::Claude, ExecutionPolicy::Unconstrained) => {
+            ("bypassPermissions", "bypassPermissions / sandbox-off")
+        }
+        (harness, policy) => panic!("unscripted harness {harness:?} under {policy:?}"),
     };
     let request = tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx)
         .await
@@ -1907,13 +1967,7 @@ async fn codex_policy_is_enforced_before_session_is_reported(
             _ => {}
         }
     }
-    assert_eq!(
-        reported_mode.as_deref(),
-        Some(match execution_policy {
-            ExecutionPolicy::ConfiguredApprovals => "agent / guardian",
-            ExecutionPolicy::Unconstrained => "agent-full-access",
-        })
-    );
+    assert_eq!(reported_mode.as_deref(), Some(expected_label));
     assert_eq!(reported_resumed, Some(resume_session.is_some()));
     assert_eq!(configured_mode.as_deref(), Some(expected_mode));
 
@@ -1924,13 +1978,18 @@ async fn codex_policy_is_enforced_before_session_is_reported(
 
 #[tokio::test]
 async fn codex_selects_guardian_for_a_new_session() {
-    codex_policy_is_enforced_before_session_is_reported(ExecutionPolicy::ConfiguredApprovals, None)
-        .await;
+    policy_is_enforced_before_session_is_reported(
+        HarnessKind::Codex,
+        ExecutionPolicy::ConfiguredApprovals,
+        None,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn codex_selects_target_policy_when_loading_a_session() {
-    codex_policy_is_enforced_before_session_is_reported(
+    policy_is_enforced_before_session_is_reported(
+        HarnessKind::Codex,
         ExecutionPolicy::ConfiguredApprovals,
         Some("native-session"),
     )
@@ -1939,7 +1998,24 @@ async fn codex_selects_target_policy_when_loading_a_session() {
 
 #[tokio::test]
 async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
-    codex_policy_is_enforced_before_session_is_reported(ExecutionPolicy::Unconstrained, None).await;
+    policy_is_enforced_before_session_is_reported(
+        HarnessKind::Codex,
+        ExecutionPolicy::Unconstrained,
+        None,
+    )
+    .await;
+}
+
+/// Claude's guardian policy is its Auto mode, which it must select before the
+/// session is reported; unconstrained sessions take bypassPermissions.
+#[tokio::test]
+async fn claude_selects_auto_for_guardian_and_bypass_when_unconstrained() {
+    for policy in [
+        ExecutionPolicy::ConfiguredApprovals,
+        ExecutionPolicy::Unconstrained,
+    ] {
+        policy_is_enforced_before_session_is_reported(HarnessKind::Claude, policy, None).await;
+    }
 }
 
 #[tokio::test]
@@ -4305,8 +4381,14 @@ fn the_stall_watchdog_covers_only_harnesses_whose_turn_ends_on_the_reply() {
 fn the_stall_message_says_what_happened_and_what_to_do() {
     let message = turn_stall_message(HarnessKind::Muse, 630_000);
     assert!(message.contains("stopped responding"));
-    assert!(message.contains("10 minute"), "reports the silence in minutes: {message}");
-    assert!(message.contains("git log"), "points the user at the workspace");
+    assert!(
+        message.contains("10 minute"),
+        "reports the silence in minutes: {message}"
+    );
+    assert!(
+        message.contains("git log"),
+        "points the user at the workspace"
+    );
     assert!(message.contains("Resend"), "tells the user how to continue");
     assert!(message.contains("#1007"), "names the known issue");
 }
