@@ -221,7 +221,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "spawn_agent",
-            "Start an independent Mjolnir child session in this session's target and filesystem.",
+            "Start an independent Mjolnir child session in this session's target and filesystem. Returns child_session_id at once; the child runs on its own. Do other work, then collect its result with wait_agents.",
             json!({
                 "type":"object",
                 "properties":{
@@ -245,7 +245,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "wait_agents",
-            "Register interest in completion of one or more children without blocking other tools.",
+            "Block until the named child sessions finish their current turn, or until the timeout, then return each child's latest output. Spawn agents, do other work, then wait to collect results. timeout_seconds defaults to 300 and is capped at 3600.",
             json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":MAX_WAIT_SECONDS}},"required":["child_session_ids"],"additionalProperties":false}),
         ),
         tool(

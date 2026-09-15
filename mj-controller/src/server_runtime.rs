@@ -1186,9 +1186,10 @@ pub async fn run_server(
                                     .execute_subagent_tool(parent_session_id.clone(), request)
                                     .await;
                                 let outcome = async {
-                                    backend
-                                        .deliver_subagent_result(parent_session_id.clone(), &result)
-                                        .await?;
+                                    // The result reaches the model as the tool
+                                    // call's own answer: completing the request
+                                    // unblocks the worker socket the harness is
+                                    // waiting on. It is not injected as a turn.
                                     let handle = runtime
                                         .workspace_session_handle(&parent_session_id)
                                         .await?;

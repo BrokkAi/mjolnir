@@ -388,7 +388,7 @@ impl ApiBackend {
                         .await?;
                 }
                 let deadline = tokio::time::Instant::now()
-                    + Duration::from_secs(timeout_seconds.unwrap_or(30).clamp(1, MAX_WAIT_SECONDS));
+                    + Duration::from_secs(timeout_seconds.unwrap_or(300).clamp(1, MAX_WAIT_SECONDS));
                 loop {
                     let ids = child_session_ids.clone();
                     let summaries = tokio::task::spawn_blocking(move || {
@@ -465,27 +465,11 @@ impl ApiBackend {
         Ok(())
     }
 
-    pub async fn deliver_subagent_result(
-        &self,
-        parent_session_id: String,
-        result: &mj_core::subagent::SubagentToolResult,
-    ) -> Result<()> {
-        let status = if result.is_error {
-            "error"
-        } else {
-            "completed"
-        };
-        self.prompt(
-            parent_session_id,
-            format!(
-                "<subagent_tool_result request_id={:?} status={status}>\n{}\n</subagent_tool_result>",
-                result.request_id, result.message
-            ),
-        )
-        .await?;
-        Ok(())
-    }
-
+    /// Record that a child finished a turn as a Mjolnir notice in the parent's
+    /// conversation. This is the one unsolicited sub-agent event, so it is a
+    /// notice, not a prompt: it must not forge a user turn or start one. The
+    /// child's output is left for `wait_agents` and the child transcript; the
+    /// notice only says what happened, and `output` is accepted for the log.
     pub async fn deliver_subagent_completion(
         &self,
         parent_session_id: String,
@@ -495,10 +479,24 @@ impl ApiBackend {
         outcome: &str,
         output: &str,
     ) -> Result<()> {
-        self.prompt(
-            parent_session_id,
+        let _ = output;
+        ensure!(
+            !matches!(
+                self.start_status(parent_session_id.clone()).await?,
+                Some(StartStatus::Pending)
+            ),
+            "session initialization is still running"
+        );
+        let handle = self
+            .sessions
+            .session(parent_session_id.clone())
+            .await
+            .with_context(|| format!("session {parent_session_id} is not running"))?;
+        submit_notice(
+            &handle,
             format!(
-                "<subagent_completion child_session_id={child_session_id:?} task_name={task_name:?} turn={turn} outcome={outcome:?}>\n{output}\n</subagent_completion>"
+                "Subagent {task_name:?} ({}) finished turn {turn} ({outcome}).",
+                mj_core::state::short_id(child_session_id)
             ),
         )
         .await?;
@@ -721,6 +719,18 @@ async fn submit_prompt(handle: &SessionHandle, text: String) -> Result<u64> {
             RelayCommand::Prompt {
                 prompt: vec![ContentBlock::Text(TextContent::new(text))],
             },
+        )
+        .await
+}
+
+/// Record one Mjolnir notice line in a session's conversation. Unlike a
+/// prompt, a notice never starts a turn, so it is how the daemon tells a
+/// parent that a sub-agent finished without acting as that parent's user.
+async fn submit_notice(handle: &SessionHandle, text: String) -> Result<u64> {
+    handle
+        .submit(
+            new_command_id("subagent")?,
+            RelayCommand::RecordNotice { text },
         )
         .await
 }
@@ -1686,6 +1696,50 @@ mod tests {
             panic!("the API must submit the prompt as one text block");
         };
         assert_eq!(text.text, "add a README line");
+    }
+
+    #[tokio::test]
+    async fn a_finished_subagent_is_recorded_as_a_notice_not_a_prompt() {
+        let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+        let backend = ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "parent-1".into(),
+                accepted_ordinal: 7,
+                submitted: submitted_tx,
+                view: None,
+            })),
+            running_states(),
+            Arc::new(NoExports),
+        );
+
+        backend
+            .deliver_subagent_completion(
+                "parent-1".into(),
+                "child-abcdef012345",
+                "audit deps",
+                3,
+                "completed",
+                "the full child output that must not be pasted into the notice",
+            )
+            .await
+            .unwrap();
+
+        let (command_id, command) = submitted.recv().await.unwrap();
+        assert!(
+            command_id.starts_with("subagent-"),
+            "notice command id {command_id} should name the sub-agent path"
+        );
+        let RelayCommand::RecordNotice { text } = command else {
+            panic!("a finished sub-agent must be a notice, not {command:?}");
+        };
+        assert!(
+            text.contains("audit deps") && text.contains("finished turn 3"),
+            "unexpected notice text: {text}"
+        );
+        assert!(
+            !text.contains("full child output"),
+            "the notice must stay terse, not paste the child output: {text}"
+        );
     }
 
     #[tokio::test]
