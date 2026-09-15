@@ -38,7 +38,7 @@ use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::palette::CommandPalette;
 use crate::resume::ResumeDialog;
-use crate::wizards::{NewWizard, ResumeWizard};
+use crate::wizards::{NewWizard, PickerCell, PickerChoice, ResumeWizard, guardian_warning_marker};
 use crate::workspaces::{WorkspaceControlFocus, WorkspaceManager};
 
 mod actions;
@@ -2320,7 +2320,10 @@ impl DashboardState {
             .collect()
     }
 
-    pub(crate) fn profile_choice(&self, id: &str, harness: HarnessKind) -> String {
+    /// One row of the profile picker tables: the warning marker, the profile
+    /// id, the harness, and the quota. The picker pads the cells into aligned
+    /// columns and draws the marker's footnote below the table.
+    pub(crate) fn profile_choice(&self, id: &str, harness: HarnessKind) -> PickerChoice {
         let quota = if self.quota_refreshing.contains(id) {
             "refreshing".to_string()
         } else {
@@ -2329,11 +2332,12 @@ impl DashboardState {
                 .map(ProfileQuota::compact)
                 .unwrap_or_else(|| "refreshing".to_string())
         };
-        let danger = match harness.unsandboxed_guardian_warning() {
-            Some(warning) => format!("  ⚠ {warning}"),
-            None => String::new(),
-        };
-        format!("{id}  {}  ·  {quota}{danger}", harness.display_name())
+        PickerChoice::table(vec![
+            guardian_warning_marker(harness),
+            PickerCell::text(id),
+            PickerCell::text(harness.display_name()),
+            PickerCell::text(quota),
+        ])
     }
 
     /// The selected session, if its target template creates a container.
