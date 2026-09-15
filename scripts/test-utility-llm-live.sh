@@ -18,5 +18,5 @@ for variable in "${required[@]}"; do
 done
 
 cargo test -p brokk-mj-controller \
-  hel_utility_llm::tests::utility_llm_live_all_profiles \
+  utility_llm::tests::utility_llm_live_all_profiles \
   -- --ignored --exact --nocapture

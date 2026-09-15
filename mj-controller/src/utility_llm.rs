@@ -1099,4 +1099,52 @@ mod tests {
             summary.len()
         );
     }
+
+    /// Exercises a DeepSeek-on-Codex profile as a utility model end to end:
+    /// the DeepSeek family, its newest flash model, and one real inference.
+    /// Set MJ_UTILITY_LIVE_DEEPSEEK_PROFILE to a configured Codex profile whose
+    /// home names the DeepSeek provider.
+    #[tokio::test]
+    #[ignore = "requires a real DeepSeek-on-Codex profile, network access, and paid quota"]
+    async fn utility_llm_live_deepseek_codex() {
+        let profile_id = std::env::var("MJ_UTILITY_LIVE_DEEPSEEK_PROFILE")
+            .expect("set MJ_UTILITY_LIVE_DEEPSEEK_PROFILE to a configured Codex profile id");
+        let loaded = Config::load().expect("load Mjolnir configuration");
+        let profile = loaded
+            .profiles
+            .get(&profile_id)
+            .unwrap_or_else(|| panic!("profile {profile_id:?} is not configured"));
+        assert_eq!(profile.kind, HarnessKind::Codex, "profile {profile_id:?}");
+        assert_eq!(utility_family(profile), Some(UtilityFamily::DeepSeek));
+        let mut config = Config::default();
+        config.profiles.insert(profile_id.clone(), profile.clone());
+
+        let cancel = CancellationToken::new();
+        let mut candidates = UtilityLlmRuntime::default()
+            .resolve(&config, &cancel)
+            .await
+            .expect("resolve the live DeepSeek-on-Codex utility profile");
+        assert_eq!(candidates.len(), 1);
+        let candidate = candidates.remove(0);
+        assert_eq!(candidate.profile_id, profile_id);
+        assert_eq!(candidate.harness, HarnessKind::Codex);
+        assert_eq!(candidate.quota_class, UtilityQuotaClass::Healthy);
+        assert!(UtilityFamily::DeepSeek.matches(&candidate.model));
+
+        let model = candidate.model.clone();
+        let backend = UtilityCompactionBackend::new(vec![candidate], cancel);
+        let summary = backend
+            .compact(
+                "Facts: the utility backend selected the newest DeepSeek flash model through a Codex profile. Facts: the selected model returned a schema-valid state snapshot. Summarize these facts faithfully in the state_snapshot field."
+                    .to_string(),
+            )
+            .await
+            .expect("DeepSeek utility inference");
+        assert!(!summary.trim().is_empty());
+        assert!(summary.len() <= MAX_SUMMARY_BYTES);
+        eprintln!(
+            "DeepSeek utility live ok: model={model}, summary_bytes={}",
+            summary.len()
+        );
+    }
 }
