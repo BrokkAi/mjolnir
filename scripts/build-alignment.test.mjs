@@ -38,7 +38,8 @@ const value = (key, fallback) => {
   const i = args.indexOf(key);
   return i >= 0 ? args[i+1] : args.find(arg => arg.startsWith(key + '='))?.slice(key.length+1) ?? fallback;
 };
-const binary = value('--bin');
+const binaries = args.flatMap((arg, index) => arg === '--bin' ? [args[index + 1]] : []);
+for (const binary of binaries) {
 const triple = value('--target', '');
 const profile = args.includes('--release') ? 'release' : value('--profile', 'debug').replace(/^dev$/, 'debug');
 const dir = path.resolve(value('--target-dir', 'target'), triple, profile);
@@ -46,6 +47,7 @@ fs.mkdirSync(dir, { recursive: true });
 const executable = path.join(dir, binary);
 fs.writeFileSync(executable, binary === 'mj' ? '#!/bin/sh\\nexit 0\\n' : 'built', { mode: 0o755 });
 console.log(JSON.stringify({ reason: 'compiler-artifact', target: { name: binary, kind: ['bin'] }, executable }));
+}
 `, { mode: 0o755 });
 
   const record = (script, args) => {
@@ -81,7 +83,10 @@ for (const extra of [[], ['--release'], ['--profile', 'dev']]) {
       const installed = f.record('install', extra);
       const ran = f.record('run', [...extra, '--', '--version']);
 
-      const byKey = (builds) => new Map(builds.map(args => [key(args), args]));
+      const byKey = (builds) => new Map(builds.flatMap(args => {
+        const target = args.includes('--target') ? args[args.indexOf('--target') + 1] : 'host';
+        return args.flatMap((arg, index) => arg === '--bin' ? [[`${args[index + 1]}/${target}`, args]] : []);
+      }));
       const fromInstall = byKey(installed);
       const fromRun = byKey(ran);
       const shared = ['mj/host', 'mj-voice-worker/host', 'mj-worker/host', 'mj-worker/x86_64-unknown-linux-musl'].sort();

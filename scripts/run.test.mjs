@@ -40,7 +40,8 @@ const value = (key, fallback) => {
   const i = args.indexOf(key);
   return i >= 0 ? args[i+1] : args.find(arg => arg.startsWith(key + '='))?.slice(key.length+1) ?? fallback;
 };
-const binary = value('--bin');
+const binaries = args.flatMap((arg, index) => arg === '--bin' ? [args[index + 1]] : []);
+for (const binary of binaries) {
 const cli = binary === 'mj';
 const triple = value('--target', '');
 const profile = args.includes('--release') ? 'release' : value('--profile', 'debug').replace(/^dev$/, 'debug');
@@ -53,7 +54,7 @@ if (!cli) {
   fs.writeFileSync(executable, 'fresh');
   // Real Cargo reports the artifact for every binary it builds, workers included.
   console.log(JSON.stringify({ reason: 'compiler-artifact', target: {name: binary, kind:['bin']}, executable }));
-  process.exit(0);
+  continue;
 }
 fs.writeFileSync(executable, ${JSON.stringify(`#!${process.execPath}
 import fs from 'node:fs';
@@ -61,6 +62,7 @@ if (fs.readFileSync(process.env.MJ_VOICE_WORKER, 'utf8') !== 'fresh') process.ex
 fs.writeFileSync(process.env.RAN_CLIENT, JSON.stringify({ args: process.argv.slice(2), restart: process.env.MJ_DEV_RESTART_STALE_DAEMON, marker: process.env.USER_SETTING }));
 `)}, {mode: 0o755});
 if (process.env.NO_ARTIFACT !== '1') console.log(JSON.stringify({ reason: 'compiler-artifact', target: {name:'mj', kind:['bin']}, executable }));
+}
 `, { mode: 0o755 });
   const marker = path.join(root, 'client-ran');
   const log = path.join(root, 'builds.jsonl');

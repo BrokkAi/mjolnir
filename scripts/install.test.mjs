@@ -26,10 +26,10 @@ function fixture(os, arch) {
   tool('cargo', `
     command=$1
     shift
-    target_dir='' triple='' root='' path='' binary='' locked=0 profile=debug
+    target_dir='' triple='' root='' path='' binaries=() locked=0 profile=debug
     while [ $# -gt 0 ]; do
       case "$1" in
-        --bin) binary=$2; shift ;;
+        --bin) binaries+=("$2"); shift ;;
         --target-dir) target_dir=$2; shift ;;
         --target) triple=$2; shift ;;
         --root) root=$2; shift ;;
@@ -44,6 +44,7 @@ function fixture(os, arch) {
     test "$locked" = 1
     if [ "$profile" = dev ]; then profile=debug; fi
     if [ "$command" = build ]; then
+      for binary in "\${binaries[@]}"; do
       if [ "\${FAIL_BUILD:-0}" = 1 ] || [ "\${FAIL_TARGET:-none}" = "\${triple:-native}" ] || [ "\${FAIL_TARGET:-none}" = "$binary" ]; then exit 42; fi
       output="\${target_dir:-target}/\${triple:+$triple/}$profile"
       mkdir -p "$output"
@@ -54,6 +55,7 @@ function fixture(os, arch) {
         echo "worker \${triple:-native}" > "$output/$binary"
       fi
       printf '{"reason":"compiler-artifact","target":{"name":"%s","kind":["bin"]},"executable":"%s"}\n' "$binary" "$output/$binary"
+      done
     elif [ "$command" = install ]; then
       test "$path" = mj-cli
       mkdir -p "$root/bin"
