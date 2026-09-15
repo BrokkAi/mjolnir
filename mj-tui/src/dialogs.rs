@@ -661,7 +661,9 @@ pub(crate) fn render_import_bundle_confirmation(
     } else {
         "This import uses an isolated workspace."
     }));
-    let control_lines = usize::from(confirmation.has_untracked_files) + 3;
+    let control_lines = usize::from(confirmation.has_untracked_files)
+        + usize::from(confirmation.managed_worktree.available)
+        + 2;
     let body_paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
     let height = popup_height(
         &body_paragraph,
@@ -693,16 +695,21 @@ pub(crate) fn render_import_bundle_confirmation(
         dismissible_modal_title(&mut form, popup, "Confirm import", theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
     let y = inner.y.saturating_add(body_height);
-    Checkbox::render(
-        frame,
-        Rect::new(inner.x, y, inner.width, 1),
-        "Create managed worktree",
-        confirmation.create_managed_worktree,
+    // The worktree choice only exists when the import can create one.
+    if confirmation.managed_worktree.available {
+        Checkbox::render(
+            frame,
+            Rect::new(inner.x, y, inner.width, 1),
+            "Create managed worktree",
+            confirmation.create_managed_worktree,
+            true,
+            &mut form,
+            DialogControl::ImportManagedWorktree,
+        );
+    }
+    let y = y.saturating_add(u16::from(
         confirmation.managed_worktree.available,
-        &mut form,
-        DialogControl::ImportManagedWorktree,
-    );
-    let y = y.saturating_add(1);
+    ));
     if confirmation.has_untracked_files {
         Checkbox::render(
             frame,
@@ -2158,11 +2165,13 @@ impl DashboardState {
                 DialogControl::ImportContinue,
             )
         };
-        form.get_mut().declare_with_enabled(
-            DialogControl::ImportManagedWorktree,
-            ControlKind::Checkbox,
-            managed_worktree.available,
-        );
+        if managed_worktree.available {
+            form.get_mut().declare_with_enabled(
+                DialogControl::ImportManagedWorktree,
+                ControlKind::Checkbox,
+                true,
+            );
+        }
         self.mode = Mode::ConfirmImportBundle(ImportBundleConfirmation {
             managed_worktree,
             create_managed_worktree: managed_worktree.default_create,

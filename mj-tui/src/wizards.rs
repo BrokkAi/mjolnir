@@ -819,13 +819,16 @@ pub(crate) fn render_new_wizard(
                 subagents: wizard
                     .subagent_choice_applies(&dashboard.config)
                     .then_some(wizard.mjolnir_subagents),
-                worktree: Some((
-                    wizard.create_managed_worktree,
-                    raw_project
-                        && wizard
+                // Isolated targets always provide the workspace, so the choice
+                // only exists for a bare project directory.
+                worktree: raw_project.then(|| {
+                    (
+                        wizard.create_managed_worktree,
+                        wizard
                             .selected_worktree_options(&dashboard.config)
                             .is_some_and(|options| options.available),
-                )),
+                    )
+                }),
                 profile_id: &nth_enabled_profile(&dashboard.config, wizard.profile),
                 project_label: if raw_project {
                     "Project directory"
@@ -1426,9 +1429,7 @@ fn render_review_wizard(
         let row = lines.len() as u16;
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            if !is_bare_project_target(target) {
-                "The target provides its own isolated workspace."
-            } else if checked && available {
+            if checked && available {
                 "Create a separate session-owned checkout from the selected checkout's HEAD."
             } else {
                 "Use the selected directory directly."

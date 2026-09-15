@@ -2720,6 +2720,61 @@ fn raw_review_waits_for_worktree_inspection_and_preserves_explicit_selection() {
     );
 }
 
+/// Isolated targets provide the workspace themselves, so the review must not
+/// show a disabled worktree checkbox at all; a bare project keeps the choice.
+#[test]
+fn review_hides_the_worktree_choice_for_isolated_targets() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        &dashboard.mode,
+        Mode::New(wizard) if wizard.step == WizardStep::Review
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let isolated = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(!isolated.contains("Create managed worktree"), "{isolated}");
+    assert!(
+        !isolated.contains("isolated workspace"),
+        "the checkbox and its explanation are gone together: {isolated}"
+    );
+
+    let mut configuration = config();
+    configuration.targets.clear();
+    configuration
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.step = WizardStep::Review;
+    wizard.project_directory = "/work/main".into();
+    dashboard.apply_resolved_project_directory(
+        &dashboard.path_input_context(),
+        "/work/main",
+        Ok((
+            PathBuf::from("/work/main"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: true,
+            },
+        )),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let bare = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(bare.contains("Create managed worktree"), "{bare}");
+}
+
 /// Only Claude and Codex can receive Mjolnir's delegation tools, so only they
 /// show the choice. The box follows the global `[subagents] enabled` setting.
 #[test]

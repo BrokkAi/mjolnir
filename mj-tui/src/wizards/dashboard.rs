@@ -109,17 +109,19 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
                     true,
                 );
             }
-            form.declare_with_enabled(
-                WizardControl::CreateManagedWorktree,
-                ControlKind::Checkbox,
-                wizard
-                    .selected_worktree_options(&dashboard.config)
-                    .is_some_and(|options| options.available)
-                    && is_bare_project_target(
-                        &dashboard.config.targets
-                            [&nth_key(&dashboard.config.targets, wizard.target)],
-                    ),
-            );
+            // Isolated targets have no worktree choice, so the control only
+            // exists for a bare project directory.
+            if is_bare_project_target(
+                &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target)],
+            ) {
+                form.declare_with_enabled(
+                    WizardControl::CreateManagedWorktree,
+                    ControlKind::Checkbox,
+                    wizard
+                        .selected_worktree_options(&dashboard.config)
+                        .is_some_and(|options| options.available),
+                );
+            }
             form.declare_with_enabled(
                 WizardControl::MjolnirSubagents,
                 ControlKind::Checkbox,
