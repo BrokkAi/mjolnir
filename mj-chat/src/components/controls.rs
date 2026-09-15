@@ -798,10 +798,11 @@ impl TabStrip {
             let style = if !enabled {
                 disabled_style()
             } else if index == selected {
+                // The active tab is always highlighted; underline marks keyboard focus.
                 if form.is_focused(id) {
-                    focus_style().add_modifier(Modifier::BOLD)
+                    focus_style().add_modifier(Modifier::UNDERLINED)
                 } else {
-                    normal_style().add_modifier(Modifier::UNDERLINED)
+                    focus_style()
                 }
             } else {
                 normal_style()
