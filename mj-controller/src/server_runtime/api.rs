@@ -388,7 +388,9 @@ impl ApiBackend {
                         .await?;
                 }
                 let deadline = tokio::time::Instant::now()
-                    + Duration::from_secs(timeout_seconds.unwrap_or(300).clamp(1, MAX_WAIT_SECONDS));
+                    + Duration::from_secs(
+                        timeout_seconds.unwrap_or(300).clamp(1, MAX_WAIT_SECONDS),
+                    );
                 loop {
                     let ids = child_session_ids.clone();
                     let summaries = tokio::task::spawn_blocking(move || {
