@@ -1272,7 +1272,7 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
                 Line::raw(if retry.is_some() {
                     "Resolve the problem below, then Retry launch with the same settings."
                 } else {
-                    "Cleanup did not complete. Dismiss, select the failed session and remove it before starting again."
+                    "Dismiss, resolve the problem below, then select the failed session to retry or remove it."
                 }),
                 Line::raw("PgUp/PgDn scroll the full details. Esc dismisses."),
                 Line::raw(""),

@@ -313,9 +313,16 @@ pub(super) fn preflight_target(
             })?;
             if output.status != 0 {
                 bail!(
-                    "Apple container preflight failed; run `mj doctor` for actionable prerequisites: container system status exited {}: {}",
+                    "Apple container preflight failed; run `container system start` to start the runtime, then `mj doctor` to verify prerequisites: container system status exited {}: {}",
                     output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
+                    [
+                        String::from_utf8_lossy(&output.stdout).trim(),
+                        String::from_utf8_lossy(&output.stderr).trim(),
+                    ]
+                    .into_iter()
+                    .filter(|message| !message.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n")
                 );
             }
             Ok(())
@@ -1843,19 +1850,30 @@ mod tests {
                 workspace_storage: Default::default(),
             },
         };
-        let executor = PreflightExecutor {
-            outputs: RefCell::new(vec![CommandOutput {
-                status: 1,
-                stdout: vec![],
-                stderr: b"daemon is not running".to_vec(),
-            }]),
-            notices: RefCell::new(vec![]),
-        };
+        for (stdout, stderr) in [
+            (
+                "apiserver is not running and not registered with launchd",
+                "",
+            ),
+            ("", "daemon is not running"),
+            ("apiserver is not running", "service unavailable"),
+        ] {
+            let executor = PreflightExecutor {
+                outputs: RefCell::new(vec![CommandOutput {
+                    status: 1,
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: stderr.as_bytes().to_vec(),
+                }]),
+                notices: RefCell::new(vec![]),
+            };
 
-        let error = preflight_target(&template, &executor)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("mj doctor"));
-        assert!(error.contains("daemon is not running"));
+            let error = preflight_target(&template, &executor)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("mj doctor"));
+            assert!(error.contains("container system start"));
+            assert!(error.contains(stdout));
+            assert!(error.contains(stderr));
+        }
     }
 }
