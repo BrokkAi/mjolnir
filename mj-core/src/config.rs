@@ -2594,11 +2594,7 @@ mod tests {
         assert_eq!(claude.session_sandbox(), None);
         assert_eq!(claude.staged_setting(), None);
 
-        for kind in [
-            HarnessKind::Kimi,
-            HarnessKind::Grok,
-            HarnessKind::Deepseek,
-        ] {
+        for kind in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::Deepseek] {
             assert_eq!(
                 kind.execution_enforcement(ExecutionPolicy::ConfiguredApprovals),
                 None,
