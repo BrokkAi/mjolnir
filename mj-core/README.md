@@ -72,7 +72,7 @@ relevant. Compared against repository snapshots inspected on **September 8, 2026
 
 | Feature | Mjolnir | Herdr | Paseo | T3 Code |
 |---|---|---|---|---|
-| **Supported harnesses** | Claude Code, Codex, Kimi Code, Grok Build, DSH, Muse Code | Pi, OMP, Copilot, Devin, Kimi, Hermes, Qoder, Qwen, Droid, OpenCode, Kilo, MastraCode, Claude, Codex, Cursor, Amp, Grok, Antigravity, Kiro, Maki, Muse; any other CLI runs without agent-aware features | Claude, Codex, Copilot, OpenCode, Pi, OMP; catalog and custom ACP agents including Kimi, Cursor, Hermes, and Qwen | Codex, Claude, Cursor, Grok, OpenCode |
+| **Supported harnesses** | Claude Code, Codex, Kimi Code, Grok Build, Muse Code | Pi, OMP, Copilot, Devin, Kimi, Hermes, Qoder, Qwen, Droid, OpenCode, Kilo, MastraCode, Claude, Codex, Cursor, Amp, Grok, Antigravity, Kiro, Maki, Muse; any other CLI runs without agent-aware features | Claude, Codex, Copilot, OpenCode, Pi, OMP; catalog and custom ACP agents including Kimi, Cursor, Hermes, and Qwen | Codex, Claude, Cursor, Grok, OpenCode |
 | **Multiple profiles per harness** | First-class named profiles | Manual wrappers and environment configuration | Custom provider aliases | Provider instances; continuation compatibility varies by harness |
 | **Usage and quota view** | Live subscription quota by profile plus target capacity⁴ | — | Provider plan usage on demand | Token and API-cost analytics; not remaining subscription quota |
 
@@ -100,8 +100,8 @@ and bringing it under management. Ordinary same-harness continuation is excluded
 2. T3 continuation also requires compatible provider homes: Codex can share history
    across accounts using its shadow-home setup; separate Claude account homes
    cannot continue the same thread.
-3. Bundles apply to managed targets. DSH (DeepSeek Harness) and Muse Code currently
-   accept one workspace root. Bare sessions can access neighboring repositories
+3. Bundles apply to managed targets. Muse Code currently accepts one workspace
+   root. Bare sessions can access neighboring repositories
    subject to harness permissions, but do not manage them as a bundle.
 4. Quota availability depends on the harness. Muse currently cannot use the
    project-memory tools or act as a reviewer. Cross-harness resume requires a

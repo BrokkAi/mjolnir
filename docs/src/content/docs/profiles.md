@@ -1,6 +1,6 @@
 ---
 title: Profiles and harnesses
-description: Configure Codex (including custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, and DeepSeek Harness accounts, credentials, skills, runtimes, and quota reporting.
+description: Configure Codex (including custom model providers), Claude Code, Kimi Code, Grok Build, and Muse Code accounts, credentials, skills, runtimes, and quota reporting.
 ---
 
 A profile connects Mjolnir to one installed coding-agent harness and one account.
@@ -20,10 +20,9 @@ available choices can come from the provider's current catalog.
 | Claude Code | `claude` | `CLAUDE_CONFIG_DIR` | `~/.claude` | `.credentials.json` | yes |
 | Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | no |
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
-| DeepSeek Harness | `deepseek` | `DSH_HOME` | `~/.dsh` | `.credentials.yaml` | no |
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | yes |
 
-There are six harness kinds. A Codex profile can also authenticate with an API
+There are five harness kinds. A Codex profile can also authenticate with an API
 key against a model provider other than OpenAI; see
 [Codex with a custom provider](#codex-with-a-custom-provider).
 
@@ -31,10 +30,10 @@ key against a model provider other than OpenAI; see
 conventional location. A detected home becomes the explicit `home` path in
 `config.toml`; subsequent sessions use that configured path.
 
-Kimi Code and DeepSeek Harness do not expose a guardian approval mode. Mjolnir
-warns before using either on a raw `local-bare` target or an `ssh-bare` target
-configured with `permissions = "guardian"`. Container and EC2 targets instead
-run every harness unconstrained inside the target's isolation boundary. See
+Kimi Code does not expose a guardian approval mode. Mjolnir warns before using
+it on a raw `local-bare` target or an `ssh-bare` target configured with
+`permissions = "guardian"`. Container and EC2 targets instead run every harness
+unconstrained inside the target's isolation boundary. See
 [Targets](/targets/) and [Security boundaries](/security/).
 
 ## Codex with a custom provider
@@ -134,8 +133,15 @@ and no reasoning levels, so a session on such a model offers no effort choice
 rather than offering one the provider would reject.
 
 Quota reporting is separate from the catalog and covers Z.ai (`api.z.ai`) and
-Zhipu (`open.bigmodel.cn`) hosts only, so a DeepSeek profile shows no quota
-windows. Sessions on it run normally.
+Zhipu (`open.bigmodel.cn`) hosts only. A profile on any other provider, such as
+DeepSeek, shows `API` in the quota column, because it is usage-priced rather
+than a subscription window. Sessions on it run normally.
+
+A DeepSeek profile can also supply utility inference for Mjolnir's own work,
+such as transcript compaction. It has the lowest precedence for that work and
+uses the newest `deepseek-*flash*` model in the merged catalog. A Z.ai (GLM)
+profile does not supply utility inference. See
+[Durability and recovery](/durability/).
 
 ### Refine the catalog with your own `models.json`
 
@@ -274,7 +280,6 @@ environment before starting the harness's interactive login:
 | Claude Code | `claude auth login` |
 | Kimi Code | `kimi login` |
 | Grok Build | `grok login` |
-| DeepSeek Harness | `dsh web` |
 | Muse Code | `muse login` |
 
 The login command is always resolved from the controller's `PATH`. A profile
@@ -318,7 +323,6 @@ symbolic links:
 | Claude Code | `.claude.json`, `.credentials.json`, `settings.json`, `CLAUDE.md`, `skills/`, `plugins/` |
 | Kimi Code | `credentials/`, `config.toml`, `device_id`, `AGENTS.md`, `SYSTEM.md`, `mcp.json`, `skills/`, `agents/`, `plugins/` |
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
-| DeepSeek Harness | `.credentials.yaml`, `settings.yaml`, `AGENTS.md`, `skills/`, `.agent-presets/` |
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
 
 History, caches, SSH and GPG keys, shell dotfiles, cloud configuration, editor
@@ -379,8 +383,8 @@ Local-bare, raw SSH, and EC2 workers instead install the exact versions pinned b
 Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 `$HOME/.cache/mjolnir/harnesses` when `XDG_CACHE_HOME` is unset. They launch
 only the resulting absolute path—never an arbitrary compatible executable from
-`PATH`. Codex, Claude, and DeepSeek require Node.js 22 or newer plus npm on the
-host. Kimi and Grok require curl and Bash for their official installers.
+`PATH`. Codex and Claude require Node.js 22 or newer plus npm on the host.
+Kimi and Grok require curl and Bash for their official installers.
 Muse requires curl and tar; Mjolnir downloads the pinned native Muse binary and
 `muse-acp` adapter and verifies both SHA-256 checksums. Linux and macOS, on
 x86-64 and ARM64, are supported. The adapter's Apache-2.0 LICENSE and NOTICE
@@ -408,12 +412,12 @@ profiles independently, so a slow provider does not delay the others. Press
 | Claude Code | Five-hour and weekly subscription windows when reported. |
 | Kimi Code | Usage windows returned by the configured Kimi service. |
 | Grok Build | The harness's ACP billing extension. |
-| DeepSeek Harness | `API`, because it is usage-priced rather than a subscription window. |
 | Muse Code | Native subscription usage windows and reset times, when reported. |
 
-An unavailable reading is displayed as an error for that profile; it does not
-make the profile disappear. Quota is advisory rather than an admission-control
-scheduler. Session creation remains your decision.
+A Codex profile on a provider that publishes no quota endpoint shows `API`
+instead of a window, because it is usage-priced. An unavailable reading is
+displayed as an error for that profile; it does not make the profile
+disappear. Quota is advisory rather than an admission-control scheduler. Session creation remains your decision.
 
 Mjolnir may use a currently available non-Claude profile for internal utility
 work such as transcript compaction when appropriate. It does not silently move
@@ -444,11 +448,8 @@ project-memory tools. Another supported reviewer can still review a Muse
 primary session. Muse Spark can also supply utility inference for cross-harness handoffs; see
 [Durability and recovery](/durability/).
 
-- DeepSeek Harness ACP supports exactly one workspace root. Use either a
-  single-repository bundle or one bare project directory, with no attached
-  directories.
-- Kimi Code and DeepSeek Harness have no guardian approval mode. Prefer an
-  isolated [container target](/containers/) or EC2 rather than raw execution.
+- Kimi Code has no guardian approval mode. Prefer an isolated
+  [container target](/containers/) or EC2 rather than raw execution.
 - A custom bridge must speak the ACP version and features Mjolnir expects.
 - A profile home is account-scoped. Do not point two profiles at the same home
   and expect them to represent different accounts.

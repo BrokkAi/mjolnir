@@ -41,12 +41,11 @@ deliver only part of an equivalent environment setting.
 ## ACP bridges
 
 For each harness, Mjolnir first looks for an image-baked bridge binary on
-`PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, `grok`, or
-`dsh`. If it doesn't find one, Codex and Claude Code fall back to
-running the bridge with `npx -y`, pinned to Mjolnir's fallback versions. DeepSeek
-Harness requires Node 22 or newer: bake the pinned `@deepseek-ai/dsh` package
-into the image. Kimi Code and Grok Build have no npm bridge: Mjolnir runs their official
-installer with `curl` piped to Bash instead, which needs both tools in the image.
+`PATH`: `codex-acp`, `claude-agent-acp`, `kimi`, or `grok`. If it doesn't find
+one, Codex and Claude Code fall back to running the bridge with `npx -y`, pinned
+to Mjolnir's fallback versions. Kimi Code and Grok Build have no npm bridge:
+Mjolnir runs their official installer with `curl` piped to Bash instead, which
+needs both tools in the image.
 
 Baking the bridges in, the way the reference image does, avoids that
 per-session install cost and pins the exact bridge version through the image
@@ -59,13 +58,6 @@ container contract. The documented `!command` surface always runs the command
 through `bash -lc`, so a custom image must also provide `bash` on `PATH` for
 that surface to work. Those commands intentionally use the session user's
 shell environment.
-
-DeepSeek Harness includes its own ACP implementation. Mjolnir pins
-`@deepseek-ai/dsh` 0.1.2-rc.1 and launches `dsh --profile acp` over stdio,
-and stages only `.credentials.yaml`, settings, instructions, skills, and agent
-presets from `DSH_HOME`. DeepSeek's adapter currently accepts one workspace
-root, so a DeepSeek profile cannot launch a multi-repository bundle or a
-session with additional mounted directories.
 
 Muse Code requires both `muse-acp` on `PATH` and the native `muse` executable.
 Set `MUSE_CLI` to the native binary's absolute path. The reference image uses

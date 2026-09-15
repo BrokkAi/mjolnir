@@ -12,15 +12,15 @@ isolation always
 selects Mjolnir's `unconstrained` execution policy. The `permissions` setting is
 only available for raw `ssh-bare` targets. Mjolnir translates the policy into the
 selected harness's own control: Codex `agent-full-access`, Claude Code
-`bypassPermissions`, Kimi Code `auto`, Grok Build's `--always-approve` launch
-flag, or DeepSeek Harness's `danger-full-access` permission mode. Every one of
-those approves every call. Note that Kimi Code's mode is named `auto` but is
-not a guardian policy that approves only low-risk calls.
+`bypassPermissions`, Kimi Code `auto`, or Grok Build's `--always-approve`
+launch flag. Every one of those approves every call. Note that Kimi Code's
+mode is named `auto` but is not a guardian policy that approves only low-risk
+calls.
 
 Raw localhost worktrees preserve the profile and harness's configured approval
 behavior instead. Codex, Claude Code, and Grok Build expose guardian modes
-through their harnesses; Kimi Code and DeepSeek Harness do not. Mjolnir warns
-against running either unsupported harness on a raw, unsandboxed target.
+through their harnesses; Kimi Code does not. Mjolnir warns against running an
+unsupported harness on a raw, unsandboxed target.
 
 A container session's repository content always comes from a network clone. A
 local session that runs the agent in a directory on this machine can still move
@@ -57,10 +57,9 @@ installs both Linux companions.
 ## Get the agent-dev image
 
 Mjolnir ships a reference container image with everything a session needs
-pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Git, GitHub CLI, the
-Codex and Claude ACP bridges, and pinned DeepSeek Harness with
-its bundled ACP profile. It also carries Playwright's Chromium system libraries and
-the pre-installed Chromium headless shell in
+pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Git, GitHub CLI, and
+the Codex and Claude ACP bridges. It also carries Playwright's Chromium system
+libraries and the pre-installed Chromium headless shell in
 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
 privileged install and no run-time browser download, and the profiling tools
 `perf`, `cargo-flamegraph`, `samply`, and `heaptrack`; `perf` additionally needs

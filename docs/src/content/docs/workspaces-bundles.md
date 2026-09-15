@@ -193,7 +193,7 @@ reason across the set without pretending the repositories are one Git tree.
 Each repository keeps its own `.git`, origin, session branch, dirty state, and
 archive material.
 
-DeepSeek Harness ACP supports one workspace root only. Pair it with a
+Muse Code ACP supports one workspace root only. Pair it with a
 single-repository bundle or one bare project directory, and do not add attached
 directories. The other four supported harnesses accept multi-root bundles.
 

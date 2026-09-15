@@ -58,15 +58,14 @@ chosen harness's controls:
 | Every container and EC2 target | Unconstrained inside the isolation boundary. |
 
 The unconstrained translation is Codex `agent-full-access`, Claude Code
-`bypassPermissions` with its sandbox disabled, Kimi Code `auto`, Grok Build
-always-approve with its sandbox disabled, and DeepSeek Harness
-`danger-full-access`. These all approve every action; Kimi's mode happens to be
-named `auto` but is not a risk-selective guardian.
+`bypassPermissions` with its sandbox disabled, Kimi Code `auto`, and Grok Build
+always-approve with its sandbox disabled. These all approve every action; Kimi's
+mode happens to be named `auto` but is not a risk-selective guardian.
 
 Codex, Claude Code, and Grok Build can preserve guardian approvals on raw
-targets. Kimi Code and DeepSeek Harness cannot, so Mjolnir displays a prominent
-warning when either is selected without an isolation boundary. Read
-[Security boundaries](/security/) before choosing a raw or `yolo` target.
+targets. Kimi Code cannot, so Mjolnir displays a prominent warning when it is
+selected without an isolation boundary. Read [Security boundaries](/security/)
+before choosing a raw or `yolo` target.
 
 ## Bare targets
 
@@ -122,9 +121,9 @@ path, not the selected project or its linked-worktree location.
 
 The host does not need a preinstalled harness bridge. Its worker installs and
 reuses the exact harness version pinned by Mjolnir in the remote user's cache.
-It does require Node.js 22 and npm for Codex, Claude, and DeepSeek, or curl and
-Bash for Kimi and Grok. Mjolnir never uses sudo to add these prerequisites and
-does not fall back to another harness executable from the remote `PATH`.
+It does require Node.js 22 and npm for Codex and Claude, or curl and Bash for
+Kimi and Grok. Mjolnir never uses sudo to add these prerequisites and does not
+fall back to another harness executable from the remote `PATH`.
 
 `permissions` is required and accepts `guardian` or `yolo`. SSH connection
 fields include `identity_file` and `extra_args`. See
@@ -249,10 +248,10 @@ origin <url>`) or keep resuming on a bare target. A subdirectory of a checkout,
 an SSH-hosted checkout, and a multi-repository bundle cannot become one
 checkout either way.
 
-DeepSeek Harness supports one ACP workspace root, so it requires a
-single-repository bundle or one existing bare project directory, with no
-supplemental directories. See [Workspaces and bundles](/workspaces-bundles/)
-for repository validation, dirty state, Git caching, and project memory.
+Muse Code supports one ACP workspace root, so it requires a single-repository
+bundle or one existing bare project directory, with no supplemental directories.
+See [Workspaces and bundles](/workspaces-bundles/) for repository validation,
+dirty state, Git caching, and project memory.
 
 ## Supplemental directories
 

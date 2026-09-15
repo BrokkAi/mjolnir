@@ -5,9 +5,9 @@ description: Understand Mjolnir's purpose, boundaries, supported coding harnesse
 
 Mjolnir (`mj`) is a session manager for coding agents that provisions their
 execution environments and lets you continue work across harnesses, accounts,
-and machines. It supports Codex, Claude Code, Kimi Code, Grok Build, DeepSeek
-Harness, and Muse Code through the Agent Client Protocol (ACP), with a terminal
-dashboard, personal web viewer, and desktop app.
+and machines. It supports Codex, Claude Code, Kimi Code, Grok Build, and Muse
+Code through the Agent Client Protocol (ACP), with a terminal dashboard,
+personal web viewer, and desktop app.
 
 Choose a harness account independently from the target where it runs. Mjolnir
 provisions containers or instances, synchronizes credentials, and can move the
@@ -95,7 +95,6 @@ These are the integrations shipped with Mjolnir 2.x today:
 | Claude Code | `claude` | Yes | Yes | Yes | Yes |
 | Kimi Code | `kimi` | Yes | Yes | Yes | No |
 | Grok Build | `grok` | Yes | Yes | Yes | Yes |
-| DeepSeek Harness | `deepseek` | Yes | No subscription quota | Yes | No |
 | Muse Code | `muse` | Yes | Yes | Yes | Yes |
 
 “Native state” means Mjolnir can resume the harness's own session when the
@@ -103,11 +102,10 @@ same harness is selected again. A cross-harness resume instead restores the
 workspace and supplies a size-bounded handoff derived from the canonical
 transcript. See [Durability and recovery](/durability/).
 
-Kimi Code, DeepSeek Harness, and Muse Code do not provide a guardian approval
-mode. They should not be used on a raw, unsandboxed target. DeepSeek Harness
-and Muse Code currently
-accept one workspace root, so use either a one-repository bundle or one bare
-project directory, without attached directories.
+Kimi Code and Muse Code do not provide a guardian approval mode. They should
+not be used on a raw, unsandboxed target. Muse Code currently accepts one
+workspace root, so use either a one-repository bundle or one bare project
+directory, without attached directories.
 
 ## Supported targets
 

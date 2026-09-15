@@ -189,7 +189,7 @@ home = "/home/me/.codex-work"
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
-| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, `deepseek`, or `muse`. |
+| `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, or `muse`. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
 | `environment` | table of strings | no | empty | Environment passed to harness/profile commands. Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` must set that variable here, with a non-empty value. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
@@ -197,7 +197,7 @@ home = "/home/me/.codex-work"
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
 instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
-`KIMI_CODE_HOME`, `GROK_HOME`, and `DSH_HOME` respectively.
+`KIMI_CODE_HOME`, and `GROK_HOME` respectively.
 
 Profiles do not select target-side executables. Raw SSH and EC2 workers resolve
 an exact pinned runtime from their managed cache, while local and container
@@ -561,7 +561,6 @@ written:
 | Claude Code | `CLAUDE_CONFIG_DIR` | `~/.claude` |
 | Kimi Code | `KIMI_CODE_HOME` | `~/.kimi-code` |
 | Grok Build | `GROK_HOME` | `~/.grok` |
-| DeepSeek Harness | `DSH_HOME` | `~/.dsh` |
 | Muse Code | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` |
 
 The release installer separately accepts `MJOLNIR_INSTALL_DIR` (preferred over

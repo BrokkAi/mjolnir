@@ -532,8 +532,8 @@ across a prompt’s model requests, including cancellation. Unknown resumed base
 missing reports, or counter resets retain incomplete (`unspecified`) coverage. Older
 Codex adapters and historical reports retain `last_request` scope. Grok's native
 prompt-ledger metadata and matching completion notifications report whole-turn
-consumption; explicitly incomplete reports retain `unspecified` scope. Kimi and
-Deepseek reports retain `unspecified` scope. The managed Muse adapter 0.4.3 and
+consumption; explicitly incomplete reports retain `unspecified` scope. Kimi
+reports retain `unspecified` scope. The managed Muse adapter 0.4.3 and
 later report whole-turn usage on the prompt response and omit the report when the
 backend reported no model legs; older Muse adapters produce no token reports.
 Only known whole-turn reports contribute to `totals`. Each counter includes

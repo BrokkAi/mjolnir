@@ -33,7 +33,7 @@ Active work and requests for input take precedence over unread activity. Reading
 Press **Create**, `n`, `N`, `Alt+N`, or `Alt+W` anywhere in the terminal
 dashboard. The full wizard resolves four things:
 
-1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, DeepSeek Harness, or Muse Code and the credentials to use.
+1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, or Muse Code and the credentials to use.
 2. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing Git directory for a bare target.
 3. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
 4. A final launch review, with optional attached directories and per-session container sizing where the target supports them.
@@ -201,14 +201,14 @@ For Codex, the archive includes the primary thread and child-agent results surfa
 
 ## Import a native harness session
 
-The `Alt+S` picker also has an Import view for sessions created outside Mjolnir. Native sessions from all six supported harnesses can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. DSH and Muse imports retain their native session IDs and support workspace relocation. Both harnesses accept one workspace root.
+The `Alt+S` picker also has an Import view for sessions created outside Mjolnir. Native sessions from all five supported harnesses can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
 
 For scripting, select a specific native UUID or the latest session:
 
 ```sh
 mj import codex --latest --bundle myapp --title "Investigate flaky tests"
 mj import claude --session <native-uuid> --bundle myapp
-mj import deepseek --latest --bundle myapp
+mj import grok --latest --bundle myapp
 mj import muse --session <native-uuid> --bundle myapp
 ```
 

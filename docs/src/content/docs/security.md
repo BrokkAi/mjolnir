@@ -30,15 +30,14 @@ controls:
 | Claude Code | `bypassPermissions` with its sandbox disabled |
 | Kimi Code | `auto` |
 | Grok Build | always approve with its sandbox disabled |
-| DeepSeek Harness | `danger-full-access` |
 | Muse Code | the `:unrestricted` permission profile in its staged settings, `allowAll` approvals, and `--disable-sandbox` |
 
 Kimi's mode is named `auto`, but in this context it approves every call. It is
 not a low-risk guardian policy.
 
 Codex, Claude Code, and Grok Build can preserve guardian-style approvals on a
-raw target. Kimi Code and DeepSeek Harness cannot, and neither can Muse Code:
-its permission profile is a host-lifetime setting that the wire cannot select,
+raw target. Kimi Code cannot, and neither can Muse Code: its permission
+profile is a host-lifetime setting that the wire cannot select,
 so every Muse session runs unconstrained. Mjolnir warns when a harness without
 guardian support is paired with a raw target, but a warning is not a
 sandbox—choose a container or instance instead.
@@ -79,7 +78,6 @@ home from a harness-specific allowlist:
 | Claude Code | Authentication and account config, settings, `CLAUDE.md`, skills, and plugins |
 | Kimi Code | Authentication, config, device ID, instructions, MCP config, skills, agents, and plugins |
 | Grok Build | Authentication, config, agent ID, instructions, skills, and plugins |
-| DeepSeek Harness | Authentication, settings, instructions, skills, and agent presets |
 
 Symbolic links encountered while copying an allowlisted profile entry are
 skipped. Files outside the allowlist—such as general shell state, unrelated

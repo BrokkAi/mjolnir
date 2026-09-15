@@ -153,8 +153,8 @@ After changing a profile's environment, restart the worker or stop and resume
 the session; an already running worker does not continuously reread shell
 startup files. Raw SSH and EC2 sessions do not launch an ambient harness from
 this path: they use the exact Mjolnir-managed version, while `PATH` supplies its
-installer prerequisites. These targets require Node.js 22 and npm for Codex,
-Claude, and DeepSeek, or curl and Bash for Kimi and Grok. Install prerequisites
+installer prerequisites. These targets require Node.js 22 and npm for Codex
+and Claude, or curl and Bash for Kimi and Grok. Install prerequisites
 on the host yourself; Mjolnir never invokes sudo for harness setup.
 
 Container images must expose required tools on their ordinary image `PATH`.
