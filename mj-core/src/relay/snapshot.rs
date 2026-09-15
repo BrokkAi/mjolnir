@@ -1173,24 +1173,38 @@ pub fn clamp_observation(observation: RelayObservation, budget: usize) -> Result
 /// Its exact field order and serde attributes are load-bearing — changing them
 /// would invalidate every stored v1 digest.
 #[derive(Serialize)]
-struct RelayEventDigestPayload<'a> {
+struct RelayEventDigestPayload<'a, O: Serialize> {
     ordinal: u64,
     previous_digest: &'a str,
     recorded_at_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     command_id: Option<&'a str>,
-    observation: &'a RelayObservation,
+    observation: &'a O,
 }
 
 /// v2 digest payload: identical to v1 but with no `previous_digest`, so the
 /// digest depends only on the record's own content.
 #[derive(Serialize)]
-struct RelayEventDigestPayloadV2<'a> {
+struct RelayEventDigestPayloadV2<'a, O: Serialize> {
     ordinal: u64,
     recorded_at_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     command_id: Option<&'a str>,
-    observation: &'a RelayObservation,
+    observation: &'a O,
+}
+
+/// The `session_opened` encoding written by builds 0f070506 through e6ed54ed
+/// on 2026-09-15, which serialized `native_continuity_lost` even when false.
+/// Records from that window carry digests over this shape, so validation
+/// accepts it for exactly that observation and nothing else.
+#[derive(Serialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+enum LegacyFlaggedObservation<'a> {
+    SessionOpened {
+        native_session_id: &'a str,
+        resumed: bool,
+        native_continuity_lost: bool,
+    },
 }
 
 fn digest_over(domain: &[u8], encoded: &[u8]) -> String {
@@ -1204,6 +1218,10 @@ fn digest_over(domain: &[u8], encoded: &[u8]) -> String {
 /// formula that matches the record's format. The `digest` field itself is
 /// excluded; for v2 so is `previous_digest`.
 pub fn relay_event_digest(event: &RelayEvent) -> Result<String> {
+    relay_event_digest_over(event, &event.observation)
+}
+
+fn relay_event_digest_over<O: Serialize>(event: &RelayEvent, observation: &O) -> Result<String> {
     match event.format {
         RELAY_EVENT_FORMAT_V1 => {
             validate_relay_digest(&event.previous_digest, "previous event digest")?;
@@ -1212,7 +1230,7 @@ pub fn relay_event_digest(event: &RelayEvent) -> Result<String> {
                 previous_digest: &event.previous_digest,
                 recorded_at_ms: event.recorded_at_ms,
                 command_id: event.command_id.as_deref(),
-                observation: &event.observation,
+                observation,
             };
             let encoded =
                 serde_json::to_vec(&payload).context("serialize relay event digest payload")?;
@@ -1229,7 +1247,7 @@ pub fn relay_event_digest(event: &RelayEvent) -> Result<String> {
                 ordinal: event.ordinal,
                 recorded_at_ms: event.recorded_at_ms,
                 command_id: event.command_id.as_deref(),
-                observation: &event.observation,
+                observation,
             };
             let encoded =
                 serde_json::to_vec(&payload).context("serialize relay event digest payload")?;
@@ -1285,10 +1303,25 @@ pub fn validate_relay_event(
 pub fn validate_relay_event_self(event: &RelayEvent) -> Result<()> {
     validate_relay_digest(&event.digest, "event digest")?;
     let expected_digest = relay_event_digest(event)?;
-    if event.digest != expected_digest {
-        bail!("relay event {} digest is invalid", event.ordinal);
+    if event.digest == expected_digest {
+        return Ok(());
     }
-    Ok(())
+    if let RelayObservation::SessionOpened {
+        native_session_id,
+        resumed,
+        native_continuity_lost: false,
+    } = &event.observation
+    {
+        let legacy = LegacyFlaggedObservation::SessionOpened {
+            native_session_id,
+            resumed: *resumed,
+            native_continuity_lost: false,
+        };
+        if event.digest == relay_event_digest_over(event, &legacy)? {
+            return Ok(());
+        }
+    }
+    bail!("relay event {} digest is invalid", event.ordinal);
 }
 
 pub fn validate_relay_digest(digest: &str, name: &str) -> Result<()> {
@@ -2072,6 +2105,19 @@ mod native_continuity_encoding_tests {
             !encoded.contains("native_continuity_lost"),
             "false must not be written: {encoded}"
         );
+    }
+
+    /// Written by the build that emitted the flag as false, copied from a
+    /// live journal. Its digest covers that encoding.
+    const RECORDED_BY_THE_FLAGGING_BUILD: &str = r#"{"format":2,"ordinal":188,"digest":"83a8ded900c35360e8998e6b7710902475145370bdaa88ce1fa186cb5d108636","recorded_at_ms":1789436362441,"observation":{"type":"session_opened","data":{"native_session_id":"020bb831-ec40-49ac-bbcb-a702135deb5d","resumed":true,"native_continuity_lost":false}}}"#;
+
+    #[test]
+    fn a_record_that_wrote_the_flag_as_false_still_verifies() {
+        let event: RelayEvent = serde_json::from_str(RECORDED_BY_THE_FLAGGING_BUILD).unwrap();
+        validate_relay_event_self(&event).expect("the legacy encoding must still verify");
+        let mut tampered = event;
+        tampered.recorded_at_ms += 1;
+        assert!(validate_relay_event_self(&tampered).is_err());
     }
 
     #[test]
