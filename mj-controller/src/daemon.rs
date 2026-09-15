@@ -1998,6 +1998,13 @@ impl RuntimeState {
             .controller
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        self.active_lifecycles_with(&controller)
+    }
+
+    /// The same view for a caller that already holds the controller lock.
+    /// The lock is not reentrant, so taking it again here would deadlock the
+    /// daemon.
+    fn active_lifecycles_with(&self, controller: &Controller) -> Vec<RuntimeLifecycleView> {
         self.lifecycle
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2008,7 +2015,7 @@ impl RuntimeState {
                 cancellable: active.is_cancellable()
                     && lifecycle_cancellable(
                         active.kind,
-                        durable_session_state(&controller, session_id),
+                        durable_session_state(controller, session_id),
                     ),
                 session_id: session_id.clone(),
                 kind: active.kind.into(),
@@ -2092,7 +2099,7 @@ impl RuntimeState {
             .controller
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let operations = self.active_lifecycles();
+        let operations = self.active_lifecycles_with(&controller);
         let mut records = controller.state.sessions.clone();
         for id in self
             .close_requested
@@ -5306,6 +5313,36 @@ mod tests {
         release.notify_one();
         RuntimeState::wait_lifecycle_result(cleanup).await.unwrap();
         assert!(state.active_lifecycles().is_empty());
+    }
+
+    /// `session_projection` holds the controller lock while it reads the
+    /// lifecycle view, and that view also needs the controller. A re-lock on
+    /// the same thread hangs the daemon, so the read must finish promptly.
+    #[tokio::test]
+    async fn session_projection_reads_lifecycles_without_relocking_the_controller() {
+        let state = test_runtime_state();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let running = state
+            .start_or_join_lifecycle("session-1".into(), LifecycleKind::Close, {
+                let release = release.clone();
+                move |_, _, _| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let projecting = state.clone();
+        std::thread::spawn(move || {
+            let (_, lifecycles) = projecting.session_projection();
+            let _ = sender.send(lifecycles.len());
+        });
+        let visible = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("session projection must not deadlock on the controller lock");
+        assert_eq!(visible, 1);
+        release.notify_one();
+        RuntimeState::wait_lifecycle_result(running).await.unwrap();
     }
 
     #[tokio::test]
