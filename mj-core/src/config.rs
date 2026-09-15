@@ -503,7 +503,8 @@ impl HarnessKind {
     }
 
     /// How this harness realizes a target-level execution policy. Configured
-    /// approvals preserve harness configuration; Codex selects guardian explicitly.
+    /// approvals preserve harness configuration, except that Codex, ZCode, and
+    /// Claude select their guardian mode explicitly.
     pub const fn execution_enforcement(
         self,
         policy: ExecutionPolicy,
@@ -555,6 +556,18 @@ impl HarnessKind {
                 acp_mode: Some("yolo"),
                 launch_flag: None,
                 launch_environment: Some(("ZCODE_ACP_MODE", "yolo")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
+            }),
+            // Claude's guardian is its Auto mode: Claude decides each
+            // permission itself instead of asking the client, which has no
+            // per-tool approval surface of its own.
+            (Self::Claude, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
+                label: "auto / guardian",
+                acp_mode: Some("auto"),
+                launch_flag: None,
+                launch_environment: None,
                 launch_argument: None,
                 session_sandbox: None,
                 staged_setting: None,
@@ -2547,7 +2560,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_approvals_preserve_other_profiles_and_select_codex_guardian() {
+    fn configured_approvals_preserve_other_profiles_and_select_guardians() {
         let codex = HarnessKind::Codex
             .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
             .expect("Codex ACP selects guardian explicitly");
@@ -2556,9 +2569,15 @@ mod tests {
             codex.launch_environment(),
             Some(("INITIAL_AGENT_MODE", "agent"))
         );
+        let claude = HarnessKind::Claude
+            .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
+            .expect("Claude selects its Auto mode as guardian");
+        assert_eq!(claude.acp_mode(), Some("auto"));
+        assert_eq!(claude.label(), "auto / guardian");
+        assert_eq!(claude.session_sandbox(), None);
+        assert_eq!(claude.staged_setting(), None);
 
         for kind in [
-            HarnessKind::Claude,
             HarnessKind::Kimi,
             HarnessKind::Grok,
             HarnessKind::Deepseek,

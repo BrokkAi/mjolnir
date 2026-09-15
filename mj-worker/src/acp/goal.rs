@@ -439,7 +439,7 @@ for line in sys.stdin:
     elif method == 'session/resume':
         assert p['_meta']['goal']['resumePolicy'] == ('pause' if asking else 'preserve')
         goal['status']='paused' if asking and os.environ['GOAL_STATUS']=='active' else os.environ['GOAL_STATUS']
-        result={'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'}]},'_meta':{'goal':goal,'execution':{'version':1,'status':'running' if running else 'idle','turnId':'native-turn' if running else None}}}
+        result={'modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]},'_meta':{'goal':goal,'execution':{'version':1,'status':'running' if running else 'idle','turnId':'native-turn' if running else None}}}
         # Live output is legal before the resume response and exceeds a pipe buffer.
         if running:
             emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'x'*80000}}}})
@@ -593,7 +593,7 @@ for line in sys.stdin:
     if m=='initialize':
         emit({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{},'_meta':{'goal':{'version':1,'controlMethod':'_session/goal','actions':['pause','resume','clear'] if codex else ['set','clear']}}}})
     elif m=='session/new':
-        emit({'jsonrpc':'2.0','id':i,'result':{'sessionId':'native','modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'}]}}})
+        emit({'jsonrpc':'2.0','id':i,'result':{'sessionId':'native','modes':{'currentModeId':'agent','availableModes':[{'id':'agent','name':'Guardian'},{'id':'auto','name':'Auto'}]}}})
     elif m=='session/prompt':
         assert p['prompt'][0]['text']=='work'
         text('prompt-started')
