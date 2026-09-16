@@ -617,7 +617,6 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "textwrap",
  "tokio",
@@ -693,7 +692,6 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac",
  "http-body-util",
- "image",
  "libc",
  "rayon",
  "reedline",
@@ -703,7 +701,6 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.10.9",
  "signal-hook",
  "sysinfo",
@@ -849,7 +846,6 @@ dependencies = [
  "libc",
  "mimalloc",
  "proptest",
- "regex",
  "rusqlite",
  "serde",
  "serde_json",
@@ -859,7 +855,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "zstd",
 ]
 
 [[package]]
@@ -869,7 +864,6 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "axum",
- "axum-server",
  "brokk-mj-chat",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
@@ -880,7 +874,6 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
- "getrandom 0.3.4",
  "libc",
  "ratatui",
  "reqwest",
@@ -894,7 +887,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -5168,19 +5160,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap 2.14.0",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "servo_arc"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6217,12 +6196,6 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

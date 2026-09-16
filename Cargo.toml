@@ -68,7 +68,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 rayon = "1"
-regex = "1"
 # `rustls-no-provider` takes the process-wide rustls provider instead of
 # pulling aws-lc-rs, which needs a C toolchain and complicates
 # cross-compilation. Every executable installs the ring provider at startup

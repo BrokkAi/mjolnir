@@ -36,7 +36,6 @@ rat-event = "2.1.0"
 rat-focus = "2.1.1"
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
-sha2.workspace = true
 textwrap = "0.16"
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
