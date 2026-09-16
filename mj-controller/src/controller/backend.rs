@@ -23,6 +23,52 @@ use crate::targets::{
 use super::{Controller, backend_ssh, execute_checked, ssh_args_with_identity, ssh_command_spec};
 
 impl Controller {
+    /// Inspect the actual execution checkout in a background worker.
+    pub fn session_working_context(
+        &self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<(PathBuf, String)> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("session is missing")?;
+        let locator = session
+            .target
+            .as_ref()
+            .context("target is still starting")?;
+        let backend = backend_locator(locator, session, &self.config)?;
+        let launch = self.current_worker_launch_config(session_id, &backend)?;
+        let output = executor.execute(&targets::command_on_locator(
+            &backend,
+            session_id,
+            vec![
+                "git".into(),
+                "-C".into(),
+                launch.cwd.to_string_lossy().into_owned(),
+                "rev-parse".into(),
+                "--abbrev-ref".into(),
+                "HEAD".into(),
+            ],
+            "read current session branch",
+        )?)?;
+        let branch = if output.status == 0 {
+            let branch = String::from_utf8(output.stdout).context("decode session branch")?;
+            if branch.trim() == "HEAD" {
+                "detached HEAD".to_owned()
+            } else {
+                branch.trim().to_owned()
+            }
+        } else {
+            format!(
+                "unavailable: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        };
+        Ok((launch.cwd, branch))
+    }
+
     pub fn resolve_aws_resource_options(
         &self,
         target_id: &str,
@@ -266,14 +312,14 @@ pub(super) fn preflight_target(
             .map(|_| ())
             .map_err(|error| {
                 anyhow::anyhow!(
-                    "local Podman preflight failed; run `mj doctor` for actionable prerequisites: {error:#}"
+                    "local Podman is not ready. Fix the problem below, then Retry launch: {error:#}"
                 )
             }),
         TargetTemplate::LocalDocker { .. } => targets::verify_local_docker(executor)
             .map(|_| ())
             .map_err(|error| {
                 anyhow::anyhow!(
-                    "local Docker preflight failed; run `mj doctor` for actionable prerequisites: {error:#}"
+                    "local Docker is not ready. Start Docker or fix the problem below, then Retry launch: {error:#}"
                 )
             }),
         TargetTemplate::SshPodman { ssh, .. } => {
@@ -286,7 +332,7 @@ pub(super) fn preflight_target(
                 })
                 .map_err(|error| {
                     anyhow::anyhow!(
-                        "remote Podman preflight failed for {}; run `mj doctor` for actionable prerequisites: {error:#}",
+                        "remote Podman is not ready on {}. Fix the problem below, then Retry launch: {error:#}",
                         ssh.destination
                     )
                 })
@@ -297,7 +343,7 @@ pub(super) fn preflight_target(
                 .map(|_| ())
                 .map_err(|error| {
                     anyhow::anyhow!(
-                        "remote Docker preflight failed for {}; run `mj doctor` for actionable prerequisites: {error:#}",
+                        "remote Docker preflight failed for {}. Fix the problem below, then Retry launch: {error:#}",
                         ssh.destination
                     )
                 })
@@ -308,12 +354,12 @@ pub(super) fn preflight_target(
                 .stage(ProvisionStage::Provisioning);
             let output = executor.execute(&command).map_err(|error| {
                 anyhow::anyhow!(
-                    "Apple container preflight failed; run `mj doctor` for actionable prerequisites: {error}"
+                    "Apple container is not ready. Fix the problem below, then Retry launch: {error}"
                 )
             })?;
             if output.status != 0 {
                 bail!(
-                    "Apple container preflight failed; run `container system start` to start the runtime, then `mj doctor` to verify prerequisites: container system status exited {}: {}",
+                    "Apple container is not ready. Start the runtime with `container system start`, then Retry launch: container system status exited {}: {}",
                     output.status,
                     [
                         String::from_utf8_lossy(&output.stdout).trim(),
@@ -1723,7 +1769,7 @@ mod tests {
         }
     }
     #[test]
-    fn local_podman_preflight_failures_recommend_doctor() {
+    fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
                 image: "ubuntu:24.04".into(),
@@ -1747,11 +1793,11 @@ mod tests {
         let error = preflight_target(&template, &executor)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("mj doctor"));
+        assert!(error.contains("Retry launch"));
         assert!(error.contains("Podman 4.0.0"));
     }
     #[test]
-    fn ssh_podman_preflight_failures_name_the_destination_and_recommend_doctor() {
+    fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
         let template = TargetTemplate::SshPodman {
             ssh: SshConnection {
                 host: "example.test".into(),
@@ -1786,7 +1832,7 @@ mod tests {
         let error = preflight_target(&template, &executor)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("mj doctor"));
+        assert!(error.contains("Retry launch"));
         assert!(error.contains("dev@example.test"));
         assert!(error.contains("Podman 4.0.0"));
     }
@@ -1863,7 +1909,7 @@ mod tests {
             let error = preflight_target(&template, &executor)
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("mj doctor"));
+            assert!(error.contains("Retry launch"));
             assert!(error.contains("container system start"));
             assert!(error.contains(stdout));
             assert!(error.contains(stderr));

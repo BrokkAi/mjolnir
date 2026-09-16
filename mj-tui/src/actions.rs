@@ -22,6 +22,7 @@ use crate::{DashboardAction, DashboardState, Focus};
 pub enum CommandId {
     OpenSession,
     NewSessionWizard,
+    ChangeGoSetup,
     RestartSession,
     ResumeDialog,
     RenameSession,
@@ -378,6 +379,23 @@ fn operation_in_flight(dashboard: &DashboardState) -> Availability {
 /// Every command the surface has. The order here is the order the footer
 /// prints its hints and the order the help overlay prints each group.
 pub(crate) static COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        id: CommandId::ChangeGoSetup,
+        label: "Change fast-start setup",
+        description: "Choose and remember a new account, target, or isolation for this project.",
+        scope: Scope::Settings,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: |dashboard| {
+            if dashboard.go.is_some() {
+                Availability::Ready
+            } else {
+                Availability::Hidden
+            }
+        },
+    },
     CommandSpec {
         id: CommandId::OpenSession,
         label: "Open session",
@@ -902,6 +920,7 @@ impl DashboardState {
         match id {
             CommandId::OpenSession => self.open_selected_session(),
             CommandId::NewSessionWizard => self.begin_new(),
+            CommandId::ChangeGoSetup => self.change_go_setup(),
             CommandId::RestartSession => self
                 .selected_session()
                 .map(|s| DashboardAction::RestartSession {
