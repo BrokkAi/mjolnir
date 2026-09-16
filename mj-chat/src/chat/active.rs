@@ -3191,9 +3191,11 @@ pub(super) fn render_composer_band(
         bottom_spans.push(Span::styled(
             label,
             if chat.subagent_control_focused() {
-                theme::selection(false)
+                theme::selection(true)
             } else {
-                theme::muted()
+                // The chip is always clickable, so keep its blue highlight;
+                // keyboard focus only adds the accent foreground.
+                theme::selection(false)
             },
         ));
     }
@@ -5588,6 +5590,29 @@ mod tests {
                 ),
             )),
         )
+    }
+
+    #[test]
+    fn subagents_are_blue_highlighted_as_clickable_on_prompt_border() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_subagent_count(2);
+        let mut terminal =
+            Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
+        terminal
+            .draw(|frame| render_full_frame(frame, &mut chat, false))
+            .expect("chat draws");
+        let area = chat
+            .subagent_control_area
+            .expect("the sub-agent control is rendered");
+        let buffer = terminal.backend().buffer();
+        let label = (area.x..area.right())
+            .map(|x| buffer[(x, area.y)].symbol())
+            .collect::<String>();
+        assert_eq!(label, " Sub-agents (2) ");
+        assert!((area.x..area.right()).all(|x| {
+            let cell = &buffer[(x, area.y)];
+            cell.bg == theme::palette().selection && cell.fg == theme::palette().text
+        }));
     }
 
     #[test]
