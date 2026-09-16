@@ -76,8 +76,18 @@ fn call_tool(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
 /// One request, one line, one reply. The socket lives in the worker root and
 /// is only reachable from inside this container.
 pub fn send_dispatch(socket: &Path, dispatch: &LaneDispatch) -> Result<LaneDispatchReply> {
-    crate::mcp_stdio::socket_request(socket, dispatch, "review dispatch")
+    crate::mcp_stdio::socket_request(socket, dispatch, "review dispatch", DISPATCH_REPLY_TIMEOUT)?
+        .with_context(|| {
+            format!(
+                "the review dispatch socket did not answer within {}s",
+                DISPATCH_REPLY_TIMEOUT.as_secs()
+            )
+        })
 }
+
+/// The worker answers a dispatch as soon as it has queued the lanes, so a
+/// reply that takes longer than this means the worker is not serving.
+const DISPATCH_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn tool_definition() -> Value {
     let roster = REVIEW_LANES.iter().map(|lane| lane.id).collect::<Vec<_>>();

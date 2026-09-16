@@ -5,7 +5,9 @@
 //! instructions, tools and call handler, so the JSON-RPC loop lives here once.
 
 use std::io::{BufRead, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -122,15 +124,28 @@ fn rpc_error(id: Value, code: i64, message: String) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+/// How long a connect may wait for the worker to accept. A Unix socket
+/// connect only blocks when the listener's backlog is full, which means the
+/// worker has stopped accepting.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Send one JSON request line over a worker Unix socket and read one JSON
-/// reply line. `what` names the exchange in errors.
+/// reply line. `what` names the exchange in errors. The connect is bounded
+/// by [`CONNECT_TIMEOUT`]; the reply must arrive within `reply_timeout`, and
+/// `Ok(None)` reports that it did not, so a worker that never answers turns
+/// into a bounded failure instead of an indefinite hang.
 #[cfg(unix)]
-pub fn socket_request<Q, A>(socket: &std::path::Path, request: &Q, what: &str) -> Result<A>
+pub fn socket_request<Q, A>(
+    socket: &Path,
+    request: &Q,
+    what: &str,
+    reply_timeout: Duration,
+) -> Result<Option<A>>
 where
     Q: serde::Serialize,
     A: serde::de::DeserializeOwned,
 {
-    let mut stream = mj_core::local_sockets::connect_unix_stream(socket)
+    let mut stream = connect_with_timeout(socket)
         .with_context(|| format!("connect to the {what} socket {}", socket.display()))?;
     let mut body = serde_json::to_vec(request)?;
     body.push(b'\n');
@@ -140,18 +155,59 @@ where
     stream
         .flush()
         .with_context(|| format!("flush the {what} request"))?;
+    stream
+        .set_read_timeout(Some(reply_timeout))
+        .with_context(|| format!("bound the {what} reply wait"))?;
     let mut reader = std::io::BufReader::new(stream);
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .with_context(|| format!("read the {what} reply"))?;
-    serde_json::from_str(line.trim()).with_context(|| format!("parse the {what} reply"))
+    match reader.read_line(&mut line) {
+        Ok(0) => anyhow::bail!("the {what} socket closed without a reply"),
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error).with_context(|| format!("read the {what} reply")),
+    }
+    serde_json::from_str(line.trim())
+        .map(Some)
+        .with_context(|| format!("parse the {what} reply"))
+}
+
+/// Connect on a helper thread so the wait is bounded. A thread still blocked
+/// in connect after the timeout is abandoned; it exits once the connect
+/// resolves.
+#[cfg(unix)]
+fn connect_with_timeout(socket: &Path) -> Result<std::os::unix::net::UnixStream> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let path = socket.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = sender.send(mj_core::local_sockets::connect_unix_stream(&path));
+    });
+    match receiver.recv_timeout(CONNECT_TIMEOUT) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            anyhow::bail!("no accept within {}s", CONNECT_TIMEOUT.as_secs())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("the connect thread ended without a result")
+        }
+    }
 }
 
 /// Workers run on Unix; the servers compile everywhere so the CLI stays one
 /// shape, and say plainly where they cannot run.
 #[cfg(not(unix))]
-pub fn socket_request<Q, A>(socket: &std::path::Path, _request: &Q, what: &str) -> Result<A> {
+pub fn socket_request<Q, A>(
+    socket: &Path,
+    _request: &Q,
+    what: &str,
+    _reply_timeout: Duration,
+) -> Result<Option<A>> {
     anyhow::bail!(
         "the {what} socket {} needs a Unix platform",
         socket.display()
@@ -166,4 +222,97 @@ fn write_line<W: Write>(output: &Mutex<W>, value: &Value) -> Result<()> {
     let mut output = output.lock().expect("MCP stdout lock poisoned");
     output.write_all(&body).context("write MCP response")?;
     output.flush().context("flush MCP response")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::time::Instant;
+
+    /// Accept one connection, read the request line, then run `answer` on
+    /// the stream and hold it open until the client goes away.
+    fn fake_worker(
+        socket: &Path,
+        answer: impl FnOnce(&mut std::os::unix::net::UnixStream) + Send + 'static,
+    ) {
+        let listener = UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut stream = reader.into_inner();
+            answer(&mut stream);
+            let _ = stream.read(&mut [0u8; 1]);
+        });
+    }
+
+    #[test]
+    fn socket_request_reports_a_missing_reply_within_the_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("worker.sock");
+        fake_worker(&socket, |_| std::thread::sleep(Duration::from_secs(2)));
+
+        let started = Instant::now();
+        let reply: Option<Value> = socket_request(
+            &socket,
+            &json!({"ping": true}),
+            "test",
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        assert_eq!(reply, None);
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "the call must give up at the reply timeout, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn socket_request_returns_the_reply_when_it_arrives() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("worker.sock");
+        fake_worker(&socket, |stream| {
+            stream.write_all(b"{\"pong\":true}\n").unwrap();
+            stream.flush().unwrap();
+        });
+
+        let reply: Option<Value> = socket_request(
+            &socket,
+            &json!({"ping": true}),
+            "test",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(reply, Some(json!({"pong": true})));
+    }
+
+    #[test]
+    fn socket_request_reports_a_closed_socket_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("worker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            // Drop without answering.
+        });
+
+        let error = socket_request::<_, Value>(
+            &socket,
+            &json!({"ping": true}),
+            "test",
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("closed without a reply"),
+            "{error:#}"
+        );
+    }
 }
