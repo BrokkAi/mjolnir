@@ -26,7 +26,6 @@ use mj_core::state::{
 use mj_core::subagent::SubagentRecord;
 
 use crate::targets::AdditionalMount;
-use mj_core::relay::RELAY_EVENT_GENESIS_DIGEST;
 use mj_core::workspace::{
     DEFAULT_WORKSPACE_ID, DetachedDraft, PaneSize, PaneSizes, WorkspaceRecord, new_workspace_id,
     normalize_workspace_name,
@@ -45,7 +44,7 @@ pub use events::*;
 
 pub use schema::database_path;
 #[cfg(test)]
-use schema::{forget_verified_schema, table_has_column};
+use schema::forget_verified_schema;
 use schema::{open, open_reader};
 
 const DATABASE_WRITE_QUEUE_CAPACITY: usize = 256;

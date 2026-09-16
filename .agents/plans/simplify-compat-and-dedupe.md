@@ -16,7 +16,8 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 - [x] (2026-09-16) The user set the compatibility floor at 2.8.0 and ruled out scope cuts.
 - [x] (2026-09-16) Filed #1043 and #1044.
 - [x] (2026-09-16) Milestone 1: delete dead code. Daemon protocol raised to 20 because `CreateSessionRequest` lost `allow_dirty_local`.
-- [ ] Milestone 2a: database, config, and small compatibility shims below 2.8.0.
+- [x] (2026-09-16) Milestone 2a, database part: `mj-controller/src/database/baseline.sql` creates a new store at revision 33 and replaces migration steps 1–33. Stores older than revision 33 are refused.
+- [ ] Milestone 2a, remaining: config and small compatibility shims below 2.8.0.
 - [ ] Milestone 2b: relay protocol, journal format v1, and worker-export fallbacks.
 - [ ] Milestone 3: merge duplicated target and process plumbing.
 - [ ] Milestone 4: merge duplicated feature paths.
@@ -33,6 +34,12 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 
 ## Decision Log
 
+- Decision: Keep the database compatibility floor (`schema_compatibility`, `read_schema_state`) and the writer's schema re-read before each write. Only the migration steps are replaced.
+  Rationale: The repository's CLAUDE.md "Testing Guidelines" require every migration to be classified as compatible or breaking and the minimum compatible revision to be raised for breaking ones. The floor is how that rule works, and it lets an older build keep using a store that a newer compatible build migrated. Removing it would contradict a standing repository rule, so it is out of scope for "no downgrades".
+  Date/Author: 2026-09-16, agent.
+- Decision: `baseline.sql` is generated from a store created by the migration steps, then reformatted. It is checked two ways: `pragma table_xinfo`, `foreign_key_list`, `index_xinfo`, STRICT flags and SQL text all match a store the migration steps created, and they also match the maintainer's live store, which is at revision 33 and was upgraded step by step since August.
+  Rationale: 2.8.0 shipped revision 33, so the baseline must equal what those steps produced, including the `'deepseek'`/`'zcode'` values that CHECK constraints still allow. The default workspace row the steps inserted is part of the baseline.
+  Date/Author: 2026-09-16, agent.
 - Decision: Milestone 1 keeps four audit candidates.
   Rationale:
   - `Controller::resume_session_with_options` is the entry point of the podman import end-to-end test (`mj-cli/tests/import_e2e.rs`).
