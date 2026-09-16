@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[cfg(unix)]
 use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
@@ -10,8 +9,9 @@ use anyhow::Result;
 
 use super::{Controller, MoveMutationGuard, move_owns_session, move_refuses_command};
 use crate::controller::test_support::{
-    checkpoint_test_session, committed_repository, local_bundle, managed_raw_session,
-    raw_session_on, resume_compatibility_config, ssh_worktree_target,
+    IsolatedTest, RefusingExecutor, checkpoint_test_session, committed_repository,
+    install_fake_command, local_bundle, managed_raw_session, raw_session_on,
+    resume_compatibility_config, ssh_worktree_target,
 };
 #[cfg(unix)]
 use mj_checkpoint::archive::{
@@ -43,14 +43,6 @@ const MOVE_QUEUE_RELAY_ROOT: &str = "MJ_MOVE_QUEUE_RELAY_ROOT";
 const MOVE_QUEUE_RELAY_MARKER: &str = "MJ_MOVE_QUEUE_RELAY_MARKER";
 const MOVE_QUEUE_SESSION_ID: &str = "0123456789abcdef0123456789abcdef";
 
-struct UnusedExecutor;
-
-impl CommandExecutor for UnusedExecutor {
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        panic!("move preflight unexpectedly ran {}", command.program);
-    }
-}
-
 fn add_codex_profile(config: &mut Config, home: &Path) {
     config.profiles.insert(
         "codex".into(),
@@ -70,30 +62,16 @@ fn isolated_test_child(test_name: &str, marker: &str) -> bool {
         return true;
     }
     let directory = tempfile::tempdir().unwrap();
-    let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test_name, "--nocapture"])
+    IsolatedTest::new(test_name)
         .env(marker, "1")
-        .env("MJ_DATA_DIR", directory.path().join("data"))
-        .env("MJ_CONFIG_DIR", directory.path().join("config"))
+        .isolated_store(directory.path())
         .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "isolated move test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        .run();
     false
 }
 
 fn test_name(short: &str) -> String {
-    format!(
-        "{}::{short}",
-        module_path!()
-            .strip_prefix("mj_controller::")
-            .unwrap_or(module_path!())
-    )
+    crate::controller::test_support::test_name(module_path!(), short)
 }
 
 #[cfg(unix)]
@@ -119,12 +97,7 @@ fn install_move_queue_relay_worker(root: &Path, marker: &Path, marker_exists: bo
         binary = shell_literal(&std::env::current_exe().unwrap()),
         child = test_name("move_queue_relay_child"),
     );
-    let binary = root.join("hel");
-    fs::write(&binary, script).unwrap();
-    let mut permissions = fs::metadata(&binary).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
-    permissions.set_mode(0o755);
-    fs::set_permissions(binary, permissions).unwrap();
+    install_fake_command(root, "hel", &script);
 }
 
 /// Serve one durable relay connection. The first queue submission is ACKed
@@ -457,12 +430,16 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
             config: config.clone(),
             state: state.clone(),
         };
-        let error = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(controller.prepare_move_session_controlled(selection, &UnusedExecutor))
-            .unwrap_err();
+        let error =
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(controller.prepare_move_session_controlled(
+                    selection,
+                    &RefusingExecutor("move preflight"),
+                ))
+                .unwrap_err();
         let detail = format!("{error:#}");
         assert!(detail.contains(expected), "{label}: {detail}");
         assert_eq!(controller.state.sessions[session_id], previous, "{label}");
@@ -499,7 +476,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 additional_mounts: None,
                 resource_allocation: None,
             },
-            &UnusedExecutor,
+            &RefusingExecutor("move preflight"),
         ))
         .unwrap_err();
     assert!(format!("{error:#}").contains("resume it on a bare target there"));
@@ -679,7 +656,8 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .build()
         .unwrap();
     super::restore_move_queue_hold(&operation);
-    let first = runtime.block_on(controller.admit_move_queue(&mut operation, &UnusedExecutor));
+    let first = runtime
+        .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")));
     assert!(first.is_err(), "the first relay must crash after its ACK");
     assert!(move_refuses_command(
         MOVE_QUEUE_SESSION_ID,
@@ -695,7 +673,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     assert!(!operation.queue_admission_finished);
 
     runtime
-        .block_on(controller.admit_move_queue(&mut operation, &UnusedExecutor))
+        .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))
         .unwrap();
     assert!(operation.queue_admission_finished);
     assert!(!move_owns_session(MOVE_QUEUE_SESSION_ID));
@@ -745,7 +723,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .target = Some(replacement_target.clone());
     operation.destination_target = Some(replacement_target);
     let error = runtime
-        .block_on(controller.admit_move_queue(&mut operation, &UnusedExecutor))
+        .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))
         .unwrap_err();
     assert!(format!("{error:#}").contains("storage was replaced"));
     assert_eq!(

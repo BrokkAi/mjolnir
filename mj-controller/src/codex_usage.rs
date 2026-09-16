@@ -466,15 +466,7 @@ mod tests {
         temp: &tempfile::TempDir,
         script: &str,
     ) -> (HashMap<String, String>, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let executable = temp.path().join("codex");
-        std::fs::write(&executable, script).expect("write fake codex");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("fake codex metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).expect("make fake codex executable");
+        crate::controller::test_support::install_fake_command(temp.path(), "codex", script);
 
         let log = temp.path().join("requests.jsonl");
         let env = HashMap::from([

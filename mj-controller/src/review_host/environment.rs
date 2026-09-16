@@ -1,0 +1,124 @@
+use super::*;
+
+/// Everything a review needs from the controller: whether it can review this
+/// session at all, and a staged reviewer profile to launch a role from.
+///
+/// It is a trait so the host's own tests can drive a whole review without a
+/// container, a harness, or the developer's own `config.toml`. The daemon
+/// installs [`ControllerEnvironment`], which loads the real controller.
+pub trait ReviewEnvironment: Send + Sync {
+    /// Refuses, with a sentence for a person, when this session cannot be
+    /// reviewed under `profile`.
+    fn check(&self, session_id: &str, profile: &str) -> Result<(), String>;
+
+    /// Stages the reviewer profile for one role and describes how to launch
+    /// it. Blocking: it copies a profile onto the session's target.
+    fn stage(
+        &self,
+        session_id: &str,
+        profile: &str,
+        generation: u64,
+        mcp_servers: &[mj_core::worker_launch::ReviewMcpServer],
+        dispatch_tool: bool,
+    ) -> Result<mj_core::worker_launch::ReviewerLaunchConfig, String>;
+
+    /// How far this session has been reviewed. Blocking: it reads the
+    /// controller's database.
+    fn load_state(&self, session_id: &str) -> Result<TurnReviewState, String>;
+
+    /// Records how far this session has been reviewed. Blocking: the host
+    /// routes it through its ordered persistence lane rather than calling it
+    /// on the Tokio task that owns review state.
+    fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String>;
+
+    /// Clears the in-flight flag of every review a restart interrupted, and
+    /// reports whose they were. Baselines are deliberately left alone: the
+    /// interrupted review never advanced one, so the next review covers the
+    /// same change and nothing is lost.
+    fn clear_interrupted(&self) -> Result<Vec<String>, String>;
+}
+
+/// The production environment: the controller as it is on disk right now.
+///
+/// It is reloaded per call rather than held, because a review is rare and the
+/// answer must reflect the config as it stands when the review starts -- the
+/// daemon reloads config.toml every 500 ms for the same reason.
+#[derive(Debug, Default)]
+pub struct ControllerEnvironment;
+
+impl ReviewEnvironment for ControllerEnvironment {
+    fn check(&self, session_id: &str, profile: &str) -> Result<(), String> {
+        let controller =
+            crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
+        let Some(reviewer) = controller.config.profiles.get(profile) else {
+            return Err(format!(
+                "turn review needs a reviewer: [review] profile {profile:?} is not a profile in config.toml"
+            ));
+        };
+        if !reviewer.enabled {
+            return Err(format!(
+                "turn review needs an enabled reviewer: [review] profile {profile:?} is disabled"
+            ));
+        }
+        validate_reviewer_assignment(
+            session_id,
+            controller.state.sessions.get(session_id),
+            profile,
+        )
+    }
+
+    fn stage(
+        &self,
+        session_id: &str,
+        profile: &str,
+        generation: u64,
+        mcp_servers: &[mj_core::worker_launch::ReviewMcpServer],
+        dispatch_tool: bool,
+    ) -> Result<mj_core::worker_launch::ReviewerLaunchConfig, String> {
+        let controller =
+            crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
+        controller
+            .stage_reviewer_profile_with_mcp(
+                session_id,
+                profile,
+                generation,
+                mcp_servers,
+                dispatch_tool,
+            )
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn load_state(&self, session_id: &str) -> Result<TurnReviewState, String> {
+        crate::database::turn_review_state(session_id).map_err(|error| format!("{error:#}"))
+    }
+
+    fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String> {
+        crate::database::save_turn_review_state(session_id, state)
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn clear_interrupted(&self) -> Result<Vec<String>, String> {
+        crate::database::clear_interrupted_turn_reviews().map_err(|error| format!("{error:#}"))
+    }
+}
+
+pub(crate) fn validate_reviewer_assignment(
+    session_id: &str,
+    session: Option<&mj_core::state::SessionRecord>,
+    profile: &str,
+) -> Result<(), String> {
+    let Some(session) = session else {
+        return Err(format!(
+            "session {session_id:?} is not in the controller store"
+        ));
+    };
+    if session.archived {
+        return Err("this session is archived".to_owned());
+    }
+    if session.last_profile == profile {
+        return Err(format!(
+            "turn review profile {profile:?} is also this session's primary profile; choose a different [review] profile"
+        ));
+    }
+    Ok(())
+}

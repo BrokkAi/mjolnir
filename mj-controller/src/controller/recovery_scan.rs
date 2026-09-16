@@ -878,6 +878,7 @@ fn recovery_backend_locator(
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::controller::test_support::{IsolatedTest, test_name};
     use mj_core::config::{
         AwsAddressSource, Config, ContainerTemplate as ConfigContainer, HarnessKind, TargetTemplate,
     };
@@ -895,23 +896,13 @@ mod tests {
         // an exact child test with its own data directory.
         if std::env::var_os(FAILED_ADOPTION_CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "controller::recovery_scan::tests::\
-                     a_failed_adoption_records_the_failure_and_stays_retryable",
-                    "--nocapture",
-                ])
-                .env(FAILED_ADOPTION_CHILD, "1")
-                .env("MJ_DATA_DIR", directory.path())
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "isolated adoption retry test failed\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_failed_adoption_records_the_failure_and_stays_retryable",
+            ))
+            .env(FAILED_ADOPTION_CHILD, "1")
+            .env("MJ_DATA_DIR", directory.path())
+            .run();
             return;
         }
         // Alone in this child process, so it installs the one writer.
@@ -993,23 +984,13 @@ mod tests {
     async fn orphan_workspace_ids_are_reconciled_before_adoption_persistence() {
         if std::env::var_os(RECOVERY_WORKSPACE_CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
-            let test = "orphan_workspace_ids_are_reconciled_before_adoption_persistence";
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    &format!("controller::recovery_scan::tests::{test}"),
-                    "--nocapture",
-                ])
-                .env(RECOVERY_WORKSPACE_CHILD, "1")
-                .env("MJ_DATA_DIR", directory.path());
-            let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
-            assert!(
-                output.status.success(),
-                "isolated recovery workspace test failed\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "orphan_workspace_ids_are_reconciled_before_adoption_persistence",
+            ))
+            .env(RECOVERY_WORKSPACE_CHILD, "1")
+            .env("MJ_DATA_DIR", directory.path())
+            .run();
             return;
         }
 

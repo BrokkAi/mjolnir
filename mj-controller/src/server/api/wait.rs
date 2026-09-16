@@ -1,0 +1,243 @@
+use super::*;
+
+pub(super) async fn wait(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<WaitRequest>,
+) -> Result<Json<WaitResponse>, ApiFailure> {
+    let timeout = request.timeout_secs.unwrap_or(DEFAULT_WAIT_SECS);
+    if timeout == 0 || timeout > MAX_WAIT_SECS {
+        return Err(ApiFailure::bad_request(format!(
+            "timeout_secs must be between 1 and {MAX_WAIT_SECS}"
+        )));
+    }
+    let backend = backend(&state)?.clone();
+    {
+        let snapshot = state.snapshot_rx.borrow();
+        require_session_record(&snapshot, &session_id)?;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
+    let mut snapshot_rx = state.snapshot_rx.clone();
+    let mut handle = backend.session_handle(session_id.clone()).await?;
+
+    loop {
+        let start_status = backend.start_status(session_id.clone()).await?;
+        let live = handle.as_ref().map(SessionHandle::view);
+        let relay = live.as_ref().map(RelayHealth::from);
+        let durable = match live.as_ref().and_then(|view| view.snapshot.as_ref()) {
+            Some(_) => None,
+            None => backend.turn_state(session_id.clone()).await?,
+        };
+        let (session_facts, observation) = {
+            let snapshot = snapshot_rx.borrow();
+            let session = require_session_record(&snapshot, &session_id)?;
+            let observation = build_observation(
+                &snapshot,
+                session,
+                live.as_ref(),
+                durable.as_ref(),
+                start_status,
+            );
+            (ApiSession::from(session), observation)
+        };
+        if let Some(decision) = resolve_wait(&observation, &request) {
+            return Ok(Json(
+                finish_wait(
+                    &backend,
+                    &session_id,
+                    session_facts,
+                    observation,
+                    decision,
+                    relay,
+                )
+                .await?,
+            ));
+        }
+
+        let changed = async {
+            match handle.as_mut() {
+                Some(handle) => {
+                    let _ = handle.changed().await;
+                }
+                // No live actor: durable state is the only thing that moves,
+                // and it is not a channel, so poll it.
+                None => tokio::time::sleep(STOPPED_POLL_INTERVAL).await,
+            }
+        };
+        tokio::select! {
+            () = changed => {}
+            // A closed snapshot channel means the control loop that publishes
+            // session facts is gone. Ignoring the error would spin this loop,
+            // because a closed watch reports "changed" immediately and forever.
+            published = snapshot_rx.changed() => {
+                if published.is_err() {
+                    return Err(ApiFailure::unavailable(
+                        "the controller stopped publishing session state",
+                    ));
+                }
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                let snapshot = snapshot_rx.borrow();
+                let session = require_session_record(&snapshot, &session_id)?;
+                return Ok(Json(WaitResponse {
+                           diagnostic: None,
+                    pending_elicitations: Vec::new(),
+                    usage: None,
+                    outcome: WaitOutcome::Timeout,
+                    stop_reason: None,
+                    message: Some(format!("the turn was still running after {timeout} seconds")),
+                    final_message: None,
+                    turn_id: request.turn_id.or_else(|| {
+                        observation.active_turn.as_ref().and_then(|turn| turn.accepted_ordinal)
+                    }),
+                    turn_number: None,
+                    elapsed_ms: None,
+                    capacity_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
+                    relay,
+                    session: ApiSession::from(session),
+                }));
+            }
+            () = state.shutdown.cancelled() => {
+                return Err(ApiFailure::unavailable("the server is shutting down"));
+            }
+        }
+        // A stopped actor stops publishing; re-acquire so a session that was
+        // replaced or resumed under us is followed rather than waited on
+        // forever.
+        if handle.as_ref().is_some_and(SessionHandle::is_stopped) {
+            handle = backend.session_handle(session_id.clone()).await?;
+        }
+    }
+}
+
+pub(super) fn build_observation(
+    snapshot: &ViewerSnapshot,
+    session: &ViewerSession,
+    live: Option<&mj_client::session::ManagedSessionView>,
+    durable: Option<&TurnState>,
+    start_status: Option<StartStatus>,
+) -> WaitObservation {
+    let mut observation = WaitObservation {
+        pending_elicitations: session.pending_elicitations.clone(),
+        lifecycle: Some(session.lifecycle),
+        launch_failed: snapshot
+            .launch_failures
+            .iter()
+            .any(|failure| failure.session_id.as_deref() == Some(session.id.as_str())),
+        // Prefer the reason the failing action recorded on the workspace
+        // notice; fall back to the session's own launch error text.
+        launch_error: snapshot
+            .launch_failures
+            .iter()
+            .find(|failure| failure.session_id.as_deref() == Some(session.id.as_str()))
+            .and_then(|failure| failure.error.clone())
+            .or_else(|| session.launch_error.clone()),
+        capacity_retry: session.capacity_retry.clone(),
+        start_status,
+        ..WaitObservation::default()
+    };
+    if let Some(view) = live
+        && view.connected
+        && let Some(snapshot) = &view.snapshot
+    {
+        observation.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+    }
+    if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {
+        observation
+            .pending_elicitations
+            .clone_from(&snapshot.materialized.pending_elicitations);
+        observation.execution = snapshot.materialized.execution;
+        observation.active_turn = snapshot.materialized.active_turn.clone();
+        observation
+            .last_turn_outcome
+            .clone_from(&snapshot.materialized.last_turn_outcome);
+        observation.queued = snapshot.materialized.queued_prompts.len();
+        observation
+            .capacity_retry
+            .clone_from(&snapshot.operational.capacity_retry);
+    } else if let Some(durable) = durable {
+        observation.execution = durable.execution;
+        observation.active_turn = durable.active_turn.clone();
+        observation
+            .last_turn_outcome
+            .clone_from(&durable.last_turn_outcome);
+    }
+    observation
+}
+
+// Older v1 clients reject unknown fields inside this shared turn type. Usage
+// travels in the new top-level wait field and the dedicated usage endpoint.
+pub(super) fn api_turn_outcome(mut turn: MaterializedTurnOutcome) -> MaterializedTurnOutcome {
+    turn.usage = None;
+    turn.diagnostic = None;
+    turn
+}
+
+pub(super) async fn finish_wait(
+    backend: &Arc<dyn SubagentBackend>,
+    session_id: &str,
+    mut session: ApiSession,
+    observation: WaitObservation,
+    decision: WaitDecision,
+    relay: Option<RelayHealth>,
+) -> Result<WaitResponse, ApiFailure> {
+    session
+        .background_work
+        .clone_from(&observation.background_work);
+    session
+        .last_turn_outcome
+        .clone_from(&observation.last_turn_outcome);
+    session.last_turn_diagnostic = session
+        .last_turn_outcome
+        .as_ref()
+        .and_then(|turn| turn.diagnostic.clone());
+    session.last_turn_outcome = session.last_turn_outcome.map(api_turn_outcome);
+    let summary = match decision.turn_start_position {
+        Some(position) => Some(
+            backend
+                .turn_summary(session_id.to_owned(), position)
+                .await?,
+        ),
+        None => None,
+    };
+    Ok(WaitResponse {
+        diagnostic: observation
+            .last_turn_outcome
+            .as_ref()
+            .filter(|turn| {
+                turn.turn_start_position.is_some()
+                    && turn.turn_start_position == decision.turn_start_position
+            })
+            .and_then(|turn| turn.diagnostic.clone()),
+        pending_elicitations: if decision.outcome == WaitOutcome::InputRequired {
+            observation.pending_elicitations.clone()
+        } else {
+            Vec::new()
+        },
+        usage: observation
+            .last_turn_outcome
+            .as_ref()
+            .filter(|turn| {
+                turn.turn_start_position.is_some()
+                    && turn.turn_start_position == decision.turn_start_position
+            })
+            .and_then(|turn| turn.usage.clone()),
+        outcome: decision.outcome,
+        stop_reason: decision.stop_reason,
+        message: decision.message,
+        final_message: summary
+            .as_ref()
+            .and_then(|summary| summary.final_message.clone()),
+        turn_id: decision.turn_id,
+        turn_number: summary.as_ref().map(|summary| summary.turn_number),
+        elapsed_ms: summary
+            .as_ref()
+            .map(|summary| summary.last_changed_at_ms - summary.turn_started_at_ms),
+        capacity_retry: observation
+            .capacity_retry
+            .as_ref()
+            .map(WaitCapacityRetry::from),
+        relay,
+        session,
+    })
+}

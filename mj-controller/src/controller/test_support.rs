@@ -264,7 +264,7 @@ pub(super) fn local_bundle(repository: &Path) -> ProjectBundle {
     }
 }
 
-pub(super) fn test_git(directory: &Path, args: &[&str]) -> String {
+pub(crate) fn test_git(directory: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .arg("-C")
         .arg(directory)
@@ -394,4 +394,132 @@ pub(super) fn managed_worktree_session(repository: &Path, session_id: &str) -> S
     session.project_directory = Some(worktree.worktree_root.clone());
     session.managed_worktree = Some(worktree);
     session
+}
+
+/// An executor that fails the test if anything runs a command through it.
+///
+/// `reason` names the step that was supposed to avoid running anything, so a
+/// failure says which expectation broke as well as which command ran.
+pub(crate) struct RefusingExecutor(pub(crate) &'static str);
+
+impl crate::targets::CommandExecutor for RefusingExecutor {
+    fn execute(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        panic!(
+            "{} unexpectedly ran {}: {command:?}",
+            self.0, command.program
+        );
+    }
+}
+
+/// The `--exact` name of a test in this binary, given its `module_path!()`.
+///
+/// `module_path!()` carries the crate name, which libtest's filter does not.
+pub(crate) fn test_name(module_path: &str, test: &str) -> String {
+    let module = module_path
+        .strip_prefix("mj_controller::")
+        .unwrap_or(module_path);
+    format!("{module}::{test}")
+}
+
+/// Re-run one test alone, in a child of this test binary.
+///
+/// The data directory, the installed database writer, the tracing subscriber
+/// and the process working directory are all process-global, so a test that
+/// needs its own has to be the only test in its process. The child runs the
+/// named test with `--exact`, and [`IsolatedTest::run`] fails the parent with
+/// the child's own output when it does not pass.
+///
+/// Build the name with [`test_name`], which strips the crate prefix that
+/// `module_path!()` carries and libtest's filter does not accept.
+pub(crate) struct IsolatedTest {
+    name: String,
+    command: Command,
+}
+
+impl IsolatedTest {
+    pub(crate) fn new(name: impl Into<String>) -> Self {
+        let name = name.into();
+        let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+        command.args(["--exact", &name, "--nocapture"]);
+        Self { name, command }
+    }
+
+    /// Set a variable for the child. The marker a test uses to tell the child
+    /// apart from the parent goes here too.
+    pub(crate) fn env(
+        mut self,
+        key: impl AsRef<std::ffi::OsStr>,
+        value: impl AsRef<std::ffi::OsStr>,
+    ) -> Self {
+        self.command.env(key, value);
+        self
+    }
+
+    /// Give the child its own configuration and data directories under `root`.
+    pub(crate) fn isolated_store(self, root: &Path) -> Self {
+        self.env("MJ_DATA_DIR", root.join("data"))
+            .env("MJ_CONFIG_DIR", root.join("config"))
+    }
+
+    /// Run the child and return its output without judging it.
+    pub(crate) fn output(mut self) -> std::process::Output {
+        self.command
+            .output()
+            .unwrap_or_else(|error| panic!("run isolated {}: {error}", self.name))
+    }
+
+    /// Run the child and fail this test with its output if it did not pass.
+    pub(crate) fn run(self) -> std::process::Output {
+        let name = self.name.clone();
+        let output = self.output();
+        assert!(
+            output.status.success(),
+            "isolated {name} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+}
+
+/// Install a shell stand-in, under `program`, for a command the code under
+/// test looks up on `PATH` in `directory`.
+///
+/// No test may exec a file it has just written. `execve` answers `ETXTBSY`
+/// ("Text file busy") while any process still holds that file open for
+/// writing, and a test binary is multi-threaded: if another thread forks
+/// between the write and the exec, its child inherits the still-open write
+/// descriptor and keeps the file busy past the point where the writer closed
+/// it. That is the race behind issue #1036. Writing under a temporary name and
+/// renaming does not fix it, because a rename keeps the same inode.
+///
+/// So the name on `PATH` is a symlink to a dispatcher checked in at
+/// `mj-controller/tests/fixtures/fake-command.sh`, which this process never
+/// opens for writing, and the behaviour goes in `<program>.script`, which only
+/// `/bin/sh` ever reads. Nothing execs a written file at any point.
+#[cfg(unix)]
+pub(crate) fn install_fake_command(directory: &Path, program: &str, script: &str) {
+    let dispatcher = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("fake-command.sh");
+    assert!(
+        dispatcher.is_file(),
+        "fake command dispatcher is missing at {}",
+        dispatcher.display()
+    );
+    std::fs::write(directory.join(format!("{program}.script")), script)
+        .unwrap_or_else(|error| panic!("write the {program} stand-in: {error}"));
+    let installed = directory.join(program);
+    // A directory may host several fakes, and a test may replace one.
+    match std::fs::remove_file(&installed) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("replace the {program} stand-in: {error}"),
+    }
+    std::os::unix::fs::symlink(&dispatcher, &installed)
+        .unwrap_or_else(|error| panic!("link the {program} stand-in: {error}"));
 }
