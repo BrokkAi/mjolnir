@@ -21,7 +21,8 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 - [x] (2026-09-16) Milestone 2b: the worker checks the relay protocol once, when a request arrives, and serves only the current version. The controller checks each request's minimum protocol once, in `WorkerClient::call_with_timeout`. Checkpoint export uses the shared staging-command loop, and the fallback that uploaded the spec file is gone. Journal span boundary digests come from one helper.
 - [x] (2026-09-16) Milestone 3, part 1: one set of ssh, scp and container-exec builders in `mj-core/src/targets/ssh.rs` and `targets.rs`. `locator_command` builds every exec-style per-target command (architecture probe, worker stop/liveness/probe/last words, digest, launch refresh, reconnect, checkpoint cleanup). Remote upload staging uses `REMOTE_UPLOAD_STAGING`.
 - [x] (2026-09-16) Milestone 3, part 2: `mj_core::bounded_frame::read_bounded_frame` replaces four async frame readers (each caller keeps its own meaning for a partial frame at end of stream). `SessionState::as_str`/`from_stored`, `TargetTemplate::kind_name` and `TargetLocator::kind_name` replace four hand-written maps. One `mj_core::config::sync_directory` replaces four copies.
-- [ ] Milestone 4: merge duplicated feature paths.
+- [x] (2026-09-16) Milestone 4, part 1: one MCP stdio loop and socket client (`mj-worker/src/mcp_stdio.rs`); every harness imports through `import_native_session`; move-preparation image placeholders come from one tested helper; stale crate-split comments corrected.
+- [ ] Milestone 4, part 2: session activity and lifecycle labels.
 - [ ] Milestone 5: larger merges that keep behavior the same.
 - [ ] Milestone 6: hand the Kimi quota token refresh to the Kimi CLI.
 
@@ -37,6 +38,9 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 
 ## Decision Log
 
+- Decision: Keep `SubagentBackend`, `ExportRuntime` and `SessionStateSource`, and keep the `start_or_join_lifecycle*` and `import e2e` script variants.
+  Rationale: The traits are no longer needed across a crate boundary, but they are the seam that lets about 4,000 lines of `/api/v1` route tests run against hand-written fakes (`FakeBackend`, `NoExports`), which the repository guidelines prefer. Only their stale justification comments were wrong, and those are fixed. Folding the lifecycle wrappers would trade about 40 lines for longer calls at 31 call sites. The three import e2e scripts set different harness environment variables, and a test reads them by name.
+  Date/Author: 2026-09-16, agent.
 - Decision: Milestone 3 leaves three duplicates alone: the relay journal validation loops, the `zai_usage`/`muse_usage` HTTP body readers, and the database's target-kind column projection.
   Rationale: The validation loops check different things (some enforce ordinal continuity, one enforces only the v1 chain link), so merging them would change validation. The body readers are two 12-line loops over `reqwest` streams, and `mj-core` does not depend on `reqwest`. The database projection maps a different locator type into several columns at once.
   Date/Author: 2026-09-16, agent.

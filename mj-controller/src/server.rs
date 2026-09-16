@@ -2437,31 +2437,7 @@ async fn prepare_move(
                 "move preparation was rejected; refresh and try again",
             )
         })?;
-    Ok(Json(inspector_move_preparation(preparation)))
-}
-
-/// Queued image bytes are replayed from the verified archive after readiness;
-/// they are not needed by a browser confirmation. Replace them at this
-/// boundary even if an older daemon did not already make the preparation an
-/// inspector-only value.
-fn inspector_move_preparation(mut preparation: MovePreparation) -> MovePreparation {
-    for command in &mut preparation.queued_commands {
-        for block in &mut command.content {
-            if block.get("type").and_then(serde_json::Value::as_str) != Some("image") {
-                continue;
-            }
-            let mime = block
-                .get("mimeType")
-                .or_else(|| block.get("mime_type"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("image");
-            *block = serde_json::json!({
-                "type": "text",
-                "text": format!("[Image attachment: {mime}]")
-            });
-        }
-    }
-    preparation
+    Ok(Json(preparation))
 }
 
 /// Ask the state channel one thing and wait for its answer.
@@ -6585,9 +6561,8 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                     command_id: "queued-1".into(),
                     kind: mj_core::state::QueuedCommandKind::Prompt,
                     content: vec![serde_json::json!({
-                        "type": "image",
-                        "mimeType": "image/png",
-                        "data": "secret-image-bytes"
+                        "type": "text",
+                        "text": "[Image attachment: image/png]"
                     })],
                     queued_at_ms: 1,
                 }],
@@ -6605,8 +6580,6 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
             body["queued_commands"][0]["content"][0]["text"],
             "[Image attachment: image/png]"
         );
-        assert!(body.to_string().contains("[Image attachment: image/png]"));
-        assert!(!body.to_string().contains("secret-image-bytes"));
     }
 
     #[tokio::test]

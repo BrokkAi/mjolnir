@@ -1,9 +1,8 @@
 //! The daemon half of the documented HTTP API.
 //!
-//! `mj-controller` serves the `/api/v1` routes but cannot reach the daemon's
-//! live session actors or its SQLite store, so it declares the
-//! [`SubagentBackend`](crate::server::api::SubagentBackend) trait
-//! and this module implements it here, where both are available.
+//! `server::api` serves the `/api/v1` routes against the
+//! [`SubagentBackend`](crate::server::api::SubagentBackend) trait, so its
+//! route tests can use a fake. This module is the daemon's implementation.
 //!
 //! Every database read runs on `spawn_blocking`: the web server's handlers run
 //! on the async runtime, and a synchronous SQLite read on that thread would
