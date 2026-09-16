@@ -334,7 +334,7 @@ mod tests {
         let error = discover_account(account(home.path()), Duration::from_secs(600))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("42"));
+        assert!(error.contains("42"), "{error}");
         assert!(!error.contains("secret"));
     }
 
