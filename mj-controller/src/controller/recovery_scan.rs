@@ -1305,6 +1305,7 @@ mod tests {
             target_template_id: "local".to_owned(),
             locator: TargetLocator::LocalDocker {
                 container_id: format!("mj-{session_id}"),
+                borrowed_from: None,
             },
             ownership: None,
             instance_id: instance_id.map(str::to_owned),

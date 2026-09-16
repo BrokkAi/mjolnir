@@ -23,7 +23,7 @@ test-hooks = ["mj-core/test-hooks"]
 workspace = true
 
 [dependencies]
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 getrandom = "0.3"
 flate2 = "1"
 sha2 = "0.10"
