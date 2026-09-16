@@ -1633,10 +1633,24 @@ mod tests {
         all
     }
 
+    /// The remote probes arrive in one batched SSH command, framed the way the
+    /// remote script prints them.
+    fn ssh_podman_probes(linger: (i32, &str, &str)) -> Vec<Result<CommandOutput>> {
+        vec![Ok(output(crate::targets::ssh_podman_probe_fixture(&[
+            ("version", 0, "podman version 5.4.2\n", ""),
+            ("rootless", 0, "true\n", ""),
+            (
+                "uid_map",
+                0,
+                "         0       1000          1\n         1     100000      65536\n",
+                "",
+            ),
+            ("linger", linger.0, linger.1, linger.2),
+        ])))]
+    }
+
     fn passing_ssh_podman_probes() -> Vec<Result<CommandOutput>> {
-        let mut responses = passing_podman_probes();
-        responses.push(Ok(output(b"yes\n")));
-        responses
+        ssh_podman_probes((0, "yes\n", ""))
     }
 
     fn passing_podman_probes() -> Vec<Result<CommandOutput>> {
@@ -1958,26 +1972,24 @@ mod tests {
         assert!(check.detail.contains("Remote rootless Podman 5.4.2"));
         assert!(check.detail.contains("dev@example.test"));
         let commands = executor.commands.borrow();
-        assert_eq!(commands.len(), 5);
+        assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].args.last().unwrap(), "'true'");
         for command in commands.iter().skip(1) {
             assert_eq!(command.program, "ssh");
             assert!(command.args.contains(&"dev@example.test".to_owned()));
         }
         assert!(
-            commands[4]
+            commands[1]
                 .args
                 .last()
                 .unwrap()
-                .contains("'loginctl show-user")
+                .contains("loginctl show-user")
         );
     }
 
     #[test]
     fn ssh_podman_check_warns_when_remote_user_lingering_is_disabled() {
-        let mut responses = passing_podman_probes();
-        responses.push(Ok(output(b"no\n")));
-        let executor = FakeExecutor::new(reachable_then(responses));
+        let executor = FakeExecutor::new(reachable_then(ssh_podman_probes((0, "no\n", ""))));
 
         let check = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
 
@@ -1996,13 +2008,11 @@ mod tests {
 
     #[test]
     fn ssh_podman_check_explains_when_durability_cannot_be_verified() {
-        let mut responses = passing_podman_probes();
-        responses.push(Ok(CommandOutput {
-            status: 127,
-            stdout: vec![],
-            stderr: b"sh: loginctl: not found\n".to_vec(),
-        }));
-        let executor = FakeExecutor::new(reachable_then(responses));
+        let executor = FakeExecutor::new(reachable_then(ssh_podman_probes((
+            127,
+            "",
+            "sh: loginctl: not found\n",
+        ))));
 
         let check = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
 
@@ -2018,7 +2028,14 @@ mod tests {
 
     #[test]
     fn ssh_podman_check_failure_scopes_the_remediation_to_the_remote_host() {
-        let executor = FakeExecutor::new(reachable_then([Ok(output(b"podman version 3.4.7\n"))]));
+        let executor = FakeExecutor::new(reachable_then([Ok(output(
+            crate::targets::ssh_podman_probe_fixture(&[(
+                "version",
+                0,
+                "podman version 3.4.7\n",
+                "",
+            )]),
+        ))]));
 
         let check = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
 
@@ -2064,14 +2081,14 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Ready);
         let commands = executor.commands.borrow();
-        assert_eq!(commands.len(), 8);
-        for command in commands.iter().skip(5) {
+        assert_eq!(commands.len(), 5);
+        for command in commands.iter().skip(2) {
             assert_eq!(command.program, "ssh");
             assert!(command.args.contains(&"dev@example.test".to_owned()));
         }
-        assert!(commands[5].args.last().unwrap().contains("'run' '--init'"));
-        assert!(commands[6].args.last().unwrap().ends_with("'true'"));
-        assert!(commands[7].args.last().unwrap().contains("'rm' '--force'"));
+        assert!(commands[2].args.last().unwrap().contains("'run' '--init'"));
+        assert!(commands[3].args.last().unwrap().ends_with("'true'"));
+        assert!(commands[4].args.last().unwrap().contains("'rm' '--force'"));
     }
 
     #[test]
