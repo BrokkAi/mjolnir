@@ -43,8 +43,12 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
       binaries.push(worker);
     }
     mkdirSync(join(dir, 'licenses/native'), { recursive: true });
-    for (const file of ['README.md', 'LICENSE', 'licenses/SOURCE.md', 'licenses/OFL-1.1.md', 'licenses/THIRD_PARTY_LICENSES.html', 'licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt', 'licenses/native/notice']) {
+    for (const file of ['README.md', 'LICENSE', 'licenses/SOURCE.md', 'licenses/OFL-1.1.md', 'licenses/native/notice']) {
       writeFileSync(join(dir, file), file);
+    }
+    mkdirSync(join(dir, 'release-notices'));
+    for (const file of ['THIRD_PARTY_LICENSES.html', 'SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt']) {
+      writeFileSync(join(dir, 'release-notices', file), `generated for this tag: ${file}`);
     }
     const job = mac ? 'package-macos' : `package-${target}`;
     const block = release.split(`  ${job}:\n`)[1].split(/\n  [\w-]+:\n/)[0];
@@ -58,6 +62,9 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
       assert.equal(statSync(join(dir, name, binary)).mode & 0o777, 0o755);
     }
     assert.ok(readdirSync(join(dir, name, 'licenses/native')).includes('notice'));
+    for (const file of ['THIRD_PARTY_LICENSES.html', 'SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt']) {
+      assert.equal(readFileSync(join(dir, name, 'licenses', file), 'utf8'), `generated for this tag: ${file}`);
+    }
     const checksum = spawnSync('shasum', ['-a', '256', '-c', `${name}.tar.gz.sha256`], { cwd: dir, encoding: 'utf8' });
     assert.equal(checksum.status, 0, checksum.stderr);
   });

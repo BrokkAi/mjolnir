@@ -9,10 +9,10 @@ const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const outputPath = path.resolve(
-  repositoryRoot,
-  process.argv[2] ?? "licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt",
-);
+if (!process.argv[2]) {
+  throw new Error("usage: node scripts/generate-supplemental-third-party-notices.mjs OUTPUT");
+}
+const outputPath = path.resolve(repositoryRoot, process.argv[2]);
 
 // cargo-about handles license files declared by Cargo packages. This inventory
 // catches standalone notices, native payloads, and embedded assets that can

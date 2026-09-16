@@ -146,8 +146,8 @@ Add the smallest regression test that would have caught the problem:
   and the Playwright web checks under `tests/e2e/web/`.
 - Add negative controls for permission, protocol, persistence, cleanup, and
   terminal-lifecycle changes.
-- Update the guides under [docs](docs/) — `PODMAN.md`, `DOCKER.md`, `SSH.md`,
-  `AWS.md`, and the pages in `docs/src/content/docs/` — when a user-visible
+- Update the embedded guides in `mj-controller/docs/`, `docs/SSH.md`,
+  `docs/AWS.md`, and the pages in `docs/src/content/docs/` when a user-visible
   command, keyboard action, setup flow, harness, target kind, configuration
   option, or limitation changes; `docs/scripts/sync-podman.mjs` copies the
   Podman and Docker guides into the site during `npm run build` in `docs/`.
@@ -202,25 +202,23 @@ Rust workspace, native voice dependencies, and embedded fonts. Do not broaden
 an allowed license or add an exception without explaining
 and reviewing the obligation it introduces.
 
-After changing dependencies, license policy, bundled assets, or the voice
-worker, use Node.js 24 and the tool versions pinned by CI to refresh and
-validate the reports:
+CI checks the dependency-license policy using pinned cargo-deny. Generated
+third-party reports are release artifacts, not repository files: the tag
+workflow creates them with cargo-about and the audited native/font inventory.
+Do not regenerate or commit reports when bumping a version.
+
+To check a dependency or license-policy change locally:
 
 ```bash
-cargo install --locked cargo-about --version 0.9.1 --features cli
 cargo install --locked cargo-deny --version 0.20.2
 cargo fetch --locked
-
 cargo deny --workspace --config licenses/deny.toml --locked check licenses
-cargo about generate --workspace --offline --config licenses/about.toml \
-  --locked --fail licenses/about.hbs -o licenses/THIRD_PARTY_LICENSES.html
-node scripts/generate-supplemental-third-party-notices.mjs
 ```
 
-Review the generated diff rather than assuming regeneration is sufficient. CI
-recreates both notice reports, inventories bundled native material, checks the
-crate package contents, and fails when committed output is stale. Keep
-`voice-worker/LICENSE` synchronized with the root license.
+Keep the audited license inputs under `licenses/` current when changing bundled
+native material or fonts. Cargo includes the root LICENSE via workspace
+metadata; there are no per-crate copies to synchronize. CI checks actual crate
+contents, and release packaging fails if notice generation fails.
 
 ## Pull Requests
 
