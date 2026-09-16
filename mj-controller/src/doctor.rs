@@ -344,6 +344,24 @@ fn configuration_checks(path: &Path) -> (Option<Config>, Vec<DoctorCheck>) {
             )],
         );
     }
+    // A config a newer build wrote is not broken TOML: replacing it with
+    // `mj setup` would discard that build's settings. Say what is actually
+    // wrong before the load below reports it as invalid.
+    if let Some(found) = mj_core::config::newer_version_on_disk(path) {
+        return (
+            None,
+            vec![DoctorCheck::fixable(
+                "config",
+                "Mjolnir configuration",
+                format!(
+                    "{} was written by a newer Mjolnir (config version {found}; this build supports {})",
+                    path.display(),
+                    mj_core::config::CONFIG_VERSION
+                ),
+                "Update Mjolnir to that build or newer. Do not lower the version value by hand or replace the file.",
+            )],
+        );
+    }
     match Config::load_from(path) {
         Ok(config) => {
             let mut checks = vec![DoctorCheck::ready(
@@ -1658,6 +1676,30 @@ mod tests {
             identity_file: None,
             extra_args: vec![],
         }
+    }
+
+    #[test]
+    fn doctor_tells_the_user_to_update_rather_than_replace_a_newer_builds_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "version = {}\n\n[targets.localhost]\nkind = \"local-bare\"\n",
+                mj_core::config::CONFIG_VERSION + 1
+            ),
+        )
+        .unwrap();
+
+        let (config, checks) = configuration_checks(&path);
+
+        assert!(config.is_none());
+        let check = checks.iter().find(|check| check.id == "config").unwrap();
+        assert_eq!(check.status, CheckStatus::Fixable);
+        assert!(check.detail.contains("newer Mjolnir"), "{}", check.detail);
+        let remediation = check.remediation.as_deref().unwrap_or_default();
+        assert!(remediation.contains("Update Mjolnir"), "{remediation}");
+        assert!(!remediation.contains("mj setup"), "{remediation}");
     }
 
     fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>) -> Config {

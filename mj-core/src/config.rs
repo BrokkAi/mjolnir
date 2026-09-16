@@ -1874,7 +1874,7 @@ fn newer_version(document: &toml::Value) -> Option<u32> {
 
 /// The config version at `path` when it is above this build's. Read
 /// tolerantly: a missing or unreadable file never blocks a save.
-fn newer_version_on_disk(path: &Path) -> Option<u32> {
+pub fn newer_version_on_disk(path: &Path) -> Option<u32> {
     let contents = fs::read_to_string(path).ok()?;
     newer_version(&contents.parse::<toml::Value>().ok()?)
 }

@@ -206,7 +206,7 @@ pub(super) fn forget_verified_schema(path: &Path) {
         .remove(&schema_cache_key(path));
 }
 
-/// The oldest revision this build upgrades in place: the revision Mjolnir 2.8.0
+/// The oldest revision this build upgrades in place: the revision Mjolnir 2.7.2
 /// shipped. A new store is created directly at this revision from
 /// `baseline.sql`; stores written by older builds are refused.
 const BASELINE_SCHEMA_VERSION: i64 = 33;
@@ -225,8 +225,8 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         create_baseline_schema(connection)?;
     } else if version < BASELINE_SCHEMA_VERSION {
         bail!(
-            "Mjolnir database schema {version} was written by a Mjolnir release older than 2.8.0, \
-             which this build cannot upgrade; upgrade through Mjolnir 2.8 or 2.9 first, or start \
+            "Mjolnir database schema {version} was written by a Mjolnir release older than 2.7.2, \
+             which this build cannot upgrade; upgrade through Mjolnir 2.7.2 or 2.9 first, or start \
              with a fresh data directory (--instance NAME or MJ_DATA_DIR)"
         );
     }
@@ -488,7 +488,7 @@ mod reader_tests {
         let error = open_writer(&path).unwrap_err();
 
         assert!(
-            format!("{error:#}").contains("older than 2.8.0"),
+            format!("{error:#}").contains("older than 2.7.2"),
             "{error:#}"
         );
     }

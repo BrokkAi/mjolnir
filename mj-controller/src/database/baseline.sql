@@ -1,4 +1,4 @@
--- The controller store at schema revision 33, the revision Mjolnir 2.8.0
+-- The controller store at schema revision 33, the revision Mjolnir 2.7.2
 -- shipped. schema.rs creates a new store from this file in one transaction and
 -- applies later revisions as numbered migrations.
 
