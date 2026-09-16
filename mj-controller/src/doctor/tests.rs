@@ -208,7 +208,7 @@ fn podman_check_is_fixable_with_an_upgrade_remediation_for_an_old_runtime() {
             .remediation
             .as_deref()
             .unwrap()
-            .contains("Upgrade Podman")
+            .contains("Install or upgrade Podman")
     );
 }
 
@@ -463,7 +463,7 @@ fn ssh_podman_check_failure_scopes_the_remediation_to_the_remote_host() {
             .remediation
             .as_deref()
             .unwrap()
-            .starts_with("On dev@example.test: Upgrade Podman")
+            .starts_with("On dev@example.test: Install or upgrade Podman")
     );
 }
 

@@ -13,10 +13,10 @@ use crate::setup::{
 };
 use crate::targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec,
-    ContainerTemplate as RuntimeContainerTemplate, ProcessExecutor, SshTarget as RuntimeSshTarget,
-    TargetTemplate as RuntimeTargetTemplate, run_setup_smoke_test, ssh_command,
-    ssh_connectivity_probe, ssh_validation_command, verify_local_docker, verify_local_podman,
-    verify_ssh_docker, verify_ssh_podman,
+    ContainerTemplate as RuntimeContainerTemplate, PodmanProbe, ProcessExecutor,
+    SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate, failed_podman_probe,
+    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_validation_command,
+    verify_local_docker, verify_local_podman, verify_ssh_docker, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
@@ -533,8 +533,8 @@ pub fn local_podman_runtime_check(executor: &impl CommandExecutor) -> DoctorChec
             DoctorCheck::fixable(
                 "runtime.podman",
                 "Rootless Podman",
-                detail.clone(),
-                podman_remediation(&detail),
+                detail,
+                podman_remediation(&error),
             )
         }
     }
@@ -782,36 +782,70 @@ fn ssh_connectivity(ssh: &RuntimeSshTarget, executor: &impl CommandExecutor) -> 
 
 const SSH_MISSING_REMEDIATION: &str = "Install an OpenSSH client and put `ssh` on PATH: `sudo apt update && sudo apt install -y openssh-client` (Debian/Ubuntu) or `sudo dnf install -y openssh-clients` (Fedora).";
 
+/// What OpenSSH reported, as far as doctor needs to tell the cases apart.
+///
+/// OpenSSH is an external tool, so its wording is the only signal available.
+/// This is the one place in doctor that reads it; everything downstream works
+/// from the classification rather than the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SshFailure {
+    UntrustedHostKey,
+    Unauthenticated,
+    ClientMissing,
+    Unrecognized,
+}
+
+fn classify_ssh_stderr(stderr: &str) -> SshFailure {
+    const UNTRUSTED_HOST_KEY: [&str; 3] = [
+        "Host key verification failed",
+        "No ECDSA host key is known",
+        "REMOTE HOST IDENTIFICATION HAS CHANGED",
+    ];
+    const UNAUTHENTICATED: [&str; 4] = [
+        "Permission denied",
+        "Too many authentication failures",
+        "no matching host key",
+        "Authentication failed",
+    ];
+    const CLIENT_MISSING: [&str; 2] = ["ssh: command not found", "No such file or directory"];
+
+    let reported = |signatures: &[&str]| signatures.iter().any(|text| stderr.contains(text));
+    if reported(&UNTRUSTED_HOST_KEY) {
+        SshFailure::UntrustedHostKey
+    } else if reported(&UNAUTHENTICATED) {
+        SshFailure::Unauthenticated
+    } else if reported(&CLIENT_MISSING) {
+        SshFailure::ClientMissing
+    } else {
+        SshFailure::Unrecognized
+    }
+}
+
 /// Map `ssh -o BatchMode=yes` stderr to the command that fixes it.
 fn ssh_failure_remediation(stderr: &str, ssh: &RuntimeSshTarget) -> String {
     let destination = &ssh.destination;
-    if stderr.contains("Host key verification failed")
-        || stderr.contains("No ECDSA host key is known")
-        || stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
-    {
-        let host = ssh_host_only(destination);
-        return format!(
-            "Add the host key with `ssh-keyscan -H {host} >> ~/.ssh/known_hosts`. Verify the fingerprint out of band before trusting it; if the key changed, remove the stale entry with `ssh-keygen -R {host}` first."
-        );
-    }
-    if stderr.contains("Permission denied")
-        || stderr.contains("Too many authentication failures")
-        || stderr.contains("no matching host key")
-        || stderr.contains("Authentication failed")
-    {
-        return match ssh_identity_file(ssh) {
+    match classify_ssh_stderr(stderr) {
+        SshFailure::UntrustedHostKey => {
+            let host = ssh_host_only(destination);
+            format!(
+                "Add the host key with `ssh-keyscan -H {host} >> ~/.ssh/known_hosts`. Verify the fingerprint out of band before trusting it; if the key changed, remove the stale entry with `ssh-keygen -R {host}` first."
+            )
+        }
+        SshFailure::Unauthenticated => match ssh_identity_file(ssh) {
             Some(identity) => format!(
                 "Install your public key on the host with `ssh-copy-id -i {identity}.pub {destination}`."
             ),
             None => {
                 format!("Install your public key on the host with `ssh-copy-id {destination}`.")
             }
-        };
+        },
+        SshFailure::ClientMissing => SSH_MISSING_REMEDIATION.to_owned(),
+        SshFailure::Unrecognized => {
+            format!(
+                "Run `ssh {destination} true` by hand and resolve the error it reports: {stderr}"
+            )
+        }
     }
-    if stderr.contains("ssh: command not found") || stderr.contains("No such file or directory") {
-        return SSH_MISSING_REMEDIATION.to_owned();
-    }
-    format!("Run `ssh {destination} true` by hand and resolve the error it reports: {stderr}")
 }
 
 /// The host part of an OpenSSH destination, without any `user@` prefix.
@@ -940,7 +974,7 @@ fn ssh_podman_runtime_check(
         Ok(preflight) => preflight,
         Err(error) => {
             let detail = format!("{error:#}");
-            let remediation = match podman_remediation_match(&detail) {
+            let remediation = match podman_remediation_match(&error) {
                 Some(remediation) => format!("On {destination}: {remediation}"),
                 None => format!(
                     "Verify `ssh {destination}` succeeds noninteractively from this host, then install rootless Podman 4 or newer there (see docs/PODMAN.md)."
@@ -1359,29 +1393,20 @@ fn doctor_smoke_id() -> String {
     )
 }
 
-fn podman_remediation(detail: &str) -> &'static str {
-    podman_remediation_match(detail).unwrap_or(
+fn podman_remediation(error: &anyhow::Error) -> &'static str {
+    podman_remediation_match(error).unwrap_or(
         "Install Podman with `sudo apt update && sudo apt install -y podman uidmap` (Debian/Ubuntu) or `sudo dnf install -y podman shadow-utils` (Fedora).",
     )
 }
 
 /// Map a Podman preflight failure to its specific remediation, if one applies.
-fn podman_remediation_match(detail: &str) -> Option<&'static str> {
-    if detail.contains("Podman 4.0.0") {
-        Some(
-            "Upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`.",
-        )
-    } else if detail.contains("podman unshare") {
-        Some(
-            "Install UID mapping support with `sudo apt install -y uidmap` (Debian/Ubuntu) or `sudo dnf install -y shadow-utils` (Fedora), add `/etc/subuid` and `/etc/subgid` entries, then log out and back in.",
-        )
-    } else if detail.contains("Rootless") {
-        Some(
-            "Run mj without `sudo`; unset `CONTAINER_HOST` and select the rootless local Podman connection.",
-        )
-    } else {
-        None
-    }
+///
+/// The preflight reports which postcondition failed on the error itself, so
+/// the fix is chosen from that probe rather than by matching the message text
+/// this repository just produced. A failure that is not a probe result, such
+/// as an unreachable SSH host, has no specific fix here.
+fn podman_remediation_match(error: &anyhow::Error) -> Option<&'static str> {
+    failed_podman_probe(error).map(PodmanProbe::remediation)
 }
 
 const AWS_CLI_INSTALL_URL: &str =

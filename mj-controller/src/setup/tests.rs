@@ -470,14 +470,20 @@ fn unusable_podman_carries_the_doctor_remediation_into_the_runtime_list() {
     assert_eq!(runtimes.len(), 2);
     assert!(!runtimes[0].usable);
     let remediation = runtimes[0].remediation.as_deref().unwrap();
-    assert!(remediation.contains("Upgrade Podman"), "{remediation}");
+    assert!(
+        remediation.contains("Install or upgrade Podman"),
+        "{remediation}"
+    );
 
     let mut output = Vec::new();
     write_runtimes(&mut output, &runtimes).unwrap();
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("Podman: unavailable"), "{output}");
     assert!(output.contains("Docker: unavailable"), "{output}");
-    assert!(output.contains("remediation: Upgrade Podman"), "{output}");
+    assert!(
+        output.contains("remediation: Install or upgrade Podman"),
+        "{output}"
+    );
 }
 
 #[test]

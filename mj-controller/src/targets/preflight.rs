@@ -201,10 +201,41 @@ pub fn verify_ssh_podman(
 
 /// One rootless Podman postcondition, with the wording used to report it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PodmanProbe {
+pub(crate) enum PodmanProbe {
     Version,
     Rootless,
     UidMap,
+}
+
+/// A rootless Podman postcondition that was not met, carrying which one.
+///
+/// `mj doctor` needs the probe, not its wording, to name the fix. Carrying the
+/// probe on the error means the diagnosis never depends on matching message
+/// text that this repository itself produces.
+#[derive(Debug)]
+pub(crate) struct PodmanProbeFailure {
+    probe: PodmanProbe,
+    message: String,
+}
+
+impl std::fmt::Display for PodmanProbeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PodmanProbeFailure {}
+
+/// The probe whose postcondition failed, when the error came from one.
+pub(crate) fn failed_podman_probe(error: &anyhow::Error) -> Option<PodmanProbe> {
+    error
+        .downcast_ref::<PodmanProbeFailure>()
+        .map(|failure| failure.probe)
+}
+
+/// Fail a probe with its own wording, keeping the probe machine-readable.
+fn probe_failure(probe: PodmanProbe, message: String) -> anyhow::Error {
+    anyhow::Error::new(PodmanProbeFailure { probe, message })
 }
 
 impl PodmanProbe {
@@ -245,7 +276,7 @@ impl PodmanProbe {
         }
     }
 
-    pub(super) fn remediation(self) -> &'static str {
+    pub(crate) fn remediation(self) -> &'static str {
         match self {
             Self::Version => {
                 "Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`."
@@ -279,21 +310,27 @@ pub(super) fn verify_podman_probes(
     let rootless = probe_output(PodmanProbe::Rootless)?;
     let rootless_output = String::from_utf8_lossy(&rootless.stdout);
     if rootless_output.trim() != "true" {
-        bail!(
-            "{}: Postcondition `podman info --format '{{{{.Host.Security.Rootless}}}}'` prints `true` returned {:?}. {}Run Mjolnir as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection. See {PODMAN_DOCUMENTATION_PATH}.",
-            host.failure(),
-            rootless_output.trim(),
-            host.remediation_scope(),
-        );
+        return Err(probe_failure(
+            PodmanProbe::Rootless,
+            format!(
+                "{}: Postcondition `podman info --format '{{{{.Host.Security.Rootless}}}}'` prints `true` returned {:?}. {}Run Mjolnir as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection. See {PODMAN_DOCUMENTATION_PATH}.",
+                host.failure(),
+                rootless_output.trim(),
+                host.remediation_scope(),
+            ),
+        ));
     }
 
     let uid_map = probe_output(PodmanProbe::UidMap)?;
     if !valid_rootless_uid_map(&uid_map.stdout) {
-        bail!(
-            "{}: Postcondition `podman unshare cat /proc/self/uid_map` maps container UIDs 0 and 1 was not met. {}Add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"`, verify `/etc/subuid` and `/etc/subgid`, then log out and back in. See {PODMAN_DOCUMENTATION_PATH}.",
-            host.failure(),
-            host.remediation_scope(),
-        );
+        return Err(probe_failure(
+            PodmanProbe::UidMap,
+            format!(
+                "{}: Postcondition `podman unshare cat /proc/self/uid_map` maps container UIDs 0 and 1 was not met. {}Add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"`, verify `/etc/subuid` and `/etc/subgid`, then log out and back in. See {PODMAN_DOCUMENTATION_PATH}.",
+                host.failure(),
+                host.remediation_scope(),
+            ),
+        ));
     }
 
     Ok(PodmanPreflight {
@@ -366,10 +403,12 @@ pub(super) fn execute_podman_probe(
     let command = host.command(probe.args(), probe.purpose());
     let output = match executor.execute(&command) {
         Ok(output) => output,
-        Err(error) => bail!(
-            "{}",
-            podman_probe_run_failure(host, probe, &error.to_string())
-        ),
+        Err(error) => {
+            return Err(probe_failure(
+                probe,
+                podman_probe_run_failure(host, probe, &error.to_string()),
+            ));
+        }
     };
     check_podman_probe_status(host, probe, output)
 }
@@ -407,14 +446,17 @@ pub(super) fn check_podman_probe_status(
         bail!("{message}");
     }
     if output.status != 0 {
-        bail!(
-            "{}: {}. {}{} See {PODMAN_DOCUMENTATION_PATH}. Podman reported: {}",
-            host.failure(),
-            probe.postcondition(),
-            host.remediation_scope(),
-            probe.remediation(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        return Err(probe_failure(
+            probe,
+            format!(
+                "{}: {}. {}{} See {PODMAN_DOCUMENTATION_PATH}. Podman reported: {}",
+                host.failure(),
+                probe.postcondition(),
+                host.remediation_scope(),
+                probe.remediation(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
     }
     Ok(output)
 }
@@ -583,23 +625,32 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
         .split_whitespace()
         .find(|part| part.as_bytes().first().is_some_and(u8::is_ascii_digit))
     else {
-        bail!(
-            "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
-        );
+        return Err(probe_failure(
+            PodmanProbe::Version,
+            format!(
+                "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+            ),
+        ));
     };
     let Some(major) = candidate
         .split('.')
         .next()
         .and_then(|part| part.parse::<u32>().ok())
     else {
-        bail!(
-            "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
-        );
+        return Err(probe_failure(
+            PodmanProbe::Version,
+            format!(
+                "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+            ),
+        ));
     };
     if major < PODMAN_MINIMUM_MAJOR_VERSION {
-        bail!(
-            "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer was not met (found {candidate}). {scope}Upgrade Podman to 4.0.0 or newer: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
-        );
+        return Err(probe_failure(
+            PodmanProbe::Version,
+            format!(
+                "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer was not met (found {candidate}). {scope}Upgrade Podman to 4.0.0 or newer: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+            ),
+        ));
     }
     Ok(candidate.to_owned())
 }
