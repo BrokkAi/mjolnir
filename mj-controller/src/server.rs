@@ -432,7 +432,7 @@ impl ViewerSnapshot {
                     profile_id: session.last_profile.clone(),
                     bundle_id: session.bundle_id.clone(),
                     target_id: session.target_template_id.clone(),
-                    state: session_state_name(session.state).into(),
+                    state: session.state.as_str().into(),
                     created_at: session.created_at.clone(),
                     updated_at: session.updated_at.clone(),
                     has_error: session.last_error.is_some()
@@ -507,7 +507,7 @@ impl ViewerSnapshot {
             .iter()
             .map(|(id, target)| ViewerTarget {
                 id: id.clone(),
-                kind: target_kind_name(target).into(),
+                kind: target.kind_name().into(),
                 requires_project_directory: matches!(
                     target,
                     TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
@@ -1164,18 +1164,6 @@ impl ViewerOperationKind {
             // Checkpointing is an ordinary live-session operation. It must
             // not replace a readable conversation with a placeholder.
             Self::Checkpoint => None,
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Create => "Starting",
-            Self::Resume => "Resuming",
-            Self::Move => "Moving",
-            Self::Stop => "Stopping",
-            Self::Destroy => "Destroying",
-            Self::Cleanup => "Cleaning up",
-            Self::Checkpoint => "Checkpointing",
         }
     }
 }
@@ -2437,31 +2425,7 @@ async fn prepare_move(
                 "move preparation was rejected; refresh and try again",
             )
         })?;
-    Ok(Json(inspector_move_preparation(preparation)))
-}
-
-/// Queued image bytes are replayed from the verified archive after readiness;
-/// they are not needed by a browser confirmation. Replace them at this
-/// boundary even if an older daemon did not already make the preparation an
-/// inspector-only value.
-fn inspector_move_preparation(mut preparation: MovePreparation) -> MovePreparation {
-    for command in &mut preparation.queued_commands {
-        for block in &mut command.content {
-            if block.get("type").and_then(serde_json::Value::as_str) != Some("image") {
-                continue;
-            }
-            let mime = block
-                .get("mimeType")
-                .or_else(|| block.get("mime_type"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("image");
-            *block = serde_json::json!({
-                "type": "text",
-                "text": format!("[Image attachment: {mime}]")
-            });
-        }
-    }
-    preparation
+    Ok(Json(preparation))
 }
 
 /// Ask the state channel one thing and wait for its answer.
@@ -2494,9 +2458,6 @@ async fn client_state(
 ) -> Result<Json<ViewerClientState>, ApiError> {
     validate_public_id(&session_id)?;
     require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
-    // A viewer with a legacy cookie has no identity and so has nothing stored.
-    // Answering with an empty state is the truth, and is what lets an older
-    // phone keep working through a deployment.
     let Some(client_id) = viewer_client_id(&state, &headers) else {
         return Ok(Json(ViewerClientState::default()));
     };
@@ -3536,20 +3497,6 @@ fn signed_cookie_value(key: &[u8], viewer: &str, expiry: u64) -> String {
     format!("{viewer}.{expiry}.{signature}")
 }
 
-/// The cookie value a viewer with no identity used to receive.
-///
-/// Still accepted, so a phone holding one is not signed out by a deployment.
-/// It carries no viewer, so it stores nothing and is replaced by a three-part
-/// cookie at its next unlock.
-fn legacy_signed_cookie_value(key: &[u8], expiry: u64) -> String {
-    let canonical = expiry.to_string();
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts arbitrary key lengths");
-    mac.update(canonical.as_bytes());
-    let signature =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-    format!("{canonical}.{signature}")
-}
-
 fn session_cookie_valid(key: &[u8], value: &str, now: u64) -> bool {
     cookie_viewer(key, value, now).is_some()
 }
@@ -3570,34 +3517,16 @@ pub fn mint_desktop_session_cookie(key: &[u8]) -> AnyResult<String> {
 }
 
 /// The viewer a cookie names, or `None` when the cookie is not valid.
-///
-/// A legacy two-part cookie validates and names no viewer, which is the
-/// difference between "signed out" and "signed in with nothing stored".
-fn cookie_viewer(key: &[u8], value: &str, now: u64) -> Option<Option<String>> {
-    let parts = value.split('.').collect::<Vec<_>>();
-    let (viewer, expiry, expected) = match parts.as_slice() {
-        [viewer, expiry, _] => {
-            let expiry_value = expiry.parse::<u64>().ok()?;
-            (
-                Some((*viewer).to_owned()),
-                expiry_value,
-                signed_cookie_value(key, viewer, expiry_value),
-            )
-        }
-        [expiry, _] => {
-            let expiry_value = expiry.parse::<u64>().ok()?;
-            (
-                None,
-                expiry_value,
-                legacy_signed_cookie_value(key, expiry_value),
-            )
-        }
-        _ => return None,
+fn cookie_viewer(key: &[u8], value: &str, now: u64) -> Option<String> {
+    let [viewer, expiry, _] = value.split('.').collect::<Vec<_>>()[..] else {
+        return None;
     };
+    let expiry = expiry.parse::<u64>().ok()?;
     if now >= expiry {
         return None;
     }
-    constant_time_eq(expected.as_bytes(), value.as_bytes()).then_some(viewer)
+    let expected = signed_cookie_value(key, viewer, expiry);
+    constant_time_eq(expected.as_bytes(), value.as_bytes()).then(|| viewer.to_owned())
 }
 
 fn session_cookie_header(
@@ -3625,19 +3554,12 @@ fn clear_cookie_header(secure: bool) -> HeaderValue {
 }
 
 /// The stored-state key for the viewer making this request.
-///
-/// A viewer with a legacy cookie has no identity, so it has no stored state:
-/// it reads and writes nothing rather than sharing a bucket with every other
-/// phone that unlocked in the same second, which is what the old whole-cookie
-/// key amounted to.
 fn viewer_client_id(state: &ServerState, headers: &HeaderMap) -> Option<String> {
     let cookie = headers
         .get(COOKIE)
         .and_then(|value| value.to_str().ok())
         .and_then(|header| cookie_value(header, COOKIE_NAME))?;
-    cookie_viewer(&state.cookie_key, cookie, now_unix())
-        .flatten()
-        .map(|viewer| format!("phone:{viewer}"))
+    cookie_viewer(&state.cookie_key, cookie, now_unix()).map(|viewer| format!("phone:{viewer}"))
 }
 
 fn cookie_value<'a>(header: &'a str, name: &str) -> Option<&'a str> {
@@ -3665,34 +3587,6 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(u64::MAX)
-}
-
-const fn session_state_name(state: SessionState) -> &'static str {
-    match state {
-        SessionState::Provisioning => "provisioning",
-        SessionState::Running => "running",
-        SessionState::Disconnected => "disconnected",
-        SessionState::Checkpointing => "checkpointing",
-        SessionState::Closing => "closing",
-        SessionState::Destroying => "destroying",
-        SessionState::Stopped => "stopped",
-        SessionState::Lost => "lost",
-        SessionState::Error => "error",
-        SessionState::DestroyedWithDataLoss => "destroyed-with-data-loss",
-    }
-}
-
-const fn target_kind_name(target: &TargetTemplate) -> &'static str {
-    match target {
-        TargetTemplate::LocalBare => "local-bare",
-        TargetTemplate::LocalPodman { .. } => "local-podman",
-        TargetTemplate::LocalDocker { .. } => "local-docker",
-        TargetTemplate::AppleContainer { .. } => "apple-container",
-        TargetTemplate::AwsEc2 { .. } => "aws-ec2",
-        TargetTemplate::SshBare { .. } => "ssh-bare",
-        TargetTemplate::SshPodman { .. } => "ssh-podman",
-        TargetTemplate::SshDocker { .. } => "ssh-docker",
-    }
 }
 
 /// Every asset the browser application is built from. They are real files
@@ -3933,7 +3827,7 @@ mod tests {
         let value = mint_desktop_session_cookie(&key).unwrap();
         let viewer = cookie_viewer(&key, &value, now_unix());
         assert!(
-            matches!(viewer, Some(Some(_))),
+            viewer.is_some(),
             "minted cookie must validate and carry a viewer id: {value:?}"
         );
         assert!(!session_cookie_valid(
@@ -3950,7 +3844,6 @@ mod tests {
             sessions_side: Default::default(),
             advanced: Default::default(),
             show_stopped_sessions: false,
-            newer_config_version: None,
             spinner: Default::default(),
             theme: Default::default(),
             phone: Default::default(),
@@ -5627,27 +5520,11 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
         );
         assert_eq!(
             cookie_viewer(key, &first, now_unix()),
-            Some(Some("viewer-a".to_owned()))
+            Some("viewer-a".to_owned())
         );
         assert_eq!(
             cookie_viewer(key, &second, now_unix()),
-            Some(Some("viewer-b".to_owned()))
-        );
-    }
-
-    /// A phone holding the previous cookie keeps working through a deployment.
-    /// It names no viewer, so it stores nothing, which is the difference
-    /// between signed out and signed in with nothing kept.
-    #[test]
-    fn a_legacy_cookie_still_authenticates_and_stores_nothing() {
-        let key = b"01234567890123456789012345678901";
-        let expiry = now_unix().saturating_add(3600);
-        let legacy = legacy_signed_cookie_value(key, expiry);
-        assert_eq!(cookie_viewer(key, &legacy, now_unix()), Some(None));
-        assert!(session_cookie_valid(key, &legacy, now_unix()));
-        assert!(
-            !session_cookie_valid(key, &legacy, expiry),
-            "an expired legacy cookie still authenticated"
+            Some("viewer-b".to_owned())
         );
     }
 
@@ -5683,50 +5560,6 @@ if (!questions[1].startsWith("Stop session?\n\n")) {
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert!(stored.try_recv().is_err(), "an oversized draft was stored");
-    }
-
-    /// A viewer with no identity has nothing stored, and is told so rather
-    /// than being promised a persistence that is not there.
-    #[tokio::test]
-    async fn a_legacy_viewer_reads_empty_state_and_cannot_store_a_draft() {
-        let key = b"01234567890123456789012345678901";
-        let legacy = format!(
-            "{COOKIE_NAME}={}",
-            legacy_signed_cookie_value(key, now_unix().saturating_add(3600))
-        );
-
-        let (reader, _, _, _, mut stored) = app();
-        let response = reader
-            .oneshot(
-                Request::get("/api/sessions/session-1/client-state")
-                    .header(COOKIE, legacy.clone())
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let state: ViewerClientState = serde_json::from_slice(&body).unwrap();
-        assert_eq!(state, ViewerClientState::default());
-        assert!(
-            stored.try_recv().is_err(),
-            "a legacy viewer read stored state"
-        );
-
-        let (writer, _, _, _, mut stored) = app();
-        let response = writer
-            .oneshot(
-                Request::put("/api/sessions/session-1/draft")
-                    .header(COOKIE, legacy)
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"draft":"text"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert!(stored.try_recv().is_err(), "a legacy viewer stored a draft");
     }
 
     /// A search that is not a search is refused before it reaches a database.
@@ -6716,9 +6549,8 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
                     command_id: "queued-1".into(),
                     kind: mj_core::state::QueuedCommandKind::Prompt,
                     content: vec![serde_json::json!({
-                        "type": "image",
-                        "mimeType": "image/png",
-                        "data": "secret-image-bytes"
+                        "type": "text",
+                        "text": "[Image attachment: image/png]"
                     })],
                     queued_at_ms: 1,
                 }],
@@ -6736,8 +6568,6 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
             body["queued_commands"][0]["content"][0]["text"],
             "[Image attachment: image/png]"
         );
-        assert!(body.to_string().contains("[Image attachment: image/png]"));
-        assert!(!body.to_string().contains("secret-image-bytes"));
     }
 
     #[tokio::test]

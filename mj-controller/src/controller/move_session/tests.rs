@@ -1127,3 +1127,24 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     );
     assert_eq!(first.fingerprint, second.fingerprint);
 }
+
+#[test]
+fn a_move_preparation_shows_queued_images_as_placeholders_without_their_bytes() {
+    let mut queued = vec![mj_core::state::MaterializedQueuedPrompt {
+        accepted_ordinal: None,
+        command_id: "queued-1".into(),
+        kind: mj_core::state::QueuedCommandKind::Prompt,
+        content: vec![
+            serde_json::json!({"type": "text", "text": "look at this"}),
+            serde_json::json!({"type": "image", "mimeType": "image/png", "data": "secret-image-bytes"}),
+        ],
+        queued_at_ms: 1,
+    }];
+
+    super::replace_queued_images_with_placeholders(&mut queued);
+
+    let content = serde_json::to_string(&queued[0].content).unwrap();
+    assert!(content.contains("look at this"));
+    assert!(content.contains("[Image attachment: image/png]"));
+    assert!(!content.contains("secret-image-bytes"));
+}

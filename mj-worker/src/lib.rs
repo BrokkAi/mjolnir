@@ -11,6 +11,7 @@ pub mod terminal;
 
 pub mod checkpoint;
 
+mod mcp_stdio;
 pub mod memory_mcp;
 pub mod review;
 pub mod subagent_mcp;

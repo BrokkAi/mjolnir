@@ -45,7 +45,7 @@ The human-readable `mj doctor` output is convenient at a terminal; JSON is
 better for exact check IDs, automation, and issue reports. A warning can still
 matter, but only `fixable` means the doctor loop has not converged.
 
-## Configuration is missing, invalid, or read-only
+## Configuration is missing, invalid, or from a newer build
 
 If `config.toml` does not exist, run `mj` and open **F7 Settings** to add or detect
 an agent profile. Local target choices are supplied automatically.
@@ -56,10 +56,9 @@ For a TOML error, fix the exact path and type named by `mj doctor`. Mjolnir's
 schema rejects unknown fields rather than silently ignoring a misspelling. See
 the [Configuration reference](/configuration/) for every version 2 field.
 
-An older Mjolnir can load the settings it understands from a configuration last
-written by a newer build, but it makes that file read-only. If doctor reports a
-newer owning build, update Mjolnir or edit with that newer build; do not lower
-the `version` value by hand.
+An older Mjolnir refuses to load a configuration last written by a newer build.
+Update Mjolnir, or use the newer build; do not lower the `version` value by
+hand.
 
 ## A bare session says the primary checkout is dirty
 

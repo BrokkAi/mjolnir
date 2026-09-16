@@ -1153,6 +1153,20 @@ pub enum TargetTemplate {
 }
 
 impl TargetTemplate {
+    /// The `kind` spelling used in configuration and on the wire.
+    pub const fn kind_name(&self) -> &'static str {
+        match self {
+            Self::LocalBare => "local-bare",
+            Self::LocalPodman { .. } => "local-podman",
+            Self::LocalDocker { .. } => "local-docker",
+            Self::AppleContainer { .. } => "apple-container",
+            Self::AwsEc2 { .. } => "aws-ec2",
+            Self::SshBare { .. } => "ssh-bare",
+            Self::SshPodman { .. } => "ssh-podman",
+            Self::SshDocker { .. } => "ssh-docker",
+        }
+    }
+
     pub const fn execution_policy(&self) -> ExecutionPolicy {
         match self {
             Self::LocalBare => ExecutionPolicy::ConfiguredApprovals,
@@ -1476,12 +1490,6 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "AdvancedConfig::is_default")]
     pub advanced: AdvancedConfig,
     pub version: u32,
-    /// The version found on disk when it was above this build's
-    /// [`CONFIG_VERSION`]. Such a config loads best-effort so its settings
-    /// still work, and it is read-only: [`Config::save_to`] refuses, so an
-    /// older Hel never overwrites a file a newer Mjolnir maintains.
-    #[serde(skip)]
-    pub newer_config_version: Option<u32>,
     /// Client-side activity animation; omitted configurations retain the classic scan.
     #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
     pub spinner: SpinnerStyle,
@@ -1515,7 +1523,6 @@ impl Default for Config {
             advanced: AdvancedConfig::default(),
             show_stopped_sessions: false,
             version: CONFIG_VERSION,
-            newer_config_version: None,
             spinner: SpinnerStyle::default(),
             theme: Default::default(),
             phone: PhoneConfig::default(),
@@ -1654,11 +1661,8 @@ impl Config {
     }
 
     /// Read the config from `path`, returning [`Config::default`] when the
-    /// file is missing or empty and an error when it is malformed.
-    ///
-    /// A file written by a *newer* Hel loads best-effort and read-only rather
-    /// than refusing to start: its settings still work, and every write path
-    /// refuses, so nothing downgrades the file.
+    /// file is missing or empty and an error when it is malformed or was
+    /// written by a newer Mjolnir.
     pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -1672,13 +1676,11 @@ impl Config {
             .parse()
             .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         if let Some(found) = newer_version(&document) {
-            tracing::warn!(
-                path = %path.display(),
-                found_version = found,
-                supported_version = CONFIG_VERSION,
-                "Mjolnir config was written by a newer build; loading it read-only"
+            bail!(
+                "{} was written by a newer Mjolnir (config version {found}; this build supports \
+                 {CONFIG_VERSION}). Update Mjolnir",
+                path.display()
             );
-            return Ok(Self::load_newer(&contents, &document, found));
         }
         reject_removed_profile_overrides(&contents)?;
         reject_non_bare_permissions(&contents)?;
@@ -1697,76 +1699,6 @@ impl Config {
         }
         config.validate()?;
         Ok(config)
-    }
-
-    /// Best-effort read of a config a newer Mjolnir maintains. Fields this build
-    /// does not know drop away, and a section it cannot read falls back on its
-    /// own instead of costing the whole file, so the profiles, bundles, and
-    /// targets that still parse keep working. The recorded version is what
-    /// makes the result read-only.
-    fn load_newer(contents: &str, document: &toml::Value, found: u32) -> Self {
-        let parsed = toml::from_str::<Self>(contents).ok().map(|mut config| {
-            config.version = CONFIG_VERSION;
-            config
-        });
-        let mut config = match parsed {
-            Some(config) if config.validate().is_ok() => config,
-            _ => Self::salvage(document),
-        };
-        config.newer_config_version = Some(found);
-        config
-    }
-
-    /// Recover each section on its own when the document as a whole no longer
-    /// matches this build's schema. Maps recover entry by entry, so one target
-    /// written in a future shape costs only that target.
-    fn salvage(document: &toml::Value) -> Self {
-        let mut config = Self::default();
-        if let Some(side) = salvage_section::<SessionsSide>(document, "sessions_side") {
-            config.sessions_side = side;
-        }
-        if let Some(theme) = salvage_section::<UiTheme>(document, "theme") {
-            config.theme = theme;
-        }
-        if let Some(spinner) = salvage_section::<SpinnerStyle>(document, "spinner") {
-            config.spinner = spinner;
-        }
-        if let Some(advanced) = salvage_section::<AdvancedConfig>(document, "advanced") {
-            config.advanced = advanced;
-        }
-        if let Some(phone) = salvage_section::<PhoneConfig>(document, "phone")
-            && phone.validate().is_ok()
-        {
-            config.phone = phone;
-        }
-        config.profiles = salvage_map(document, "profiles", HarnessProfile::validate);
-        // Salvaged after the profiles, because whether a review section is
-        // usable depends on which profiles survived.
-        if let Some(review) = salvage_section::<ReviewConfig>(document, "review")
-            && review.validate(&config.profiles).is_ok()
-        {
-            config.review = review;
-        }
-        if let Some(subagents) = salvage_section::<SubagentConfig>(document, "subagents")
-            && subagents.validate(&config.profiles).is_ok()
-        {
-            config.subagents = subagents;
-        }
-        config.bundles = salvage_map(document, "bundles", ProjectBundle::validate);
-        config.targets = salvage_map(document, "targets", TargetTemplate::validate);
-        config
-    }
-
-    /// One line for surfaces that show this config when the file on disk
-    /// belongs to a newer Mjolnir; `None` for a config this build owns.
-    pub fn newer_build_notice(&self) -> Option<String> {
-        self.newer_config_version.map(|found| {
-            format!(
-                "This config was written by a newer Mjolnir (config version {found}; this build \
-                 supports {CONFIG_VERSION}), so it is read-only. Update Mjolnir, or change settings \
-                 with the newer build."
-            )
-        })
     }
 
     pub fn save(&self) -> Result<()> {
@@ -1813,7 +1745,6 @@ impl Config {
     {
         let _lock = ConfigLock::acquire(path)?;
         let mut config = Self::load_from(path)?;
-        config.ensure_writable(path)?;
         let value = edit(&mut config)?;
         config.save_to_locked(path)?;
         Ok((config, value))
@@ -1849,55 +1780,16 @@ impl Config {
     /// from [`Self::save_to`] so a transaction does not try to lock the same
     /// sibling file recursively.
     fn save_to_locked(&self, path: &Path) -> Result<()> {
-        self.ensure_writable(path)?;
+        Self::ensure_writable(path)?;
         self.validate()?;
         let body = toml::to_string_pretty(self).context("serialize Mjolnir config")?;
         atomic_write(path, body.as_bytes())
     }
 
-    /// Rename the setup-generated local bare target without rewriting
-    /// unrelated configuration. This runs under the controller store lock
-    /// before SQLite is opened, so config and persisted sessions converge in
-    /// one startup.
-    pub fn migrate_legacy_localhost_target() -> Result<bool> {
-        Self::migrate_legacy_localhost_target_at(&config_path())
-    }
-
-    fn migrate_legacy_localhost_target_at(path: &Path) -> Result<bool> {
-        let _lock = ConfigLock::acquire(path)?;
-        if !path.exists() {
-            return Ok(false);
-        }
-        let mut config = Self::load_from(path)?;
-        if config.newer_config_version.is_some() {
-            // The newer Mjolnir that owns this file renames its own targets.
-            tracing::warn!(
-                path = %path.display(),
-                "skipping the legacy localhost target rename: the config belongs to a newer Mjolnir"
-            );
-            return Ok(false);
-        }
-        let Some(legacy) = config.targets.get("raw-localhost").cloned() else {
-            return Ok(false);
-        };
-        if let Some(current) = config.targets.get("localhost")
-            && current != &legacy
-        {
-            bail!(
-                "cannot rename target `raw-localhost` to `localhost`: both exist with different configurations"
-            );
-        }
-        config.targets.remove("raw-localhost");
-        config.targets.entry("localhost".into()).or_insert(legacy);
-        config.save_to_locked(path)?;
-        Ok(true)
-    }
-
-    fn ensure_writable(&self, path: &Path) -> Result<()> {
-        if let Some(found) = self
-            .newer_config_version
-            .or_else(|| newer_version_on_disk(path))
-        {
+    /// Refuse to overwrite a file that a newer Mjolnir wrote after this
+    /// config was loaded.
+    fn ensure_writable(path: &Path) -> Result<()> {
+        if let Some(found) = newer_version_on_disk(path) {
             bail!(
                 "{} was written by a newer Mjolnir (config version {found}; this build writes \
                  {CONFIG_VERSION}). Update Mjolnir, or change settings with the newer build",
@@ -1982,53 +1874,9 @@ fn newer_version(document: &toml::Value) -> Option<u32> {
 
 /// The config version at `path` when it is above this build's. Read
 /// tolerantly: a missing or unreadable file never blocks a save.
-fn newer_version_on_disk(path: &Path) -> Option<u32> {
+pub fn newer_version_on_disk(path: &Path) -> Option<u32> {
     let contents = fs::read_to_string(path).ok()?;
     newer_version(&contents.parse::<toml::Value>().ok()?)
-}
-
-/// Deserialize one top-level section, or `None` when this build cannot read
-/// the shape a newer Mjolnir wrote.
-fn salvage_section<T: for<'de> Deserialize<'de>>(document: &toml::Value, key: &str) -> Option<T> {
-    document
-        .get(key)
-        .cloned()
-        .and_then(|value| value.try_into().ok())
-}
-
-/// Deserialize one top-level table entry by entry, dropping only the entries
-/// this build cannot read or accept.
-fn salvage_map<T, F>(document: &toml::Value, key: &str, validate: F) -> BTreeMap<String, T>
-where
-    T: for<'de> Deserialize<'de>,
-    F: Fn(&T, &str) -> Result<()>,
-{
-    let Some(table) = document.get(key).and_then(toml::Value::as_table) else {
-        return BTreeMap::new();
-    };
-    let mut kept = BTreeMap::new();
-    for (id, value) in table {
-        match value.clone().try_into::<T>() {
-            Ok(entry) => match validate(&entry, id) {
-                Ok(()) => {
-                    kept.insert(id.clone(), entry);
-                }
-                Err(error) => tracing::warn!(
-                    section = key,
-                    id,
-                    %error,
-                    "dropping a newer Mjolnir config entry this build rejects"
-                ),
-            },
-            Err(error) => tracing::warn!(
-                section = key,
-                id,
-                %error,
-                "dropping a newer Mjolnir config entry this build cannot read"
-            ),
-        }
-    }
-    kept
 }
 
 fn reject_removed_profile_overrides(contents: &str) -> Result<()> {
@@ -2233,6 +2081,18 @@ enum ParentDirectory {
     Require,
 }
 
+/// Make a rename or new entry in `path` durable. Directory fsync is only
+/// available on Unix; Windows cannot open a directory handle this way.
+pub fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("sync directory {}", path.display()))?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 fn atomic_write_with_parent(
     path: &Path,
     body: &[u8],
@@ -2284,13 +2144,7 @@ fn atomic_write_with_parent(
         drop(file);
         fs::rename(&temporary, path)
             .with_context(|| format!("replace {} with {}", path.display(), temporary.display()))?;
-        #[cfg(unix)]
-        OpenOptions::new()
-            .read(true)
-            .open(parent)
-            .and_then(|directory| directory.sync_all())
-            .with_context(|| format!("sync {}", parent.display()))?;
-        Ok(())
+        sync_directory(parent)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -2682,7 +2536,6 @@ mod tests {
             sessions_side: Default::default(),
             advanced: Default::default(),
             show_stopped_sessions: false,
-            newer_config_version: None,
             spinner: SpinnerStyle::default(),
             theme: Default::default(),
             phone: PhoneConfig::default(),
@@ -2737,56 +2590,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("unknown field `executable`"));
-    }
-
-    #[test]
-    fn legacy_localhost_target_migration_is_atomic_and_idempotent() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        let mut config = sample_config();
-        config.targets.clear();
-        config
-            .targets
-            .insert("raw-localhost".into(), TargetTemplate::LocalBare);
-        config.save_to(&path).unwrap();
-
-        assert!(Config::migrate_legacy_localhost_target_at(&path).unwrap());
-        let migrated = Config::load_from(&path).unwrap();
-        assert_eq!(
-            migrated.targets.get("localhost"),
-            Some(&TargetTemplate::LocalBare)
-        );
-        assert!(!migrated.targets.contains_key("raw-localhost"));
-        assert!(!Config::migrate_legacy_localhost_target_at(&path).unwrap());
-    }
-
-    #[test]
-    fn conflicting_localhost_target_migration_leaves_config_unchanged() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        let mut config = sample_config();
-        config
-            .targets
-            .insert("raw-localhost".into(), TargetTemplate::LocalBare);
-        config.targets.insert(
-            "localhost".into(),
-            TargetTemplate::LocalPodman {
-                container: ContainerTemplate {
-                    image: "different".into(),
-                    pull_policy: ImagePullPolicy::Auto,
-                    platform: None,
-                    cpus: None,
-                    memory: None,
-                    environment: BTreeMap::new(),
-                    workspace_storage: Default::default(),
-                },
-            },
-        );
-        config.save_to(&path).unwrap();
-        let before = fs::read(&path).unwrap();
-
-        assert!(Config::migrate_legacy_localhost_target_at(&path).is_err());
-        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -3416,7 +3219,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_theme_is_rejected_but_newer_configs_salvage_known_themes() {
+    fn unknown_theme_is_rejected() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         fs::write(
@@ -3425,16 +3228,6 @@ mod tests {
         )
         .unwrap();
         assert!(Config::load_from(&path).is_err());
-
-        let newer = format!(
-            "version = {}\ntheme = \"light\"\nfuture = true\n",
-            CONFIG_VERSION + 1
-        );
-        fs::write(&path, &newer).unwrap();
-        let config = Config::load_from(&path).unwrap();
-        assert_eq!(config.theme, UiTheme::Light);
-        assert!(config.save_to(&path).is_err());
-        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
     }
 
     #[test]
@@ -3806,43 +3599,6 @@ mod tests {
         assert_eq!(config.review.reviewer_profile(), Some("reviewer"));
     }
 
-    /// A review section that survives salvage is one whose profile also
-    /// survived: the section is only usable if its reviewer exists.
-    #[test]
-    fn salvage_keeps_a_review_section_whose_profile_survived() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        fs::write(
-            &path,
-            format!(
-                "version = 9999\n{}\n[review]\nenabled = true\nprofile = \"reviewer\"\n",
-                config_with_profile("reviewer")
-                    .strip_prefix("version = 1\n")
-                    .unwrap()
-            ),
-        )
-        .unwrap();
-
-        let config = Config::load_from(&path).unwrap();
-        assert_eq!(config.newer_config_version, Some(9999));
-        assert!(config.review.enabled);
-        assert_eq!(config.review.reviewer_profile(), Some("reviewer"));
-    }
-
-    #[test]
-    fn salvage_drops_a_review_section_whose_profile_did_not_survive() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        fs::write(
-            &path,
-            "version = 9999\n[review]\nenabled = true\nprofile = \"gone\"\n",
-        )
-        .unwrap();
-
-        let config = Config::load_from(&path).unwrap();
-        assert_eq!(config.review, ReviewConfig::default());
-    }
-
     #[test]
     fn explicit_web_viewer_opt_out_survives_serialization() {
         let directory = tempfile::tempdir().unwrap();
@@ -3881,65 +3637,19 @@ mod tests {
     }
 
     #[test]
-    fn newer_config_loads_read_only_instead_of_blocking_startup() {
-        // Running a newer Mjolnir and then downgrading must not lock the user out
-        // of the older build.
+    fn a_newer_config_is_refused_without_touching_the_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         let body = format!(
-            "version = {}\nsetting_from_the_future = true\n\n[targets.localhost]\nkind = \
-             \"local-bare\"\n",
+            "version = {}\nsetting_from_the_future = true\n",
             CONFIG_VERSION + 1
         );
         fs::write(&path, &body).unwrap();
 
-        let config = Config::load_from(&path).unwrap();
+        let error = Config::load_from(&path).unwrap_err().to_string();
 
-        // The settings the newer build saved still work.
-        assert_eq!(
-            config.targets.get("localhost"),
-            Some(&TargetTemplate::LocalBare)
-        );
-        assert_eq!(config.newer_config_version, Some(CONFIG_VERSION + 1));
-        assert!(
-            config
-                .newer_build_notice()
-                .is_some_and(|notice| notice.contains("newer Mjolnir"))
-        );
-
-        // Saving would downgrade the newer build's file, so it must refuse and
-        // leave the file byte for byte as it was.
-        let error = config.save_to(&path).unwrap_err().to_string();
         assert!(error.contains("newer Mjolnir"), "{error}");
         assert_eq!(fs::read_to_string(&path).unwrap(), body);
-    }
-
-    #[test]
-    fn newer_config_keeps_the_sections_this_build_still_understands() {
-        // A future release reshapes one target and adds a section. Only the
-        // reshaped target is lost; everything else still loads.
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        fs::write(
-            &path,
-            format!(
-                "version = {}\n\n[future_section]\nwhatever = 1\n\n[profiles.codex-1]\nkind \
-                 = \"codex\"\nhome = \"/home/test/.codex-one\"\n\n[targets.localhost]\nkind \
-                 = \"local-bare\"\n\n[targets.future]\nkind = \"quantum-sandbox\"\n",
-                CONFIG_VERSION + 1
-            ),
-        )
-        .unwrap();
-
-        let config = Config::load_from(&path).unwrap();
-
-        assert!(config.profiles.contains_key("codex-1"));
-        assert_eq!(
-            config.targets.get("localhost"),
-            Some(&TargetTemplate::LocalBare)
-        );
-        assert!(!config.targets.contains_key("future"));
-        assert_eq!(config.newer_config_version, Some(CONFIG_VERSION + 1));
     }
 
     #[test]
@@ -3956,22 +3666,6 @@ mod tests {
 
         let error = config.save_to(&path).unwrap_err().to_string();
         assert!(error.contains("newer Mjolnir"), "{error}");
-        assert_eq!(fs::read_to_string(&path).unwrap(), body);
-    }
-
-    #[test]
-    fn the_legacy_localhost_rename_leaves_a_newer_config_alone() {
-        // The rename runs at daemon startup and used to be a save; against a
-        // read-only config it must skip instead of failing startup.
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        let body = format!(
-            "version = {}\n\n[targets.raw-localhost]\nkind = \"local-bare\"\n",
-            CONFIG_VERSION + 1
-        );
-        fs::write(&path, &body).unwrap();
-
-        assert!(!Config::migrate_legacy_localhost_target_at(&path).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), body);
     }
 

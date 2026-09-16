@@ -1502,7 +1502,6 @@ impl DashboardState {
             } else {
                 wizard.mounts.mounts.clone()
             },
-            allow_dirty_local: false,
             resource_allocation: wizard.resource_allocation.clone(),
         }
     }

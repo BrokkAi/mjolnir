@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::checkpoint_transfer::{
-    CheckpointTransfer, capture_stdin_command, export_command, export_stdin_command,
-    pack_stdin_command,
+    CheckpointTransfer, capture_stdin_command, export_stdin_command, pack_stdin_command,
 };
 use crate::session_manager::{
     ManagedSessionHandle, ManagedSessionLease, SessionManagerControl, StandaloneSession,
@@ -42,7 +41,7 @@ use super::readiness::wait_for_native_session_in_stage;
 use super::worker_restart::{InstalledWorkerRestart, RESTART_FOR_CHECKPOINT};
 use super::{
     Controller, execute_checked, now, persist_session_record_transition_or_restore,
-    scp_command_spec, ssh_command_spec, target_kind, target_profile_home,
+    target_profile_home,
 };
 
 /// Where one session's work lives on its target.
@@ -83,7 +82,7 @@ const CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART: Duration = Duration::from_secs(3
 /// database transaction committed. Call this only while holding the
 /// machine-wide controller-store guard and before starting background work.
 pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
-    let mut state = crate::database::load_state_migrating()?;
+    let mut state = crate::database::load_state()?;
     // Include operation-owned recovery copies even after a ready destination
     // installs a newer ordinary checkpoint.
     for operation in crate::database::load_move_operations()? {
@@ -782,13 +781,12 @@ impl Controller {
         // Packing can outlive the relay capture barrier. Another export must
         // never replace the archive whose digest this operation transfers.
         let operation_id = new_command_id("checkpoint")?;
-        let remote_spec = format!("{worker_root}/{operation_id}-spec.json");
         let remote_archive = format!("{worker_root}/{operation_id}.hel.zip");
         let remote_stage = format!("{worker_root}/{operation_id}-stage");
         let checkpointed_at = now();
         let target_manifest = TargetManifest {
             template_id: session.target_template_id.clone(),
-            target_kind: target_kind(&backend).into(),
+            target_kind: backend.kind_name().into(),
             details: Default::default(),
         };
         let bundle_manifest = BundleManifest {
@@ -835,6 +833,7 @@ impl Controller {
                     &prestage,
                     capture_stdin_command,
                     "prestage target checkpoint",
+                    None,
                 )
             };
             match prestaged {
@@ -1115,6 +1114,7 @@ impl Controller {
                         &capture_spec,
                         capture_stdin_command,
                         "capture target checkpoint",
+                        None,
                     )?
                 };
                 let captured: CapturedCheckpoint = serde_json::from_slice(&captured.stdout)
@@ -1155,6 +1155,7 @@ impl Controller {
                         &pack_spec,
                         pack_stdin_command,
                         "pack target checkpoint",
+                        None,
                     )?
                 };
                 tracing::info!(
@@ -1169,12 +1170,14 @@ impl Controller {
                     let _recovery_copy = recovery_copy.then(|| {
                         ProvisionStageGuard::new(executor, ProvisionStage::RecoveryCopy)
                     });
-                    export_target_checkpoint(
+                    run_checkpoint_staging_command(
                         executor,
                         &backend,
                         session_id,
                         &spec,
-                        &remote_spec,
+                        export_stdin_command,
+                        "export target checkpoint",
+                        None,
                     )?
                 };
                 export_ms = Some(export_started.elapsed().as_millis() as u64);
@@ -1603,16 +1606,11 @@ async fn wait_for_checkpoint_barrier(
             && snapshot.operational.execution == RelayExecutionState::Running
             && !cancel_submitted
         {
-            let cancel_turn = RelayCommand::CancelTurn;
-            if relay.protocol_version() < cancel_turn.minimum_protocol() {
-                return Err(CheckpointBarrierUnreachable::cancel_turn_unavailable(
-                    command_id,
-                    relay.protocol_version(),
-                )
-                .into());
-            }
             let cancel_command_id = new_command_id("checkpoint-cancel-turn")?;
-            match relay.submit(cancel_command_id, cancel_turn).await {
+            match relay
+                .submit(cancel_command_id, RelayCommand::CancelTurn)
+                .await
+            {
                 Ok(_) => {
                     cancel_submitted = true;
                     cancel_started_at = Some(Instant::now());
@@ -1751,10 +1749,9 @@ fn checkpoint_barrier_needs_worker_restart(error: &anyhow::Error) -> bool {
         .is_some()
 }
 
-/// A worker that reports an incompatible protocol for `CancelTurn` needs to be
-/// replaced before the close can retry the checkpoint with cancellation
-/// available. The negotiated protocol is checked before submission; this
-/// handles a race with a worker-side protocol rejection as well.
+/// A worker that cannot decode `CancelTurn` needs to be replaced before the
+/// close can retry the checkpoint with cancellation available. The relay client
+/// refuses the command for an older worker with the same code the worker uses.
 fn checkpoint_cancel_turn_needs_worker_restart(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         let Some(rejected) = cause.downcast_ref::<RelayRejected>() else {
@@ -2074,6 +2071,12 @@ async fn release_checkpoint_after_capture(
     }
 }
 
+/// Run one checkpoint command on the target with its spec streamed over stdin.
+///
+/// When the installed worker is older than this controller and cannot read the
+/// spec, its `mj` is replaced with the controller's binary once and the command
+/// is retried. `worker_binary` names that binary; `None` resolves the one this
+/// controller would install.
 fn run_checkpoint_staging_command<T: serde::Serialize>(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
@@ -2081,6 +2084,7 @@ fn run_checkpoint_staging_command<T: serde::Serialize>(
     spec: &T,
     command: fn(&targets::TargetLocator, &str) -> Result<CommandSpec>,
     operation: &str,
+    worker_binary: Option<&Path>,
 ) -> Result<CommandOutput> {
     let body = serde_json::to_vec(spec).with_context(|| format!("serialize {operation} spec"))?;
     let mut replaced_worker = false;
@@ -2096,7 +2100,7 @@ fn run_checkpoint_staging_command<T: serde::Serialize>(
                 executor,
                 locator,
                 session_id,
-                None,
+                worker_binary,
                 &failure,
                 &mut replaced_worker,
             )?
@@ -2108,107 +2112,6 @@ fn run_checkpoint_staging_command<T: serde::Serialize>(
             output.status
         );
     }
-}
-
-/// Run the target's checkpoint export with the spec streamed over stdin.
-///
-/// Streaming removes a whole `podman cp`/`scp` round trip from the window in
-/// which the relay barrier keeps ACP dispatch frozen.
-fn export_target_checkpoint(
-    executor: &impl CommandExecutor,
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    spec: &CheckpointExportSpec,
-    remote_spec: &str,
-) -> Result<CommandOutput> {
-    export_target_checkpoint_with_worker(executor, locator, session_id, spec, remote_spec, None)
-}
-
-fn export_target_checkpoint_with_worker(
-    executor: &impl CommandExecutor,
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    spec: &CheckpointExportSpec,
-    remote_spec: &str,
-    worker_binary: Option<&Path>,
-) -> Result<CommandOutput> {
-    let body = serde_json::to_vec(spec).context("serialize checkpoint export spec")?;
-    let mut replaced_worker = false;
-    loop {
-        let streamed = export_stdin_command(locator, session_id)?;
-        let output = executor.execute_with_stdin(&streamed, &mut body.as_slice())?;
-        if output.status == 0 {
-            return Ok(output);
-        }
-        let failure = String::from_utf8_lossy(&output.stderr).into_owned();
-        if export_spec_stdin_unsupported(&failure) {
-            tracing::debug!(
-                session_id,
-                "target worker predates streamed checkpoint specs; uploading the spec file instead"
-            );
-            let output = export_uploaded_spec(executor, locator, session_id, spec, remote_spec)?;
-            if output.status == 0 {
-                return Ok(output);
-            }
-            let failure = String::from_utf8_lossy(&output.stderr).into_owned();
-            if replace_stale_export_worker(
-                executor,
-                locator,
-                session_id,
-                worker_binary,
-                &failure,
-                &mut replaced_worker,
-            )? {
-                continue;
-            }
-            bail!(
-                "export target checkpoint failed with status {}: {failure}",
-                output.status
-            );
-        }
-        if replace_stale_export_worker(
-            executor,
-            locator,
-            session_id,
-            worker_binary,
-            &failure,
-            &mut replaced_worker,
-        )? {
-            continue;
-        }
-        bail!(
-            "{} failed with status {}: {failure}",
-            streamed.purpose,
-            output.status
-        );
-    }
-}
-
-fn export_uploaded_spec(
-    executor: &impl CommandExecutor,
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    spec: &CheckpointExportSpec,
-    remote_spec: &str,
-) -> Result<CommandOutput> {
-    let staging = tempfile::tempdir().context("create checkpoint staging")?;
-    let local_spec = staging.path().join("checkpoint-spec.json");
-    spec.write(&local_spec)?;
-    upload_checkpoint_spec(executor, locator, session_id, &local_spec, remote_spec)?;
-    let output = executor.execute(&export_command(locator, session_id, remote_spec)?)?;
-    if output.status == 0 {
-        execute_checked(
-            executor,
-            targets::command_on_locator(
-                locator,
-                session_id,
-                ["rm", "-f", "--", remote_spec].map(str::to_owned).to_vec(),
-                "remove uploaded checkpoint specification",
-            )?,
-        )
-        .context("clean successful checkpoint export specification")?;
-    }
-    Ok(output)
 }
 
 /// When the installed worker cannot execute this export protocol, replace its
@@ -2240,19 +2143,6 @@ fn replace_stale_export_worker(
     super::worker_binary::replace_installed_worker_binary(executor, locator, session_id, binary)?;
     *replaced_worker = true;
     Ok(true)
-}
-
-/// Whether an export failure says the target's worker cannot read its spec from
-/// standard input.
-///
-/// A worker built before `--spec -` treats the dash as a file name, so it fails
-/// while reading that file rather than while running the checkpoint. One built
-/// before the flag existed at all fails in argument parsing. Every other
-/// failure is a real checkpoint error and must surface.
-fn export_spec_stdin_unsupported(failure: &str) -> bool {
-    failure.contains("read checkpoint export spec -")
-        || failure.contains("unexpected argument")
-        || failure.contains("invalid value")
 }
 
 /// Whether an export failure says the target's worker cannot deserialize this
@@ -2331,7 +2221,8 @@ pub(super) fn upload_checkpoint_spec(
         targets::TargetLocator::AwsEc2 { ssh, .. }
         | targets::TargetLocator::SshBare { ssh, .. } => execute_checked(
             executor,
-            scp_command_spec(ssh, local, remote, false).purpose("upload checkpoint specification"),
+            crate::targets::scp_upload(ssh, local, remote, false)
+                .purpose("upload checkpoint specification"),
         )
         .map(|_| ()),
         targets::TargetLocator::SshPodman {
@@ -2343,20 +2234,23 @@ pub(super) fn upload_checkpoint_spec(
                 targets::TargetLocator::SshDocker { .. } => "docker",
                 _ => unreachable!("matched remote container target"),
             };
-            let staging = format!(".local/share/hel/uploads/{session_id}-checkpoint.json");
+            let staging = format!(
+                "{}/{session_id}-checkpoint.json",
+                targets::REMOTE_UPLOAD_STAGING
+            );
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["mkdir", "-p", ".local/share/hel/uploads"])
+                crate::targets::ssh_command(ssh, ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING])
                     .purpose("create remote checkpoint staging"),
             )?;
             execute_checked(
                 executor,
-                scp_command_spec(ssh, local, &staging, false)
+                crate::targets::scp_upload(ssh, local, &staging, false)
                     .purpose("upload remote container checkpoint specification"),
             )?;
             execute_checked(
                 executor,
-                ssh_command_spec(
+                crate::targets::ssh_command(
                     ssh,
                     [engine, "cp", &staging, &format!("{container_id}:{remote}")],
                 )
@@ -2364,7 +2258,7 @@ pub(super) fn upload_checkpoint_spec(
             )?;
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["rm", "-f", "--", &staging])
+                crate::targets::ssh_command(ssh, ["rm", "-f", "--", &staging])
                     .purpose("remove remote checkpoint staging"),
             )?;
             Ok(())
@@ -3109,12 +3003,14 @@ mod tests {
         let spec = export_spec_fixture();
         let executor = ExportExecutor::new(0, "");
 
-        let output = export_target_checkpoint(
+        let output = run_checkpoint_staging_command(
             &executor,
             &locator,
             LATCH_RELAY_SESSION,
             &spec,
-            "/var/lib/hel/workers/session/checkpoint-spec.json",
+            export_stdin_command,
+            "export target checkpoint",
+            None,
         )
         .unwrap();
 
@@ -3129,40 +3025,6 @@ mod tests {
             vec!["export target checkpoint".to_owned()]
         );
     }
-    /// A worker copied into the target before `--spec -` existed reads the dash
-    /// as a file name. The checkpoint has to keep working on it.
-    #[test]
-    fn an_export_that_cannot_read_stdin_falls_back_to_uploading_the_spec() {
-        let locator = targets::TargetLocator::LocalPodman {
-            container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
-            workspace_storage: Default::default(),
-        };
-        let executor = ExportExecutor::new(
-            1,
-            "Error: read checkpoint export spec -\n\nCaused by:\n    \
-                 No such file or directory (os error 2)\n",
-        );
-
-        let output = export_target_checkpoint(
-            &executor,
-            &locator,
-            LATCH_RELAY_SESSION,
-            &export_spec_fixture(),
-            "/var/lib/hel/workers/session/checkpoint-spec.json",
-        )
-        .unwrap();
-
-        assert_eq!(output.stdout, exported_checkpoint_json());
-        assert_eq!(
-            executor.purposes.into_inner(),
-            vec![
-                "export target checkpoint".to_owned(),
-                "upload checkpoint specification".to_owned(),
-                "export target checkpoint".to_owned(),
-                "remove uploaded checkpoint specification".to_owned(),
-            ]
-        );
-    }
     #[test]
     fn a_failing_export_is_not_retried_as_an_old_worker() {
         let locator = targets::TargetLocator::LocalPodman {
@@ -3171,12 +3033,14 @@ mod tests {
         };
         let executor = ExportExecutor::new(1, "Error: repository 'app' is missing\n");
 
-        let error = export_target_checkpoint(
+        let error = run_checkpoint_staging_command(
             &executor,
             &locator,
             LATCH_RELAY_SESSION,
             &export_spec_fixture(),
-            "/var/lib/hel/workers/session/checkpoint-spec.json",
+            export_stdin_command,
+            "export target checkpoint",
+            None,
         )
         .unwrap_err();
 
@@ -3206,12 +3070,13 @@ mod tests {
         .retry_stdin_after_failure();
         let worker_binary = Path::new("/hel-test-worker");
 
-        let output = export_target_checkpoint_with_worker(
+        let output = run_checkpoint_staging_command(
             &executor,
             &locator,
             LATCH_RELAY_SESSION,
             &spec,
-            "/var/lib/hel/workers/session/checkpoint-spec.json",
+            export_stdin_command,
+            "export target checkpoint",
             Some(worker_binary),
         )
         .unwrap();
@@ -3225,95 +3090,6 @@ mod tests {
         assert_eq!(
             executor.purposes.into_inner(),
             vec![
-                "export target checkpoint".to_owned(),
-                "stage replacement Mjolnir worker".to_owned(),
-                "assign replacement worker to the worker user".to_owned(),
-                "replace installed Mjolnir worker".to_owned(),
-                "make replaced Mjolnir worker executable".to_owned(),
-                "export target checkpoint".to_owned(),
-            ]
-        );
-    }
-    #[test]
-    fn a_schema_mismatch_after_uploading_the_spec_still_replaces_the_worker_binary() {
-        let locator = targets::TargetLocator::LocalPodman {
-            container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
-            workspace_storage: Default::default(),
-        };
-        struct FileThenRefreshExecutor {
-            purposes: RefCell<Vec<String>>,
-            file_export_calls: Cell<usize>,
-        }
-        impl CommandExecutor for FileThenRefreshExecutor {
-            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                self.purposes.borrow_mut().push(command.purpose.clone());
-                if command.purpose == "export target checkpoint" {
-                    let attempt = self.file_export_calls.get();
-                    self.file_export_calls.set(attempt + 1);
-                    if attempt == 0 {
-                        return Ok(CommandOutput {
-                            status: 1,
-                            stdout: Vec::new(),
-                            stderr: b"Error: parse checkpoint export spec /spec.json\n\nCaused by:\n    unknown variant `terminal_output`, expected one of `user`, `agent`, `thought`, `tool`, `plan`, `system`\n".to_vec(),
-                        });
-                    }
-                }
-                Ok(CommandOutput {
-                    status: 0,
-                    stdout: exported_checkpoint_json(),
-                    stderr: Vec::new(),
-                })
-            }
-
-            fn execute_with_stdin(
-                &self,
-                command: &CommandSpec,
-                input: &mut (dyn std::io::Read + Send),
-            ) -> Result<CommandOutput> {
-                self.purposes.borrow_mut().push(command.purpose.clone());
-                let mut discarded = Vec::new();
-                input.read_to_end(&mut discarded)?;
-                let stdin_calls = self
-                    .purposes
-                    .borrow()
-                    .iter()
-                    .filter(|purpose| *purpose == "export target checkpoint")
-                    .count();
-                if stdin_calls == 1 {
-                    return Ok(CommandOutput {
-                        status: 1,
-                        stdout: Vec::new(),
-                        stderr: b"Error: read checkpoint export spec -\n\nCaused by:\n    No such file or directory (os error 2)\n".to_vec(),
-                    });
-                }
-                Ok(CommandOutput {
-                    status: 0,
-                    stdout: exported_checkpoint_json(),
-                    stderr: Vec::new(),
-                })
-            }
-        }
-
-        let executor = FileThenRefreshExecutor {
-            purposes: RefCell::new(Vec::new()),
-            file_export_calls: Cell::new(0),
-        };
-        let output = export_target_checkpoint_with_worker(
-            &executor,
-            &locator,
-            LATCH_RELAY_SESSION,
-            &export_spec_fixture(),
-            "/var/lib/hel/workers/session/checkpoint-spec.json",
-            Some(Path::new("/hel-test-worker")),
-        )
-        .unwrap();
-
-        assert_eq!(output.stdout, exported_checkpoint_json());
-        assert_eq!(
-            executor.purposes.into_inner(),
-            vec![
-                "export target checkpoint".to_owned(),
-                "upload checkpoint specification".to_owned(),
                 "export target checkpoint".to_owned(),
                 "stage replacement Mjolnir worker".to_owned(),
                 "assign replacement worker to the worker user".to_owned(),

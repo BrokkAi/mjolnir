@@ -29,22 +29,6 @@ pub enum WorkerPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkerSessionSummary {
-    pub phase: WorkerPhase,
-    pub latest_seq: u64,
-    pub latest_completed_turn_seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_session_id: Option<String>,
-    pub session_title: Option<String>,
-    pub unread_agent_messages: u64,
-    pub agent_text_stream_open: bool,
-    pub last_agent_message_id: Option<String>,
-    pub transcript_tail: Vec<crate::transcript::ChatEntry>,
-    #[serde(default)]
-    pub queued_prompts: Vec<QueuedPrompt>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivePrompt {
     pub request_id: String,
     pub text: String,

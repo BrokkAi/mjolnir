@@ -157,6 +157,28 @@ impl Drop for MovePhaseTimer<'_> {
     }
 }
 
+/// Confirmation is an inspector, not transport for attachment bytes: every
+/// surface that shows a move preparation sees a placeholder for each queued
+/// image. Replay always reads the verified archive after destination readiness.
+fn replace_queued_images_with_placeholders(
+    queued_commands: &mut [mj_core::state::MaterializedQueuedPrompt],
+) {
+    for block in queued_commands
+        .iter_mut()
+        .flat_map(|command| command.content.iter_mut())
+    {
+        if block.get("type").and_then(serde_json::Value::as_str) != Some("image") {
+            continue;
+        }
+        let mime = block
+            .get("mimeType")
+            .or_else(|| block.get("mime_type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("image");
+        *block = serde_json::json!({"type": "text", "text": format!("[Image attachment: {mime}]")});
+    }
+}
+
 impl Controller {
     /// Returns the planned conversion when this move turns a local checkout
     /// into an isolated workspace, so the caller can describe it without
@@ -479,19 +501,7 @@ impl Controller {
             .map(Box::new);
         let (active, mut queued_commands, fingerprint) =
             self.move_confirmation(&selection, conversion.as_deref())?;
-        // Confirmation is an inspector, not transport for attachment bytes.
-        // Replay always reads the verified archive after destination readiness.
-        for entry in &mut queued_commands {
-            for content in &mut entry.content {
-                if content.get("type").and_then(serde_json::Value::as_str) == Some("image") {
-                    let mime = content
-                        .get("mimeType")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("image");
-                    *content = serde_json::json!({"type":"text", "text":format!("[Image attachment: {mime}]")});
-                }
-            }
-        }
+        replace_queued_images_with_placeholders(&mut queued_commands);
         let operation_id = previous
             .as_ref()
             .filter(|operation| {

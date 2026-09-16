@@ -18,7 +18,7 @@ use crate::targets::{
 pub(super) use mj_client::target::managed_worktree_target;
 pub use mj_client::target::{ResumePlan, resume_compatibility};
 
-use super::{Controller, backend_ssh, execute_checked, now, ssh_command_spec};
+use super::{Controller, backend_ssh, execute_checked, now};
 
 impl Controller {
     /// Inspect in a supervised worker, never on a UI event loop.
@@ -369,7 +369,7 @@ impl<E: CommandExecutor> CommandExecutor for RemoteGitExecutor<'_, E> {
         arguments.push(command.program.clone());
         arguments.extend(command.args.clone());
         self.executor
-            .execute(&ssh_command_spec(&self.ssh, arguments).purpose(&command.purpose))
+            .execute(&crate::targets::ssh_command(&self.ssh, arguments).purpose(&command.purpose))
     }
 
     fn cancellation_requested(&self) -> bool {
@@ -412,7 +412,7 @@ fn managed_target_command(
         Some(ssh) => {
             let mut remote = vec![program.to_owned()];
             remote.extend(args);
-            ssh_command_spec(&ssh, remote)
+            crate::targets::ssh_command(&ssh, remote)
         }
     }
 }

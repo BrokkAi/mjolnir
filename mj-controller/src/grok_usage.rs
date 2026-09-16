@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 /// A cold agent start plus one round trip to the billing backend. Generous
@@ -234,36 +234,14 @@ async fn read_bounded_frame<R>(reader: &mut R) -> Result<Option<Vec<u8>>, GrokUs
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    let mut frame = Vec::new();
-    loop {
-        let (consumed, complete) = {
-            let available = reader
-                .fill_buf()
-                .await
-                .map_err(|error| GrokUsageError::Protocol(error.to_string()))?;
-            if available.is_empty() {
-                return Ok((!frame.is_empty()).then_some(frame));
-            }
-            match available.iter().position(|byte| *byte == b'\n') {
-                Some(newline) => {
-                    frame.extend_from_slice(&available[..newline]);
-                    (newline + 1, true)
-                }
-                None => {
-                    frame.extend_from_slice(available);
-                    (available.len(), false)
-                }
-            }
-        };
-        reader.consume(consumed);
-        if frame.len() > MAX_RESPONSE_BYTES {
-            return Err(GrokUsageError::Protocol(
-                "response frame is too large".into(),
-            ));
-        }
-        if complete {
-            return Ok(Some(frame));
-        }
+    use mj_core::bounded_frame::{BoundedFrame, BoundedFrameError};
+    match mj_core::bounded_frame::read_bounded_frame(reader, MAX_RESPONSE_BYTES).await {
+        Ok(BoundedFrame::Line(frame) | BoundedFrame::Truncated(frame)) => Ok(Some(frame)),
+        Ok(BoundedFrame::End) => Ok(None),
+        Err(BoundedFrameError::TooLarge) => Err(GrokUsageError::Protocol(
+            "response frame is too large".into(),
+        )),
+        Err(BoundedFrameError::Io(error)) => Err(GrokUsageError::Protocol(error.to_string())),
     }
 }
 

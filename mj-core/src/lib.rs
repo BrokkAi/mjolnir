@@ -5,6 +5,7 @@ pub mod clock;
 pub mod acp;
 pub mod archive;
 pub mod attachment;
+pub mod bounded_frame;
 pub mod codex_catalog;
 pub mod codex_provider;
 pub mod config;

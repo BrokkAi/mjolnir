@@ -19,8 +19,8 @@ use crate::relay::{
     ClaimedRelayCommand, DeferredRelayAttach, DurableRelay, RELAY_STATE_FILE,
     RESTORED_RELAY_SEED_FILE, RelayCommand, RelayCommandOutcome, RelayErrorCode, RelayObservation,
     RelayProtocolError, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
-    RelayResponseEnvelope, RelayResponsePayload, incompatible_request_protocol_response,
-    invalid_relay_request_response, unsupported_relay_method_response,
+    RelayResponseEnvelope, RelayResponsePayload, invalid_relay_request_response,
+    unsupported_relay_method_response,
 };
 use mj_core::config::HarnessKind;
 use mj_core::subprocess::terminate_process_group;
@@ -1506,35 +1506,18 @@ pub(super) async fn read_bounded_line(
     reader: &mut (impl AsyncBufRead + Unpin),
     maximum_bytes: usize,
 ) -> Result<Option<String>> {
-    let mut line = Vec::new();
-    loop {
-        let available = reader.fill_buf().await.context("read relay request")?;
-        if available.is_empty() {
-            if line.is_empty() {
-                return Ok(None);
-            }
-            return String::from_utf8(line)
-                .context("relay request is not UTF-8")
-                .map(Some);
+    use mj_core::bounded_frame::{BoundedFrame, BoundedFrameError};
+    let line = match mj_core::bounded_frame::read_bounded_frame(reader, maximum_bytes).await {
+        Ok(BoundedFrame::Line(line) | BoundedFrame::Truncated(line)) => line,
+        Ok(BoundedFrame::End) => return Ok(None),
+        Err(BoundedFrameError::TooLarge) => bail!("relay request frame is too large"),
+        Err(BoundedFrameError::Io(error)) => {
+            return Err(anyhow::Error::new(error).context("read relay request"));
         }
-        let newline = available.iter().position(|byte| *byte == b'\n');
-        let content_bytes = newline.unwrap_or(available.len());
-        let next_len = line
-            .len()
-            .checked_add(content_bytes)
-            .context("relay request frame length overflow")?;
-        if next_len > maximum_bytes {
-            bail!("relay request frame is too large");
-        }
-        line.extend_from_slice(&available[..content_bytes]);
-        let consumed = content_bytes + usize::from(newline.is_some());
-        reader.consume(consumed);
-        if newline.is_some() {
-            return String::from_utf8(line)
-                .context("relay request is not UTF-8")
-                .map(Some);
-        }
-    }
+    };
+    String::from_utf8(line)
+        .context("relay request is not UTF-8")
+        .map(Some)
 }
 
 /// A durable write can only fail permanently because the worker root is
@@ -1736,6 +1719,15 @@ pub(super) async fn serve_client_with_memory(
                     continue;
                 }
             };
+            if let Some(body) = mj_core::relay::protocol::relay_protocol_rejection(&envelope) {
+                let response = RelayResponseEnvelope {
+                    request_id: envelope.request_id,
+                    protocol_version: envelope.protocol_version,
+                    body,
+                };
+                write_logged_response(&mut writer, &response, &session_id, "incompatible").await?;
+                continue;
+            }
             if matches!(
                 &envelope.request,
                 RelayRequest::AttachmentPresent { .. }
@@ -1746,14 +1738,7 @@ pub(super) async fn serve_client_with_memory(
                 let request_id = envelope.request_id.clone();
                 let protocol_version = envelope.protocol_version;
                 let store = mj_core::attachment::AttachmentStore::worker(&relay_root);
-                let body = if !(8..=mj_core::relay::RELAY_PROTOCOL_VERSION)
-                    .contains(&protocol_version)
-                {
-                    compaction_error(
-                        RelayErrorCode::InvalidRequest,
-                        "image attachments require worker protocol 8; upgrade the worker",
-                    )
-                } else {
+                let body =
                     match tokio::task::spawn_blocking(move || -> Result<RelayResponsePayload> {
                         use base64::Engine as _;
                         let base64 = base64::engine::general_purpose::STANDARD;
@@ -1790,8 +1775,7 @@ pub(super) async fn serve_client_with_memory(
                             RelayErrorCode::Internal,
                             &format!("image attachment task failed: {error}"),
                         ),
-                    }
-                };
+                    };
                 write_logged_response(
                     &mut writer,
                     &RelayResponseEnvelope {
@@ -2074,12 +2058,6 @@ async fn reviewer_response(
     reviewer: Option<&Arc<ReviewerSidecar>>,
     reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
 ) -> RelayResponseEnvelope {
-    if !envelope.request.supported_at(envelope.protocol_version) {
-        return incompatible_request_protocol_response(
-            envelope.request_id,
-            envelope.protocol_version,
-        );
-    }
     let Some(reviewer) = reviewer else {
         return RelayResponseEnvelope {
             request_id: envelope.request_id,
@@ -2139,12 +2117,6 @@ async fn elicitation_response(
     envelope: RelayRequestEnvelope,
     commands: Option<&mpsc::Sender<CommandRequest>>,
 ) -> RelayResponseEnvelope {
-    if !envelope.request.supported_at(envelope.protocol_version) {
-        return incompatible_request_protocol_response(
-            envelope.request_id,
-            envelope.protocol_version,
-        );
-    }
     let protocol_version = envelope.protocol_version;
     let request_id = envelope.request_id;
     let RelayRequest::RespondElicitation {
@@ -2198,12 +2170,6 @@ async fn background_task_stop_response(
     commands: Option<&mpsc::Sender<CommandRequest>>,
     relay: &Arc<Mutex<DurableRelay>>,
 ) -> RelayResponseEnvelope {
-    if !envelope.request.supported_at(envelope.protocol_version) {
-        return incompatible_request_protocol_response(
-            envelope.request_id,
-            envelope.protocol_version,
-        );
-    }
     let protocol_version = envelope.protocol_version;
     let request_id = envelope.request_id;
     let RelayRequest::StopBackgroundTask { background_task_id } = envelope.request else {
@@ -2284,12 +2250,6 @@ async fn credential_response(
     credentials: &std::result::Result<CredentialEndpoint, String>,
     relay_root: &std::path::Path,
 ) -> RelayResponseEnvelope {
-    if !envelope.request.supported_at(envelope.protocol_version) {
-        return incompatible_request_protocol_response(
-            envelope.request_id,
-            envelope.protocol_version,
-        );
-    }
     let body = match credentials {
         Err(message) => RelayResponseBody::Error {
             error: RelayProtocolError {
@@ -2365,12 +2325,6 @@ async fn project_memory_response(
     envelope: RelayRequestEnvelope,
     endpoint: &ProjectMemoryEndpoint,
 ) -> RelayResponseEnvelope {
-    if !envelope.request.supported_at(envelope.protocol_version) {
-        return incompatible_request_protocol_response(
-            envelope.request_id,
-            envelope.protocol_version,
-        );
-    }
     let body = match endpoint.config.as_ref() {
         None => RelayResponseBody::Error {
             error: RelayProtocolError {
