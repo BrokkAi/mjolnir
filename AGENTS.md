@@ -42,12 +42,12 @@ tag, and publishing remotely through the normal release workflows, including
 required package-channel updates. Treat this as an explicit push request;
 do not ask for separate push or publication confirmation.
 
-Follow `RELEASING.md` for every release. The release version must be committed
-in the workspace manifest, synchronized internal dependency constraints,
-`Cargo.lock`, and the generated license report before creating the tag. Run
-`node scripts/release-version.mjs check vX.Y.Z` against the clean release
-commit, and never create or push the tag until that check and the release
-validations pass.
+Follow `RELEASING.md` for every release. Tag the selected known-good commit;
+it need not be current master or merged into master. Reuse passing validation
+for that exact commit instead of rerunning it for the release. The committed
+workspace version, internal dependency constraints, `Cargo.lock`, and license
+report must match the tag; the release workflow checks version consistency.
+Do not add a new pre-tag checklist or repeat registry authorization audits.
 
 # Repository Guidelines
 

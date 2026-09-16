@@ -110,7 +110,7 @@ jobs:
 
   build-linux:
     name: Build x86_64-unknown-linux-gnu
-    needs: [build-worker-x64, build-worker-arm64]
+    needs: verify-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -131,11 +131,31 @@ jobs:
       - name: Build and verify glibc 2.28 CLI
         run: bash scripts/build-linux-cli.sh x86_64-unknown-linux-gnu
 
-      - name: Build desktop binary
-        run: cargo build --release --locked -p brokk-mj-desktop --target x86_64-unknown-linux-gnu
+      - name: Build desktop and voice worker
+        run: cargo build --release --locked -p brokk-mj-desktop -p brokk-mj-voice-worker --target x86_64-unknown-linux-gnu
 
-      - name: Build voice worker
-        run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-unknown-linux-gnu
+      - name: Stage native binaries
+        run: |
+          mkdir native
+          cp target/release-cli/x86_64-unknown-linux-gnu/release/mj native/
+          cp target/x86_64-unknown-linux-gnu/release/mj-desktop target/x86_64-unknown-linux-gnu/release/mj-voice-worker native/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-x86_64-unknown-linux-gnu
+          path: native/
+          if-no-files-found: error
+
+  package-x86_64-unknown-linux-gnu:
+    name: Package x86_64-unknown-linux-gnu
+    needs: [build-linux, build-worker-x64, build-worker-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-x86_64-unknown-linux-gnu
+          path: native
 
       - name: Download session workers
         uses: actions/download-artifact@v8
@@ -148,9 +168,9 @@ jobs:
         run: |
           name="brokk-mjolnir-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
           mkdir "$name"
-          cp "target/release-cli/x86_64-unknown-linux-gnu/release/mj" "$name/"
-          cp "target/x86_64-unknown-linux-gnu/release/mj-desktop" "$name/"
-          cp "target/x86_64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
+          cp "native/mj" "$name/"
+          cp "native/mj-desktop" "$name/"
+          cp "native/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
           chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
@@ -164,7 +184,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: x86_64-unknown-linux-gnu
+          name: archive-x86_64-unknown-linux-gnu
           path: |
             brokk-mjolnir-*.tar.gz
             brokk-mjolnir-*.tar.gz.sha256
@@ -172,7 +192,7 @@ jobs:
 
   build-linux-arm64:
     name: Build aarch64-unknown-linux-gnu
-    needs: [build-worker-x64, build-worker-arm64]
+    needs: verify-version
     # Build natively so desktop and audio system dependencies match the target.
     runs-on: ubuntu-24.04-arm
     steps:
@@ -194,11 +214,31 @@ jobs:
       - name: Build and verify glibc 2.28 CLI
         run: bash scripts/build-linux-cli.sh aarch64-unknown-linux-gnu
 
-      - name: Build desktop binary
-        run: cargo build --release --locked -p brokk-mj-desktop --target aarch64-unknown-linux-gnu
+      - name: Build desktop and voice worker
+        run: cargo build --release --locked -p brokk-mj-desktop -p brokk-mj-voice-worker --target aarch64-unknown-linux-gnu
 
-      - name: Build voice worker
-        run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-unknown-linux-gnu
+      - name: Stage native binaries
+        run: |
+          mkdir native
+          cp target/release-cli/aarch64-unknown-linux-gnu/release/mj native/
+          cp target/aarch64-unknown-linux-gnu/release/mj-desktop target/aarch64-unknown-linux-gnu/release/mj-voice-worker native/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-aarch64-unknown-linux-gnu
+          path: native/
+          if-no-files-found: error
+
+  package-aarch64-unknown-linux-gnu:
+    name: Package aarch64-unknown-linux-gnu
+    needs: [build-linux-arm64, build-worker-x64, build-worker-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-aarch64-unknown-linux-gnu
+          path: native
 
       - name: Download session workers
         uses: actions/download-artifact@v8
@@ -211,9 +251,9 @@ jobs:
         run: |
           name="brokk-mjolnir-${GITHUB_REF_NAME}-aarch64-unknown-linux-gnu"
           mkdir "$name"
-          cp "target/release-cli/aarch64-unknown-linux-gnu/release/mj" "$name/"
-          cp "target/aarch64-unknown-linux-gnu/release/mj-desktop" "$name/"
-          cp "target/aarch64-unknown-linux-gnu/release/mj-voice-worker" "$name/"
+          cp "native/mj" "$name/"
+          cp "native/mj-desktop" "$name/"
+          cp "native/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
           chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
@@ -227,57 +267,69 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: aarch64-unknown-linux-gnu
+          name: archive-aarch64-unknown-linux-gnu
           path: |
             brokk-mjolnir-*.tar.gz
             brokk-mjolnir-*.tar.gz.sha256
           if-no-files-found: error
 
   build-macos:
-    name: Build macOS universal
-    needs: [build-worker-x64, build-worker-arm64]
+    name: Build ${{ matrix.target }}
+    needs: verify-version
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
+          targets: ${{ matrix.target }}
+      - name: Build native binaries
+        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-desktop -p brokk-mj-voice-worker --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/mj
+            target/${{ matrix.target }}/release/mj-worker
+            target/${{ matrix.target }}/release/mj-desktop
+            target/${{ matrix.target }}/release/mj-voice-worker
+          if-no-files-found: error
 
-      - name: Build x86_64 controller, local worker, and desktop binaries
-        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-desktop --target x86_64-apple-darwin
-
-      - name: Build x86_64 voice worker
-        run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-apple-darwin
-
-      - name: Build aarch64 controller, local worker, and desktop binaries
-        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-desktop --target aarch64-apple-darwin
-
-      - name: Build aarch64 voice worker
-        run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-apple-darwin
+  package-macos:
+    name: Package macOS universal
+    needs: [build-macos, build-worker-x64, build-worker-arm64]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-*-apple-darwin
+          path: native
 
       - name: Create universal binary
         run: |
           mkdir -p target/universal-apple-darwin/release
           lipo -create \
-            target/x86_64-apple-darwin/release/mj \
-            target/aarch64-apple-darwin/release/mj \
+            native/native-x86_64-apple-darwin/mj \
+            native/native-aarch64-apple-darwin/mj \
             -output target/universal-apple-darwin/release/mj
           lipo -info target/universal-apple-darwin/release/mj
           lipo -create \
-            target/x86_64-apple-darwin/release/mj-worker \
-            target/aarch64-apple-darwin/release/mj-worker \
+            native/native-x86_64-apple-darwin/mj-worker \
+            native/native-aarch64-apple-darwin/mj-worker \
             -output target/universal-apple-darwin/release/mj-worker
           lipo -info target/universal-apple-darwin/release/mj-worker
           lipo -create \
-            target/x86_64-apple-darwin/release/mj-desktop \
-            target/aarch64-apple-darwin/release/mj-desktop \
+            native/native-x86_64-apple-darwin/mj-desktop \
+            native/native-aarch64-apple-darwin/mj-desktop \
             -output target/universal-apple-darwin/release/mj-desktop
           lipo -info target/universal-apple-darwin/release/mj-desktop
           lipo -create \
-            target/x86_64-apple-darwin/release/mj-voice-worker \
-            target/aarch64-apple-darwin/release/mj-voice-worker \
+            native/native-x86_64-apple-darwin/mj-voice-worker \
+            native/native-aarch64-apple-darwin/mj-voice-worker \
             -output target/universal-apple-darwin/release/mj-voice-worker
           lipo -info target/universal-apple-darwin/release/mj-voice-worker
 
@@ -308,7 +360,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: universal-apple-darwin
+          name: archive-universal-apple-darwin
           path: |
             brokk-mjolnir-*.tar.gz
             brokk-mjolnir-*.tar.gz.sha256
@@ -316,7 +368,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build-linux, build-linux-arm64, build-macos]
+    needs: [package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-macos]
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -327,6 +379,7 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
+          pattern: archive-*
           path: artifacts
           merge-multiple: true
 
