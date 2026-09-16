@@ -186,10 +186,14 @@ include narrow and resized terminals. Also exercise the viewer when shared
 rendering, session, review, or permission code affects those paths.
 Include a screenshot or terminal recording for visible rendering changes.
 
-CI builds and tests the workspace on Linux (musl), macOS, and Windows, gates
-the GNU/Linux desktop shell, runs a deterministic multi-client reliability
-scenario, checks the voice worker on Linux, and independently verifies
-dependency licenses and packaged legal files. You do not need to reproduce
+CI runs workspace lint/tests, CLI release builds, portable Linux musl worker
+checks, and desktop checks in independent jobs. Linux and macOS execute the
+workspace tests; Windows compiles them. Separate jobs check formatting, older
+GNU/Linux compatibility, a deterministic multi-client reliability scenario,
+the Linux voice worker, dependency licenses, and packaged legal files.
+Build caches are isolated by job, OS, architecture, and configuration, with
+per-commit keys that restore compatible prior builds and refresh after success.
+Superseded CI runs for the same event and ref are cancelled. You do not need to reproduce
 every runner locally, but consider terminal capabilities, path syntax,
 filesystem behavior, subprocesses, audio dependencies, and platform-specific
 packaging when changing portable code.
