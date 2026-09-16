@@ -690,8 +690,9 @@ pub async fn run_server(
     let resolved = resolve_server_args(args, termination.clone()).await?;
     let bind = resolved.bind;
     let mut controller = Controller::load()?;
-    // `list_profiles` is called in the middle of a model's turn, so its
-    // capabilities are discovered ahead of the call rather than inside it.
+    // `list_profiles` is called in the middle of a model's turn, so the
+    // catalogue discovers the profiles' capabilities in the background and
+    // the call only waits for what is already under way.
     let profile_catalog = profile_catalog::ProfileCatalog::new(termination.child_token());
     profile_catalog.sync(&controller.config);
     let mut daemon_revisions = daemon_runtime.revisions();
@@ -2091,8 +2092,9 @@ pub async fn run_server(
                             // the catalogue's answers wrong, so it drops them,
                             // adopts the configuration it is given here, and
                             // discovers the new one in the background. A
-                            // `list_profiles` call that arrives first falls
-                            // back to discovering on the call.
+                            // `list_profiles` call that arrives first waits on
+                            // that pass's discoveries rather than starting its
+                            // own.
                             profile_catalog.sync(&controller.config);
                             queued_prompts.retain(|session_id, _| {
                                 controller.state.sessions.contains_key(session_id)

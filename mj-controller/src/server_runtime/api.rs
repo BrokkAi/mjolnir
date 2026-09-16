@@ -144,9 +144,9 @@ pub struct ApiBackend {
     /// Latest background-refreshed quota reports, used to choose one profile
     /// per harness without making the parent reason about credential aliases.
     quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
-    /// The capabilities `list_profiles` answers with. A warm catalogue turns
-    /// that call into a filter over data the daemon discovered in the
-    /// background; a cold one falls back to discovering on the call.
+    /// The capabilities `list_profiles` answers with. The catalogue discovers
+    /// them in the background, so the call only filters and ranks what it
+    /// holds, waiting for a profile the pass has not published yet.
     profile_catalog: Arc<super::profile_catalog::ProfileCatalog>,
 }
 
@@ -162,9 +162,10 @@ impl ApiBackend {
             exports,
             starts: Arc::new(Mutex::new(BTreeMap::new())),
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
-            // Cold until the daemon adopts a configuration, so a backend built
-            // without one — every test that does not care about profiles —
-            // keeps the on-demand behaviour.
+            // Nothing is adopted until the daemon hands its configuration
+            // over, so a backend built without one — every test that does not
+            // care about profiles — reports that `list_profiles` has nothing
+            // to answer from instead of discovering on the call.
             profile_catalog: super::profile_catalog::ProfileCatalog::new(
                 tokio_util::sync::CancellationToken::new(),
             ),
@@ -222,19 +223,12 @@ impl ApiBackend {
                     .exports
                     .session_record(parent_session_id)
                     .context("parent session disappeared")?;
-                // A warm catalogue already holds both the candidate list and
-                // the capabilities the answer quotes, so the call only filters
-                // and ranks. A cold one reads the configuration and discovers
-                // what it is missing on the call, as this arm always did.
-                let (candidates, configs, generation) =
-                    match self.profile_catalog.view(&parent.last_profile) {
-                        Some(view) => (view.candidates, view.configs, Some(view.generation)),
-                        None => (
-                            self.list_profile_candidates(&parent.last_profile).await?,
-                            BTreeMap::new(),
-                            None,
-                        ),
-                    };
+                // The catalogue discovers profile capabilities in the
+                // background, so this call only filters and ranks: it takes
+                // the candidates the catalogue's configuration offers, ranks
+                // them with the quota reports, and waits on the background
+                // pass for the capabilities of the profiles it will quote.
+                let candidates = self.profile_catalog.candidates(&parent.last_profile)?;
                 let ids = {
                     let quota_reports = self
                         .quota_reports
@@ -242,18 +236,10 @@ impl ApiBackend {
                         .map_err(|_| anyhow!("sub-agent quota reports lock poisoned"))?;
                     select_profile_per_harness(candidates, &quota_reports)
                 };
+                let wanted = ids.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+                let choices = self.profile_catalog.capabilities(&wanted).await?;
                 let mut profiles = Vec::with_capacity(ids.len());
-                for (id, harness) in ids {
-                    let choices = match configs.get(&id) {
-                        Some(choices) => choices.clone(),
-                        // The catalogue remembers a discovery it was missing,
-                        // so a failed background probe heals on first use.
-                        None => {
-                            self.profile_catalog
-                                .discover_profile(&id, generation)
-                                .await?
-                        }
-                    };
+                for ((id, harness), choices) in ids.into_iter().zip(choices) {
                     profiles.push(serde_json::json!({
                         "profile_id":id,
                         "harness":harness.id(),
@@ -588,19 +574,6 @@ impl ApiBackend {
             ));
         }
         Ok(())
-    }
-
-    /// The profiles a parent may delegate to, for a catalogue that has not
-    /// adopted a configuration yet. It reads the file on a blocking thread —
-    /// the daemon's control loop must not wait for the disk — and applies the
-    /// same policy the catalogue applies to the configuration it adopted.
-    async fn list_profile_candidates(&self, parent: &str) -> Result<Vec<(String, HarnessKind)>> {
-        let config = tokio::task::spawn_blocking(mj_core::config::Config::load).await??;
-        Ok(super::profile_catalog::candidates(
-            &config.profiles,
-            &config.subagents,
-            parent,
-        ))
     }
 }
 
