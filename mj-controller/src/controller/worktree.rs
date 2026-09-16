@@ -18,7 +18,7 @@ use crate::targets::{
 pub(super) use mj_client::target::managed_worktree_target;
 pub use mj_client::target::{ResumePlan, resume_compatibility};
 
-use super::{Controller, backend_ssh, execute_checked, now};
+use super::{Controller, execute_checked, now};
 
 impl Controller {
     /// Inspect in a supervised worker, never on a UI event loop.
@@ -105,12 +105,16 @@ impl Controller {
                 Ok(())
             }
             TargetTemplate::SshBare { ssh, .. } => {
-                targets::validate_bare_project_directory(&backend_ssh(ssh), directory, executor)?;
+                targets::validate_bare_project_directory(
+                    &SshTarget::from(ssh),
+                    directory,
+                    executor,
+                )?;
                 mj_core::remote_git::resolve_local_repository(
                     directory,
                     &RemoteGitExecutor {
                         executor,
-                        ssh: backend_ssh(ssh),
+                        ssh: SshTarget::from(ssh),
                     },
                 )?;
                 Ok(())

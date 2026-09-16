@@ -1560,7 +1560,7 @@ pub(super) fn preflight_harness(
     let (command, destination) = match template {
         TargetTemplate::LocalBare => (CommandSpec::new("sh", args), "local host".to_owned()),
         TargetTemplate::SshBare { ssh, .. } => {
-            let ssh = super::backend_ssh(ssh);
+            let ssh = SshTarget::from(ssh);
             args.insert(0, "sh".into());
             (crate::targets::ssh_command(&ssh, args), ssh.destination)
         }

@@ -13,7 +13,7 @@ use mj_core::worker_launch::WorkerOwnership;
 
 use super::backend::{ContainerOverrides, backend_locator, backend_target};
 use super::readiness::wait_for_native_session;
-use super::{Controller, backend_ssh, now, ssh_args_with_identity};
+use super::{Controller, now};
 
 pub use mj_core::state::{RecoveryCandidate, RecoveryScan};
 
@@ -694,7 +694,7 @@ fn execute_scan(
 }
 
 fn ssh_spec(ssh: &SshConnection, remote: impl IntoIterator<Item = String>) -> CommandSpec {
-    let backend = backend_ssh(ssh);
+    let backend = SshTarget::from(ssh);
     let mut args = backend.ssh_args;
     mj_core::targets::push_connection_sharing_args(&mut args);
     args.push(backend.destination.clone());
@@ -820,7 +820,7 @@ fn recovery_backend_locator(
         }
         (TargetTemplate::SshPodman { ssh, .. }, TargetLocator::SshPodman { container_id, .. }) => {
             targets::TargetLocator::SshPodman {
-                ssh: backend_ssh(ssh),
+                ssh: SshTarget::from(ssh),
                 container_id: container_id.clone(),
                 workspace_storage: Default::default(),
             }
@@ -833,13 +833,13 @@ fn recovery_backend_locator(
                 bail!("recovery SSH Docker host does not match target template")
             }
             targets::TargetLocator::SshDocker {
-                ssh: backend_ssh(ssh),
+                ssh: SshTarget::from(ssh),
                 container_id: container_id.clone(),
             }
         }
         (TargetTemplate::SshBare { ssh, .. }, TargetLocator::SshBare { workspace, .. }) => {
             targets::TargetLocator::SshBare {
-                ssh: backend_ssh(ssh),
+                ssh: SshTarget::from(ssh),
                 workspace: workspace.to_string_lossy().into_owned(),
                 worker_id: None,
             }
@@ -866,7 +866,7 @@ fn recovery_backend_locator(
                     "{ssh_user}@{}",
                     address.as_deref().unwrap_or("unavailable.invalid")
                 ),
-                ssh_args: ssh_args_with_identity(ssh_args, identity_file.as_deref()),
+                ssh_args: targets::ssh_args_with_identity(ssh_args, identity_file.as_deref()),
             },
             workspace: format!(".local/share/hel/workspaces/{session_id}"),
         },

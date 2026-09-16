@@ -28,8 +28,8 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 
 use mj_core::config::{
-    Config, ProjectBundle, ProjectRepository, SshConnection, TargetTemplate, atomic_write,
-    container_size_host, data_dir, is_bare_project_target, mount_history_host,
+    Config, ProjectBundle, ProjectRepository, TargetTemplate, atomic_write, container_size_host,
+    data_dir, is_bare_project_target, mount_history_host,
 };
 
 use crate::import::{
@@ -576,7 +576,7 @@ impl Controller {
             | TargetTemplate::AppleContainer { .. }
             | TargetTemplate::AwsEc2 { .. } => targets::local_directory_completions(&lookup),
             TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
-                targets::ssh_directory_completions(&backend_ssh(ssh), &lookup, executor)?
+                targets::ssh_directory_completions(&SshTarget::from(ssh), &lookup, executor)?
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
                 bail!("resource path completion is unsupported for bare targets")
@@ -632,7 +632,7 @@ impl Controller {
                 })
                 .with_context(|| format!("inspect resource source {}", source.display()))?,
             TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
-                targets::ssh_directory_exists(&backend_ssh(ssh), source, executor)?
+                targets::ssh_directory_exists(&SshTarget::from(ssh), source, executor)?
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
                 bail!("resource attachments are unsupported for bare targets")
@@ -656,7 +656,7 @@ impl Controller {
         let ssh = match target {
             TargetTemplate::LocalPodman { .. } | TargetTemplate::LocalDocker { .. } => None,
             TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
-                Some(backend_ssh(ssh))
+                Some(SshTarget::from(ssh))
             }
             // Apple Container already mounts read-only, and EC2 copies instead
             // of mounting, so neither has an overlay to lose.
@@ -1235,7 +1235,7 @@ pub fn resolve_target_input_path(
                 .map(mj_core::path_input::expand_local)
                 .transpose()?;
             let command = crate::targets::ssh_command(
-                &backend_ssh(&ssh),
+                &SshTarget::from(&ssh),
                 ["sh", "-c", "printf '%s' \"$HOME\""],
             )
             .purpose("resolve remote home directory");
@@ -1251,39 +1251,6 @@ pub fn resolve_target_input_path(
         }
         _ => mj_core::path_input::expand_local(path),
     }
-}
-
-pub(crate) fn backend_ssh(ssh: &SshConnection) -> SshTarget {
-    let destination = match &ssh.user {
-        Some(user) => format!("{user}@{}", ssh.host),
-        None => ssh.host.clone(),
-    };
-    SshTarget {
-        destination,
-        ssh_args: ssh_args_with_identity(&ssh.extra_args, ssh.identity_file.as_deref()),
-    }
-}
-
-fn ssh_args_with_identity(args: &[String], identity: Option<&Path>) -> Vec<String> {
-    // Mjolnir drives ssh non-interactively from a TUI; a host-key or password
-    // prompt would steal the terminal and wedge provisioning. BatchMode fails
-    // fast instead of prompting, and accept-new trusts a first-seen host key
-    // (fresh EC2 instances are always first-seen) while still rejecting
-    // changed keys. User-supplied ssh_args come last so they can override.
-    let mut result = vec![
-        "-o".into(),
-        "BatchMode=yes".into(),
-        "-o".into(),
-        "StrictHostKeyChecking=accept-new".into(),
-        "-o".into(),
-        "ConnectTimeout=15".into(),
-    ];
-    result.extend(args.iter().cloned());
-    if let Some(identity) = identity {
-        result.push("-i".into());
-        result.push(identity.to_string_lossy().into_owned());
-    }
-    result
 }
 
 fn execute_checked(executor: &impl CommandExecutor, command: CommandSpec) -> Result<CommandOutput> {

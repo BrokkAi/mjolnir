@@ -7,9 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use mj_core::config::{
-    AwsAddressSource, Config, PodmanWorkspaceStorage, ProjectBundle, TargetTemplate, data_dir,
-};
+use mj_core::config::{AwsAddressSource, Config, ProjectBundle, TargetTemplate, data_dir};
 use mj_core::state::{
     PodmanWorkspaceLocator, SessionRecord, SessionResourceAllocation, TargetLocator,
     allocation_cpus,
@@ -20,7 +18,7 @@ use crate::targets::{
     ImageRefresh, ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
 };
 
-use super::{Controller, backend_ssh, execute_checked, ssh_args_with_identity};
+use super::{Controller, execute_checked};
 
 impl Controller {
     /// Inspect the actual execution checkout in a background worker.
@@ -229,7 +227,7 @@ impl Controller {
                 | TargetTemplate::SshDocker { ssh, .. } => {
                     let entry = ssh_hosts.entry(ssh.host.clone()).or_default();
                     entry.0.push(target_id.clone());
-                    let command = targets::ssh_host_capacity_command(&backend_ssh(ssh));
+                    let command = targets::ssh_host_capacity_command(&SshTarget::from(ssh));
                     if !entry.1.contains(&command) {
                         entry.1.push(command);
                     }
@@ -323,7 +321,7 @@ pub(super) fn preflight_target(
                 )
             }),
         TargetTemplate::SshPodman { ssh, .. } => {
-            let ssh = backend_ssh(ssh);
+            let ssh = SshTarget::from(ssh);
             targets::verify_ssh_podman(&ssh, executor)
                 .map(|preflight| {
                     for warning in preflight.warnings {
@@ -338,7 +336,7 @@ pub(super) fn preflight_target(
                 })
         }
         TargetTemplate::SshDocker { ssh, .. } => {
-            let ssh = backend_ssh(ssh);
+            let ssh = SshTarget::from(ssh);
             targets::verify_ssh_docker(&ssh, executor)
                 .map(|_| ())
                 .map_err(|error| {
@@ -374,7 +372,7 @@ pub(super) fn preflight_target(
             Ok(())
         }
         TargetTemplate::SshBare { ssh, .. } => {
-            let ssh = backend_ssh(ssh);
+            let ssh = SshTarget::from(ssh);
             let command = targets::ssh_connectivity_probe(&ssh);
             let output = executor.execute(&command)?;
             ensure!(
@@ -491,7 +489,7 @@ pub(super) fn backend_target(
         TargetTemplate::LocalBare => targets::TargetTemplate::LocalBare,
         TargetTemplate::LocalPodman { container } => {
             let mut backend = backend_container(container, allocation, overrides);
-            backend.workspace_storage = backend_workspace_storage(&container.workspace_storage);
+            backend.workspace_storage = (&container.workspace_storage).into();
             targets::TargetTemplate::LocalPodman(backend)
         }
         TargetTemplate::LocalDocker { container } => targets::TargetTemplate::LocalDocker(
@@ -523,7 +521,7 @@ pub(super) fn backend_target(
             // The address is filled after describe-instances.
             ssh: SshTarget {
                 destination: format!("{ssh_user}@pending.invalid"),
-                ssh_args: ssh_args_with_identity(ssh_args, identity_file.as_deref()),
+                ssh_args: targets::ssh_args_with_identity(ssh_args, identity_file.as_deref()),
             },
         }),
         TargetTemplate::SshBare {
@@ -531,19 +529,19 @@ pub(super) fn backend_target(
             workspace_prefix,
             ..
         } => targets::TargetTemplate::SshBare {
-            ssh: backend_ssh(ssh),
+            ssh: SshTarget::from(ssh),
             workspace_prefix: workspace_prefix.to_string_lossy().into_owned(),
         },
         TargetTemplate::SshPodman { ssh, container, .. } => {
             let mut backend = backend_container(container, allocation, overrides);
-            backend.workspace_storage = backend_workspace_storage(&container.workspace_storage);
+            backend.workspace_storage = (&container.workspace_storage).into();
             targets::TargetTemplate::SshPodman {
-                ssh: backend_ssh(ssh),
+                ssh: SshTarget::from(ssh),
                 container: backend,
             }
         }
         TargetTemplate::SshDocker { ssh, container, .. } => targets::TargetTemplate::SshDocker {
-            ssh: backend_ssh(ssh),
+            ssh: SshTarget::from(ssh),
             container: backend_container(container, allocation, overrides),
         },
     })
@@ -563,10 +561,10 @@ pub fn image_refresh_plan(config: &Config) -> Vec<ImageRefresh> {
             TargetTemplate::LocalPodman { container } => (ImageHost::LocalPodman, container),
             TargetTemplate::LocalDocker { container } => (ImageHost::LocalDocker, container),
             TargetTemplate::SshPodman { ssh, container } => {
-                (ImageHost::SshPodman(backend_ssh(ssh)), container)
+                (ImageHost::SshPodman(SshTarget::from(ssh)), container)
             }
             TargetTemplate::SshDocker { ssh, container } => {
-                (ImageHost::SshDocker(backend_ssh(ssh)), container)
+                (ImageHost::SshDocker(SshTarget::from(ssh)), container)
             }
             TargetTemplate::LocalBare
             | TargetTemplate::AppleContainer { .. }
@@ -702,53 +700,6 @@ fn backend_container(
     }
 }
 
-fn backend_workspace_storage(storage: &PodmanWorkspaceStorage) -> targets::PodmanWorkspaceStorage {
-    match storage {
-        PodmanWorkspaceStorage::PodmanVolume => targets::PodmanWorkspaceStorage::PodmanVolume,
-        PodmanWorkspaceStorage::HostHelper { root, helper } => {
-            targets::PodmanWorkspaceStorage::HostHelper {
-                root: root.to_string_lossy().into_owned(),
-                helper: helper.clone(),
-            }
-        }
-        PodmanWorkspaceStorage::ContainerLayer => targets::PodmanWorkspaceStorage::ContainerLayer,
-    }
-}
-
-fn backend_workspace_locator(storage: &PodmanWorkspaceLocator) -> targets::PodmanWorkspaceLocator {
-    match storage {
-        PodmanWorkspaceLocator::ContainerLayer => targets::PodmanWorkspaceLocator::ContainerLayer,
-        PodmanWorkspaceLocator::Volume { name } => {
-            targets::PodmanWorkspaceLocator::Volume { name: name.clone() }
-        }
-        PodmanWorkspaceLocator::HostPath {
-            path,
-            helper,
-            resource,
-        } => targets::PodmanWorkspaceLocator::HostPath {
-            path: path.to_string_lossy().into_owned(),
-            helper: helper.clone(),
-            resource: resource.clone(),
-        },
-    }
-}
-
-fn durable_workspace_locator(storage: targets::PodmanWorkspaceLocator) -> PodmanWorkspaceLocator {
-    match storage {
-        targets::PodmanWorkspaceLocator::ContainerLayer => PodmanWorkspaceLocator::ContainerLayer,
-        targets::PodmanWorkspaceLocator::Volume { name } => PodmanWorkspaceLocator::Volume { name },
-        targets::PodmanWorkspaceLocator::HostPath {
-            path,
-            helper,
-            resource,
-        } => PodmanWorkspaceLocator::HostPath {
-            path: PathBuf::from(path),
-            helper,
-            resource,
-        },
-    }
-}
-
 pub(super) fn validate_resource_allocation(
     template: &TargetTemplate,
     allocation: Option<&SessionResourceAllocation>,
@@ -834,7 +785,7 @@ pub(super) fn locator_after_provision(
             };
             TargetLocator::LocalPodman {
                 container_id: generated,
-                workspace_storage: durable_workspace_locator(targets::podman_workspace_locator(
+                workspace_storage: PodmanWorkspaceLocator::from(targets::podman_workspace_locator(
                     container, session_id,
                 )?),
             }
@@ -857,7 +808,7 @@ pub(super) fn locator_after_provision(
             TargetLocator::SshPodman {
                 host: ssh.host.clone(),
                 container_id: generated,
-                workspace_storage: durable_workspace_locator(targets::podman_workspace_locator(
+                workspace_storage: PodmanWorkspaceLocator::from(targets::podman_workspace_locator(
                     container, session_id,
                 )?),
             }
@@ -940,7 +891,7 @@ pub(super) fn locator_after_provision(
             }
             let ssh = SshTarget {
                 destination: format!("{ssh_user}@{address}"),
-                ssh_args: ssh_args_with_identity(ssh_args, identity_file.as_deref()),
+                ssh_args: targets::ssh_args_with_identity(ssh_args, identity_file.as_deref()),
             };
             wait_for_ssh_ready(
                 executor,
@@ -959,6 +910,10 @@ pub(super) fn locator_after_provision(
     })
 }
 
+/// The execution-plan locator for a session's stored target.
+///
+/// The mapping itself lives in `mj_core::targets`; this only pairs the stored
+/// locator with the target template the session was created against.
 pub(super) fn backend_locator(
     locator: &TargetLocator,
     session: &SessionRecord,
@@ -968,97 +923,11 @@ pub(super) fn backend_locator(
         .targets
         .get(&session.target_template_id)
         .context("session target template is missing")?;
-    Ok(match locator {
-        TargetLocator::LocalBare { worker_root } => {
-            let TargetTemplate::LocalBare = template else {
-                bail!("session locator/template mismatch")
-            };
-            targets::TargetLocator::LocalBare {
-                worker_root: worker_root.to_string_lossy().into_owned(),
-            }
-        }
-        TargetLocator::LocalPodman {
-            container_id,
-            workspace_storage,
-        } => targets::TargetLocator::LocalPodman {
-            container_id: container_id.clone(),
-            workspace_storage: backend_workspace_locator(workspace_storage),
-        },
-        TargetLocator::LocalDocker { container_id } => targets::TargetLocator::LocalDocker {
-            container_id: container_id.clone(),
-        },
-        TargetLocator::AppleContainer { container_id } => targets::TargetLocator::AppleContainer {
-            container_id: container_id.clone(),
-        },
-        TargetLocator::SshBare {
-            workspace,
-            worker_id,
-            ..
-        } => {
-            let TargetTemplate::SshBare { ssh, .. } = template else {
-                bail!("session locator/template mismatch")
-            };
-            targets::TargetLocator::SshBare {
-                ssh: backend_ssh(ssh),
-                workspace: workspace.to_string_lossy().into_owned(),
-                worker_id: worker_id.clone(),
-            }
-        }
-        TargetLocator::SshPodman {
-            container_id,
-            workspace_storage,
-            ..
-        } => {
-            let TargetTemplate::SshPodman { ssh, .. } = template else {
-                bail!("session locator/template mismatch")
-            };
-            targets::TargetLocator::SshPodman {
-                ssh: backend_ssh(ssh),
-                container_id: container_id.clone(),
-                workspace_storage: backend_workspace_locator(workspace_storage),
-            }
-        }
-        TargetLocator::SshDocker { host, container_id } => {
-            let TargetTemplate::SshDocker { ssh, .. } = template else {
-                bail!("session locator/template mismatch")
-            };
-            ensure!(
-                host == &ssh.host,
-                "session locator/template SSH host mismatch"
-            );
-            targets::TargetLocator::SshDocker {
-                ssh: backend_ssh(ssh),
-                container_id: container_id.clone(),
-            }
-        }
-        TargetLocator::AwsEc2 {
-            instance_id,
-            address,
-        } => {
-            let TargetTemplate::AwsEc2 {
-                aws_profile,
-                region,
-                ssh_user,
-                identity_file,
-                ssh_args,
-                ..
-            } = template
-            else {
-                bail!("session locator/template mismatch")
-            };
-            let address = address.as_deref().context("AWS locator has no address")?;
-            targets::TargetLocator::AwsEc2 {
-                profile: aws_profile.clone().unwrap_or_else(|| "default".into()),
-                region: region.clone(),
-                instance_id: instance_id.clone(),
-                ssh: SshTarget {
-                    destination: format!("{ssh_user}@{address}"),
-                    ssh_args: ssh_args_with_identity(ssh_args, identity_file.as_deref()),
-                },
-                workspace: format!(".local/share/hel/workspaces/{}", session.id),
-            }
-        }
-    })
+    Ok(targets::TargetLocator::try_from(targets::StoredTarget {
+        locator,
+        template,
+        session_id: &session.id,
+    })?)
 }
 
 #[cfg(test)]
@@ -1604,10 +1473,12 @@ mod tests {
         let refresh = image_refresh_plan(&config).pop().expect("refresh plan");
         assert_eq!(
             refresh.host,
-            ImageHost::SshDocker(backend_ssh(match config.targets.get("docker").unwrap() {
-                TargetTemplate::SshDocker { ssh, .. } => ssh,
-                _ => unreachable!(),
-            }))
+            ImageHost::SshDocker(SshTarget::from(
+                match config.targets.get("docker").unwrap() {
+                    TargetTemplate::SshDocker { ssh, .. } => ssh,
+                    _ => unreachable!(),
+                }
+            ))
         );
         assert_eq!(refresh.pull.program, "ssh");
         assert_eq!(

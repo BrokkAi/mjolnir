@@ -7,9 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::controller::{
-    WorkerBinaryAvailability, backend_ssh, worker_binary_prerequisite_for_arch,
-};
+use crate::controller::{WorkerBinaryAvailability, worker_binary_prerequisite_for_arch};
 use crate::setup::{
     DiscoveredHome, discover_harness_homes_with_executor, harness_is_authenticated_with_executor,
 };
@@ -839,7 +837,7 @@ fn ssh_bare_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> 
         .iter()
         .filter_map(|(id, target)| match target {
             TargetTemplate::SshBare { ssh, .. } => {
-                Some(ssh_bare_check(id, &backend_ssh(ssh), executor))
+                Some(ssh_bare_check(id, &RuntimeSshTarget::from(ssh), executor))
             }
             _ => None,
         })
@@ -884,7 +882,7 @@ fn ssh_podman_checks(
         .iter()
         .flat_map(|(id, target)| match target {
             TargetTemplate::SshPodman { ssh, container, .. } => {
-                let ssh = backend_ssh(ssh);
+                let ssh = RuntimeSshTarget::from(ssh);
                 let (check, reachable) =
                     ssh_podman_check(id, &ssh, &container.image, executor, smoke);
                 let mut checks = vec![check];
@@ -1232,7 +1230,7 @@ fn ssh_docker_checks(
         .filter_map(|(id, target)| match target {
             TargetTemplate::SshDocker { ssh, container } => Some(ssh_docker_check(
                 id,
-                &backend_ssh(ssh),
+                &RuntimeSshTarget::from(ssh),
                 &container.image,
                 executor,
                 smoke,
@@ -1953,7 +1951,7 @@ mod tests {
     }
 
     fn runtime_ssh() -> RuntimeSshTarget {
-        backend_ssh(&ssh_connection())
+        RuntimeSshTarget::from(&ssh_connection())
     }
 
     #[test]
