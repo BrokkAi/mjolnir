@@ -224,10 +224,14 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if version == 0 {
         create_baseline_schema(connection)?;
     } else if version < BASELINE_SCHEMA_VERSION {
+        // Every release from 2.7.2 through 2.9.x still carries the migration
+        // chain below the baseline; every later release refuses, as this one
+        // does. That range is closed, so the advice never goes stale.
         bail!(
             "Mjolnir database schema {version} was written by a Mjolnir release older than 2.7.2, \
-             which this build cannot upgrade; upgrade through Mjolnir 2.7.2 or 2.9 first, or start \
-             with a fresh data directory (--instance NAME or MJ_DATA_DIR)"
+             which this build cannot upgrade; upgrade through any Mjolnir release from 2.7.2 \
+             through 2.9.x first, or start with a fresh data directory (--instance NAME or \
+             MJ_DATA_DIR)"
         );
     }
     // Compatible: adds one table. Older readers ignore it and treat read-write
@@ -554,9 +558,11 @@ mod reader_tests {
 
         let error = open_writer(&path).unwrap_err();
 
+        let message = format!("{error:#}");
+        assert!(message.contains("older than 2.7.2"), "{message}");
         assert!(
-            format!("{error:#}").contains("older than 2.7.2"),
-            "{error:#}"
+            message.contains("from 2.7.2 through 2.9.x"),
+            "advice must name the closed range of releases that can migrate: {message}"
         );
     }
 
