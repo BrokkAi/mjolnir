@@ -244,6 +244,15 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
             );
             mj_worker::worker_runtime::attach_session_git_environment(root, &mut environment)?;
         }
+        // The reliability lab's crash hooks run inside the worker after this
+        // environment-isolating re-exec. Carry only those feature-gated test
+        // controls across; ordinary launcher variables must stay excluded.
+        #[cfg(feature = "test-hooks")]
+        for name in ["MJ_CHAOS_ISOLATED", "MJ_TEST_HOOK", "MJ_TEST_HOOK_DIR"] {
+            if let Some(value) = std::env::var(name).ok() {
+                environment.insert(name.to_owned(), value);
+            }
+        }
         let executable = if cfg!(target_os = "linux") {
             PathBuf::from("/proc/self/exe")
         } else {

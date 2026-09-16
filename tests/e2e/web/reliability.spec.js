@@ -136,8 +136,11 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await expect(page.locator('#new-progress')).toContainText('Profile');
     await page.getByRole('button', { name: 'Next' }).click();
     await expect(page.locator('#new-progress')).toContainText('Target');
+    // Config::with_local_targets also offers container candidates. Select the
+    // bare host explicitly so this scenario exercises the directory flow.
+    await page.locator('#new-target').getByRole('radio', { name: /^localhost/ }).check();
     await page.getByRole('button', { name: 'Next' }).click();
-    // The lab's only target is bare, so the project step asks for a directory
+    // The selected target is bare, so the project step asks for a directory
     // rather than offering a bundle.
     await expect(page.locator('#new-project-directory')).toBeVisible();
     await page.locator('#new-project-directory').fill(projectDirectory);
