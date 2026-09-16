@@ -199,32 +199,106 @@ pub fn verify_ssh_podman(
             host.failure()
         )
     })?;
-    let mut preflight = verify_podman(host, executor)?;
-    if let Some(warning) = ssh_podman_linger_warning(ssh, executor) {
+    // One SSH round trip carries every probe; a remote shell runs them in
+    // sequence and frames each result so the checks below stay unchanged.
+    let probes = run_ssh_podman_probes(host, executor)?;
+    let mut preflight = verify_podman_probes(host, |probe| {
+        let output = probes.get(probe.key()).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}",
+                ssh_transport_failure(
+                    host,
+                    &format!(
+                        "the preflight output ended before the {} probe",
+                        probe.key()
+                    ),
+                )
+                .expect("SSH host always reports a transport failure")
+            )
+        })?;
+        check_podman_probe_status(host, probe, output)
+    })?;
+    if let Some(warning) = ssh_podman_linger_warning(ssh, probes.get(LINGER_PROBE_KEY)) {
         preflight.warnings.push(warning);
     }
     Ok(preflight)
 }
 
+/// One rootless Podman postcondition, with the wording used to report it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PodmanProbe {
+    Version,
+    Rootless,
+    UidMap,
+}
+
+impl PodmanProbe {
+    /// Name of this probe in the batched remote script's output.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Version => "version",
+            Self::Rootless => "rootless",
+            Self::UidMap => "uid_map",
+        }
+    }
+
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Version => &["podman", "--version"],
+            Self::Rootless => &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+            Self::UidMap => &["podman", "unshare", "cat", "/proc/self/uid_map"],
+        }
+    }
+
+    fn purpose(self) -> &'static str {
+        match self {
+            Self::Version => "check Podman version",
+            Self::Rootless => "check rootless Podman mode",
+            Self::UidMap => "check rootless Podman UID map",
+        }
+    }
+
+    fn postcondition(self) -> &'static str {
+        match self {
+            Self::Version => "Postcondition `podman --version` succeeds with Podman 4.0.0 or newer",
+            Self::Rootless => {
+                "Postcondition `podman info --format '{{.Host.Security.Rootless}}'` prints `true`"
+            }
+            Self::UidMap => {
+                "Postcondition `podman unshare cat /proc/self/uid_map` maps container UIDs 0 and 1"
+            }
+        }
+    }
+
+    fn remediation(self) -> &'static str {
+        match self {
+            Self::Version => {
+                "Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`."
+            }
+            Self::Rootless => {
+                "Run Mjolnir as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection."
+            }
+            Self::UidMap => {
+                "Install UID-map helpers (`sudo apt install -y uidmap` on Debian/Ubuntu or `sudo dnf install -y shadow-utils` on Fedora), then add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"` and start a fresh login session."
+            }
+        }
+    }
+}
+
 fn verify_podman(host: PodmanHost<'_>, executor: &impl CommandExecutor) -> Result<PodmanPreflight> {
-    let version = execute_podman_preflight(
-        executor,
-        host,
-        &["podman", "--version"],
-        "check Podman version",
-        "Postcondition `podman --version` succeeds with Podman 4.0.0 or newer",
-        "Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`.",
-    )?;
+    verify_podman_probes(host, |probe| execute_podman_probe(executor, host, probe))
+}
+
+/// Apply the rootless Podman postconditions to probe results, however they
+/// were obtained: one command each locally, one batched command over SSH.
+fn verify_podman_probes(
+    host: PodmanHost<'_>,
+    probe_output: impl Fn(PodmanProbe) -> Result<CommandOutput>,
+) -> Result<PodmanPreflight> {
+    let version = probe_output(PodmanProbe::Version)?;
     let version = parse_podman_version(host, &version.stdout)?;
 
-    let rootless = execute_podman_preflight(
-        executor,
-        host,
-        &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
-        "check rootless Podman mode",
-        "Postcondition `podman info --format '{{.Host.Security.Rootless}}'` prints `true`",
-        "Run Mjolnir as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection.",
-    )?;
+    let rootless = probe_output(PodmanProbe::Rootless)?;
     let rootless_output = String::from_utf8_lossy(&rootless.stdout);
     if rootless_output.trim() != "true" {
         bail!(
@@ -235,14 +309,7 @@ fn verify_podman(host: PodmanHost<'_>, executor: &impl CommandExecutor) -> Resul
         );
     }
 
-    let uid_map = execute_podman_preflight(
-        executor,
-        host,
-        &["podman", "unshare", "cat", "/proc/self/uid_map"],
-        "check rootless Podman UID map",
-        "Postcondition `podman unshare cat /proc/self/uid_map` maps container UIDs 0 and 1",
-        "Install UID-map helpers (`sudo apt install -y uidmap` on Debian/Ubuntu or `sudo dnf install -y shadow-utils` on Fedora), then add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"` and start a fresh login session.",
-    )?;
+    let uid_map = probe_output(PodmanProbe::UidMap)?;
     if !valid_rootless_uid_map(&uid_map.stdout) {
         bail!(
             "{}: Postcondition `podman unshare cat /proc/self/uid_map` maps container UIDs 0 and 1 was not met. {}Add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"`, verify `/etc/subuid` and `/etc/subgid`, then log out and back in. See {PODMAN_DOCUMENTATION_PATH}.",
@@ -261,24 +328,13 @@ fn verify_podman(host: PodmanHost<'_>, executor: &impl CommandExecutor) -> Resul
 /// durability check. Neither condition makes an otherwise usable target fail.
 fn ssh_podman_linger_warning(
     ssh: &SshTarget,
-    executor: &impl CommandExecutor,
+    output: Option<&CommandOutput>,
 ) -> Option<PodmanPreflightWarning> {
-    let command = PodmanHost::Ssh(ssh).command(
-        &[
-            "sh",
-            "-c",
-            "loginctl show-user \"$(id -u)\" --property=Linger --value",
-        ],
-        "check remote user lingering",
-    );
-    let output = match executor.execute(&command) {
-        Ok(output) => output,
-        Err(error) => {
-            return Some(linger_unavailable_warning(
-                ssh,
-                format!("the probe could not run: {error}"),
-            ));
-        }
+    let Some(output) = output else {
+        return Some(linger_unavailable_warning(
+            ssh,
+            "the probe could not run: the preflight output did not include it".to_owned(),
+        ));
     };
     let linger = String::from_utf8_lossy(&output.stdout);
     match (output.status, linger.trim().to_ascii_lowercase().as_str()) {
@@ -321,26 +377,41 @@ fn linger_unavailable_warning(ssh: &SshTarget, reason: String) -> PodmanPrefligh
     }
 }
 
-fn execute_podman_preflight(
+fn execute_podman_probe(
     executor: &impl CommandExecutor,
     host: PodmanHost<'_>,
-    args: &[&str],
-    purpose: &'static str,
-    postcondition: &str,
-    remediation: &str,
+    probe: PodmanProbe,
 ) -> Result<CommandOutput> {
-    let command = host.command(args, purpose);
-    let failure = host.failure();
-    let scope = host.remediation_scope();
+    let command = host.command(probe.args(), probe.purpose());
     let output = match executor.execute(&command) {
         Ok(output) => output,
-        Err(error) => match ssh_transport_failure(host, &error.to_string()) {
-            Some(message) => bail!("{message}"),
-            None => bail!(
-                "{failure}: {postcondition}. {scope}{remediation} See {PODMAN_DOCUMENTATION_PATH}. Underlying error: {error}"
-            ),
-        },
+        Err(error) => bail!(
+            "{}",
+            podman_probe_run_failure(host, probe, &error.to_string())
+        ),
     };
+    check_podman_probe_status(host, probe, output)
+}
+
+/// Message for a probe that could not be run at all.
+fn podman_probe_run_failure(host: PodmanHost<'_>, probe: PodmanProbe, reported: &str) -> String {
+    match ssh_transport_failure(host, reported) {
+        Some(message) => message,
+        None => format!(
+            "{}: {}. {}{} See {PODMAN_DOCUMENTATION_PATH}. Underlying error: {reported}",
+            host.failure(),
+            probe.postcondition(),
+            host.remediation_scope(),
+            probe.remediation(),
+        ),
+    }
+}
+
+fn check_podman_probe_status(
+    host: PodmanHost<'_>,
+    probe: PodmanProbe,
+    output: CommandOutput,
+) -> Result<CommandOutput> {
     // `ssh` reserves this status for its own connection failures; the Podman
     // probes never produce it. Reporting that case separately keeps an
     // unreachable host from being mistaken for a broken Podman installation.
@@ -352,11 +423,160 @@ fn execute_podman_preflight(
     }
     if output.status != 0 {
         bail!(
-            "{failure}: {postcondition}. {scope}{remediation} See {PODMAN_DOCUMENTATION_PATH}. Podman reported: {}",
+            "{}: {}. {}{} See {PODMAN_DOCUMENTATION_PATH}. Podman reported: {}",
+            host.failure(),
+            probe.postcondition(),
+            host.remediation_scope(),
+            probe.remediation(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(output)
+}
+
+const LINGER_PROBE_KEY: &str = "linger";
+const PROBE_BLOCK_BEGIN: &str = "__mj_probe_begin__";
+const PROBE_BLOCK_END: &str = "__mj_probe_end__";
+const PROBE_STATUS_PREFIX: &str = "__mj_probe_status__";
+
+/// Run every remote Podman probe in one SSH round trip.
+///
+/// Each probe's stdout is captured in a shell variable and reprinted between
+/// framing markers, while its stderr is written straight to the saved stdout
+/// inside its own frame, so multi-line and arbitrary output survives intact.
+/// The version probe short-circuits the rest: without Podman the later probes
+/// can only repeat its failure.
+const SSH_PODMAN_PREFLIGHT_SCRIPT: &str = r#"
+exec 3>&1
+probe() {
+    name=$1
+    shift
+    printf '__mj_probe_begin__ %s.stderr\n' "$name"
+    out=$("$@" 2>&3)
+    status=$?
+    printf '\n__mj_probe_end__\n'
+    printf '__mj_probe_begin__ %s.stdout\n%s\n__mj_probe_end__\n' "$name" "$out"
+    printf '__mj_probe_status__ %s %s\n' "$name" "$status"
+    return "$status"
+}
+probe version podman --version || exit 0
+probe rootless podman info --format '{{.Host.Security.Rootless}}'
+probe uid_map podman unshare cat /proc/self/uid_map
+probe linger sh -c 'loginctl show-user "$(id -u)" --property=Linger --value'
+exit 0
+"#;
+
+fn run_ssh_podman_probes(
+    host: PodmanHost<'_>,
+    executor: &impl CommandExecutor,
+) -> Result<BTreeMap<String, CommandOutput>> {
+    let command = host.command(
+        &["sh", "-c", SSH_PODMAN_PREFLIGHT_SCRIPT],
+        "check remote Podman prerequisites",
+    );
+    let output = match executor.execute(&command) {
+        Ok(output) => output,
+        Err(error) => bail!(
+            "{}",
+            podman_probe_run_failure(host, PodmanProbe::Version, &error.to_string())
+        ),
+    };
+    if output.status == SSH_TRANSPORT_EXIT_STATUS
+        && let Some(message) =
+            ssh_transport_failure(host, String::from_utf8_lossy(&output.stderr).trim())
+    {
+        bail!("{message}");
+    }
+    let probes = parse_podman_probe_output(&output.stdout);
+    if !probes.contains_key(PodmanProbe::Version.key()) {
+        bail!(
+            "{}",
+            podman_probe_run_failure(
+                host,
+                PodmanProbe::Version,
+                &format!(
+                    "the preflight probes returned unparsable output (status {}): {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            )
+        );
+    }
+    Ok(probes)
+}
+
+/// Build what the batched remote script prints for the given probe results.
+///
+/// Tests across this crate stand in for a remote host, so they need the real
+/// framing rather than a second, drifting description of it.
+#[cfg(test)]
+pub(crate) fn ssh_podman_probe_fixture(probes: &[(&str, i32, &str, &str)]) -> Vec<u8> {
+    let mut output = String::new();
+    for (name, status, stdout, stderr) in probes {
+        output.push_str(&format!("{PROBE_BLOCK_BEGIN} {name}.stderr\n"));
+        output.push_str(stderr);
+        output.push_str(&format!("\n{PROBE_BLOCK_END}\n"));
+        output.push_str(&format!("{PROBE_BLOCK_BEGIN} {name}.stdout\n"));
+        output.push_str(stdout.strip_suffix('\n').unwrap_or(stdout));
+        output.push_str(&format!("\n{PROBE_BLOCK_END}\n"));
+        output.push_str(&format!("{PROBE_STATUS_PREFIX} {name} {status}\n"));
+    }
+    output.into_bytes()
+}
+
+/// Split the batched script's framed output into one result per probe.
+///
+/// A probe appears only once its status line has been read, so output truncated
+/// mid-probe is reported as a missing probe rather than a partial result.
+fn parse_podman_probe_output(stdout: &[u8]) -> BTreeMap<String, CommandOutput> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut blocks: BTreeMap<String, String> = BTreeMap::new();
+    let mut probes = BTreeMap::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if let Some(name) = line.strip_prefix(PROBE_BLOCK_BEGIN).and_then(|rest| {
+            rest.strip_prefix(' ')
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        }) {
+            let mut body = Vec::new();
+            let mut closed = false;
+            for line in lines.by_ref() {
+                if line == PROBE_BLOCK_END {
+                    closed = true;
+                    break;
+                }
+                body.push(line);
+            }
+            if closed {
+                blocks.insert(name, body.join("\n"));
+            }
+            continue;
+        }
+        let Some(rest) = line.strip_prefix(PROBE_STATUS_PREFIX) else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let (Some(name), Some(status)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let (Ok(status), Some(out), Some(err)) = (
+            status.parse::<i32>(),
+            blocks.remove(&format!("{name}.stdout")),
+            blocks.remove(&format!("{name}.stderr")),
+        ) else {
+            continue;
+        };
+        probes.insert(
+            name.to_owned(),
+            CommandOutput {
+                status,
+                stdout: out.into_bytes(),
+                stderr: err.into_bytes(),
+            },
+        );
+    }
+    probes
 }
 
 fn ssh_transport_failure(host: PodmanHost<'_>, reported: &str) -> Option<String> {

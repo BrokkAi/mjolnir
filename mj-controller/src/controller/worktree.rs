@@ -3565,9 +3565,12 @@ mod tests {
             "prune test",
         );
         assert_eq!(command.program, "ssh");
-        assert_eq!(&command.args[..3], ["-o", "BatchMode=yes", "builder"]);
+        assert_eq!(&command.args[..2], ["-o", "BatchMode=yes"]);
+        // Connection-sharing options may sit between the target's own args and
+        // the destination; the destination and quoted remote command stay last.
+        assert_eq!(command.args[command.args.len() - 2], "builder");
         assert_eq!(
-            command.args[3],
+            command.args[command.args.len() - 1],
             "'git' '-C' '/srv/project with '\\'' quote' 'worktree' 'prune'"
         );
     }

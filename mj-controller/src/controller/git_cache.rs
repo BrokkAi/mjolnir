@@ -45,6 +45,7 @@ impl CacheHost {
             }
             Self::SshPodman(ssh) | Self::SshDocker(ssh) => {
                 let mut args = ssh.ssh_args.clone();
+                targets::push_connection_sharing_args(&mut args);
                 args.push(ssh.destination.clone());
                 args.push(targets::join_remote_command(&remote));
                 CommandSpec::new("ssh", args).ssh_destination(ssh.destination.clone())

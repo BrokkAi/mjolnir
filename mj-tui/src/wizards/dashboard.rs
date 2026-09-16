@@ -1397,19 +1397,19 @@ impl DashboardState {
         if matches!(&self.mode, Mode::New(wizard) if wizard.step == WizardStep::Target)
             || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Target)
         {
-            let target_ids: Vec<_> = self
-                .config
-                .targets
-                .iter()
-                .filter(|(id, template)| {
-                    !matches!(template, TargetTemplate::LocalBare)
-                        && self
-                            .target_readiness
-                            .get(*id)
-                            .is_none_or(|check| &check.template != *template)
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
+            let now = Instant::now();
+            let target_ids: Vec<_> =
+                self.config
+                    .targets
+                    .iter()
+                    .filter(|(id, template)| {
+                        !matches!(template, TargetTemplate::LocalBare)
+                            && self.target_readiness.get(*id).is_none_or(|check| {
+                                &check.template != *template || check.is_stale(now)
+                            })
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
             if !target_ids.is_empty() {
                 self.target_readiness_generation = self.target_readiness_generation.wrapping_add(1);
                 let generation = self.target_readiness_generation;
@@ -1420,6 +1420,7 @@ impl DashboardState {
                             template: self.config.targets[id].clone(),
                             generation,
                             result: None,
+                            recorded_at: now,
                         },
                     );
                 }
@@ -1635,7 +1636,7 @@ impl DashboardState {
         match self
             .target_readiness
             .get(target_id)
-            .filter(|check| &check.template == template)
+            .filter(|check| &check.template == template && !check.is_stale(Instant::now()))
             .and_then(|check| check.result.as_ref())
         {
             Some(Ok(())) => None,
@@ -1659,6 +1660,7 @@ impl DashboardState {
             return;
         }
         check.result = Some(result);
+        check.recorded_at = Instant::now();
         self.mark_render_changed();
     }
 
@@ -2660,7 +2662,6 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_new_wizard(&mut self) -> DashboardAction {
-        self.target_readiness.clear();
         if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
             self.begin_settings_section("profiles", None);
             return DashboardAction::None;
@@ -2730,7 +2731,6 @@ impl DashboardState {
     /// this for a failed but checkpointed session; the resume dialog reaches it
     /// for a stopped one.
     pub fn begin_resume_for(&mut self, session_id: &str) -> DashboardAction {
-        self.target_readiness.clear();
         let Some(session) = self.state.sessions.get(session_id).cloned() else {
             return DashboardAction::None;
         };
@@ -2789,7 +2789,6 @@ impl DashboardState {
     /// The source workspace and session identity are fixed; only the
     /// destination profile, target, sizing, and attachments are editable.
     pub(crate) fn begin_move(&mut self) -> DashboardAction {
-        self.target_readiness.clear();
         let Some(session) = self.selected_session().cloned() else {
             return DashboardAction::None;
         };
@@ -2849,7 +2848,6 @@ impl DashboardState {
     /// live. The failed destination is prefilled so the user can inspect the
     /// exact interruption and queue choice before retrying it.
     pub fn begin_move_recovery(&mut self, operation: MoveOperation) {
-        self.target_readiness.clear();
         let Some(session) = self
             .state
             .sessions

@@ -9,8 +9,43 @@ Mjolnir has two target kinds that run a session on a remote machine over SSH:
   (same model as `local-podman`, just reached over SSH) and runs the session
   inside it.
 
-Both shell out to the local `ssh` CLI. Mjolnir does not use an SSH library or
-persistent connection multiplexing of its own.
+Both shell out to the local `ssh` CLI rather than using an SSH library.
+
+## Sharing one connection per host
+
+Provisioning a session runs 15 to 25 `ssh` and `scp` commands against the same
+host. On unix, Mjolnir makes them share a single authenticated connection
+instead of each paying for its own handshake: every `ssh` and `scp` it starts
+against a target carries `ControlMaster=auto`, a `ControlPath`, and
+`ControlPersist=60`. The first command authenticates and leaves a master
+connection behind; the rest open a channel on it. The master exits 60 seconds
+after its last channel closes, so one `ssh` process can outlive the daemon by
+that long.
+
+The control sockets live in `$XDG_RUNTIME_DIR/mjolnir/` when that variable is
+set, and in `<data dir>/ssh/` otherwise. Each socket is named by `%C`, OpenSSH's
+hash of host, port, user, and local host, so a socket is shared only by
+invocations to the same destination. Mjolnir creates the directory with mode
+`0700`. If it cannot, or if the socket path would be too long for a unix socket
+address, Mjolnir silently falls back to unshared connections. Commands that
+share a master also share its fate: if the underlying connection drops, every
+channel on it fails at once, and the affected commands report that failure the
+same way they would report a lost connection of their own.
+
+Two kinds of command only ever *reuse* a master and never create one: the
+target validation probes and remote Tab completion. They set a short
+`ConnectTimeout` and a one-miss keepalive so they fail fast instead of hanging
+the interface, and a master holding those settings would drop every later
+session on it — an upload, a container start, the worker bootstrap — after a
+stall of a couple of seconds. They carry `ControlMaster=no`, so they join a
+master when one is up and otherwise open their own direct connection.
+
+Mjolnir appends these options *after* the arguments you supply, and OpenSSH
+keeps the first value it sees for an option. So your own `ControlMaster`,
+`ControlPath`, or `ControlPersist` in the target's `extra_args` or in
+`~/.ssh/config` wins. To turn sharing off entirely, set
+`MJ_SSH_CONTROL_MASTER=0` (`off`, `false`, and `no` also work) in the daemon's
+environment. Sharing is unix-only; Windows OpenSSH does not implement it.
 
 ## Limiting concurrent connections
 
@@ -31,12 +66,10 @@ first number, or raise `MaxStartups` on the host. A dropped connection exits
 recognizes those and retries the invocation rather than reporting a failure,
 because the remote command never ran.
 
-As extra mitigation, enable connection sharing for the host in your
-`~/.ssh/config` with `ControlMaster auto` and a `ControlPersist` interval
-(plus a `ControlPath`), so later invocations reuse one authenticated
-connection instead of opening their own. Note that channels multiplexed over a
-single master connection are capped by the server's `MaxSessions`, which is
-`10` by default.
+Connection sharing removes most of this pressure, because a shared connection
+authenticates once. The concurrency limit still matters: channels multiplexed
+over one master are capped by the server's `MaxSessions`, `10` by default, and
+a host that refuses sharing falls back to one connection per command.
 
 ## Prerequisites you set up by hand
 

@@ -1817,7 +1817,12 @@ mod tests {
         let executor = PreflightExecutor {
             outputs: RefCell::new(vec![CommandOutput {
                 status: 0,
-                stdout: b"podman version 3.4.7\n".to_vec(),
+                stdout: crate::targets::ssh_podman_probe_fixture(&[(
+                    "version",
+                    0,
+                    "podman version 3.4.7\n",
+                    "",
+                )]),
                 stderr: vec![],
             }]),
             notices: RefCell::new(vec![]),
@@ -1850,28 +1855,16 @@ mod tests {
             },
         };
         let executor = PreflightExecutor {
-            outputs: RefCell::new(vec![
-                CommandOutput {
-                    status: 0,
-                    stdout: b"podman version 5.4.2\n".to_vec(),
-                    stderr: vec![],
-                },
-                CommandOutput {
-                    status: 0,
-                    stdout: b"true\n".to_vec(),
-                    stderr: vec![],
-                },
-                CommandOutput {
-                    status: 0,
-                    stdout: b"0 1000 1\n1 100000 65536\n".to_vec(),
-                    stderr: vec![],
-                },
-                CommandOutput {
-                    status: 0,
-                    stdout: b"no\n".to_vec(),
-                    stderr: vec![],
-                },
-            ]),
+            outputs: RefCell::new(vec![CommandOutput {
+                status: 0,
+                stdout: crate::targets::ssh_podman_probe_fixture(&[
+                    ("version", 0, "podman version 5.4.2\n", ""),
+                    ("rootless", 0, "true\n", ""),
+                    ("uid_map", 0, "0 1000 1\n1 100000 65536\n", ""),
+                    ("linger", 0, "no\n", ""),
+                ]),
+                stderr: vec![],
+            }]),
             notices: RefCell::new(vec![]),
         };
 
