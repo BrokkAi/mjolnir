@@ -1,4 +1,5 @@
 use super::*;
+use crate::controller::test_support::RefusingExecutor;
 use tokio::io::AsyncWriteExt;
 
 #[test]
@@ -1496,14 +1497,6 @@ async fn move_task_panic_reports_failure_and_releases_mutation_hold() {
 
 #[tokio::test]
 async fn daemon_lifecycle_reports_balanced_concurrent_stages() {
-    struct UnusedExecutor;
-
-    impl CommandExecutor for UnusedExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            panic!("a stage notification must not run {}", command.program)
-        }
-    }
-
     let state = test_runtime_state();
     let release = Arc::new(tokio::sync::Notify::new());
     let result = state
@@ -1524,8 +1517,11 @@ async fn daemon_lifecycle_reports_balanced_concurrent_stages() {
         ),
         BTreeSet::from(["session-1".to_owned()])
     );
-    let executor =
-        DaemonStageReportingExecutor::new(UnusedExecutor, state.clone(), "session-1".into());
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
     executor.stage_started(ProvisionStage::Cloning);
     executor.stage_started(ProvisionStage::Cloning);
     executor.stage_started(ProvisionStage::Syncing);

@@ -14,7 +14,7 @@ use anyhow::Result;
 use crate::controller::now;
 use crate::controller::restore_session_after_persistence_failure;
 use crate::controller::test_support::{
-    IsolatedTest, checkpoint_test_session, write_checkpoint_gate_archive,
+    IsolatedTest, RefusingExecutor, checkpoint_test_session, write_checkpoint_gate_archive,
 };
 #[cfg(unix)]
 use crate::session_manager::{ManagedSessionHandle, new_command_id};
@@ -44,14 +44,6 @@ use super::*;
 /// An executor that fails if it is used. The layout of a session whose
 /// repositories are described by configuration is derived without touching
 /// the target at all.
-struct UnusedExecutor;
-
-impl CommandExecutor for UnusedExecutor {
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        panic!("the export layout ran {command:?}");
-    }
-}
-
 #[test]
 fn the_export_layout_places_each_session_kind_in_its_workspace() {
     let session_id = "1123456789abcdef0123456789abcdef";
@@ -86,7 +78,7 @@ fn the_export_layout_places_each_session_kind_in_its_workspace() {
     };
 
     let layout = controller
-        .session_export_layout(session_id, &UnusedExecutor)
+        .session_export_layout(session_id, &RefusingExecutor("the export layout"))
         .unwrap();
     assert_eq!(layout.workspace_root, "/workspace");
     assert_eq!(layout.primary_repository, "app");
@@ -120,7 +112,7 @@ fn the_export_layout_places_each_session_kind_in_its_workspace() {
     let controller = Controller { config, state };
 
     let layout = controller
-        .session_export_layout(session_id, &UnusedExecutor)
+        .session_export_layout(session_id, &RefusingExecutor("the export layout"))
         .unwrap();
     assert_eq!(layout.workspace_root, "/home/dev");
     assert_eq!(layout.primary_repository, "project");

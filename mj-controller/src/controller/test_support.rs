@@ -264,7 +264,7 @@ pub(super) fn local_bundle(repository: &Path) -> ProjectBundle {
     }
 }
 
-pub(super) fn test_git(directory: &Path, args: &[&str]) -> String {
+pub(crate) fn test_git(directory: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .arg("-C")
         .arg(directory)
@@ -394,6 +394,24 @@ pub(super) fn managed_worktree_session(repository: &Path, session_id: &str) -> S
     session.project_directory = Some(worktree.worktree_root.clone());
     session.managed_worktree = Some(worktree);
     session
+}
+
+/// An executor that fails the test if anything runs a command through it.
+///
+/// `reason` names the step that was supposed to avoid running anything, so a
+/// failure says which expectation broke as well as which command ran.
+pub(crate) struct RefusingExecutor(pub(crate) &'static str);
+
+impl crate::targets::CommandExecutor for RefusingExecutor {
+    fn execute(
+        &self,
+        command: &crate::targets::CommandSpec,
+    ) -> anyhow::Result<crate::targets::CommandOutput> {
+        panic!(
+            "{} unexpectedly ran {}: {command:?}",
+            self.0, command.program
+        );
+    }
 }
 
 /// The `--exact` name of a test in this binary, given its `module_path!()`.

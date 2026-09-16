@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::controller::test_support::{IsolatedTest, test_name};
+use crate::controller::test_support::{IsolatedTest, RefusingExecutor, test_name};
 use std::sync::Mutex;
 
 use mj_core::config::{
@@ -204,14 +204,6 @@ fn a_probe_that_cannot_answer_keeps_the_overlay_and_says_so() {
 
 #[test]
 fn engines_without_an_overlay_to_lose_are_never_probed() {
-    struct UnusedExecutor;
-
-    impl CommandExecutor for UnusedExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            panic!("this target must not probe: {}", command.program)
-        }
-    }
-
     let mut mounts = vec![AdditionalMount {
         source: PathBuf::from("/host/cache"),
         destination: PathBuf::from("/mnt/cache"),
@@ -236,7 +228,14 @@ fn engines_without_an_overlay_to_lose_are_never_probed() {
             },
         }),
     ] {
-        assert!(enforce_overlay_capable_mounts(&target, &mut mounts, &UnusedExecutor).is_empty());
+        assert!(
+            enforce_overlay_capable_mounts(
+                &target,
+                &mut mounts,
+                &RefusingExecutor("a target that must not probe"),
+            )
+            .is_empty()
+        );
         assert!(!mounts[0].read_only);
     }
 }
@@ -245,14 +244,6 @@ fn engines_without_an_overlay_to_lose_are_never_probed() {
 /// the probe never has to reach a host that may not answer.
 #[test]
 fn mounts_already_read_only_are_not_probed() {
-    struct UnusedExecutor;
-
-    impl CommandExecutor for UnusedExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            panic!("a read-only mount must not probe: {}", command.program)
-        }
-    }
-
     let mut mounts = vec![AdditionalMount {
         source: PathBuf::from("/host/cache"),
         destination: PathBuf::from("/mnt/cache"),
@@ -260,7 +251,12 @@ fn mounts_already_read_only_are_not_probed() {
     }];
 
     assert!(
-        enforce_overlay_capable_mounts(&podman_target(), &mut mounts, &UnusedExecutor).is_empty()
+        enforce_overlay_capable_mounts(
+            &podman_target(),
+            &mut mounts,
+            &RefusingExecutor("a read-only mount"),
+        )
+        .is_empty()
     );
 }
 

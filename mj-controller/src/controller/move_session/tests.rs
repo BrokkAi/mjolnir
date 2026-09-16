@@ -9,9 +9,9 @@ use anyhow::Result;
 
 use super::{Controller, MoveMutationGuard, move_owns_session, move_refuses_command};
 use crate::controller::test_support::{
-    IsolatedTest, checkpoint_test_session, committed_repository, install_fake_command,
-    local_bundle, managed_raw_session, raw_session_on, resume_compatibility_config,
-    ssh_worktree_target,
+    IsolatedTest, RefusingExecutor, checkpoint_test_session, committed_repository,
+    install_fake_command, local_bundle, managed_raw_session, raw_session_on,
+    resume_compatibility_config, ssh_worktree_target,
 };
 #[cfg(unix)]
 use mj_checkpoint::archive::{
@@ -42,14 +42,6 @@ const RECOVERY_TERMINAL_CHILD: &str = "MJ_MOVE_RECOVERY_TERMINAL_CHILD";
 const MOVE_QUEUE_RELAY_ROOT: &str = "MJ_MOVE_QUEUE_RELAY_ROOT";
 const MOVE_QUEUE_RELAY_MARKER: &str = "MJ_MOVE_QUEUE_RELAY_MARKER";
 const MOVE_QUEUE_SESSION_ID: &str = "0123456789abcdef0123456789abcdef";
-
-struct UnusedExecutor;
-
-impl CommandExecutor for UnusedExecutor {
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        panic!("move preflight unexpectedly ran {}", command.program);
-    }
-}
 
 fn add_codex_profile(config: &mut Config, home: &Path) {
     config.profiles.insert(
@@ -438,12 +430,16 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
             config: config.clone(),
             state: state.clone(),
         };
-        let error = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(controller.prepare_move_session_controlled(selection, &UnusedExecutor))
-            .unwrap_err();
+        let error =
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(controller.prepare_move_session_controlled(
+                    selection,
+                    &RefusingExecutor("move preflight"),
+                ))
+                .unwrap_err();
         let detail = format!("{error:#}");
         assert!(detail.contains(expected), "{label}: {detail}");
         assert_eq!(controller.state.sessions[session_id], previous, "{label}");
@@ -480,7 +476,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 additional_mounts: None,
                 resource_allocation: None,
             },
-            &UnusedExecutor,
+            &RefusingExecutor("move preflight"),
         ))
         .unwrap_err();
     assert!(format!("{error:#}").contains("resume it on a bare target there"));
@@ -660,7 +656,8 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .build()
         .unwrap();
     super::restore_move_queue_hold(&operation);
-    let first = runtime.block_on(controller.admit_move_queue(&mut operation, &UnusedExecutor));
+    let first = runtime
+        .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")));
     assert!(first.is_err(), "the first relay must crash after its ACK");
     assert!(move_refuses_command(
         MOVE_QUEUE_SESSION_ID,
@@ -676,7 +673,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     assert!(!operation.queue_admission_finished);
 
     runtime
-        .block_on(controller.admit_move_queue(&mut operation, &UnusedExecutor))
+        .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))
         .unwrap();
     assert!(operation.queue_admission_finished);
     assert!(!move_owns_session(MOVE_QUEUE_SESSION_ID));
@@ -726,7 +723,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .target = Some(replacement_target.clone());
     operation.destination_target = Some(replacement_target);
     let error = runtime
-        .block_on(controller.admit_move_queue(&mut operation, &UnusedExecutor))
+        .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))
         .unwrap_err();
     assert!(format!("{error:#}").contains("storage was replaced"));
     assert_eq!(

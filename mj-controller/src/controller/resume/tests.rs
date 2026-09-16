@@ -7,10 +7,10 @@ use std::sync::{Barrier, Mutex};
 use anyhow::Result;
 
 use crate::controller::test_support::{
-    FIXTURE_FETCH_URL, FixtureRemoteExecutor, IsolatedTest, checkout_with_network_remote,
-    checkpoint_test_session, committed_repository, managed_worktree_session, network_remote_for,
-    raw_session_on, resume_compatibility_config, write_checkpoint_archive_with_native_state,
-    write_checkpoint_gate_archive,
+    FIXTURE_FETCH_URL, FixtureRemoteExecutor, IsolatedTest, RefusingExecutor,
+    checkout_with_network_remote, checkpoint_test_session, committed_repository,
+    managed_worktree_session, network_remote_for, raw_session_on, resume_compatibility_config,
+    write_checkpoint_archive_with_native_state, write_checkpoint_gate_archive,
 };
 use crate::controller::{Controller, SessionResumeOptions};
 use mj_checkpoint::archive::{GitCommandRunner, verify_archive_streaming};
@@ -248,14 +248,6 @@ fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it() {
 
 #[test]
 fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
-    struct UnusedExecutor;
-
-    impl CommandExecutor for UnusedExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            panic!("raw in-place preflight ran {}", command.purpose);
-        }
-    }
-
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = checkpoint_test_session(session_id);
@@ -282,7 +274,11 @@ fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
     };
 
     let preflight = controller
-        .preflight_resume_repository_sources(session_id, "localhost", &UnusedExecutor)
+        .preflight_resume_repository_sources(
+            session_id,
+            "localhost",
+            &RefusingExecutor("raw in-place preflight"),
+        )
         .unwrap();
     let ResumeRepositorySourcePreflight::Ready(receipt) = preflight else {
         panic!("raw in-place resume unexpectedly needs a repository replacement");
@@ -602,14 +598,6 @@ fn self_contained_bundle_validation_cannot_lazy_fetch_or_prompt() {
 
 #[test]
 fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
-    struct UnusedExecutor;
-
-    impl CommandExecutor for UnusedExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            panic!("resume ran {} before rejecting the target", command.program);
-        }
-    }
-
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 3);
@@ -655,7 +643,7 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
                 resource_allocation: None,
                 discard_queue: false,
             },
-            &UnusedExecutor,
+            &RefusingExecutor("resume before rejecting the target"),
         ))
         .unwrap_err();
 

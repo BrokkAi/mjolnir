@@ -2,10 +2,10 @@ use mj_core::config::HarnessKind;
 use serde_json::json;
 
 use super::*;
+use crate::controller::test_support::test_git as git;
 use mj_checkpoint::archive::*;
 use mj_worker::checkpoint::*;
 use std::cell::RefCell;
-use std::process::Command;
 
 use mj_checkpoint::archive::{
     CanonicalExecutionState, CanonicalQueuedCommandKind, CanonicalQueuedPrompt,
@@ -94,20 +94,6 @@ fn transfer_plans_cover_all_target_boundaries() {
             .any(|arg| arg == "--remote")
     );
     assert!(plans[3].commands[0].args.contains(&"-P".into()));
-}
-
-fn git(repository: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repository)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().into()
 }
 
 fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
