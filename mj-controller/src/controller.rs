@@ -1247,9 +1247,11 @@ pub fn resolve_target_input_path(
                 .as_deref()
                 .map(mj_core::path_input::expand_local)
                 .transpose()?;
-            let command =
-                ssh_command_spec(&backend_ssh(&ssh), ["sh", "-c", "printf '%s' \"$HOME\""])
-                    .purpose("resolve remote home directory");
+            let command = crate::targets::ssh_command(
+                &backend_ssh(&ssh),
+                ["sh", "-c", "printf '%s' \"$HOME\""],
+            )
+            .purpose("resolve remote home directory");
             let output = executor.execute(&command)?;
             anyhow::ensure!(
                 output.status == 0,
@@ -1273,32 +1275,6 @@ pub(crate) fn backend_ssh(ssh: &SshConnection) -> SshTarget {
         destination,
         ssh_args: ssh_args_with_identity(&ssh.extra_args, ssh.identity_file.as_deref()),
     }
-}
-
-fn ssh_command_spec(
-    ssh: &SshTarget,
-    args: impl IntoIterator<Item = impl AsRef<str>>,
-) -> CommandSpec {
-    let remote = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_string())
-        .collect::<Vec<_>>();
-    let mut command_args = ssh.ssh_args.clone();
-    command_args.push(ssh.destination.clone());
-    command_args.push(targets::join_remote_command(&remote));
-    CommandSpec::new("ssh", command_args).ssh_destination(ssh.destination.clone())
-}
-
-fn scp_command_spec(ssh: &SshTarget, source: &Path, remote: &str, recursive: bool) -> CommandSpec {
-    let mut args = ssh.ssh_args.clone();
-    if recursive {
-        args.push("-r".into());
-    }
-    args.push(source.to_string_lossy().into_owned());
-    args.push(format!("{}:{remote}", ssh.destination));
-    // `scp` opens its own connection to the same host, so it competes for the
-    // same pre-auth budget and is admitted and retried the same way.
-    CommandSpec::new("scp", args).ssh_destination(ssh.destination.clone())
 }
 
 fn ssh_args_with_identity(args: &[String], identity: Option<&Path>) -> Vec<String> {
@@ -1422,24 +1398,6 @@ mod tests {
     use mj_core::state::State;
 
     use super::*;
-
-    /// Every command that opens a connection to the host has to be admitted,
-    /// `scp` included: it competes for the same pre-auth budget as `ssh`, and
-    /// a connection the server drops carried no bytes, so it can be retried.
-    #[test]
-    fn ssh_and_scp_specs_are_both_tagged_with_the_connection_destination() {
-        let ssh = SshTarget {
-            destination: "build@10.0.0.1".into(),
-            ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
-        };
-
-        let uploaded = scp_command_spec(&ssh, Path::new("/tmp/local"), "remote/path", true);
-        let ran = ssh_command_spec(&ssh, ["true"]);
-
-        assert_eq!(uploaded.program, "scp");
-        assert_eq!(uploaded.ssh_destination.as_deref(), Some("build@10.0.0.1"));
-        assert_eq!(ran.ssh_destination.as_deref(), Some("build@10.0.0.1"));
-    }
 
     /// One profile, one bundle with nothing checked out locally, and one
     /// container target, which is all `register_session_with_resources` reads.

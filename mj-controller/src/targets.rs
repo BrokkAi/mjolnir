@@ -911,46 +911,16 @@ pub fn reconnect_plan(locator: &TargetLocator, session_id: &str) -> Result<Comma
     verify_locator(locator, session_id)?;
     let root = worker_root(locator, session_id)?;
     let binary = format!("{root}/hel");
-    let command = match locator {
-        TargetLocator::LocalBare { .. } => {
-            CommandSpec::new(binary, ["worker", "proxy", "--root", root.as_str()])
-        }
-        TargetLocator::LocalPodman { container_id, .. } => container_exec(
-            "podman",
-            container_id,
-            [&binary, "worker", "proxy", "--root", &root],
-        ),
-        TargetLocator::LocalDocker { container_id } => container_exec(
-            "docker",
-            container_id,
-            [&binary, "worker", "proxy", "--root", &root],
-        ),
-        TargetLocator::AppleContainer { container_id } => container_exec(
-            "container",
-            container_id,
-            [&binary, "worker", "proxy", "--root", &root],
-        ),
-        TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            ssh_command(ssh, [&binary, "worker", "proxy", "--root", &root])
-        }
-        TargetLocator::SshPodman {
-            ssh, container_id, ..
-        }
-        | TargetLocator::SshDocker { ssh, container_id } => ssh_command(
-            ssh,
-            [
-                locator.container_engine().expect("remote container"),
-                "exec",
-                "-i",
-                container_id,
-                &binary,
-                "worker",
-                "proxy",
-                "--root",
-                &root,
-            ],
-        ),
-    }
+    let command = locator_command(
+        locator,
+        vec![
+            binary,
+            "worker".into(),
+            "proxy".into(),
+            "--root".into(),
+            root,
+        ],
+    )
     .purpose("connect to Mjolnir worker")
     .stage(ProvisionStage::Starting);
     Ok(CommandPlan {

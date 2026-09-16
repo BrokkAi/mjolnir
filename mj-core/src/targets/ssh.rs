@@ -45,6 +45,51 @@ pub fn ssh_command_owned(ssh: &SshTarget, remote_args: Vec<String>) -> CommandSp
     CommandSpec::new("ssh", args).ssh_destination(ssh.destination.clone())
 }
 
+/// Home-relative directory on an SSH host where files bound for a remote
+/// container wait before the engine copies them in. Home-relative rather than
+/// `~/`, because `ssh_command` quotes every argument while `scp` expands `~`.
+pub const REMOTE_UPLOAD_STAGING: &str = ".cache/mjolnir/uploads";
+
+/// Upload a local file or directory to the SSH host.
+pub fn scp_upload(ssh: &SshTarget, source: &Path, remote: &str, recursive: bool) -> CommandSpec {
+    let mut args = scp_args(ssh);
+    if recursive {
+        args.push("-r".into());
+    }
+    args.push(source.to_string_lossy().into_owned());
+    args.push(format!("{}:{remote}", ssh.destination));
+    scp_command(ssh, args)
+}
+
+/// Download a remote file from the SSH host.
+pub fn scp_download(ssh: &SshTarget, remote: &str, local: &str) -> CommandSpec {
+    let mut args = scp_args(ssh);
+    args.push(format!("{}:{remote}", ssh.destination));
+    args.push(local.into());
+    scp_command(ssh, args)
+}
+
+/// The connection's `ssh` arguments rewritten for `scp`, which spells the port
+/// option `-P`; to `scp`, `-p` means "preserve file times".
+fn scp_args(ssh: &SshTarget) -> Vec<String> {
+    ssh.ssh_args
+        .iter()
+        .map(|argument| {
+            if argument == "-p" {
+                "-P".to_owned()
+            } else {
+                argument.clone()
+            }
+        })
+        .collect()
+}
+
+fn scp_command(ssh: &SshTarget, args: Vec<String>) -> CommandSpec {
+    // `scp` opens its own connection to the same host, so it competes for the
+    // same pre-auth budget and is admitted and retried the same way.
+    CommandSpec::new("scp", args).ssh_destination(ssh.destination.clone())
+}
+
 pub fn join_remote_command(args: &[String]) -> String {
     args.iter()
         .map(|arg| posix_quote(arg))
@@ -574,6 +619,44 @@ pub fn ssh_retry_delay(attempts_made: usize) -> Duration {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// `scp` spells the port `-P`; passing an `ssh` `-p` through would ask it
+    /// to preserve file times and read the port as a file name. Every `scp`
+    /// also opens a connection, so it is admitted like `ssh`.
+    #[test]
+    fn scp_translates_the_ssh_port_option_and_is_tagged_with_its_destination() {
+        let ssh = SshTarget {
+            destination: "build@10.0.0.1".into(),
+            ssh_args: vec!["-p".into(), "2222".into()],
+        };
+
+        let upload = scp_upload(&ssh, Path::new("/tmp/local"), "remote/path", true);
+        let download = scp_download(&ssh, "remote/archive.zip", "/tmp/local.zip");
+
+        assert_eq!(
+            upload.args,
+            [
+                "-P",
+                "2222",
+                "-r",
+                "/tmp/local",
+                "build@10.0.0.1:remote/path"
+            ]
+        );
+        assert_eq!(
+            download.args,
+            [
+                "-P",
+                "2222",
+                "build@10.0.0.1:remote/archive.zip",
+                "/tmp/local.zip"
+            ]
+        );
+        for command in [upload, download] {
+            assert_eq!(command.program, "scp");
+            assert_eq!(command.ssh_destination.as_deref(), Some("build@10.0.0.1"));
+        }
+    }
 
     #[test]
     fn transport_rejection_matches_only_sshd_hangups() {

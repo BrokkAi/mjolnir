@@ -20,7 +20,7 @@ use crate::targets::{
     ImageRefresh, ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
 };
 
-use super::{Controller, backend_ssh, execute_checked, ssh_args_with_identity, ssh_command_spec};
+use super::{Controller, backend_ssh, execute_checked, ssh_args_with_identity};
 
 impl Controller {
     pub fn resolve_aws_resource_options(
@@ -898,7 +898,7 @@ pub(super) fn locator_after_provision(
             };
             wait_for_ssh_ready(
                 executor,
-                &ssh_command_spec(&ssh, ["true"])
+                &crate::targets::ssh_command(&ssh, ["true"])
                     .purpose("wait for EC2 SSH availability")
                     .stage(ProvisionStage::Booting),
                 AWS_SSH_READY_TIMEOUT,

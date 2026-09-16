@@ -19,13 +19,16 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 - [x] (2026-09-16) Milestone 2a, database part: `mj-controller/src/database/baseline.sql` creates a new store at revision 33 and replaces migration steps 1–33. Stores older than revision 33 are refused.
 - [x] (2026-09-16) Milestone 2a, remaining: loading a newer build's config read-only, the `raw-localhost` rename, the 1.x `state.json` import, the two-part web login cookie, and the Ctrl-G/Ctrl-Q "moved" notices are removed.
 - [x] (2026-09-16) Milestone 2b: the worker checks the relay protocol once, when a request arrives, and serves only the current version. The controller checks each request's minimum protocol once, in `WorkerClient::call_with_timeout`. Checkpoint export uses the shared staging-command loop, and the fallback that uploaded the spec file is gone. Journal span boundary digests come from one helper.
-- [ ] Milestone 3: merge duplicated target and process plumbing.
+- [x] (2026-09-16) Milestone 3, part 1: one set of ssh, scp and container-exec builders in `mj-core/src/targets/ssh.rs` and `targets.rs`. `locator_command` builds every exec-style per-target command (architecture probe, worker stop/liveness/probe/last words, digest, launch refresh, reconnect, checkpoint cleanup). Remote upload staging uses `REMOTE_UPLOAD_STAGING`.
+- [ ] Milestone 3, part 2: shared bounded line reader, enum name maps, journal file operations.
 - [ ] Milestone 4: merge duplicated feature paths.
 - [ ] Milestone 5: larger merges that keep behavior the same.
 - [ ] Milestone 6: hand the Kimi quota token refresh to the Kimi CLI.
 
 ## Surprises & Discoveries
 
+- Observation: The controller's `scp_command_spec` passed an SSH target's `-p PORT` straight to `scp`, where `-p` means "preserve file times". The checkpoint-transfer copy rewrote it to `-P`. With `extra_args = ["-p", "2222"]`, every controller-side upload (worker binary, launch config, checkpoint spec, reviewer profile) would treat `2222` as a local source file. Found by reading the code; not reproduced against a live host.
+  Evidence: `mj-controller/src/checkpoint_transfer.rs` `scp_command` vs `mj-controller/src/controller.rs` `scp_command_spec` before commit "Build per-target commands in one place". The new test `scp_translates_the_ssh_port_option_and_is_tagged_with_its_destination` pins the shared behavior.
 - Observation: The journal rewrite path stores `Some("")` as the previous-record digest for a format v2 record. The other two places that build this value store `None`.
   Evidence: `mj-worker/src/relay/journal.rs` `rewrite_relay_journal` sets `Some(first.previous_digest)`. The ack and floor checks that run first currently hide the difference.
 - Observation: The attachment request gate in `mj-worker/src/worker_runtime/unix.rs` hardcodes protocol `8..=` and returns `InvalidRequest`. The other five copies of the gate return `IncompatibleProtocol`.
@@ -34,6 +37,9 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 
 ## Decision Log
 
+- Decision: File transfers into and out of targets keep their per-target code for now. Only exec-style commands move to `locator_command`.
+  Rationale: The transfer sites differ in meaning, not just spelling. Some copy a directory's contents and others the directory itself, and they differ in ownership fixups, atomic renames, and content-addressed caching. They cannot be checked end to end against docker, podman-over-ssh or EC2 in this environment, so a shared copy helper would risk untested behavior changes. The drift that was real (the scp port flag and two upload staging directories) is fixed.
+  Date/Author: 2026-09-16, agent.
 - Decision: The controller keeps accepting older worker protocols at hello. It does not require exactly 13.
   Rationale: The worker-upgrade coordinator (`mj-controller/src/worker_upgrade.rs`, `controller/worker_restart.rs::upgrade_session_worker`) replaces an outdated worker only after it connects, leases the connection, and reads a quiet snapshot. Stop and checkpoint also need a connection. Refusing older workers at hello would strand every session still running a pre-2.8 worker. So the protocol logic was merged instead: one worker-side rule (`mj_core::relay::protocol::relay_protocol_rejection`, current version only), and one controller-side check that refuses a request an older worker cannot decode with the same `IncompatibleProtocol` code the worker would use. Eight call-site checks and the checkpoint pre-check are gone.
   Date/Author: 2026-09-16, agent.

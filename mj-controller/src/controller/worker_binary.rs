@@ -28,7 +28,7 @@ use mj_core::worker_launch::{
 
 use super::backend::backend_locator;
 use super::readiness::WORKER_EXIT_RECORD_MARKER;
-use super::{Controller, execute_checked, scp_command_spec, ssh_command_spec, target_profile_home};
+use super::{Controller, execute_checked, target_profile_home};
 
 impl Controller {
     /// Where this session's worker lives. This is decided from the session
@@ -1376,27 +1376,8 @@ fn target_architecture(
     locator: &targets::TargetLocator,
     executor: &impl CommandExecutor,
 ) -> Result<&'static str> {
-    let command = match locator {
-        targets::TargetLocator::LocalBare { .. } => CommandSpec::new("uname", ["-m"]),
-        targets::TargetLocator::LocalPodman { container_id, .. } => {
-            CommandSpec::new("podman", ["exec", container_id, "uname", "-m"])
-        }
-        targets::TargetLocator::LocalDocker { container_id } => {
-            CommandSpec::new("docker", ["exec", container_id, "uname", "-m"])
-        }
-        targets::TargetLocator::AppleContainer { container_id } => {
-            CommandSpec::new("container", ["exec", container_id, "uname", "-m"])
-        }
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => ssh_command_spec(ssh, ["uname", "-m"]),
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "uname", "-m"]),
-        targets::TargetLocator::SshDocker { ssh, container_id } => {
-            ssh_command_spec(ssh, ["docker", "exec", container_id, "uname", "-m"])
-        }
-    }
-    .purpose("detect target architecture");
+    let command = targets::locator_command(locator, vec!["uname".into(), "-m".into()])
+        .purpose("detect target architecture");
     let output = execute_checked(executor, command)?;
     match String::from_utf8(output.stdout)?.trim() {
         "x86_64" | "amd64" => Ok("x86_64"),
@@ -1581,7 +1562,7 @@ pub(super) fn preflight_harness(
         TargetTemplate::SshBare { ssh, .. } => {
             let ssh = super::backend_ssh(ssh);
             args.insert(0, "sh".into());
-            (ssh_command_spec(&ssh, args), ssh.destination)
+            (crate::targets::ssh_command(&ssh, args), ssh.destination)
         }
         _ => unreachable!(),
     };
@@ -2218,7 +2199,7 @@ fn install_worker_files(
             // keep it in a content-addressed cache on the remote host and copy
             // it over the wire only once per unique binary.
             let digest = mj_core::worker_launch::worker_executable_digest(worker_binary)?;
-            // Home-relative, not "~/": ssh_command_spec single-quotes every
+            // Home-relative, not "~/": targets::ssh_command single-quotes every
             // argument, so a tilde would stay literal in the remote shell
             // while scp expands it, and the two sides would disagree. Both
             // ssh commands (cwd is the login home) and scp resolve a relative
@@ -2227,7 +2208,7 @@ fn install_worker_files(
             let cached_worker = format!("{cache_dir}/hel");
             let cached = matches!(
                 executor.execute(
-                    &ssh_command_spec(ssh, ["test", "-f", &cached_worker])
+                    &crate::targets::ssh_command(ssh, ["test", "-f", &cached_worker])
                         .purpose("probe cached remote Mjolnir worker"),
                 ),
                 Ok(output) if output.status == 0
@@ -2235,27 +2216,27 @@ fn install_worker_files(
             if !cached {
                 execute_checked(
                     executor,
-                    ssh_command_spec(ssh, ["mkdir", "-p", &cache_dir])
+                    crate::targets::ssh_command(ssh, ["mkdir", "-p", &cache_dir])
                         .purpose("create remote worker cache"),
                 )?;
                 let partial = format!("{cache_dir}/hel.partial-{session_id}");
                 execute_checked(
                     executor,
-                    scp_command_spec(ssh, worker_binary, &partial, false)
+                    crate::targets::scp_upload(ssh, worker_binary, &partial, false)
                         .purpose("upload remote container worker binary"),
                 )?;
                 // Rename within the cache directory so the final path only
                 // ever names a complete upload.
                 execute_checked(
                     executor,
-                    ssh_command_spec(ssh, ["mv", &partial, &cached_worker])
+                    crate::targets::ssh_command(ssh, ["mv", &partial, &cached_worker])
                         .purpose("publish cached remote Mjolnir worker"),
                 )?;
             }
-            let upload = format!(".cache/mjolnir/uploads/{session_id}");
+            let upload = format!("{}/{session_id}", targets::REMOTE_UPLOAD_STAGING);
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["mkdir", "-p", &upload])
+                crate::targets::ssh_command(ssh, ["mkdir", "-p", &upload])
                     .purpose("create remote upload staging"),
             )?;
             for (source, name) in [
@@ -2264,13 +2245,13 @@ fn install_worker_files(
             ] {
                 execute_checked(
                     executor,
-                    scp_command_spec(ssh, source, &format!("{upload}/{name}"), false)
+                    crate::targets::scp_upload(ssh, source, &format!("{upload}/{name}"), false)
                         .purpose("upload remote container worker file"),
                 )?;
             }
             execute_checked(
                 executor,
-                scp_command_spec(ssh, profile_stage, &format!("{upload}/profile"), true)
+                crate::targets::scp_upload(ssh, profile_stage, &format!("{upload}/profile"), true)
                     .purpose("upload remote container profile allowlist"),
             )?;
             let remote = [
@@ -2341,7 +2322,8 @@ fn install_worker_files(
             for args in remote {
                 execute_checked(
                     executor,
-                    ssh_command_spec(ssh, args).purpose("install remote container worker"),
+                    crate::targets::ssh_command(ssh, args)
+                        .purpose("install remote container worker"),
                 )?;
             }
         }
@@ -2362,7 +2344,7 @@ fn install_worker_over_ssh(
 ) -> Result<()> {
     execute_checked(
         executor,
-        ssh_command_spec(ssh, ["mkdir", "-p", worker_root, profile_home])
+        crate::targets::ssh_command(ssh, ["mkdir", "-p", worker_root, profile_home])
             .purpose("create SSH worker directories"),
     )?;
     for (source, remote, recursive) in [
@@ -2372,18 +2354,19 @@ fn install_worker_over_ssh(
     ] {
         execute_checked(
             executor,
-            scp_command_spec(ssh, source, &remote, recursive).purpose("upload SSH worker file"),
+            crate::targets::scp_upload(ssh, source, &remote, recursive)
+                .purpose("upload SSH worker file"),
         )?;
     }
     let incoming_profile = format!("{profile_home}.incoming");
     execute_checked(
         executor,
-        scp_command_spec(ssh, profile_stage, &incoming_profile, true)
+        crate::targets::scp_upload(ssh, profile_stage, &incoming_profile, true)
             .purpose("upload SSH harness profile allowlist"),
     )?;
     execute_checked(
         executor,
-        ssh_command_spec(
+        crate::targets::ssh_command(
             ssh,
             ["cp", "-R", &format!("{incoming_profile}/."), profile_home],
         )
@@ -2391,17 +2374,17 @@ fn install_worker_over_ssh(
     )?;
     execute_checked(
         executor,
-        ssh_command_spec(ssh, ["rm", "-rf", "--", &incoming_profile])
+        crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &incoming_profile])
             .purpose("remove SSH profile staging"),
     )?;
     execute_checked(
         executor,
-        ssh_command_spec(ssh, ["chmod", "700", &format!("{worker_root}/hel")])
+        crate::targets::ssh_command(ssh, ["chmod", "700", &format!("{worker_root}/hel")])
             .purpose("make SSH worker executable"),
     )?;
     execute_checked(
         executor,
-        ssh_command_spec(ssh, ["chmod", "-R", "go-rwx", profile_home])
+        crate::targets::ssh_command(ssh, ["chmod", "-R", "go-rwx", profile_home])
             .purpose("restrict SSH harness profile permissions"),
     )?;
     Ok(())
@@ -2489,32 +2472,32 @@ pub(super) fn prepare_managed_harness_for_upgrade(
     let result = (|| {
         execute_checked(
             executor,
-            ssh_command_spec(ssh, ["rm", "-rf", "--", &staging_root])
+            crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &staging_root])
                 .purpose("clear managed harness preparation staging"),
         )?;
         execute_checked(
             executor,
-            ssh_command_spec(ssh, ["mkdir", "-p", &staging_root])
+            crate::targets::ssh_command(ssh, ["mkdir", "-p", &staging_root])
                 .purpose("create managed harness preparation staging"),
         )?;
         execute_checked(
             executor,
-            scp_command_spec(ssh, worker_binary, &staging_binary, false)
+            crate::targets::scp_upload(ssh, worker_binary, &staging_binary, false)
                 .purpose("stage current worker for managed harness preparation"),
         )?;
         execute_checked(
             executor,
-            scp_command_spec(ssh, &local_config, &staging_config, false)
+            crate::targets::scp_upload(ssh, &local_config, &staging_config, false)
                 .purpose("stage managed harness launch configuration"),
         )?;
         execute_checked(
             executor,
-            ssh_command_spec(ssh, ["chmod", "700", &staging_binary])
+            crate::targets::ssh_command(ssh, ["chmod", "700", &staging_binary])
                 .purpose("make managed harness preparation worker executable"),
         )?;
         execute_checked(
             executor,
-            ssh_command_spec(
+            crate::targets::ssh_command(
                 ssh,
                 [
                     staging_binary.as_str(),
@@ -2530,7 +2513,7 @@ pub(super) fn prepare_managed_harness_for_upgrade(
     })();
     let cleanup = execute_checked(
         executor,
-        ssh_command_spec(ssh, ["rm", "-rf", "--", &staging_root])
+        crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &staging_root])
             .purpose("remove managed harness preparation staging"),
     );
     match (result, cleanup) {
@@ -2566,7 +2549,7 @@ fn prepare_installed_managed_harness(
             ],
         ),
         targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => ssh_command_spec(
+        | targets::TargetLocator::SshBare { ssh, .. } => crate::targets::ssh_command(
             ssh,
             [
                 worker_binary.as_str(),
@@ -2656,11 +2639,11 @@ fn installed_worker_binary_replacement_plan(
         }
         targets::TargetLocator::AwsEc2 { ssh, .. }
         | targets::TargetLocator::SshBare { ssh, .. } => vec![
-            scp_command_spec(ssh, worker_binary, &staged, false)
+            crate::targets::scp_upload(ssh, worker_binary, &staged, false)
                 .purpose("stage replacement Mjolnir worker"),
-            ssh_command_spec(ssh, ["mv", "-f", "--", &staged, &installed])
+            crate::targets::ssh_command(ssh, ["mv", "-f", "--", &staged, &installed])
                 .purpose("replace installed Mjolnir worker"),
-            ssh_command_spec(ssh, ["chmod", "700", &installed])
+            crate::targets::ssh_command(ssh, ["chmod", "700", &installed])
                 .purpose("make replaced Mjolnir worker executable"),
         ],
         targets::TargetLocator::SshPodman {
@@ -2672,18 +2655,18 @@ fn installed_worker_binary_replacement_plan(
                 targets::TargetLocator::SshDocker { .. } => "docker",
                 _ => unreachable!("matched remote container target"),
             };
-            let upload = format!(".cache/mjolnir/uploads/{session_id}-hel.next");
+            let upload = format!("{}/{session_id}-hel.next", targets::REMOTE_UPLOAD_STAGING);
             vec![
-                ssh_command_spec(ssh, ["mkdir", "-p", ".cache/mjolnir/uploads"])
+                crate::targets::ssh_command(ssh, ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING])
                     .purpose("create remote replacement worker staging"),
-                scp_command_spec(ssh, worker_binary, &upload, false)
+                crate::targets::scp_upload(ssh, worker_binary, &upload, false)
                     .purpose("stage replacement Mjolnir worker"),
-                ssh_command_spec(
+                crate::targets::ssh_command(
                     ssh,
                     [engine, "cp", &upload, &format!("{container_id}:{staged}")],
                 )
                 .purpose("stage replacement Mjolnir worker"),
-                ssh_command_spec(
+                crate::targets::ssh_command(
                     ssh,
                     std::iter::once(engine.to_owned()).chain(container_upload_ownership_args(
                         container_id,
@@ -2692,7 +2675,7 @@ fn installed_worker_binary_replacement_plan(
                     )),
                 )
                 .purpose("assign replacement worker to the worker user"),
-                ssh_command_spec(
+                crate::targets::ssh_command(
                     ssh,
                     [
                         engine,
@@ -2706,12 +2689,12 @@ fn installed_worker_binary_replacement_plan(
                     ],
                 )
                 .purpose("replace installed Mjolnir worker"),
-                ssh_command_spec(
+                crate::targets::ssh_command(
                     ssh,
                     [engine, "exec", container_id, "chmod", "700", &installed],
                 )
                 .purpose("make replaced Mjolnir worker executable"),
-                ssh_command_spec(ssh, ["rm", "-f", "--", &upload])
+                crate::targets::ssh_command(ssh, ["rm", "-f", "--", &upload])
                     .purpose("remove remote replacement worker staging"),
             ]
         }
@@ -2727,27 +2710,7 @@ fn installed_file_digest_command(
     path: &str,
     purpose: &str,
 ) -> CommandSpec {
-    match locator {
-        targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sha256sum", [path]),
-        targets::TargetLocator::LocalPodman { container_id, .. } => {
-            CommandSpec::new("podman", ["exec", container_id, "sha256sum", path])
-        }
-        targets::TargetLocator::LocalDocker { container_id } => {
-            CommandSpec::new("docker", ["exec", container_id, "sha256sum", path])
-        }
-        targets::TargetLocator::AppleContainer { container_id } => {
-            CommandSpec::new("container", ["exec", container_id, "sha256sum", path])
-        }
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => ssh_command_spec(ssh, ["sha256sum", path]),
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sha256sum", path]),
-        targets::TargetLocator::SshDocker { ssh, container_id } => {
-            ssh_command_spec(ssh, ["docker", "exec", container_id, "sha256sum", path])
-        }
-    }
-    .purpose(purpose)
+    targets::locator_command(locator, vec!["sha256sum".into(), path.into()]).purpose(purpose)
 }
 
 fn worker_launch_refresh_plan(
@@ -2763,35 +2726,9 @@ fn worker_launch_refresh_plan(
     let script = format!("umask 077; cat > {staged_arg} && mv -f -- {staged_arg} {installed_arg}");
     let body = serde_json::to_vec_pretty(launch).context("serialize worker launch config")?;
     let expected_sha256 = format!("{:x}", Sha256::digest(&body));
-    let replace = match locator {
-        targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        targets::TargetLocator::LocalPodman { container_id, .. } => {
-            CommandSpec::new("podman", ["exec", "-i", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::LocalDocker { container_id } => {
-            CommandSpec::new("docker", ["exec", "-i", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::AppleContainer { container_id } => CommandSpec::new(
-            "container",
-            ["exec", "-i", container_id, "sh", "-c", &script],
-        ),
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_spec(ssh, ["sh", "-c", &script])
-        }
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ssh_command_spec(
-            ssh,
-            ["podman", "exec", "-i", container_id, "sh", "-c", &script],
-        ),
-        targets::TargetLocator::SshDocker { ssh, container_id } => ssh_command_spec(
-            ssh,
-            ["docker", "exec", "-i", container_id, "sh", "-c", &script],
-        ),
-    }
-    .purpose("replace stale Mjolnir worker launch config")
-    .with_sensitive_stdin(body);
+    let replace = targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+        .purpose("replace stale Mjolnir worker launch config")
+        .with_sensitive_stdin(body);
     Ok(WorkerLaunchRefreshPlan {
         expected_sha256,
         installed_digest: installed_file_digest_command(
@@ -2950,56 +2887,14 @@ pub(super) fn stop_worker_after_target_recovery(
 
 fn stop_worker_command(locator: &targets::TargetLocator, worker_root: &str) -> CommandSpec {
     let script = targets::stop_worker_daemon_script(worker_root);
-    match locator {
-        targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        targets::TargetLocator::LocalPodman { container_id, .. } => {
-            CommandSpec::new("podman", ["exec", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::LocalDocker { container_id } => {
-            CommandSpec::new("docker", ["exec", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::AppleContainer { container_id } => {
-            CommandSpec::new("container", ["exec", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_spec(ssh, ["sh", "-c", &script])
-        }
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
-        targets::TargetLocator::SshDocker { ssh, container_id } => {
-            ssh_command_spec(ssh, ["docker", "exec", container_id, "sh", "-c", &script])
-        }
-    }
-    .purpose("stop Mjolnir worker daemon")
+    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+        .purpose("stop Mjolnir worker daemon")
 }
 
 fn worker_liveness_command(locator: &targets::TargetLocator, worker_root: &str) -> CommandSpec {
     let script = targets::worker_daemon_liveness_script(worker_root);
-    match locator {
-        targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        targets::TargetLocator::LocalPodman { container_id, .. } => {
-            CommandSpec::new("podman", ["exec", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::LocalDocker { container_id } => {
-            CommandSpec::new("docker", ["exec", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::AppleContainer { container_id } => {
-            CommandSpec::new("container", ["exec", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_spec(ssh, ["sh", "-c", &script])
-        }
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
-        targets::TargetLocator::SshDocker { ssh, container_id } => {
-            ssh_command_spec(ssh, ["docker", "exec", container_id, "sh", "-c", &script])
-        }
-    }
-    .purpose("probe Mjolnir worker daemon liveness")
+    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+        .purpose("probe Mjolnir worker daemon liveness")
 }
 
 pub(super) fn start_worker(
@@ -3069,11 +2964,11 @@ fn start_worker_command(locator: &targets::TargetLocator, worker_root: &str) -> 
         ),
         targets::TargetLocator::AwsEc2 { ssh, .. }
         | targets::TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_spec(ssh, ["sh", "-c", &detached_script])
+            crate::targets::ssh_command(ssh, ["sh", "-c", &detached_script])
         }
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
-        } => ssh_command_spec(
+        } => crate::targets::ssh_command(
             ssh,
             [
                 "podman",
@@ -3085,7 +2980,7 @@ fn start_worker_command(locator: &targets::TargetLocator, worker_root: &str) -> 
                 &exec_script,
             ],
         ),
-        targets::TargetLocator::SshDocker { ssh, container_id } => ssh_command_spec(
+        targets::TargetLocator::SshDocker { ssh, container_id } => crate::targets::ssh_command(
             ssh,
             [
                 "docker",
@@ -3130,33 +3025,8 @@ fn worker_binary_probe_failure(
     worker_root: &str,
 ) -> Option<String> {
     let binary = format!("{worker_root}/hel");
-    let command = match locator {
-        targets::TargetLocator::LocalBare { .. } => CommandSpec::new(binary.clone(), ["--version"]),
-        targets::TargetLocator::LocalPodman { container_id, .. } => {
-            CommandSpec::new("podman", ["exec", container_id, &binary, "--version"])
-        }
-        targets::TargetLocator::LocalDocker { container_id } => {
-            CommandSpec::new("docker", ["exec", container_id, &binary, "--version"])
-        }
-        targets::TargetLocator::AppleContainer { container_id } => {
-            CommandSpec::new("container", ["exec", container_id, &binary, "--version"])
-        }
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_spec(ssh, [binary.as_str(), "--version"])
-        }
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ssh_command_spec(
-            ssh,
-            ["podman", "exec", container_id, binary.as_str(), "--version"],
-        ),
-        targets::TargetLocator::SshDocker { ssh, container_id } => ssh_command_spec(
-            ssh,
-            ["docker", "exec", container_id, binary.as_str(), "--version"],
-        ),
-    }
-    .purpose("probe installed worker binary");
+    let command = targets::locator_command(locator, vec![binary.clone(), "--version".into()])
+        .purpose("probe installed worker binary");
     match executor.execute(&command) {
         Ok(output) if output.status == 0 => None,
         Ok(output) => {
@@ -3193,29 +3063,8 @@ pub(super) fn worker_last_words(
         root = targets::posix_quote(worker_root),
         marker = WORKER_EXIT_RECORD_MARKER
     );
-    let command = match locator {
-        targets::TargetLocator::LocalBare { .. } => CommandSpec::new("sh", ["-c", &script]),
-        targets::TargetLocator::LocalPodman { container_id, .. } => {
-            CommandSpec::new("podman", ["exec", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::LocalDocker { container_id } => {
-            CommandSpec::new("docker", ["exec", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::AppleContainer { container_id } => {
-            CommandSpec::new("container", ["exec", container_id, "sh", "-c", &script])
-        }
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => {
-            ssh_command_spec(ssh, ["sh", "-c", &script])
-        }
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ssh_command_spec(ssh, ["podman", "exec", container_id, "sh", "-c", &script]),
-        targets::TargetLocator::SshDocker { ssh, container_id } => {
-            ssh_command_spec(ssh, ["docker", "exec", container_id, "sh", "-c", &script])
-        }
-    }
-    .purpose("collect worker last words");
+    let command = targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+        .purpose("collect worker last words");
     let output = match executor.execute(&command) {
         Ok(output) => output,
         Err(error) => {

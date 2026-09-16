@@ -40,8 +40,8 @@ use super::backend::backend_locator;
 use super::readiness::wait_for_native_session_in_stage;
 use super::worker_restart::{InstalledWorkerRestart, RESTART_FOR_CHECKPOINT};
 use super::{
-    Controller, execute_checked, now, persist_session_record_transition_or_restore,
-    scp_command_spec, ssh_command_spec, target_kind, target_profile_home,
+    Controller, execute_checked, now, persist_session_record_transition_or_restore, target_kind,
+    target_profile_home,
 };
 
 /// Where one session's work lives on its target.
@@ -2221,7 +2221,8 @@ pub(super) fn upload_checkpoint_spec(
         targets::TargetLocator::AwsEc2 { ssh, .. }
         | targets::TargetLocator::SshBare { ssh, .. } => execute_checked(
             executor,
-            scp_command_spec(ssh, local, remote, false).purpose("upload checkpoint specification"),
+            crate::targets::scp_upload(ssh, local, remote, false)
+                .purpose("upload checkpoint specification"),
         )
         .map(|_| ()),
         targets::TargetLocator::SshPodman {
@@ -2233,20 +2234,23 @@ pub(super) fn upload_checkpoint_spec(
                 targets::TargetLocator::SshDocker { .. } => "docker",
                 _ => unreachable!("matched remote container target"),
             };
-            let staging = format!(".local/share/hel/uploads/{session_id}-checkpoint.json");
+            let staging = format!(
+                "{}/{session_id}-checkpoint.json",
+                targets::REMOTE_UPLOAD_STAGING
+            );
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["mkdir", "-p", ".local/share/hel/uploads"])
+                crate::targets::ssh_command(ssh, ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING])
                     .purpose("create remote checkpoint staging"),
             )?;
             execute_checked(
                 executor,
-                scp_command_spec(ssh, local, &staging, false)
+                crate::targets::scp_upload(ssh, local, &staging, false)
                     .purpose("upload remote container checkpoint specification"),
             )?;
             execute_checked(
                 executor,
-                ssh_command_spec(
+                crate::targets::ssh_command(
                     ssh,
                     [engine, "cp", &staging, &format!("{container_id}:{remote}")],
                 )
@@ -2254,7 +2258,7 @@ pub(super) fn upload_checkpoint_spec(
             )?;
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["rm", "-f", "--", &staging])
+                crate::targets::ssh_command(ssh, ["rm", "-f", "--", &staging])
                     .purpose("remove remote checkpoint staging"),
             )?;
             Ok(())
