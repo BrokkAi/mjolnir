@@ -10,10 +10,12 @@ After this plan, every user-facing feature behaves as before. A contributor can 
 
 ## Progress
 
-- [ ] Stage 1.1: harness facts live on `impl HarnessKind` in `mj-core/src/config.rs`.
-- [ ] Stage 1.2: `From`/`TryFrom` conversions between the stored target types and the execution-plan target types; controller hand-built constructions replaced.
-- [ ] Stage 1.3: `[workspace.dependencies]` holds every shared version; reqwest 0.13 and sha2 0.11; the eight unused dependencies removed after a build confirms each.
-- [ ] Stage 1.4: mj-core inline test modules over 500 lines moved to sibling `tests.rs`; `config.rs` split with stable public paths; `login_environment` timing test fixed.
+- [x] (2026-09-16) Stage 1.1: harness facts live on `impl HarnessKind` (`mj-core/src/config/harness.rs`, credential JSON methods in `credentials.rs`). Commit ad0f9460.
+- [x] (2026-09-16) Stage 1.2: `TryFrom<StoredTarget>` and Podman/SSH `From` conversions in `mj-core/src/targets/convert.rs`; `backend_locator` reduced to a lookup plus the conversion. Commit 34082761.
+- [x] (2026-09-16) Stage 1.3: `[workspace.dependencies]` has 47 entries, lock byte-identical; reqwest 0.13; eight unused dependencies removed, `cargo machete` clean. Commits 9333674e, 3b4a3c48, ae2b80eb.
+- [ ] Stage 1.3 remaining: sha2 0.11 (23 call sites across seven crates plus consolidation of three hex helpers). Moved to stage 3, after the stage-2 merges.
+- [x] (2026-09-16) Stage 1.4: config, state and credentials tests moved to sibling files; `config.rs` split into `config/{harness,targets,ui,loading}.rs`, `relay/snapshot.rs` into `snapshot/{apply,budget,digest}.rs`; `failed_login_never_returns_an_ambient_environment` fixed. Commits 0040e426, 26c5f500, 6fb557d4. Merged as ffbe2f25; full suite 3,409 passed, 0 failed.
+- [ ] Stage 3 additions found in stage 1: `local_sockets` tests race on the process working directory (`a_short_path_binds_without_switching_directory` vs `a_long_path_binds...`); `capture_deadline_includes_descendants_holding_output_pipes` needs a decision about `BoundedProcessExecutor` error wording.
 - [ ] Stage 2A: mj-controller tests out, files split, stage-1 APIs used, fixtures shared, flaky tests fixed, `MJ_UTILITY_LIVE_*` and `doctor.rs` error-text checks handled.
 - [ ] Stage 2B: mj-worker, mj-checkpoint, mj-transcript, mj-review, same four steps; `MJ_CHECKPOINT_BENCH_*` removed; socket-path test fixed.
 - [ ] Stage 2C: mj-tui, mj-chat, mj-cli, mj-client, same four steps; `MJ_CHAT_CAPTURE_*` and `MJ_GO_CAPTURE_PATH` removed.
@@ -21,7 +23,24 @@ After this plan, every user-facing feature behaves as before. A contributor can 
 
 ## Surprises & Discoveries
 
-(none yet)
+- Observation: The "about 160 hand-built plan-form target constructions" baseline was a measurement artifact. The grep counted `match` patterns such as `targets::TargetLocator::LocalBare { .. } =>`. The real duplication was two stored-to-plan conversion functions in mj-controller, `backend_locator` (`controller/backend.rs`) and a drifted copy `recovery_backend_locator` (`controller/recovery_scan.rs`).
+  Evidence: stage 1b report; after the change one shared `TryFrom` remains in `mj-core/src/targets/convert.rs` plus the deliberately kept drifted copy.
+- Observation: `recovery_backend_locator` differs from `backend_locator` in three ways that look like defects: podman `workspace_storage` is replaced by `Default::default()`, a borrowed target's `worker_id` becomes `None`, and a missing AWS address becomes the literal destination `ssh_user@unavailable.invalid` instead of an error. Behavior was kept as-is; it needs its own decision.
+  Evidence: `mj-controller/src/controller/recovery_scan.rs` lines 807, 824, 840, 865-868 before stage 1b.
+- Observation: The stored target form cannot convert to the plan form on its own. `SshBare` stores only a host and `AwsEc2` only an instance id and address, so the conversion needs the target template and the session id. The interface is `TryFrom<StoredTarget<'_>>` with a named `TargetConversionError`, not `From<&state::TargetLocator>`. Likewise `config::TargetTemplate` to `targets::TargetTemplate` needs per-session resource allocation and stays in mj-controller.
+  Evidence: stage 1b report.
+- Observation: reqwest 0.13 renamed its TLS features. `rustls` now means aws-lc-rs; `rustls-no-provider` keeps ring, which works only because every binary already calls `install_rustls_crypto_provider()` first. `.query()` needs the new `query` feature. No Rust source changed.
+  Evidence: stage 1b commit "Upgrade reqwest to 0.13".
+- Observation: sha2 0.11 is not a version bump. digest 0.11 returns an array without `LowerHex` or `io::Write`, breaking 23 call sites across seven crates, six of them in files another agent owned. Stopped; it should follow stage 1.4 and consolidate the three existing hex helpers (`mj-controller/src/server/api.rs`, `mj-client/src/session.rs`, `mj-core/src/state.rs`).
+  Evidence: stage 1b report, 25 `cargo check` errors.
+- Observation: flate2 1.1.9 (locked) and 1.1.10 differ in default features (`runtime_detection` added). The workspace table pins the feature list explicitly, so a future bump needs a decision rather than changing mj-worker's build silently.
+  Evidence: stage 1b report.
+- Observation: `MJ_E2E_SSH_HOST` is read only inside a `#[cfg(test)]` module (`mj-core/src/targets/ssh.rs`), so the plan's claim that it is on a production path was wrong. Nothing to remove. The other environment-variable claims should be re-checked the same way before acting.
+  Evidence: stage 1a report.
+- Observation: A second login-shell test, `capture_deadline_includes_descendants_holding_output_pipes`, failed once under load with "assertion failed: ...contains(\"did not answer\")". The test is about the deadline, so raising it would destroy its purpose. Possible cause: `BoundedProcessExecutor::execute` (`mj-core/src/targets.rs`) rewrites the error as "did not answer" only when the inner call returns `Err`. Not confirmed.
+  Evidence: stage 1a report.
+- Observation: Agent worktrees created with `isolation: "worktree"` branched from the hel3 worktree's line (`1a5be3c6`), not from master. Merging them as-is would have carried the user's in-progress hel3 commits into master; the first cherry-pick attempt conflicted on moved test text that contained hel3 edits. Both branches were rebased onto master before landing.
+  Evidence: `git merge-base master <branch>` was 7fd533eb while `git log master..<branch>` showed 13 hel3 commits.
 
 ## Decision Log
 
