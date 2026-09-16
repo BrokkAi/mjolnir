@@ -1394,6 +1394,11 @@ impl DashboardState {
         if crate::actions::spec_for_key(key, self.focus).is_some() {
             return None;
         }
+        // On macOS the dashboard's primary accelerator is represented by
+        // SUPER, while the chat composer implements readline controls as
+        // CONTROL. Once the dashboard has declined the chord, keep that
+        // platform convention from turning Ctrl-A/K/Y into inserted text.
+        let key = standby_prompt_key(key);
         let (action, changed) = {
             let standby = self.standby_prompt_mut(&session_id);
             let action = standby.handle_key(key);
@@ -2572,6 +2577,20 @@ fn is_paste_shortcut(key: KeyEvent) -> bool {
         && key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+}
+
+#[cfg(target_os = "macos")]
+fn standby_prompt_key(mut key: KeyEvent) -> KeyEvent {
+    if key.modifiers.contains(KeyModifiers::SUPER) && !key.modifiers.contains(KeyModifiers::ALT) {
+        key.modifiers.remove(KeyModifiers::SUPER);
+        key.modifiers.insert(KeyModifiers::CONTROL);
+    }
+    key
+}
+
+#[cfg(not(target_os = "macos"))]
+fn standby_prompt_key(key: KeyEvent) -> KeyEvent {
+    key
 }
 
 #[cfg(target_os = "macos")]
