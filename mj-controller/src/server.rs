@@ -1166,18 +1166,6 @@ impl ViewerOperationKind {
             Self::Checkpoint => None,
         }
     }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Create => "Starting",
-            Self::Resume => "Resuming",
-            Self::Move => "Moving",
-            Self::Stop => "Stopping",
-            Self::Destroy => "Destroying",
-            Self::Cleanup => "Cleaning up",
-            Self::Checkpoint => "Checkpointing",
-        }
-    }
 }
 
 /// One stage of a running operation, with the clock it started on.

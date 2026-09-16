@@ -22,12 +22,14 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 - [x] (2026-09-16) Milestone 3, part 1: one set of ssh, scp and container-exec builders in `mj-core/src/targets/ssh.rs` and `targets.rs`. `locator_command` builds every exec-style per-target command (architecture probe, worker stop/liveness/probe/last words, digest, launch refresh, reconnect, checkpoint cleanup). Remote upload staging uses `REMOTE_UPLOAD_STAGING`.
 - [x] (2026-09-16) Milestone 3, part 2: `mj_core::bounded_frame::read_bounded_frame` replaces four async frame readers (each caller keeps its own meaning for a partial frame at end of stream). `SessionState::as_str`/`from_stored`, `TargetTemplate::kind_name` and `TargetLocator::kind_name` replace four hand-written maps. One `mj_core::config::sync_directory` replaces four copies.
 - [x] (2026-09-16) Milestone 4, part 1: one MCP stdio loop and socket client (`mj-worker/src/mcp_stdio.rs`); every harness imports through `import_native_session`; move-preparation image placeholders come from one tested helper; stale crate-split comments corrected.
-- [ ] Milestone 4, part 2: session activity and lifecycle labels.
+- [x] (2026-09-16) Milestone 4, part 2: the activity-kind logic was already shared (`mj_client::usage_format::SessionActivityKind` feeds the web payload). Removed the unused server-side `ViewerOperationKind::label` copy. Display wording stays per surface.
 - [ ] Milestone 5: larger merges that keep behavior the same.
 - [ ] Milestone 6: hand the Kimi quota token refresh to the Kimi CLI.
 
 ## Surprises & Discoveries
 
+- Observation: One full `cargo test -p brokk-mj-controller` run before commit 392cd7be failed two tests: `controller::update::tests::npm_upgrade_restarts_after_the_running_package_is_removed` and `worker_client::tests::a_relay_proxy_that_fails_for_another_reason_is_not_retried`. Both passed alone, and the next full run passed (1225 passed, 0 failed). Both drive subprocesses under timeouts, so this is likely a flake under load. It is not proven unrelated: the second test goes through the relay client read path that commit 53105c47 changed. Watch for a recurrence.
+  Evidence: the rerun log in the session scratchpad; the commit was made before the failure was noticed, because a pipeline's exit status hid it.
 - Observation: The controller's `scp_command_spec` passed an SSH target's `-p PORT` straight to `scp`, where `-p` means "preserve file times". The checkpoint-transfer copy rewrote it to `-P`. With `extra_args = ["-p", "2222"]`, every controller-side upload (worker binary, launch config, checkpoint spec, reviewer profile) would treat `2222` as a local source file. Found by reading the code; not reproduced against a live host.
   Evidence: `mj-controller/src/checkpoint_transfer.rs` `scp_command` vs `mj-controller/src/controller.rs` `scp_command_spec` before commit "Build per-target commands in one place". The new test `scp_translates_the_ssh_port_option_and_is_tagged_with_its_destination` pins the shared behavior.
 - Observation: The journal rewrite path stores `Some("")` as the previous-record digest for a format v2 record. The other two places that build this value store `None`.
@@ -38,6 +40,9 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 
 ## Decision Log
 
+- Decision: Do not standardize the TUI and web activity wording.
+  Rationale: The audit counted the differing strings as drift, but the decision about what a session is doing is already shared. The server builds `activity_details.kind` from `SessionActivityKind`. The TUI renders a fixed-width bracketed column (`[idle]`, `  BG 1m00s`), and the web renders phone-card sentences (`Idle since 14:02`). Making them match would be a UI change nobody asked for, not a simplification.
+  Date/Author: 2026-09-16, agent.
 - Decision: Keep `SubagentBackend`, `ExportRuntime` and `SessionStateSource`, and keep the `start_or_join_lifecycle*` and `import e2e` script variants.
   Rationale: The traits are no longer needed across a crate boundary, but they are the seam that lets about 4,000 lines of `/api/v1` route tests run against hand-written fakes (`FakeBackend`, `NoExports`), which the repository guidelines prefer. Only their stale justification comments were wrong, and those are fixed. Folding the lifecycle wrappers would trade about 40 lines for longer calls at 31 call sites. The three import e2e scripts set different harness environment variables, and a test reads them by name.
   Date/Author: 2026-09-16, agent.
