@@ -235,7 +235,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties":{
                     "task_name":{"type":"string"},"instructions":{"type":"string"},
                     "profile_id":{"type":"string"},"model":{"type":"string"},"effort":{"type":"string"},
-                    "working_directory":{"type":"string"},"context":{"type":"string"},"request_key":{"type":"string","description":"Optional idempotency key. Repeating a call with the same key returns the original result instead of duplicating the work; useful for retries and long waits."},
+                    "working_directory":{"type":"string","description":"Launch directory for the child session on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent session's working directory. The directory must exist; no other restriction applies. Defaults to the parent session's working directory."},"context":{"type":"string"},"request_key":{"type":"string","description":"Optional idempotency key. Repeating a call with the same key returns the original result instead of duplicating the work; useful for retries and long waits."},
                     "files":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["file","start","end"],"additionalProperties":false}}
                 },
                 "required":["task_name","instructions"],"additionalProperties":false
@@ -339,5 +339,18 @@ mod tests {
             .as_str()
             .expect("request_key description");
         assert!(description.contains("idempotency key"));
+    }
+
+    #[test]
+    fn spawn_documents_how_a_working_directory_resolves() {
+        let spawn = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "spawn")
+            .expect("spawn definition");
+        let description = spawn["inputSchema"]["properties"]["working_directory"]["description"]
+            .as_str()
+            .expect("working_directory description");
+        assert!(description.contains("Absolute"), "{description}");
+        assert!(description.contains("relative"), "{description}");
     }
 }

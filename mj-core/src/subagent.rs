@@ -44,6 +44,9 @@ pub enum SubagentToolAction {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        /// Absolute, or relative to the parent session's working directory.
+        /// Empty means the parent's own working directory. The directory must
+        /// exist on the target; no other restriction applies.
         #[serde(default)]
         working_directory: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +93,10 @@ pub struct SubagentRecord {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Launch directory for the child on the parent's target: absolute, or
+    /// relative to the parent session's working directory. Empty means the
+    /// parent's own working directory. The directory must exist; no other
+    /// restriction applies.
     pub working_directory: PathBuf,
     /// Complete first prompt after the controller captures requested ranges.
     pub initial_prompt: String,
