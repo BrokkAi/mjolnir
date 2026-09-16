@@ -213,34 +213,7 @@ fn create_owner_only_directory(directory: &Path) -> Result<()> {
 ///
 /// Anything unparseable is `None` rather than a guess.
 pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
-    if kind == HarnessKind::Muse {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    match kind {
-        HarnessKind::Claude => value.get("claudeAiOauth")?.get("expiresAt")?.as_i64(),
-        HarnessKind::Codex => {
-            let last_refresh = value.get("last_refresh")?.as_str()?;
-            chrono::DateTime::parse_from_rfc3339(last_refresh)
-                .ok()
-                .map(|refreshed| refreshed.timestamp_millis())
-        }
-        HarnessKind::Kimi => value
-            .get("expires_at")?
-            .as_i64()
-            .and_then(|seconds| seconds.checked_mul(1000)),
-        HarnessKind::Grok => value
-            .as_object()?
-            .values()
-            .filter_map(|grant| {
-                let expires_at = grant.get("expires_at")?.as_str()?;
-                chrono::DateTime::parse_from_rfc3339(expires_at)
-                    .ok()
-                    .map(|expiry| expiry.timestamp_millis())
-            })
-            .max(),
-        HarnessKind::Muse => unreachable!("handled before JSON parsing"),
-    }
+    kind.credential_freshness_ms(&serde_json::from_slice(bytes).ok()?)
 }
 
 /// Epoch milliseconds at which the stored access token stops working, for the
@@ -254,22 +227,65 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
 ///
 /// Anything unparseable is `None` rather than a guess.
 pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
-    if matches!(kind, HarnessKind::Grok | HarnessKind::Muse) {
-        return None;
+    kind.credential_expiry_ms(&serde_json::from_slice(bytes).ok()?)
+}
+
+impl HarnessKind {
+    /// Read [`credential_freshness`] out of this harness's own credential JSON.
+    pub fn credential_freshness_ms(self, json: &serde_json::Value) -> Option<i64> {
+        match self {
+            Self::Claude => json.get("claudeAiOauth")?.get("expiresAt")?.as_i64(),
+            Self::Codex => {
+                let last_refresh = json.get("last_refresh")?.as_str()?;
+                chrono::DateTime::parse_from_rfc3339(last_refresh)
+                    .ok()
+                    .map(|refreshed| refreshed.timestamp_millis())
+            }
+            Self::Kimi => json
+                .get("expires_at")?
+                .as_i64()
+                .and_then(|seconds| seconds.checked_mul(1000)),
+            Self::Grok => json
+                .as_object()?
+                .values()
+                .filter_map(|grant| {
+                    let expires_at = grant.get("expires_at")?.as_str()?;
+                    chrono::DateTime::parse_from_rfc3339(expires_at)
+                        .ok()
+                        .map(|expiry| expiry.timestamp_millis())
+                })
+                .max(),
+            // Muse stores no timestamp Hel can order two copies by.
+            Self::Muse => None,
+        }
     }
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    match kind {
-        HarnessKind::Claude => value.get("claudeAiOauth")?.get("expiresAt")?.as_i64(),
-        HarnessKind::Codex => {
-            jwt_expiry_millis(value.get("tokens")?.get("access_token")?.as_str()?)
+
+    /// Read [`credential_expiry`] out of this harness's own credential JSON.
+    pub fn credential_expiry_ms(self, json: &serde_json::Value) -> Option<i64> {
+        match self {
+            Self::Claude => json.get("claudeAiOauth")?.get("expiresAt")?.as_i64(),
+            Self::Codex => jwt_expiry_millis(json.get("tokens")?.get("access_token")?.as_str()?),
+            Self::Kimi => json
+                .get("expires_at")?
+                .as_i64()
+                .and_then(|seconds| seconds.checked_mul(1000)),
+            // Neither has a proactive-refresh path, so neither reports an
+            // expiry Hel would act on.
+            Self::Grok | Self::Muse => None,
         }
-        HarnessKind::Kimi => value
-            .get("expires_at")?
-            .as_i64()
-            .and_then(|seconds| seconds.checked_mul(1000)),
-        HarnessKind::Grok | HarnessKind::Muse => {
-            unreachable!("handled before JSON parsing")
-        }
+    }
+
+    /// The harness CLI's own interactive login command.
+    ///
+    /// Verified against the locally installed CLIs with `--help`: `codex
+    /// login`, `claude auth login` (there is no bare `claude login`), `kimi
+    /// login`, `grok login`, and `muse login`.
+    pub fn native_login_command(self) -> (String, Vec<String>) {
+        let arguments = match self {
+            Self::Claude => vec!["auth".to_owned(), "login".to_owned()],
+            Self::Codex | Self::Kimi | Self::Grok | Self::Muse => vec!["login".to_owned()],
+        };
+        (self.cli_binary_name().to_owned(), arguments)
     }
 }
 
@@ -530,16 +546,7 @@ pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> 
 /// exists, where "this profile needs no login" is not a useful answer: it only
 /// wants the program name to run `--version` against.
 pub fn native_login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
-    match profile.kind {
-        HarnessKind::Codex => ("codex".to_owned(), vec!["login".to_owned()]),
-        HarnessKind::Claude => (
-            "claude".to_owned(),
-            vec!["auth".to_owned(), "login".to_owned()],
-        ),
-        HarnessKind::Kimi => ("kimi".to_owned(), vec!["login".to_owned()]),
-        HarnessKind::Grok => ("grok".to_owned(), vec!["login".to_owned()]),
-        HarnessKind::Muse => ("muse".to_owned(), vec!["login".to_owned()]),
-    }
+    profile.kind.native_login_command()
 }
 
 /// One live session the coordinator may reconcile with its profile.

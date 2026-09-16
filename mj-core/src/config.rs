@@ -391,13 +391,7 @@ impl ExecutionEnforcement {
 /// the same path, so it is decided here beside [`HarnessKind`] rather than in
 /// any one of them.
 pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf {
-    home.join(match kind {
-        HarnessKind::Codex => "auth.json",
-        HarnessKind::Claude => ".credentials.json",
-        HarnessKind::Kimi => "credentials/kimi-code.json",
-        HarnessKind::Grok => "auth.json",
-        HarnessKind::Muse => "auth.json",
-    })
+    home.join(kind.credential_file_name())
 }
 
 impl HarnessKind {
@@ -463,6 +457,47 @@ impl HarnessKind {
             Self::Kimi => ".kimi-code",
             Self::Grok => ".grok",
             Self::Muse => ".config/muse",
+        }
+    }
+
+    /// The harness-home-relative file that proves the harness is logged in.
+    /// Join it onto a home with [`harness_authentication_marker`].
+    pub const fn credential_file_name(self) -> &'static str {
+        match self {
+            Self::Codex => "auth.json",
+            Self::Claude => ".credentials.json",
+            Self::Kimi => "credentials/kimi-code.json",
+            Self::Grok => "auth.json",
+            Self::Muse => "auth.json",
+        }
+    }
+
+    /// The harness's own command-line program, as found on `PATH`.
+    pub const fn cli_binary_name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Kimi => "kimi",
+            Self::Grok => "grok",
+            Self::Muse => "muse",
+        }
+    }
+
+    /// The project instruction file this harness reads.
+    pub const fn agent_instructions_file(self) -> &'static str {
+        match self {
+            Self::Claude => "CLAUDE.md",
+            Self::Codex | Self::Kimi | Self::Grok | Self::Muse => "AGENTS.md",
+        }
+    }
+
+    /// The harness-home-relative directories Hel keeps in sync for a profile.
+    ///
+    /// Every harness resolves user skills from a `skills/` directory under its
+    /// home, matching the provisioning allowlist the controller stages.
+    pub const fn synced_skill_dirs(self) -> &'static [&'static str] {
+        match self {
+            Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse => &["skills"],
         }
     }
 
