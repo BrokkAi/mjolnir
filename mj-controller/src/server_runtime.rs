@@ -2612,10 +2612,6 @@ async fn apply_phone_action(
                 format!("{project} via {profile_id}")
             });
             let session_title_override = Some(title.clone());
-            // Isolated creation always starts from the network default branch;
-            // the legacy field remains accepted on the wire for old phones but
-            // cannot opt local commits or dirty files into a new session.
-            let allow_dirty_local = false;
             let (published, publication) = tokio::sync::oneshot::channel();
             let registered = services
                 .daemon_runtime
@@ -2630,7 +2626,6 @@ async fn apply_phone_action(
                         project_directory,
                         target_template_id: target_id,
                         additional_mounts: Vec::new(),
-                        allow_dirty_local,
                         resource_allocation: None,
                         title,
                         session_title_override,

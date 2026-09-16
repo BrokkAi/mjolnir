@@ -337,26 +337,6 @@ pub fn harness_config_home(kind: HarnessKind) -> Result<PathBuf> {
     Ok(home)
 }
 
-/// Resolve the Claude configuration home without ever modifying it.
-pub fn claude_config_home() -> Result<PathBuf> {
-    harness_config_home(HarnessKind::Claude)
-}
-
-/// Resolve the Codex configuration home without ever modifying it.
-pub fn codex_config_home() -> Result<PathBuf> {
-    harness_config_home(HarnessKind::Codex)
-}
-
-/// Resolve the Kimi Code configuration home without ever modifying it.
-pub fn kimi_config_home() -> Result<PathBuf> {
-    harness_config_home(HarnessKind::Kimi)
-}
-
-/// Resolve the Grok Build configuration home without ever modifying it.
-pub fn grok_config_home() -> Result<PathBuf> {
-    harness_config_home(HarnessKind::Grok)
-}
-
 /// One native session located on disk, normalized across harnesses: the id
 /// `session/load` takes and the file or directory its transcript is read from.
 #[derive(Debug, Clone, PartialEq, Eq)]

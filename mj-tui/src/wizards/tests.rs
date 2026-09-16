@@ -52,7 +52,6 @@ fn new_session_wizard_returns_all_three_choices() {
                 project_directory: None,
                 target_template_id: "podman".into(),
                 additional_mounts: vec![],
-                allow_dirty_local: false,
                 resource_allocation: Some(SessionResourceAllocation::Container {
                     cpus: BASELINE_CPUS,
                     memory_bytes: BASELINE_MEMORY_BYTES,
@@ -774,7 +773,6 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
             project_directory: Some("/srv/repaired".into()),
             target_template_id: "machine".into(),
             additional_mounts: Vec::new(),
-            allow_dirty_local: false,
             resource_allocation: None,
         }
     );
@@ -966,7 +964,6 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
             project_directory: Some("/home/me/project".into()),
             target_template_id: "localhost".into(),
             additional_mounts: Vec::new(),
-            allow_dirty_local: false,
             resource_allocation: None,
         }
     );
@@ -1015,7 +1012,6 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
                 project_directory: None,
                 target_template_id: "podman".into(),
                 additional_mounts: vec![],
-                allow_dirty_local: false,
                 resource_allocation: Some(SessionResourceAllocation::Container {
                     cpus: BASELINE_CPUS,
                     memory_bytes: BASELINE_MEMORY_BYTES,
@@ -1271,7 +1267,6 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                     destination: "/mnt/cache".into(),
                     read_only: false,
                 }],
-                allow_dirty_local: false,
                 resource_allocation: Some(SessionResourceAllocation::Container {
                     cpus: BASELINE_CPUS,
                     memory_bytes: BASELINE_MEMORY_BYTES,

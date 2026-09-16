@@ -51,14 +51,6 @@ pub(super) enum ProvisioningFailureDisposition {
 }
 
 impl Controller {
-    pub async fn provision_session_controlled(
-        &mut self,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<()> {
-        self.provision_session_controlled_with_commit(session_id, executor, || Ok(()))
-            .await
-    }
 
     pub async fn provision_session_controlled_with_commit(
         &mut self,
@@ -189,30 +181,6 @@ impl Controller {
         );
         self.persist_session_state(session_id)?;
         Ok(failure)
-    }
-
-    pub async fn provision_session_with(
-        &mut self,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<()> {
-        self.provision_session_with_github_token(session_id, executor, None)
-            .await
-    }
-
-    async fn provision_session_with_github_token(
-        &mut self,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-        github_token: Option<&str>,
-    ) -> Result<()> {
-        self.provision_session_with_failure_disposition(
-            session_id,
-            executor,
-            github_token,
-            ProvisioningFailureDisposition::Discard,
-        )
-        .await
     }
 
     pub(super) async fn provision_session_with_failure_disposition(
@@ -1582,7 +1550,6 @@ mod tests {
                     initial_prompt: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                     additional_mounts: Vec::new(),
-                    allow_dirty_local: false,
                     resource_allocation: None,
                     project_directory: None,
                     session_title_override: None,
@@ -1686,7 +1653,6 @@ mod tests {
                     initial_prompt: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                     additional_mounts: Vec::new(),
-                    allow_dirty_local: false,
                     resource_allocation: None,
                     project_directory: Some("/srv/project".into()),
                     session_title_override: None,

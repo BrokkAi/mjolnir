@@ -734,10 +734,6 @@ pub fn reassign_resumable_session_workspace_at(
     Ok(())
 }
 
-pub fn workspace_for_session(session_id: &str) -> Result<Option<String>> {
-    workspace_for_session_at(&database_path(), session_id)
-}
-
 pub fn workspace_for_session_at(path: &Path, session_id: &str) -> Result<Option<String>> {
     open_reader(path)?
         .query_row(
@@ -2503,32 +2499,6 @@ fn load_materialized_turn_summary_from(
     })
 }
 
-/// Read the transcript items whose sequence is above `after_seq`, oldest
-/// first. Returns `None` when the session has no projection row.
-///
-/// The sequence is `COALESCE(latest_content_event_ordinal, position)`: an
-/// agent message is rewritten while it streams, so paging by position would
-/// hand a caller the message as it was first created and never send the
-/// finished text. Paging by this sequence sends the item again exactly when it
-/// changed, and a caller that keeps the highest sequence it saw resumes from
-/// there whether the session is live or long stopped.
-pub fn load_materialized_transcript_after(
-    session_id: &str,
-    after_seq: u64,
-    limit: usize,
-) -> Result<Option<TranscriptPage>> {
-    load_materialized_transcript_after_from(&database_path(), session_id, after_seq, limit)
-}
-
-fn load_materialized_transcript_after_from(
-    path: &Path,
-    session_id: &str,
-    after_seq: u64,
-    limit: usize,
-) -> Result<Option<TranscriptPage>> {
-    load_materialized_transcript_filtered_from(path, session_id, after_seq, limit, None)
-}
-
 pub fn load_materialized_transcript_filtered(
     session_id: &str,
     after_seq: u64,
@@ -2621,31 +2591,6 @@ fn load_materialized_transcript_filtered_from(
         latest_seq,
         execution: fields.execution,
     }))
-}
-
-/// Read the newest `limit` transcript items for a session, oldest first.
-///
-/// A conversation view seeds itself from the tail and discards everything
-/// before it — `ChatState::from_materialized_tail` keeps `TAIL_SEED_ITEMS`
-/// and drops the rest — so reading the whole transcript to show the end of it
-/// is work proportional to history for a result that never was. On a real
-/// session that meant reading 28,066 rows to render 256.
-///
-/// The `materialized_transcript_position` index covers the ordering, so this
-/// costs the rows it returns rather than the rows that exist.
-pub fn load_materialized_transcript_tail(
-    session_id: &str,
-    limit: usize,
-) -> Result<Vec<Arc<TranscriptItem>>> {
-    load_materialized_transcript_tail_from(&database_path(), session_id, limit)
-}
-
-fn load_materialized_transcript_tail_from(
-    path: &Path,
-    session_id: &str,
-    limit: usize,
-) -> Result<Vec<Arc<TranscriptItem>>> {
-    read_materialized_transcript(&open_reader(path)?, session_id, Some(limit))
 }
 
 /// How many transcript rows one retention pass rewrites.

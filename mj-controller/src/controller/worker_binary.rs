@@ -16,7 +16,7 @@ use crate::session_manager::{
     WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
 };
 use crate::targets::{
-    self, CommandExecutor, CommandPlan, CommandSpec, ProcessExecutor, ProvisionStage, SshTarget,
+    self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, SshTarget,
 };
 use mj_core::config::{
     HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write, data_dir,
@@ -212,13 +212,6 @@ impl Controller {
             &profile_stage,
         )?;
         prepare_installed_managed_harness(executor, backend, worker_root, &launch)
-    }
-
-    /// Probe the installed binary and collect the dead worker's exit record
-    /// and log tail after a session becomes unreachable. Best-effort; returns
-    /// `None` when the target no longer exists or has no diagnostics.
-    pub fn diagnose_worker(&self, session_id: &str) -> Option<String> {
-        self.diagnose_worker_controlled(session_id, &ProcessExecutor)
     }
 
     pub fn diagnose_worker_controlled(
@@ -3251,6 +3244,7 @@ pub(super) fn worker_last_words(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mj_core::targets::ProcessExecutor;
 
     use anyhow::Result;
 

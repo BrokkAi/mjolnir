@@ -15,7 +15,7 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 - [x] (2026-09-16) Audit of mj-controller, the worker/core crates, and the UI crates, done as three parallel read-only audits.
 - [x] (2026-09-16) The user set the compatibility floor at 2.8.0 and ruled out scope cuts.
 - [x] (2026-09-16) Filed #1043 and #1044.
-- [ ] Milestone 1: delete dead code.
+- [x] (2026-09-16) Milestone 1: delete dead code. Daemon protocol raised to 20 because `CreateSessionRequest` lost `allow_dirty_local`.
 - [ ] Milestone 2a: database, config, and small compatibility shims below 2.8.0.
 - [ ] Milestone 2b: relay protocol, journal format v1, and worker-export fallbacks.
 - [ ] Milestone 3: merge duplicated target and process plumbing.
@@ -33,6 +33,16 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 
 ## Decision Log
 
+- Decision: Milestone 1 keeps four audit candidates.
+  Rationale:
+  - `Controller::resume_session_with_options` is the entry point of the podman import end-to-end test (`mj-cli/tests/import_e2e.rs`).
+  - `TranscriptSnapshot::browser_transcript`/`browser_tail`/`transcript_snapshot` in mj-chat are how dozens of projection behavior tests reach the shared `mj_client::transcript::browser_transcript`.
+  - `format_activity_clock` is the label code Milestone 4 consolidates onto.
+  - `DashboardState::handle_key`/`handle_mouse` are the TUI tests' input entry points, not legacy wrappers.
+  Date/Author: 2026-09-16, agent.
+- Decision: Removing `allow_dirty_local` from `CreateSessionRequest` raises `mj_client::daemon::PROTOCOL_VERSION` from 19 to 20.
+  Rationale: The field had no serde default, so a daemon from before the change would reject a new client's create request. The version handshake makes that mismatch explicit instead.
+  Date/Author: 2026-09-16, agent.
 - Decision: The compatibility floor is 2.8.0. A database, config, journal, or worker from before 2.8.0 does not need to upgrade in place.
   Rationale: The user chose this. Protocol 13 first shipped in 2.8.0 (2026-09-15). The controller already replaces stale workers.
   Date/Author: 2026-09-16, user.

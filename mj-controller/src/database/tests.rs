@@ -2984,7 +2984,7 @@ fn the_transcript_tail_reader_returns_the_end_without_reading_the_head() {
         .unwrap();
     drop(connection);
 
-    let tail = load_materialized_transcript_tail_from(&database, "session-1", 2).unwrap();
+    let tail = read_materialized_transcript(&open_reader(&database).unwrap(), "session-1", Some(2)).unwrap();
 
     assert_eq!(
         tail.iter()
@@ -2994,9 +2994,9 @@ fn the_transcript_tail_reader_returns_the_end_without_reading_the_head() {
     );
     // Asking for more than exists returns what exists, and the corrupt head is
     // what makes that an error rather than a short read.
-    assert!(load_materialized_transcript_tail_from(&database, "session-1", 256).is_err());
+    assert!(read_materialized_transcript(&open_reader(&database).unwrap(), "session-1", Some(256)).is_err());
     assert!(
-        load_materialized_transcript_tail_from(&database, "unknown", 256)
+        read_materialized_transcript(&open_reader(&database).unwrap(), "unknown", Some(256))
             .unwrap()
             .is_empty()
     );
@@ -5096,7 +5096,7 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
     })
     .unwrap();
 
-    let page = load_materialized_transcript_after_from(&database, "session-1", 0, 10)
+    let page = load_materialized_transcript_filtered_from(&database, "session-1", 0, 10, None)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -5109,7 +5109,7 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
     );
     assert_eq!(page.latest_seq, 3);
 
-    let resumed = load_materialized_transcript_after_from(&database, "session-1", 2, 10)
+    let resumed = load_materialized_transcript_filtered_from(&database, "session-1", 2, 10, None)
         .unwrap()
         .unwrap();
     assert_eq!(resumed.items.len(), 1);
@@ -5123,7 +5123,7 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
     );
 
     assert!(
-        load_materialized_transcript_after_from(&database, "unknown", 0, 10)
+        load_materialized_transcript_filtered_from(&database, "unknown", 0, 10, None)
             .unwrap()
             .is_none(),
         "a session with no projection row has no transcript to page"

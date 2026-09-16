@@ -1130,7 +1130,6 @@ impl RuntimeState {
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,
-                    allow_dirty_local: request.allow_dirty_local,
                     resource_allocation: request.resource_allocation,
                     project_directory,
                     session_title_override: request.session_title_override,

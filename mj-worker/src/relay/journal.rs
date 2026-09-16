@@ -592,12 +592,6 @@ fn visit_relay_journal_reader(
                 gaps,
             });
         }
-        if !terminated {
-            return Ok(RelayJournalScan {
-                truncate_to: None,
-                gaps,
-            });
-        }
     }
 }
 

@@ -324,13 +324,6 @@ fn discover_installed_harnesses(
     }
 }
 
-pub fn discover_harness_homes(
-    home: Option<&Path>,
-    overrides: impl IntoIterator<Item = (HarnessKind, PathBuf)>,
-) -> Vec<DiscoveredHome> {
-    discover_harness_homes_with_executor(home, overrides, &probe_executor())
-}
-
 pub(crate) fn discover_harness_homes_with_executor(
     home: Option<&Path>,
     overrides: impl IntoIterator<Item = (HarnessKind, PathBuf)>,
@@ -378,10 +371,6 @@ fn probe_profile(kind: HarnessKind, home: &Path) -> HarnessProfile {
         context_window_bytes: None,
         guardian_review_model: None,
     }
-}
-
-pub fn harness_is_authenticated(kind: HarnessKind, home: &Path) -> bool {
-    harness_is_authenticated_with_executor(&probe_profile(kind, home), &probe_executor())
 }
 
 pub(crate) fn harness_is_authenticated_with_executor(

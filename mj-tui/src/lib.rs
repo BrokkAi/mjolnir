@@ -118,7 +118,6 @@ pub enum DashboardAction {
         project_directory: Option<std::path::PathBuf>,
         target_template_id: String,
         additional_mounts: Vec<AdditionalMount>,
-        allow_dirty_local: bool,
         resource_allocation: Option<SessionResourceAllocation>,
     },
     /// Resolve all network sources for an isolated session and leave the
@@ -3669,7 +3668,11 @@ mod tests {
         );
 
         let mut confirm = dashboard_with_session(stopped_session());
-        confirm.show_dirty_local_confirmation(DashboardAction::None, vec!["project".into()]);
+        confirm.mode = Mode::Confirm(dialogs::ConfirmDialog::new(
+            dialogs::Confirmation::ForceDestroy {
+                session_id: "session-1".into(),
+            },
+        ));
 
         let mut resume_dialog = dashboard_with_session(stopped_session());
         resume_dialog.show_resume_dialog(1, Vec::new());
