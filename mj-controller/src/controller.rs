@@ -14,7 +14,7 @@ mod resume;
 mod reviewer;
 mod subagents;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 pub mod update;
 mod worker_binary;
 mod worker_restart;

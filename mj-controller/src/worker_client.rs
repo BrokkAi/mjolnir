@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -62,34 +62,44 @@ const RELAY_PROXY_REAP_POLL: Duration = Duration::from_millis(10);
 /// How many trailing stderr lines a failed connect reports back to its caller.
 const RELAY_PROXY_STDERR_TAIL: usize = 10;
 
-/// Forward a relay proxy's stderr to the log, one line at a time, until the
-/// child closes it. Reporting rather than dropping keeps connect failures
-/// diagnosable now that the controller no longer shares its terminal.
+/// The proxy's last [`RELAY_PROXY_STDERR_TAIL`] non-empty stderr lines, shared
+/// with whoever has to report them.
 ///
-/// Returns the last [`RELAY_PROXY_STDERR_TAIL`] non-empty lines, so a connect
-/// that fails can put the proxy's own complaint in the error the caller sees
-/// rather than only in the log.
+/// The drain publishes each line here as it reads it, rather than returning
+/// the whole tail when it finishes. A failed connect has to bound how long it
+/// waits for the drain, because a proxy that leaves a grandchild holding
+/// stderr never reaches EOF. Reading the tail from here means that bound costs
+/// only the lines not yet read, instead of discarding every line already
+/// collected.
+type ProxyStderrTail = Arc<std::sync::Mutex<VecDeque<String>>>;
+
+/// Forward a relay proxy's stderr to the log, one line at a time, until the
+/// child closes it, keeping the tail in `tail`. Reporting rather than dropping
+/// keeps connect failures diagnosable now that the controller no longer shares
+/// its terminal, and lets a failed connect put the proxy's own complaint in
+/// the error the caller sees rather than only in the log.
 async fn drain_proxy_stderr(
     errors: tokio::process::ChildStderr,
     purpose: String,
     session_id: String,
-) -> VecDeque<String> {
-    let mut tail: VecDeque<String> = VecDeque::new();
+    tail: ProxyStderrTail,
+) {
     let mut lines = BufReader::new(errors).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
             Ok(Some(line)) => {
                 tracing::warn!(%session_id, %purpose, %line, "relay proxy stderr");
+                let mut tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
                 if tail.len() == RELAY_PROXY_STDERR_TAIL {
                     tail.pop_front();
                 }
                 tail.push_back(line);
             }
-            Ok(None) => return tail,
+            Ok(None) => return,
             Err(error) => {
                 tracing::warn!(%session_id, %purpose, %error, "read relay proxy stderr");
-                return tail;
+                return;
             }
         }
     }

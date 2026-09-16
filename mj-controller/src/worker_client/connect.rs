@@ -135,10 +135,12 @@ impl RelayClient {
                 );
                 error
             })?;
-        let stderr_tail = child.stderr.take().map(|errors| {
+        let stderr_tail: ProxyStderrTail = Default::default();
+        let draining = child.stderr.take().map(|errors| {
             let purpose = spec.purpose.clone();
             let session_id = expected_session_id.to_owned();
-            tokio::spawn(drain_proxy_stderr(errors, purpose, session_id))
+            let tail = stderr_tail.clone();
+            tokio::spawn(drain_proxy_stderr(errors, purpose, session_id, tail))
         });
         let input = child
             .stdin
@@ -230,7 +232,7 @@ impl RelayClient {
                     }
                     None => None,
                 };
-                let tail = Self::proxy_stderr_tail(stderr_tail).await;
+                let tail = Self::proxy_stderr_tail(draining, &stderr_tail).await;
                 let transport_rejected = permit.is_some()
                     && status
                         .is_some_and(|status| is_transport_rejection(status, &tail.join("\n")));
@@ -243,18 +245,29 @@ impl RelayClient {
         }
     }
 
-    /// Collect the proxy's trailing stderr, or nothing if it is still open
-    /// past its detach grace period.
+    /// Collect the proxy's trailing stderr.
+    ///
+    /// The caller has already waited for the proxy or killed it, so the drain
+    /// normally reaches EOF at once. The grace period covers the case it
+    /// cannot: a grandchild that inherited stderr keeps the pipe open for as
+    /// long as it lives. Either way the lines already read are returned, since
+    /// the drain publishes them as it goes.
     pub(super) async fn proxy_stderr_tail(
-        stderr_tail: Option<tokio::task::JoinHandle<VecDeque<String>>>,
+        draining: Option<tokio::task::JoinHandle<()>>,
+        tail: &ProxyStderrTail,
     ) -> Vec<String> {
-        let Some(handle) = stderr_tail else {
-            return Vec::new();
-        };
-        match tokio::time::timeout(RELAY_PROXY_DETACH_GRACE, handle).await {
-            Ok(Ok(lines)) => lines.into(),
-            _ => Vec::new(),
+        if let Some(handle) = draining
+            && tokio::time::timeout(RELAY_PROXY_DETACH_GRACE, handle)
+                .await
+                .is_err()
+        {
+            tracing::debug!("relay proxy stderr is still open; reporting the lines read so far");
         }
+        tail.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Attach the proxy's own stderr tail to a failed connect. The proxy

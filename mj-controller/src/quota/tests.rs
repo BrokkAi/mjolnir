@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use crate::controller::test_support::install_fake_command;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -219,17 +221,13 @@ fn compact_hides_claude_short_window_when_week_is_exhausted() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_grok_profile_reports_its_billing_period_as_one_quota_window() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
-    let executable = directory.path().join("grok");
     std::fs::write(directory.path().join("auth.json"), b"old credentials").unwrap();
-    std::fs::write(
-        &executable,
+    install_fake_command(
+        directory.path(),
+        "grok",
         "#!/bin/sh\nprintf 'refreshed credentials' > \"$GROK_HOME/auth.json\"\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *initialize*) printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n' ;;\n    *billing*) printf '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"config\":{\"creditUsagePercent\":25.0,\"currentPeriod\":{\"type\":\"USAGE_PERIOD_TYPE_WEEKLY\",\"end\":\"2026-08-18T05:22:07+00:00\"}},\"subscription_tier\":\"X Premium+\"}}\\n' ;;\n  esac\ndone\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let environment = BTreeMap::from([
         (
             "GROK_HOME".to_owned(),
@@ -274,11 +272,7 @@ fn fake_codex_app_server(
     directory: &Path,
     script: &str,
 ) -> (BTreeMap<String, String>, std::path::PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let executable = directory.join("codex");
-    std::fs::write(&executable, script).unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    install_fake_command(directory, "codex", script);
     let log = directory.join("requests.jsonl");
     let environment = BTreeMap::from([
         ("PATH".to_owned(), directory.to_string_lossy().into_owned()),
@@ -929,15 +923,14 @@ fn process_is_gone(pid: i32) -> bool {
 #[cfg(unix)]
 #[tokio::test]
 async fn dropping_a_profile_from_the_configuration_stops_its_codex_quota_client() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
-    let executable = directory.path().join("codex");
     let pid_file = directory.path().join("codex.pid");
     // A `codex app-server` stand-in: answer one quota refresh, then stay
-    // alive on stdin the way the real one does between refreshes.
-    std::fs::write(
-        &executable,
+    // alive on stdin the way the real one does between refreshes. The
+    // dispatcher `exec`s this script, so `$$` is the spawned process.
+    install_fake_command(
+        directory.path(),
+        "codex",
         r#"#!/bin/sh
 printf '%s\n' "$$" > "$CODEX_QUOTA_TEST_PID"
 IFS= read -r line || exit 0
@@ -949,9 +942,7 @@ IFS= read -r line || exit 0
 printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
 while IFS= read -r line; do :; done
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let request = QuotaRefreshRequest {
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,

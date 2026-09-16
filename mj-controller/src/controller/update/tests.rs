@@ -405,20 +405,32 @@ fn npm_upgrade_restarts_after_the_running_package_is_removed() {
         unreachable!("exec does not return on success");
     }
 
-    let root = tempfile::tempdir().expect("fixture directory");
+    // The fixture lives beside the test binary so the package entry below can
+    // be a hard link to it. Copying the binary and then exec'ing the copy is
+    // the ETXTBSY race described on `install_fake_command`: the copy is long,
+    // and any other test thread that forks during it inherits the open write
+    // descriptor and keeps the new file busy. A hard link opens nothing for
+    // writing, and because the kernel records the path used by `execve`, the
+    // child still sees `current_exe()` inside the package, which is what the
+    // npm restart target is resolved from.
+    let binary = std::env::current_exe().expect("test binary");
+    let root = tempfile::tempdir_in(binary.parent().expect("test binary directory"))
+        .expect("fixture directory");
     let package_bin = root.path().join("package/bin");
     let manager_bin = root.path().join("manager");
     std::fs::create_dir_all(&package_bin).expect("package bin");
     std::fs::create_dir(&manager_bin).expect("manager bin");
     let executable = package_bin.join("mj");
-    std::fs::copy(std::env::current_exe().expect("test binary"), &executable)
-        .expect("copy test executable into package");
+    std::fs::hard_link(&binary, &executable).expect("link the test binary into the package");
     let replacement = root.path().join("replacement");
     std::fs::write(&replacement, "#!/bin/sh\necho UPDATED_MJ_RESTARTED\n")
         .expect("replacement script");
-    let npm = manager_bin.join("npm");
-    std::fs::write(
-        &npm,
+    // `npm` and `replacement` are only ever read: the fake npm script is run
+    // through the shared dispatcher, and `replacement` is copied by that
+    // script before anything execs the copy.
+    crate::controller::test_support::install_fake_command(
+        &manager_bin,
+        "npm",
         r#"#!/bin/sh
 set -eu
 mv "$MJ_UPDATE_RESTART_FIXTURE/package" "$MJ_UPDATE_RESTART_FIXTURE/retired"
@@ -426,13 +438,10 @@ mkdir -p "$MJ_UPDATE_RESTART_FIXTURE/package/bin"
 cp "$MJ_UPDATE_RESTART_FIXTURE/replacement" "$MJ_UPDATE_RESTART_FIXTURE/package/bin/mj"
 rm "$MJ_UPDATE_RESTART_FIXTURE/retired/bin/mj"
 "#,
-    )
-    .expect("fake npm script");
+    );
     use std::os::unix::fs::PermissionsExt;
-    for script in [&npm, &replacement] {
-        std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755))
-            .expect("executable script");
-    }
+    std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755))
+        .expect("executable script");
     let mut paths = vec![manager_bin];
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),

@@ -119,12 +119,7 @@ fn install_move_queue_relay_worker(root: &Path, marker: &Path, marker_exists: bo
         binary = shell_literal(&std::env::current_exe().unwrap()),
         child = test_name("move_queue_relay_child"),
     );
-    let binary = root.join("hel");
-    fs::write(&binary, script).unwrap();
-    let mut permissions = fs::metadata(&binary).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
-    permissions.set_mode(0o755);
-    fs::set_permissions(binary, permissions).unwrap();
+    crate::controller::test_support::install_fake_command(root, "hel", &script);
 }
 
 /// Serve one durable relay connection. The first queue submission is ACKed
