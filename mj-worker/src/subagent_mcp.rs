@@ -7,7 +7,9 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use mj_core::subagent::{MAX_WAIT_SECONDS, SourceRange, SubagentToolAction, SubagentToolRequest};
+use mj_core::subagent::{
+    FileSourceRanges, MAX_WAIT_SECONDS, SubagentToolAction, SubagentToolRequest,
+};
 
 /// Server instructions stating the spawn/wait contract: results reach the
 /// model only as the `wait` tool call's own answer, never as a push.
@@ -69,7 +71,7 @@ struct SpawnArgs {
     #[serde(default)]
     context: Option<String>,
     #[serde(default)]
-    files: Vec<SourceRange>,
+    files: Vec<FileSourceRanges>,
     #[serde(default)]
     request_key: Option<String>,
 }
@@ -186,7 +188,7 @@ fn tool_definitions() -> Vec<Value> {
                     "task_name":{"type":"string"},"instructions":{"type":"string"},
                     "profile_id":{"type":"string"},"model":{"type":"string"},"effort":{"type":"string"},
                     "working_directory":{"type":"string","description":"Launch directory for the child session on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent session's working directory. The directory must exist; no other restriction applies. Defaults to the parent session's working directory."},"context":{"type":"string"},"request_key":{"type":"string","description":"Optional idempotency key. Repeating a call with the same key returns the original result instead of duplicating the work; useful for retries and long waits."},
-                    "files":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["file","start","end"],"additionalProperties":false}}
+                    "files":{"type":"array","description":"Source excerpts to include in the child's first prompt, grouped by file. Each entry names one relative file and a list of one or more one-based, inclusive line ranges to pull from it.","items":{"type":"object","properties":{"file":{"type":"string"},"ranges":{"type":"array","minItems":1,"items":{"type":"object","properties":{"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["start","end"],"additionalProperties":false}}},"required":["file","ranges"],"additionalProperties":false}}
                 },
                 "required":["task_name","instructions"],"additionalProperties":false
             }),
