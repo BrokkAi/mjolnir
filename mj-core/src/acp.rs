@@ -306,12 +306,35 @@ pub fn session_update_has_native_history(update: &SessionUpdate) -> bool {
 /// the substring is what can be matched.
 pub const CODEX_MISSING_THREAD_MESSAGE: &str = "no rollout found for thread id";
 
-/// Whether a failed `session/resume` or `session/load` says Codex has no such
-/// thread. If Codex rewords the message, this stops matching and Mjolnir keeps
-/// failing the resume loudly; it can never degrade into silently replacing a
-/// thread that still exists.
-pub fn codex_error_reports_missing_thread(error: &str) -> bool {
-    error.contains(CODEX_MISSING_THREAD_MESSAGE)
+/// The stable part of Claude Code's refusal to resume a session it never wrote
+/// a transcript for. Claude Code writes a session's transcript file at the
+/// first prompt, so a session that was opened and never prompted does not
+/// exist to resume. `@agentclientprotocol/claude-agent-acp` answers the ACP
+/// standard "resource not found" error, and it reaches Mjolnir as
+/// `Resource not found: <session id>: {"uri": "<session id>"}`. The session id
+/// is matched along with the prefix, so an unrelated missing resource can
+/// never be read as a missing session.
+pub const CLAUDE_MISSING_SESSION_MESSAGE: &str = "Resource not found: ";
+
+/// Whether a failed `session/resume` or `session/load` says the harness has no
+/// such native session. Only harnesses that defer writing a session to disk
+/// until its first user message can report a session Mjolnir believes it
+/// created; every other harness answers `false`, so its reload failure keeps
+/// failing loudly. If a harness rewords its message, this stops matching and
+/// the resume fails loudly again; it can never degrade into silently replacing
+/// a native session that still exists.
+pub fn error_reports_missing_native_session(
+    harness: HarnessKind,
+    native_session_id: &str,
+    error: &str,
+) -> bool {
+    match harness {
+        HarnessKind::Codex => error.contains(CODEX_MISSING_THREAD_MESSAGE),
+        HarnessKind::Claude => error.contains(&format!(
+            "{CLAUDE_MISSING_SESSION_MESSAGE}{native_session_id}"
+        )),
+        HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => false,
+    }
 }
 
 /// Only model and reasoning effort survive a bridge replacement. Restoring
@@ -667,13 +690,66 @@ mod missing_thread_tests {
     #[test]
     fn codex_reports_a_missing_thread_through_the_wrapped_adapter_message() {
         // What codex-acp actually sends back for a thread with no rollout.
-        assert!(codex_error_reports_missing_thread(
+        assert!(error_reports_missing_native_session(
+            HarnessKind::Codex,
+            "0199f0ba",
             r#"resume ACP session 0199f0ba: Internal error: {"details": "no rollout found for thread id 0199f0ba"}"#
         ));
         // Anything else keeps failing the resume loudly.
-        assert!(!codex_error_reports_missing_thread(
+        assert!(!error_reports_missing_native_session(
+            HarnessKind::Codex,
+            "0199f0ba",
             "resume ACP session 0199f0ba: Internal error: session store is locked"
         ));
+    }
+
+    #[test]
+    fn claude_reports_a_missing_session_only_for_the_session_being_resumed() {
+        // What claude-agent-acp actually sends back for a session with no
+        // transcript on disk.
+        let missing = concat!(
+            "resume ACP session 7ee4c940-f82c-4c6a-847f-47e21675e585: ",
+            "Resource not found: 7ee4c940-f82c-4c6a-847f-47e21675e585: {\n",
+            "  \"uri\": \"7ee4c940-f82c-4c6a-847f-47e21675e585\"\n}"
+        );
+        assert!(error_reports_missing_native_session(
+            HarnessKind::Claude,
+            "7ee4c940-f82c-4c6a-847f-47e21675e585",
+            missing
+        ));
+        // A resource error about anything else must never replace the session.
+        assert!(!error_reports_missing_native_session(
+            HarnessKind::Claude,
+            "0f0f0f0f-0000-4000-8000-000000000000",
+            missing
+        ));
+        assert!(!error_reports_missing_native_session(
+            HarnessKind::Claude,
+            "7ee4c940-f82c-4c6a-847f-47e21675e585",
+            "resume ACP session 7ee4c940-f82c-4c6a-847f-47e21675e585: connection closed"
+        ));
+        // Each harness only recognizes its own wording.
+        assert!(!error_reports_missing_native_session(
+            HarnessKind::Codex,
+            "7ee4c940-f82c-4c6a-847f-47e21675e585",
+            missing
+        ));
+    }
+
+    #[test]
+    fn harnesses_that_always_materialize_a_session_never_report_one_missing() {
+        for harness in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::Muse] {
+            assert!(!error_reports_missing_native_session(
+                harness,
+                "native",
+                r#"Resource not found: native: {"uri": "native"}"#
+            ));
+            assert!(!error_reports_missing_native_session(
+                harness,
+                "native",
+                "no rollout found for thread id native"
+            ));
+        }
     }
 
     #[test]

@@ -858,6 +858,16 @@ pub struct RelaySnapshot {
     /// reading the snapshots of sessions that never used their thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_session_used: bool,
+    /// Ordinal of the `SessionOpened` that recorded `native_session_id`. It
+    /// places the current native session relative to `recovery_floor_ordinal`:
+    /// a session opened above the floor has everything about it recorded in
+    /// the events this snapshot still describes, so a released archive below
+    /// the floor cannot hide history belonging to it. Older snapshots omit the
+    /// field and read as `None`, which is treated as unknown, and it is
+    /// written only once a session has been opened, so an older worker keeps
+    /// reading the snapshots of sessions that never opened one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_session_opened_ordinal: Option<u64>,
     pub agent_capabilities: Option<Box<AgentCapabilities>>,
     pub agent_info: Option<Implementation>,
     pub config_options: Vec<SessionConfigOption>,
@@ -905,6 +915,7 @@ impl RelaySnapshot {
             native_session_id: None,
             native_continuity_lost: false,
             native_session_used: false,
+            native_session_opened_ordinal: None,
             agent_capabilities: None,
             agent_info: None,
             config_options: Vec::new(),
@@ -1409,6 +1420,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             resumed,
         } => {
             snapshot.native_session_id = Some(native_session_id.clone());
+            snapshot.native_session_opened_ordinal = Some(event.ordinal);
             // A normal open clears the flag; only the fallback sets it.
             snapshot.native_continuity_lost = *native_continuity_lost;
             // A resumed thread was not created here, so this journal cannot
