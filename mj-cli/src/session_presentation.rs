@@ -143,6 +143,7 @@ mod tests {
         state.sessions.insert(
             "session-1".into(),
             SessionRecord {
+                container_workspace: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 id: "session-1".into(),

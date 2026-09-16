@@ -854,9 +854,18 @@ pub(super) fn raw_conversion_preview(
         .context("a raw session has no project directory")?
         .file_name()
         .context("a raw project directory cannot be the filesystem root")?;
+    // A raw session has no container, so the move builds it one and the
+    // checkout lands in the per-session workspace this preview names. A session
+    // that predates per-session workspaces and still records none keeps the
+    // shared one only if it already has a container, which a raw session never
+    // does.
+    let container_workspace = match session.container_workspace.clone() {
+        Some(workspace) => workspace,
+        None => mj_core::targets::new_container_workspace(&session.id)?,
+    };
     Ok(mj_core::state::RawConversionPreview {
         checkout: checkout.to_path_buf(),
-        destination: PathBuf::from(mj_core::targets::CONTAINER_WORKSPACE).join(directory),
+        destination: container_workspace.join(directory),
         branch: position.branch,
         fetch_url: conversion.source.fetch_url.clone(),
         push_urls: conversion.source.push_urls.clone(),
@@ -2690,7 +2699,9 @@ mod tests {
         );
         assert_eq!(
             preview.destination,
-            PathBuf::from("/workspace").join(checkout.path().file_name().unwrap())
+            mj_core::targets::new_container_workspace(&session.id)
+                .unwrap()
+                .join(checkout.path().file_name().unwrap())
         );
     }
 
@@ -2715,7 +2726,9 @@ mod tests {
         assert_eq!(preview.unstaged_files, 0);
         assert_eq!(
             preview.destination,
-            PathBuf::from("/workspace").join(session_id)
+            mj_core::targets::new_container_workspace(session_id)
+                .unwrap()
+                .join(session_id)
         );
     }
 

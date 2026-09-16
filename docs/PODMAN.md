@@ -37,8 +37,9 @@ podman unshare cat /proc/self/uid_map
 
 For a session, Mjolnir starts a detached, labeled container from the configured
 image, uses `podman exec` for the worker, Git, harness, and clone commands, and
-mounts a dedicated named volume at `/workspace`. Each session gets a different
-volume, so concurrent builds never share a Cargo target directory. On stop,
+mounts a dedicated named volume at the session's own directory under
+`/workspace`. Each session gets a different volume and a different path, so
+concurrent builds never share a Cargo target directory. On stop,
 Mjolnir first takes and verifies the checkpoint, stops the exact container, and
 marks the session stopped. It then removes the container, workspace volume, and
 Git-cache snapshot in a supervised background operation. A slow storage removal
@@ -78,7 +79,7 @@ Mjolnir invokes `HELPER create RESOURCE`, `HELPER status RESOURCE`, and
 `HELPER destroy RESOURCE`. The example validates the deterministic resource
 name and confines all operations beneath fixed roots; it is an example rather
 than an installed component. The helper-created directory is mounted as the
-session's complete `/workspace`, not as a shared Cargo cache.
+session's complete workspace directory, not as a shared Cargo cache.
 
 The default `pull_policy = "auto"` starts a session from the image the host
 already has, and pulls only when the host has no copy at all. Instead of pulling

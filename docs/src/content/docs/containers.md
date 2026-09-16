@@ -27,7 +27,10 @@ local session that runs the agent in a directory on this machine can still move
 or resume into a container: Mjolnir re-snapshots that checkout, the container
 clones the checkout's own network remote, and the snapshot restores the
 checkout's unpushed commits and its staged, unstaged, and untracked files over
-the clone at `/workspace/<directory name>`. Files Git ignores and anything
+the clone at `/workspace/<session id>/<directory name>`. Each session gets its
+own directory under `/workspace`, so two sessions on one host never work at the
+same path; sessions whose container was created before this version keep the
+shared `/workspace`. Files Git ignores and anything
 outside the checkout do not travel, and a checkout with no network remote cannot
 become a container workspace. See
 [Resume a local session into a container](/sessions/#resume-a-local-session-into-a-container).

@@ -27,25 +27,33 @@ impl Controller {
             .bundles
             .get(&session.bundle_id)
             .context("session bundle is missing")?;
-        let root = workspace_root(backend);
+        let root = workspace_root(backend, session.container_workspace.as_deref());
         for repository in &bundle.repositories {
-            let directory = std::path::Path::new(root).join(&repository.destination);
+            let directory = std::path::Path::new(&root).join(&repository.destination);
             initialize_workspace(executor, backend, session_id, &directory)?;
         }
         Ok(())
     }
 }
 
-pub(super) fn workspace_root(backend: &targets::TargetLocator) -> &str {
+/// The directory the session's repositories are checked out under.
+/// `container_workspace` is the session record's recorded container workspace,
+/// which only container locators use.
+pub(super) fn workspace_root(
+    backend: &targets::TargetLocator,
+    container_workspace: Option<&std::path::Path>,
+) -> String {
     match backend {
         targets::TargetLocator::LocalPodman { .. }
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => "/workspace",
+        | targets::TargetLocator::SshDocker { .. } => {
+            targets::container_workspace_root(container_workspace)
+        }
         targets::TargetLocator::AwsEc2 { workspace, .. }
-        | targets::TargetLocator::SshBare { workspace, .. } => workspace,
-        targets::TargetLocator::LocalBare { worker_root } => worker_root,
+        | targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
+        targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
     }
 }
 
@@ -348,7 +356,8 @@ mod tests {
             "11111111-1111-4111-8111-111111111111",
             "22222222-2222-4222-8222-222222222222",
         ] {
-            let plan = targets::provision_plan(&template, session_id, &bundle, &[], None).unwrap();
+            let plan =
+                targets::provision_plan(&template, session_id, &bundle, &[], None, None).unwrap();
             let clone = plan
                 .commands
                 .iter()

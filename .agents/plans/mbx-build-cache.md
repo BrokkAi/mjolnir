@@ -20,7 +20,7 @@ The user sees two new settings and no prompts. A global switch, "Enable MBX for 
 - [ ] Milestone 1: pinned mbx binary download and installation into containers.
 - [ ] Milestone 1: Rust detection, session record flag, and migration.
 - [ ] Milestone 1: three-way mount access mode (read-only, copy-on-write, read-write) in the model, database, container arguments, and the attached-directory editors. (2026-09-16: implemented and validated in the working tree together with unconditional Podman `keep-id`; awaiting review fixes and commit.)
-- [ ] Milestone 1a: per-session container workspace path (option A), landed as its own commit with tests, before any mbx code.
+- [x] (2026-09-16) Milestone 1a: per-session container workspace path. New sessions record `/workspace/<session id>` (`SessionRecord.container_workspace`, compatible migration 35); sessions created earlier keep `/workspace`; children use the parent's path; orphan adoption probes the container for the path. Consequence for 1b: mbx is enabled only for sessions with a recorded per-session workspace, because legacy sessions could still collide.
 - [ ] Milestone 1: mbx cache mount and environment.
 - [ ] Milestone 1: native mbx version check against the pin.
 - [ ] Milestone 1: end-to-end validation on localhost and morannon.

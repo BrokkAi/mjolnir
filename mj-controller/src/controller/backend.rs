@@ -1183,6 +1183,7 @@ mod tests {
         std::fs::write(source.path().join("many/files/two"), b"two").unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
         let record = SessionRecord {
+            container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),

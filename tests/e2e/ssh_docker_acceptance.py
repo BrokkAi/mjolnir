@@ -48,6 +48,11 @@ DEFAULT_TIMEOUT = 300.0
 CONTAINER_WORKSPACE = "/workspace"
 
 
+def session_workspace(session_id: str) -> str:
+    """Each session's repositories live in its own directory under /workspace."""
+    return f"{CONTAINER_WORKSPACE}/{session_id}"
+
+
 class AcceptanceFailure(RuntimeError):
     """A bounded acceptance failure with an artifact directory to inspect."""
 
@@ -430,8 +435,9 @@ class AcceptanceLab:
     def prompt_and_verify(self, session_id: str, ordinal: int, timeout: float = DEFAULT_TIMEOUT) -> None:
         before_ordinal = self.wait_state(session_id, "running").get("latest_event_ordinal", 0)
         expected = f"ssh-docker acceptance generated file for session {ordinal}"
+        workspace = session_workspace(session_id)
         prompt = (
-            f"Create {CONTAINER_WORKSPACE}/fixture/generated.txt and /mnt/overlay/generated.txt, "
+            f"Create {workspace}/fixture/generated.txt and /mnt/overlay/generated.txt, "
             f"putting exactly {expected!r} in each. Do not modify any existing file. "
             "In particular, leave /mnt/attachment/original.txt unchanged. "
             "Read all three files back after writing and report what you verified."
@@ -441,7 +447,7 @@ class AcceptanceLab:
             raise AcceptanceFailure(f"prompt action returned {status}: {value!r}")
         self.lab.record_action("prompt", session_id=session_id, ordinal=ordinal)
         container = resource_name(session_id)
-        workspace_file = f"{CONTAINER_WORKSPACE}/fixture/generated.txt"
+        workspace_file = f"{workspace}/fixture/generated.txt"
         script = shell_remote([
             "sh", "-lc",
             f"test -f {workspace_file} && "
@@ -518,7 +524,8 @@ class AcceptanceLab:
                     container,
                     "sh",
                     "-lc",
-                    "test -f /workspace/fixture/generated.txt && test ! -e /mnt/overlay/generated.txt",
+                    f"test -f {session_workspace(session_id)}/fixture/generated.txt "
+                    "&& test ! -e /mnt/overlay/generated.txt",
                 ]
             ),
             "resume-workspace",
@@ -590,7 +597,7 @@ class AcceptanceLab:
         self.checkpoint_close_resume(first)
         self.remote(shell_remote([
             "docker", "exec", resource_name(first), "sh", "-c",
-            "test \"$(cat /workspace/fixture/generated.txt)\" = 'ssh-docker acceptance generated file for session 1'",
+            f"test \"$(cat {session_workspace(first)}/fixture/generated.txt)\" = 'ssh-docker acceptance generated file for session 1'",
         ]), "verify-checkpoint-content")
         identities = {session_id: self.container_id(session_id) for session_id in (first, second)}
         record_json(self.artifact / "before-daemon-interruption.json", self.lab.snapshot())

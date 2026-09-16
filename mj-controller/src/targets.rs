@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -424,14 +424,21 @@ fn valid_rootless_uid_map(stdout: &[u8]) -> bool {
 
 /// Create the initial resource. AWS address discovery and all SSH bootstrap
 /// happen after parsing the `run-instances` response and constructing a locator.
+///
+/// `container_workspace` is the session record's recorded container workspace.
+/// Container targets clone into it and mount their workspace storage there;
+/// a session that predates per-session workspaces records none and keeps the
+/// shared `/workspace`.
 pub fn provision_plan(
     template: &TargetTemplate,
     session_id: &str,
     bundle: &ProjectBundleSpec,
     additional_mounts: &[AdditionalMount],
     image_user: Option<ImageUser>,
+    container_workspace: Option<&Path>,
 ) -> Result<CommandPlan> {
     bundle.validate()?;
+    let workspace = container_workspace_root(container_workspace);
     if !additional_mounts.is_empty()
         && !matches!(
             template,
@@ -452,6 +459,7 @@ pub fn provision_plan(
             bundle,
             additional_mounts,
             image_user,
+            container_workspace,
         )?;
         plan.commands = plan
             .commands
@@ -475,6 +483,7 @@ pub fn provision_plan(
                 additional_mounts,
                 image_user,
                 None,
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -483,7 +492,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 container_exec("podman", &name, args)
             }));
         }
@@ -494,6 +503,7 @@ pub fn provision_plan(
                 &name,
                 session_id,
                 additional_mounts,
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -502,7 +512,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 container_exec("docker", &name, args)
             }));
         }
@@ -520,6 +530,7 @@ pub fn provision_plan(
                 &name,
                 session_id,
                 additional_mounts,
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -528,7 +539,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 container_exec("container", &name, args)
             }));
         }
@@ -597,6 +608,7 @@ pub fn provision_plan(
                 additional_mounts,
                 image_user,
                 Some(ssh),
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::SshContainer {
@@ -606,7 +618,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 let mut remote = vec!["podman".to_owned(), "exec".to_owned(), name.clone()];
                 remote.extend(args);
                 ssh_command_owned(ssh, remote)
@@ -677,6 +689,7 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
         &[],
         None,
         None,
+        CONTAINER_WORKSPACE,
     )?);
     let exec = vec![
         engine.to_owned(),
@@ -758,7 +771,7 @@ fn run_ssh_docker_overlay_smoke_test(
     };
     let result = (|| {
         let create = command_over_ssh(
-            docker_container_run(container, &name, smoke_id, &[mount])?,
+            docker_container_run(container, &name, smoke_id, &[mount], CONTAINER_WORKSPACE)?,
             ssh,
         );
         execute_checked(executor, &create)?;
@@ -838,7 +851,7 @@ fn run_docker_overlay_smoke_test(
         destination: PathBuf::from("/mnt/hel-overlay-smoke"),
         access: MountAccess::Cow,
     };
-    let create = docker_container_run(container, &name, smoke_id, &[mount])?
+    let create = docker_container_run(container, &name, smoke_id, &[mount], CONTAINER_WORKSPACE)?
         .purpose("create disposable Docker OverlayFS smoke container");
     let probe = container_exec("docker", &name, ["sh", "-c", DOCKER_OVERLAY_SMOKE_PROBE])
         .purpose("verify Docker OverlayFS copy-on-write attachment");
@@ -2269,6 +2282,7 @@ fn container_run(
     name: &str,
     session_id: &str,
     additional_mounts: &[AdditionalMount],
+    workspace_root: &str,
 ) -> Result<CommandSpec> {
     Ok(CommandSpec::new(
         engine,
@@ -2280,6 +2294,7 @@ fn container_run(
             additional_mounts,
             None,
             None,
+            workspace_root,
         )?,
     )
     .purpose("start session container")
@@ -2367,6 +2382,7 @@ fn podman_container_run(
     additional_mounts: &[AdditionalMount],
     image_user: Option<ImageUser>,
     ssh: Option<&SshTarget>,
+    workspace_root: &str,
 ) -> Result<CommandSpec> {
     let workspace = podman_workspace_locator(template, session_id)?;
     let run_args = container_run_args(
@@ -2377,6 +2393,7 @@ fn podman_container_run(
         additional_mounts,
         Some(&workspace),
         image_user,
+        workspace_root,
     )?;
     let mut wrapped = match &workspace {
         PodmanWorkspaceLocator::ContainerLayer => {
@@ -2563,6 +2580,7 @@ fn docker_container_run(
     name: &str,
     session_id: &str,
     additional_mounts: &[AdditionalMount],
+    workspace_root: &str,
 ) -> Result<CommandSpec> {
     let run_args = container_run_args(
         "docker",
@@ -2572,6 +2590,7 @@ fn docker_container_run(
         additional_mounts,
         None,
         None,
+        workspace_root,
     )?;
     let overlaid = additional_mounts
         .iter()
@@ -2579,7 +2598,14 @@ fn docker_container_run(
         .filter(|(_, mount)| mount.access == MountAccess::Cow)
         .collect::<Vec<_>>();
     if overlaid.is_empty() {
-        return container_run("docker", template, name, session_id, additional_mounts);
+        return container_run(
+            "docker",
+            template,
+            name,
+            session_id,
+            additional_mounts,
+            workspace_root,
+        );
     }
     let mut args = vec![
         "-c".to_owned(),
@@ -2615,6 +2641,9 @@ fn podman_pull_argument(template: &ContainerTemplate) -> Option<String> {
         .then(|| format!("--pull={}", pull_policy.podman_value()))
 }
 
+// Every argument is an independent input the engine needs: the template, the
+// resource identity, the mounts, and the workspace the session runs in.
+#[allow(clippy::too_many_arguments)]
 fn container_run_args(
     engine: &str,
     template: &ContainerTemplate,
@@ -2623,6 +2652,7 @@ fn container_run_args(
     additional_mounts: &[AdditionalMount],
     podman_workspace: Option<&PodmanWorkspaceLocator>,
     image_user: Option<ImageUser>,
+    workspace_root: &str,
 ) -> Result<Vec<String>> {
     validate_additional_mounts(additional_mounts)?;
     let mut args = vec!["run".to_owned()];
@@ -2652,14 +2682,17 @@ fn container_run_args(
     if engine == "podman" {
         match podman_workspace.unwrap_or(&PodmanWorkspaceLocator::ContainerLayer) {
             PodmanWorkspaceLocator::ContainerLayer => {}
+            // `:U` chowns the volume to the container user, so the session's
+            // workspace is writable wherever it is mounted.
             PodmanWorkspaceLocator::Volume { name } => args.extend([
                 "--volume".to_owned(),
-                format!("{name}:{CONTAINER_WORKSPACE}:rw,U"),
+                format!("{name}:{workspace_root}:rw,U"),
             ]),
-            PodmanWorkspaceLocator::HostPath { path, .. } => args.extend([
-                "--volume".to_owned(),
-                format!("{path}:{CONTAINER_WORKSPACE}:rw"),
-            ]),
+            // The host directory belongs to the host user, which
+            // `--userns=keep-id` maps to the container user.
+            PodmanWorkspaceLocator::HostPath { path, .. } => {
+                args.extend(["--volume".to_owned(), format!("{path}:{workspace_root}:rw")])
+            }
         }
     }
     for (ordinal, mount) in additional_mounts.iter().enumerate() {

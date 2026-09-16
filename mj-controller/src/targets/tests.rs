@@ -721,6 +721,7 @@ fn podman_plan_uses_owned_name_label_and_argv_clones() {
         &bundle(),
         &[],
         None,
+        None,
     )
     .unwrap();
     let name = resource_name(SESSION).unwrap();
@@ -772,6 +773,7 @@ fn podman_volume_workspace_is_per_session_and_mounted_for_local_and_ssh_targets(
         &bundle(),
         &[],
         None,
+        None,
     )
     .unwrap();
     let volume = format!("{}-workspace", resource_name(SESSION).unwrap());
@@ -804,12 +806,121 @@ fn podman_volume_workspace_is_per_session_and_mounted_for_local_and_ssh_targets(
         &bundle(),
         &[],
         None,
+        None,
     )
     .unwrap();
     let remote = remote.commands[0].args.last().unwrap();
     assert!(remote.contains("podman volume create"));
     assert!(remote.contains(&volume));
     assert!(remote.contains("/workspace:rw,U"));
+}
+
+/// Every container plan for one session, keyed by engine, so the workspace a
+/// plan clones into and mounts can be checked the same way for all of them.
+fn container_plans_for(workspace: Option<&Path>) -> Vec<(&'static str, CommandPlan)> {
+    let container = |storage: PodmanWorkspaceStorage| ContainerTemplate {
+        image: "ubuntu:24.04".to_owned(),
+        pull_policy: ImagePullPolicy::Auto,
+        extra_run_args: vec![],
+        workspace_storage: storage,
+    };
+    let host_helper = PodmanWorkspaceStorage::HostHelper {
+        root: "/srv/mj-workspaces".to_owned(),
+        helper: vec!["/opt/mj-helper".to_owned()],
+    };
+    [
+        (
+            "local podman volume",
+            TargetTemplate::LocalPodman(container(PodmanWorkspaceStorage::PodmanVolume)),
+        ),
+        (
+            "local podman host path",
+            TargetTemplate::LocalPodman(container(host_helper.clone())),
+        ),
+        (
+            "local docker",
+            TargetTemplate::LocalDocker(container(Default::default())),
+        ),
+        (
+            "apple container",
+            TargetTemplate::AppleContainer(container(Default::default())),
+        ),
+        (
+            "ssh podman volume",
+            TargetTemplate::SshPodman {
+                ssh: ssh(),
+                container: container(PodmanWorkspaceStorage::PodmanVolume),
+            },
+        ),
+        (
+            "ssh docker",
+            TargetTemplate::SshDocker {
+                ssh: ssh(),
+                container: container(Default::default()),
+            },
+        ),
+    ]
+    .into_iter()
+    .map(|(engine, template)| {
+        (
+            engine,
+            provision_plan(&template, SESSION, &bundle(), &[], None, workspace).unwrap(),
+        )
+    })
+    .collect()
+}
+
+/// Both plan shapes in one string: a local plan carries its argv, and an SSH
+/// plan carries one quoted command line.
+fn command_text(command: &CommandSpec) -> String {
+    format!("{} {}", command.program, command.args.join(" "))
+}
+
+#[test]
+fn container_plans_clone_and_mount_under_the_session_workspace() {
+    let workspace = new_container_workspace(SESSION).unwrap();
+    assert_eq!(workspace, Path::new("/workspace").join(SESSION));
+    for (engine, plan) in container_plans_for(Some(&workspace)) {
+        let clone = plan
+            .commands
+            .iter()
+            .find(|command| command.purpose == "clone app")
+            .unwrap_or_else(|| panic!("{engine} plan clones the bundle"));
+        let clone = command_text(clone);
+        assert!(
+            clone.contains(&format!("/workspace/{SESSION}/app")),
+            "{engine}: {clone}"
+        );
+        assert!(!clone.contains(" /workspace/app"), "{engine}: {clone}");
+        let create = command_text(&plan.commands[0]);
+        if engine.contains("podman") {
+            assert!(
+                create.contains(&format!(":/workspace/{SESSION}:rw")),
+                "{engine}: {create}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_session_without_a_recorded_container_workspace_keeps_the_shared_one() {
+    for (engine, plan) in container_plans_for(None) {
+        let clone = command_text(
+            plan.commands
+                .iter()
+                .find(|command| command.purpose == "clone app")
+                .unwrap_or_else(|| panic!("{engine} plan clones the bundle")),
+        );
+        assert!(clone.contains("/workspace/app"), "{engine}: {clone}");
+        assert!(
+            !clone.contains(&format!("/workspace/{SESSION}")),
+            "{engine}: {clone}"
+        );
+        let create = command_text(&plan.commands[0]);
+        if engine.contains("podman") {
+            assert!(create.contains(":/workspace:rw"), "{engine}: {create}");
+        }
+    }
 }
 
 #[test]
@@ -833,6 +944,7 @@ fn podman_host_helper_creates_the_exact_workspace_before_launch() {
         SESSION,
         &bundle(),
         &[],
+        None,
         None,
     )
     .unwrap();
@@ -861,6 +973,7 @@ fn container_clone_borrows_from_an_optional_read_only_reference() {
         SESSION,
         &cached,
         &[],
+        None,
         None,
     )
     .unwrap();
@@ -931,7 +1044,7 @@ fn container_secret_is_streamed_without_entering_remote_ssh_arguments() {
             workspace_storage: Default::default(),
         },
     };
-    let mut plan = provision_plan(&target, SESSION, &bundle(), &[], None).unwrap();
+    let mut plan = provision_plan(&target, SESSION, &bundle(), &[], None, None).unwrap();
 
     plan.provide_target_environment_secret(&target, "GH_TOKEN", secret)
         .unwrap();
@@ -967,6 +1080,7 @@ fn podman_plan_only_marks_per_repository_clone_commands_for_parallel_execution()
         SESSION,
         &bundle(),
         &[],
+        None,
         None,
     )
     .unwrap();
@@ -1012,6 +1126,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
         &bundle(),
         &[],
         None,
+        None,
     )
     .unwrap();
     assert_eq!(podman.commands[0].args[0], "run");
@@ -1030,6 +1145,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
         SESSION,
         &bundle(),
         &[],
+        None,
         None,
     )
     .unwrap();
@@ -1051,6 +1167,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
         SESSION,
         &bundle(),
         &[],
+        None,
         None,
     )
     .unwrap();
@@ -1085,6 +1202,7 @@ fn an_automatic_pull_policy_never_pulls_during_a_launch() {
                 &[],
                 None,
                 None,
+                "/workspace",
             )
             .unwrap();
             let pull = args
@@ -1123,6 +1241,7 @@ fn an_explicit_newer_pull_policy_still_pulls_during_a_launch() {
             &[],
             None,
             None,
+            "/workspace",
         )
         .unwrap();
         assert!(
@@ -1153,6 +1272,7 @@ fn explicit_podman_pull_policy_overrides_image_tag_defaults() {
             &[],
             None,
             None,
+            "/workspace",
         )
         .unwrap();
         assert_eq!(
@@ -1186,6 +1306,7 @@ fn docker_pull_policy_uses_supported_digest_aware_run_modes() {
             &[],
             None,
             None,
+            "/workspace",
         )
         .unwrap();
         assert!(args.contains(&expected.to_owned()), "{args:?}");
@@ -1214,6 +1335,7 @@ fn podman_containers_always_map_the_image_user_onto_the_host_user() {
             &[],
             None,
             image_user,
+            "/workspace",
         )
         .unwrap()
     };
@@ -1355,6 +1477,7 @@ fn the_image_user_probe_carries_the_targets_pull_policy() {
             &[],
             None,
             None,
+            "/workspace",
         )
         .unwrap();
         assert_eq!(
@@ -1414,6 +1537,7 @@ fn podman_additional_mounts_use_copy_on_write_overlay_volumes() {
         SESSION,
         &bundle(),
         &mounts,
+        None,
         None,
     )
     .unwrap();
@@ -1513,6 +1637,7 @@ fn docker_additional_mounts_use_managed_overlay_and_read_only_bind_volumes() {
         SESSION,
         &bundle(),
         &mounts,
+        None,
         None,
     )
     .unwrap();
@@ -1691,6 +1816,7 @@ fn apple_additional_mounts_use_read_only_bind_fallback() {
         &bundle(),
         &mounts,
         None,
+        None,
     )
     .unwrap();
 
@@ -1714,6 +1840,7 @@ fn apple_plan_preflights_and_uses_container_cli() {
         SESSION,
         &bundle(),
         &[],
+        None,
         None,
     )
     .unwrap();
@@ -1946,6 +2073,7 @@ fn remote_podman_is_ssh_plus_podman_not_remote_api() {
         SESSION,
         &bundle(),
         &[],
+        None,
         None,
     )
     .unwrap();
@@ -2348,7 +2476,7 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
         ),
     ];
     for (template, purpose) in creating {
-        let plan = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
+        let plan = provision_plan(&template, SESSION, &bundle(), &[], None, None).unwrap();
         assert_eq!(
             plan.description,
             format!("provision Mjolnir session {SESSION}")
@@ -2404,7 +2532,7 @@ fn aws_plan_tags_instance_and_close_uses_recorded_id() {
         instance_type: Some("m8i-flex.2xlarge".into()),
         ssh: ssh(),
     });
-    let provision = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
+    let provision = provision_plan(&template, SESSION, &bundle(), &[], None, None).unwrap();
     assert_eq!(provision.commands.len(), 1);
     assert!(
         provision.commands[0].args.windows(2).any(|args| args
@@ -3130,6 +3258,7 @@ fn docker_overlay_run_rollback_removes_owned_mj_directory_after_run_failure() {
             destination: PathBuf::from("/mnt/cache"),
             access: crate::targets::MountAccess::Cow,
         }],
+        "/workspace",
     )
     .unwrap();
 
@@ -3644,7 +3773,7 @@ fn ssh_docker_provisions_overlay_mounts_and_streams_secret_without_local_docker(
         destination: PathBuf::from("/mnt/source"),
         access: crate::targets::MountAccess::Cow,
     };
-    let mut plan = provision_plan(&template, SESSION, &bundle(), &[mount], None).unwrap();
+    let mut plan = provision_plan(&template, SESSION, &bundle(), &[mount], None, None).unwrap();
     assert!(plan.commands.iter().all(|command| command.program == "ssh"));
     let create = &plan.commands[0];
     assert!(create.creates_target);
@@ -3813,6 +3942,7 @@ fn docker_attachment_init_failure_stops_helper_and_removes_backing_storage() {
             destination: PathBuf::from("/mnt/cache"),
             access: crate::targets::MountAccess::Cow,
         }],
+        "/workspace",
     )
     .unwrap();
     let output = execute_with_fake_docker(
@@ -3876,6 +4006,7 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
                 destination: PathBuf::from("/mnt/source"),
                 access: crate::targets::MountAccess::Cow,
             }],
+            "/workspace",
         )?;
         execute_checked(&ProcessExecutor, &create)?;
         // A file added after launch must remain visible: this is a shared lower,

@@ -1251,6 +1251,19 @@ pub fn is_bare_project_target(template: &TargetTemplate) -> bool {
     )
 }
 
+/// Whether sessions on `template` run inside a container Hel creates, and so
+/// work in a container workspace rather than a host or instance directory.
+pub fn is_container_target(template: &TargetTemplate) -> bool {
+    matches!(
+        template,
+        TargetTemplate::LocalPodman { .. }
+            | TargetTemplate::LocalDocker { .. }
+            | TargetTemplate::AppleContainer { .. }
+            | TargetTemplate::SshPodman { .. }
+            | TargetTemplate::SshDocker { .. }
+    )
+}
+
 /// The host name that prompt-history mounts on `template` should be filed
 /// under, or `None` if the target does not support attached mounts.
 pub fn mount_history_host(template: &TargetTemplate) -> Option<&str> {

@@ -893,6 +893,13 @@ pub struct SessionRecord {
     /// template's value. It is applied the next time the container is created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_memory: Option<String>,
+    /// In-container workspace root this session's repositories live under.
+    /// `None` is a session whose container predates per-session workspaces and
+    /// therefore keeps the shared legacy `/workspace`; every session created
+    /// since records `/workspace/<session id>`, so two checkouts of one project
+    /// on a host never share an absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_workspace: Option<PathBuf>,
     pub state: SessionState,
     /// Legacy visibility preference, retained for record compatibility.
     /// Current surfaces do not hide sessions based on this flag.
@@ -1725,6 +1732,7 @@ mod tests {
             archived: false,
             container_cpus: None,
             container_memory: None,
+            container_workspace: None,
             id: "0123456789abcdef".into(),
             title: "Build Hel".into(),
             harness_kind: HarnessKind::Codex,

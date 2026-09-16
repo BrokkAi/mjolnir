@@ -801,6 +801,11 @@ impl Controller {
             archived: false,
             container_cpus: None,
             container_memory: None,
+            // Recorded for every new session, container-backed or not, so a
+            // later move into a container already knows the path its checkout
+            // will occupy. Only sessions that predate per-session container
+            // workspaces leave it unset.
+            container_workspace: Some(targets::new_container_workspace(&id)?),
             id: id.clone(),
             workspace_id,
             title: title.into(),

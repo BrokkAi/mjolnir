@@ -368,6 +368,7 @@ impl Controller {
                             bundle,
                             &runtime_mounts,
                             image_user,
+                            session.container_workspace.as_deref(),
                         )
                     })
             };
@@ -1434,6 +1435,7 @@ mod tests {
             &probe_bundle(),
             &mounts,
             None,
+            None,
         )
         .unwrap();
         assert!(
@@ -1469,6 +1471,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
             &probe_bundle(),
             &mounts,
+            None,
             None,
         )
         .unwrap();
@@ -1555,6 +1558,7 @@ mod tests {
             &probe_bundle(),
             &[],
             image_user,
+            None,
         )
         .unwrap();
         assert!(
@@ -1591,6 +1595,7 @@ mod tests {
             &probe_bundle(),
             &[],
             image_user,
+            None,
         )
         .unwrap();
         // Plain `keep-id` would demote a root image to uid 1000, so a
@@ -1714,6 +1719,7 @@ mod tests {
     fn failed_new_session_provisioning_retains_error_record() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let record = SessionRecord {
+            container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
@@ -1960,6 +1966,7 @@ mod tests {
     fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let mut session = SessionRecord {
+            container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
@@ -2276,9 +2283,15 @@ mod tests {
     fn a_failure_after_the_container_exists_removes_it_and_keeps_the_original_error() {
         let name = targets::resource_name(PROVISIONED_SESSION).unwrap();
         for target in container_targets() {
-            let plan =
-                targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
-                    .unwrap();
+            let plan = targets::provision_plan(
+                &target,
+                PROVISIONED_SESSION,
+                &probe_bundle(),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
             let executor = RecordingExecutor::failing("clone app");
 
             let error = provision_target(&plan, &target, PROVISIONED_SESSION, &executor, |_| {
@@ -2304,9 +2317,15 @@ mod tests {
     #[test]
     fn target_creation_returns_repository_setup_without_running_it() {
         let target = podman_target();
-        let plan =
-            targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
-                .unwrap();
+        let plan = targets::provision_plan(
+            &target,
+            PROVISIONED_SESSION,
+            &probe_bundle(),
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
         let executor = RecordingExecutor::succeeding();
 
         let (_, repositories) =
@@ -2330,9 +2349,15 @@ mod tests {
     #[test]
     fn a_target_whose_creation_failed_is_never_torn_down() {
         for target in container_targets() {
-            let plan =
-                targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
-                    .unwrap();
+            let plan = targets::provision_plan(
+                &target,
+                PROVISIONED_SESSION,
+                &probe_bundle(),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
             let creation = plan.split_at_target_creation().unwrap().0;
             let executor =
                 RecordingExecutor::failing(creation.commands.last().unwrap().purpose.clone());
@@ -2358,9 +2383,15 @@ mod tests {
     #[test]
     fn a_target_whose_locator_cannot_be_discovered_is_removed_again() {
         let target = podman_target();
-        let plan =
-            targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
-                .unwrap();
+        let plan = targets::provision_plan(
+            &target,
+            PROVISIONED_SESSION,
+            &probe_bundle(),
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
         let executor = RecordingExecutor::succeeding();
 
         let error = provision_target(&plan, &target, PROVISIONED_SESSION, &executor, |_| {

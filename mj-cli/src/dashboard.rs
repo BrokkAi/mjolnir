@@ -3102,6 +3102,7 @@ mod tests {
             state.sessions.insert(
                 id.into(),
                 mj_core::state::SessionRecord {
+                    container_workspace: None,
                     mjolnir_subagents: None,
                     create_managed_worktree: None,
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
@@ -3983,6 +3984,7 @@ mod tests {
 
     fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
         mj_core::state::SessionRecord {
+            container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),

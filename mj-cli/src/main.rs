@@ -1601,6 +1601,7 @@ mod tests {
         state.sessions.insert(
             session_id.into(),
             SessionRecord {
+                container_workspace: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),

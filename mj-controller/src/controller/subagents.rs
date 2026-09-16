@@ -124,6 +124,9 @@ impl Controller {
             archived: false,
             container_cpus: None,
             container_memory: None,
+            // A child runs inside its parent's container, so it works in the
+            // parent's workspace, including the legacy shared one.
+            container_workspace: parent.container_workspace.clone(),
             id: child_id.clone(),
             workspace_id: parent.workspace_id.clone(),
             title: request.task_name.clone(),

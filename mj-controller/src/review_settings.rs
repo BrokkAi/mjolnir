@@ -541,6 +541,7 @@ mod tests {
                 (
                     (*session_id).to_owned(),
                     SessionRecord {
+                        container_workspace: None,
                         mjolnir_subagents: None,
                         create_managed_worktree: None,
                         id: (*session_id).to_owned(),

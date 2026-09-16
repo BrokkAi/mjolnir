@@ -22,6 +22,7 @@ impl Drop for DropFlag {
 
 fn session_record(id: &str) -> SessionRecord {
     SessionRecord {
+        container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         id: id.into(),

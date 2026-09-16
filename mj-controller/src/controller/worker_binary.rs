@@ -83,17 +83,26 @@ impl Controller {
             .get(&session.target_template_id)
             .context("session target template is missing")?;
         let subagent = crate::database::load_subagent(session_id)?;
-        let workspace_session_id = subagent.as_ref().map_or_else(
-            || session_id.to_owned(),
-            |child| child.parent_session_id.clone(),
-        );
+        // A sub-agent child shares its parent's container, so it works in the
+        // parent's workspace. The parent record is authoritative for that path.
+        let (workspace_session_id, workspace_container) = match subagent.as_ref() {
+            Some(child) => {
+                let parent = self
+                    .state
+                    .sessions
+                    .get(&child.parent_session_id)
+                    .context("sub-agent parent session is missing")?;
+                (parent.id.clone(), parent.container_workspace.clone())
+            }
+            None => (session_id.to_owned(), session.container_workspace.clone()),
+        };
         let (mut launch, project_memory, target_profile_home) = worker_launch_config(
             session,
             profile,
             bundle,
             backend,
-            session_id,
             &workspace_session_id,
+            workspace_container.as_deref(),
             target,
         )?;
         launch.subagent_tools =
@@ -130,7 +139,7 @@ impl Controller {
                 parent_bundle,
                 &parent_backend,
                 &parent.id,
-                &parent.id,
+                parent.container_workspace.as_deref(),
                 parent_target,
             )?;
             launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
@@ -315,7 +324,13 @@ impl Controller {
             .get(&session.target_template_id)
             .context("session target template is missing")?;
         let (mut launch, _, _) = worker_launch_config(
-            session, profile, bundle, backend, session_id, session_id, target,
+            session,
+            profile,
+            bundle,
+            backend,
+            session_id,
+            session.container_workspace.as_deref(),
+            target,
         )?;
         if crate::database::load_move_operation(session_id)?.is_some_and(|operation| {
             operation.source_checkpoint_only
@@ -370,6 +385,7 @@ impl Controller {
                 &backend,
                 bundle.context("session bundle is missing")?,
                 session_id,
+                session.container_workspace.as_deref(),
             )?
         };
         let target_home = target_profile_home(&backend, session_id, profile);
@@ -426,10 +442,11 @@ fn worker_launch_config(
     profile: &mj_core::config::HarnessProfile,
     bundle: Option<&ProjectBundle>,
     backend: &targets::TargetLocator,
-    session_id: &str,
     workspace_session_id: &str,
+    workspace_container: Option<&Path>,
     target: &mj_core::config::TargetTemplate,
 ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
+    let session_id = session.id.as_str();
     let execution_policy = profile
         .kind
         .effective_execution_policy(target.execution_policy());
@@ -441,6 +458,7 @@ fn worker_launch_config(
             backend,
             bundle.context("session bundle is missing")?,
             workspace_session_id,
+            workspace_container,
         )?
     };
     let mut additional_directories = workspace.1.iter().map(PathBuf::from).collect::<Vec<_>>();
@@ -1467,10 +1485,14 @@ fn validate_worker_sha256(expected_sha256: &str) -> Result<()> {
     Ok(())
 }
 
+/// The repository paths a worker opens. `session_id` and `container_workspace`
+/// identify the session whose workspace is used, which for a sub-agent child is
+/// its parent.
 fn workspace_paths(
     locator: &targets::TargetLocator,
     bundle: &ProjectBundle,
     session_id: &str,
+    container_workspace: Option<&Path>,
 ) -> Result<(String, Vec<String>)> {
     let root = match locator {
         targets::TargetLocator::LocalBare { .. } => {
@@ -1480,7 +1502,9 @@ fn workspace_paths(
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => "/workspace".to_string(),
+        | targets::TargetLocator::SshDocker { .. } => {
+            targets::container_workspace_root(container_workspace)
+        }
         targets::TargetLocator::AwsEc2 { workspace, .. }
         | targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
     };
@@ -5365,6 +5389,56 @@ mod tests {
     }
 
     #[test]
+    fn a_child_opens_its_parents_container_workspace() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = zai_profile(home.path());
+        let parent_id = "0123456789abcdef0123456789abcdef";
+        let child_id = "1123456789abcdef0123456789abcdef";
+        let parent_workspace = targets::new_container_workspace(parent_id).unwrap();
+        let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+        let locator = targets::TargetLocator::LocalPodman {
+            container_id: targets::resource_name(parent_id).unwrap(),
+            workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+        };
+        let template = mj_core::config::TargetTemplate::LocalPodman {
+            container: mj_core::config::ContainerTemplate {
+                image: "ubuntu:24.04".to_owned(),
+                pull_policy: Default::default(),
+                platform: None,
+                cpus: None,
+                memory: None,
+                environment: Default::default(),
+                workspace_storage: Default::default(),
+            },
+        };
+        // The child record copies its parent's workspace when it is created,
+        // and `prepare_worker_files` reads the same value off the parent, so
+        // both point the child's harness at the parent's checkout rather than
+        // at a workspace named after the child.
+        let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
+        child.harness_kind = HarnessKind::Codex;
+        child.last_profile = "glm".into();
+        child.project_directory = None;
+        child.container_workspace = Some(parent_workspace.clone());
+
+        let (launch, _, _) = worker_launch_config(
+            &child,
+            &profile,
+            Some(&bundle),
+            &locator,
+            parent_id,
+            Some(&parent_workspace),
+            &template,
+        )
+        .unwrap();
+
+        assert_eq!(
+            launch.cwd,
+            PathBuf::from(format!("/workspace/{parent_id}/project"))
+        );
+    }
+
+    #[test]
     fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
         let project = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -5386,7 +5460,7 @@ mod tests {
                 worker_root: "/home/me/.local/share/hel/worker".into(),
             },
             &session.id,
-            &session.id,
+            None,
             &mj_core::config::TargetTemplate::LocalBare,
         )
         .unwrap();
@@ -5441,7 +5515,7 @@ mod tests {
                 worker_root: "/home/me/.local/share/hel/worker".into(),
             },
             &session.id,
-            &session.id,
+            None,
             &mj_core::config::TargetTemplate::LocalBare,
         )
         .unwrap();

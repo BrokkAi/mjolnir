@@ -4372,6 +4372,7 @@ mod tests {
 
     fn runtime_test_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             id: id.into(),

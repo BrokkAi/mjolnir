@@ -4479,6 +4479,7 @@ mod tests {
 
     fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         SessionRecord {
+            container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),

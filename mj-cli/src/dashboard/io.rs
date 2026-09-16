@@ -2891,6 +2891,7 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: workspace_id.to_owned(),

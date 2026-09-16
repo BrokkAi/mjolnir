@@ -23,6 +23,9 @@ pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
 pub const SESSION_TAG: &str = "dev.mj.session";
 pub const MANAGED_TAG: &str = "dev.mj.managed";
+/// The shared in-container workspace every container session used before
+/// per-session workspaces existed. New sessions record a path under it; see
+/// `container_workspace_root`.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
 
 /// The launch phase a command belongs to, reported as launch progress.
@@ -1647,15 +1650,39 @@ pub fn podman_workspace_locator(
     }
 }
 
+/// The in-container workspace root a session's repositories live under.
+///
+/// `recorded` is the session record's `container_workspace`. A session whose
+/// container predates per-session workspaces has none and keeps the legacy
+/// shared `/workspace`; every session created since records
+/// `/workspace/<session id>`, so a build cache shared by every container on a
+/// host never sees two checkouts of one project at the same absolute path.
+pub fn container_workspace_root(recorded: Option<&Path>) -> String {
+    recorded.map_or_else(
+        || CONTAINER_WORKSPACE.to_owned(),
+        |path| path.to_string_lossy().into_owned(),
+    )
+}
+
+/// The per-session container workspace recorded for a session created now.
+pub fn new_container_workspace(session_id: &str) -> Result<PathBuf> {
+    validate_session_id(session_id)?;
+    Ok(Path::new(CONTAINER_WORKSPACE).join(session_id))
+}
+
 pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<String> {
     validate_session_id(session_id)?;
     match template {
         TargetTemplate::LocalBare => bail!("local bare projects use their selected directory"),
+        // A container workspace is per session and recorded on the session
+        // record, so it is read with `container_workspace_root` instead.
         TargetTemplate::LocalPodman(_)
         | TargetTemplate::LocalDocker(_)
         | TargetTemplate::AppleContainer(_)
         | TargetTemplate::SshPodman { .. }
-        | TargetTemplate::SshDocker { .. } => Ok(CONTAINER_WORKSPACE.to_owned()),
+        | TargetTemplate::SshDocker { .. } => {
+            bail!("container targets use the session's recorded container workspace")
+        }
         TargetTemplate::AwsEc2(_) => Ok(format!(".local/share/hel/workspaces/{session_id}")),
         TargetTemplate::SshBare {
             workspace_prefix, ..

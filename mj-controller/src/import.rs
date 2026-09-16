@@ -2512,6 +2512,10 @@ fn import_claude_session_inner(
         session_id.clone(),
         SessionRecord {
             mjolnir_subagents: None,
+            // An imported history is a new session: when it is resumed into a
+            // container it gets its own workspace, like any session created
+            // now.
+            container_workspace: Some(mj_core::targets::new_container_workspace(&session_id)?),
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
@@ -2842,6 +2846,10 @@ pub fn import_native_session(
         session_id.clone(),
         SessionRecord {
             mjolnir_subagents: None,
+            // An imported history is a new session: when it is resumed into a
+            // container it gets its own workspace, like any session created
+            // now.
+            container_workspace: Some(mj_core::targets::new_container_workspace(&session_id)?),
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,

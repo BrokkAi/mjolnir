@@ -6,7 +6,8 @@ test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers
 function preview(overrides = {}) {
   return {
     checkout: '/work/repo',
-    destination: '/workspace/repo',
+    // A container session's checkout lands in the session's own workspace.
+    destination: '/workspace/stopped/repo',
     branch: 'mj/session',
     fetch_url: 'https://github.com/example/repo.git',
     push_urls: ['https://github.com/example/repo.git'],
@@ -115,7 +116,7 @@ test('a container destination warns what travels and holds Resume until it is ac
   expect(state.preflights[0]).toEqual({ session_id: 'stopped', target_id: 'container' });
 
   await expect(detail(page)).toContainText(
-    'Clone https://github.com/example/repo.git (default branch main) into /workspace/repo on branch mj/session; push to https://github.com/example/repo.git.',
+    'Clone https://github.com/example/repo.git (default branch main) into /workspace/stopped/repo on branch mj/session; push to https://github.com/example/repo.git.',
   );
   await expect(detail(page)).toContainText(
     '1 staged, 1 unstaged, and 3 untracked files (2.5 MB) will be copied into the container. Ignored files such as build output, .env, and node_modules will not.',
