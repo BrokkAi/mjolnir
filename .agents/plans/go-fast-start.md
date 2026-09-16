@@ -12,7 +12,7 @@
 - [x] (2026-09-16) Implement saved global defaults and per-folder recipes, the go command, and initial setup.
 - [x] (2026-09-16) Connect New and Change setup, visible context, and in-app launch failures.
 - [x] (2026-09-16) Add behavior tests and pass the full dev-profile test suite, Clippy, formatting, CLI help, and diff checks.
-- [ ] Commit, push a PR head, and open the requested PR.
+- [x] (2026-09-16) Commit implementation as `526ffd93`, push `codex/mj-go-fast-start`, and open PR https://github.com/BrokkAi/mjolnir/pull/1046.
 
 ## Surprises & Discoveries
 
@@ -69,3 +69,5 @@ Use existing Path/PathBuf, serde, existing Config lock/atomic writes, TUI Dashbo
 Plan created 2026-09-16 to capture the authorized additive workflow and PR delivery.
 
 Updated 2026-09-16 with implemented behavior, validation progress, and explicit runtime limitations.
+
+Completed 2026-09-16: implementation and validation delivered in PR #1046. Remote master was not changed.
