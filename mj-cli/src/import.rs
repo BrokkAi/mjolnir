@@ -18,13 +18,10 @@ use mj_core::state::{SessionRecord, State};
 
 use mj_controller::controller::Controller;
 use mj_controller::import::{
-    BundleResolution, ClaudeImportRequest, ClaudeSessionSelection, ClaudeTranscript,
-    CodexImportRequest, GrokImportRequest, ImportArchiveProgress, ImportControl,
-    ImportedClaudeSession, KimiImportRequest, NativeImportRequest, SessionEditTargets,
-    import_claude_session, import_codex_session, import_grok_session, import_kimi_session,
-    import_native_session_with_control, import_safety_issues, locate_claude_session,
-    locate_codex_session, locate_grok_session, locate_kimi_session, locate_native_session,
-    read_native_transcript, resolve_bundle, scan_native_sessions, session_edit_targets,
+    BundleResolution, ClaudeSessionSelection, ClaudeTranscript, ImportArchiveProgress,
+    ImportControl, ImportedClaudeSession, NativeImportRequest, SessionEditTargets,
+    import_native_session, import_safety_issues, locate_native_session, read_native_transcript,
+    resolve_bundle, scan_native_sessions, session_edit_targets,
 };
 use mj_tui::{ImportProfileOption, ImportSessionOption};
 
@@ -116,149 +113,6 @@ fn harness_config_home(harness: HarnessKind) -> Result<PathBuf> {
     mj_controller::import::harness_config_home(harness)
 }
 
-/// The harness's own importer, already bound to the session that was located.
-/// Each harness has its own request shape, so binding it here is what lets the
-/// steps around it be written once.
-type HarnessImport = Box<
-    dyn FnOnce(
-        &Config,
-        &mut State,
-        &ClaudeTranscript,
-        &str,
-        Option<&str>,
-    ) -> Result<ImportedClaudeSession>,
->;
-
-/// One located native session plus the importer that can adopt it.
-struct LocatedImport {
-    native_session_id: String,
-    source_path: PathBuf,
-    import: HarnessImport,
-}
-
-fn locate_for_import(
-    harness: HarnessKind,
-    home: PathBuf,
-    selection: &ClaudeSessionSelection,
-) -> Result<LocatedImport> {
-    let archives = sessions_dir();
-    Ok(match harness {
-        HarnessKind::Muse => {
-            let source = locate_native_session(harness, &home, selection)?;
-            LocatedImport {
-                native_session_id: source.native_session_id.clone(),
-                source_path: source.source_path.clone(),
-                import: Box::new(move |config, state, transcript, bundle_id, title| {
-                    mj_controller::import::import_native_session(
-                        config,
-                        state,
-                        NativeImportRequest {
-                            harness,
-                            harness_home: &home,
-                            native_session_id: &source.native_session_id,
-                            source_path: &source.source_path,
-                            transcript,
-                            bundle_id,
-                            profile_id: None,
-                            title,
-                            archive_directory: &archives,
-                        },
-                        None,
-                    )
-                }),
-            }
-        }
-        HarnessKind::Claude => {
-            let source = locate_claude_session(&home, selection)?;
-            LocatedImport {
-                native_session_id: source.native_session_id.clone(),
-                source_path: source.jsonl_path.clone(),
-                import: Box::new(move |config, state, transcript, bundle_id, title| {
-                    import_claude_session(
-                        config,
-                        state,
-                        ClaudeImportRequest {
-                            claude_home: &home,
-                            source: &source,
-                            transcript,
-                            bundle_id,
-                            profile_id: None,
-                            title,
-                            archive_directory: &archives,
-                        },
-                    )
-                }),
-            }
-        }
-        HarnessKind::Codex => {
-            let source = locate_codex_session(&home, selection)?;
-            LocatedImport {
-                native_session_id: source.native_session_id.clone(),
-                source_path: source.jsonl_path.clone(),
-                import: Box::new(move |config, state, transcript, bundle_id, title| {
-                    import_codex_session(
-                        config,
-                        state,
-                        CodexImportRequest {
-                            codex_home: &home,
-                            source: &source,
-                            transcript,
-                            bundle_id,
-                            profile_id: None,
-                            title,
-                            archive_directory: &archives,
-                        },
-                    )
-                }),
-            }
-        }
-        HarnessKind::Kimi => {
-            let source = locate_kimi_session(&home, selection)?;
-            LocatedImport {
-                native_session_id: source.native_session_id.clone(),
-                source_path: source.session_path.clone(),
-                import: Box::new(move |config, state, transcript, bundle_id, title| {
-                    import_kimi_session(
-                        config,
-                        state,
-                        KimiImportRequest {
-                            kimi_home: &home,
-                            source: &source,
-                            transcript,
-                            bundle_id,
-                            profile_id: None,
-                            title,
-                            archive_directory: &archives,
-                        },
-                    )
-                }),
-            }
-        }
-        HarnessKind::Grok => {
-            let source = locate_grok_session(&home, selection)?;
-            LocatedImport {
-                native_session_id: source.native_session_id.clone(),
-                source_path: source.session_path.clone(),
-                import: Box::new(move |config, state, transcript, bundle_id, title| {
-                    import_grok_session(
-                        config,
-                        state,
-                        GrokImportRequest {
-                            grok_home: &home,
-                            source: &source,
-                            transcript,
-                            bundle_id,
-                            profile_id: None,
-                            title,
-                            archive_directory: &archives,
-                        },
-                    )
-                }),
-            }
-        }
-    })
-}
-
 /// Adopt one native session from the command line. Every harness takes these
 /// same steps; only the locator and the importer bound in [`LocatedImport`]
 /// differ.
@@ -268,7 +122,7 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
         Some(session) => ClaudeSessionSelection::NativeSessionId(session),
         None => ClaudeSessionSelection::Latest,
     };
-    let located = locate_for_import(harness, home.clone(), &selection)?;
+    let located = locate_native_session(harness, &home, &selection)?;
     println!(
         "Selected {} session {} at {}",
         import_label(harness),
@@ -291,12 +145,21 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
     let (config, bundle_id) = Config::update(|config| {
         resolve_import_bundle(config, &transcript, &targets, args.bundle.as_deref())
     })?;
-    let imported = (located.import)(
+    let imported = import_native_session(
         &config,
         &mut state,
-        &transcript,
-        &bundle_id,
-        args.title.as_deref(),
+        NativeImportRequest {
+            harness,
+            harness_home: &home,
+            native_session_id: &located.native_session_id,
+            source_path: &located.source_path,
+            transcript: &transcript,
+            bundle_id: &bundle_id,
+            profile_id: None,
+            title: args.title.as_deref(),
+            archive_directory: &sessions_dir(),
+        },
+        None,
     )?;
     let session = state
         .sessions
@@ -764,7 +627,7 @@ fn import_session_from_profile(
         progress: &archive_progress,
         include_untracked: safety.include_untracked,
     };
-    let imported = import_native_session_with_control(
+    let imported = import_native_session(
         &controller.config,
         &mut controller.state,
         NativeImportRequest {
@@ -778,7 +641,7 @@ fn import_session_from_profile(
             title: Some(display_title),
             archive_directory: &sessions_dir(),
         },
-        &control,
+        Some(&control),
     )?;
     controller
         .state
