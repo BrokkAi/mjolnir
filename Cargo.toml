@@ -42,6 +42,51 @@ mj-controller = { path = "mj-controller", package = "brokk-mj-controller", versi
 mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.10.0" }
 mj-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.10.0" }
 
+# Every external dependency that two or more crates share is declared once
+# here, so a version can only be raised in one place. Each entry carries the
+# features every user of it needs; a crate that needs more adds them beside
+# `workspace = true`, which unions them with these.
+agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
+anyhow = "1"
+axum = "0.8"
+# Use the ring provider already pulled by reqwest instead of aws-lc-rs, which
+# needs a C toolchain and complicates cross-compilation.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+base64 = "0.22"
+# `clock` enables local-time support so `Local` can render reset timestamps in
+# the machine's wall-clock time (DST-correct); `default-features = false` drops
+# the wasm-only bits.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+dirs = "6"
+# `rust_backend` is flate2 1.1.9's whole default; naming it keeps every crate
+# on the pure-Rust deflate without a C toolchain.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+getrandom = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+libc = "0.2"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+rayon = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sysinfo = "0.32"
+tar = "0.4"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "time"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+zip = { version = "2", default-features = false, features = ["deflate", "zstd"] }
+
 [workspace.lints.clippy]
 disallowed_methods = "warn"
 

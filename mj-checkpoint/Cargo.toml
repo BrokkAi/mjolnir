@@ -17,21 +17,21 @@ workspace = true
 
 [dependencies]
 mj-core.workspace = true
-agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
-anyhow = "1"
-base64 = "0.22"
+agent-client-protocol.workspace = true
+anyhow.workspace = true
+base64.workspace = true
 blake3 = { version = "1", default-features = false, features = ["std"] }
-dirs = "6"
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-libc = "0.2"
-rayon = "1"
-serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
-sha2 = "0.10"
-tar = "0.4"
-tempfile = "3"
-url = "2"
-zip = { version = "2", default-features = false, features = ["deflate", "zstd"] }
+dirs.workspace = true
+flate2.workspace = true
+libc.workspace = true
+rayon.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+url.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
