@@ -26,21 +26,6 @@ pub const MAX_SKILLS_FILES: usize = 1024;
 
 const ARCHIVE_MAGIC: &[u8; 8] = b"HELSKIL1";
 
-/// The harness-home-relative directories Hel keeps in sync for a profile.
-///
-/// Every harness resolves user skills from a `skills/` directory under its
-/// home (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `KIMI_CODE_HOME`, `GROK_HOME`),
-/// matching the provisioning allowlist in `stage_profile`.
-pub fn synced_skill_dirs(kind: HarnessKind) -> &'static [&'static str] {
-    match kind {
-        HarnessKind::Codex
-        | HarnessKind::Claude
-        | HarnessKind::Kimi
-        | HarnessKind::Grok
-        | HarnessKind::Muse => &["skills"],
-    }
-}
-
 /// Non-secret metadata about one copy of a skills tree. Fingerprints compare
 /// trees; there is no freshness concept because the controller copy always
 /// wins.
@@ -153,7 +138,7 @@ impl SkillsArchive {
 /// provisioning allowlist copy.
 pub fn collect_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
     let mut entries = Vec::new();
-    for dir in synced_skill_dirs(kind) {
+    for dir in kind.synced_skill_dirs() {
         let root = home.join(dir);
         if !root.exists() {
             continue;
@@ -220,7 +205,7 @@ fn collect_tree(root: &Path, prefix: &str, entries: &mut Vec<SkillsEntry>) -> Re
 /// destination is refused rather than followed, and entry paths outside the
 /// harness's synced directories are rejected outright.
 pub fn install_skills(kind: HarnessKind, home: &Path, archive: &SkillsArchive) -> Result<()> {
-    for dir in synced_skill_dirs(kind) {
+    for dir in kind.synced_skill_dirs() {
         let entries = archive
             .entries
             .iter()
@@ -392,7 +377,7 @@ mod tests {
     #[test]
     fn every_harness_syncs_a_skills_directory() {
         for kind in HarnessKind::ALL {
-            assert_eq!(synced_skill_dirs(kind), &["skills"]);
+            assert_eq!(kind.synced_skill_dirs(), &["skills"]);
         }
     }
 
