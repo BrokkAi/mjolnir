@@ -432,6 +432,10 @@ pub(crate) async fn run_dashboard_for_workspace(
         return Ok(DashboardExit::Normal);
     };
     if let Some((mode, setup)) = go {
+        let modes = tokio::task::spawn_blocking(crate::go::saved_workspace_modes)
+            .await
+            .context("load project workspace settings task failed")??;
+        context.dashboard.register_go_workspaces(modes);
         context.cancel_startup_session();
         let action = context.dashboard.begin_go(mode, setup);
         actions::apply_dashboard_action(&mut context, action).await?;
@@ -724,6 +728,7 @@ impl DashboardContext {
         self.workspace_id = workspace_id.clone().unwrap_or_default();
         self.selection.clear();
         self.dashboard.set_active_workspace(workspace_id);
+        self.go_selection_requested = None;
         self.dashboard.set_current_session(None);
         self.follow_selected_session();
         self.dirty = true;

@@ -3,11 +3,13 @@
 ## Purpose / Big Picture
 
 
-`mj go [folder]` should put the user into a conversation for an explicit project without changing plain `mj`. First use chooses an account and execution target using the existing launch UI. Later invocations and the New button reuse those choices. A visible context banner identifies the source folder, actual session location, and account/target. Launch failures stay in the existing retry UI. This plan follows `.agents/PLANS.md`.
+`mj go [folder]` selects the workspace bound to that directory (or creates a new one) and opens its conversation without changing plain `mj`. The full dashboard remains available; switching directory-linked workspaces changes the source folder and saved New recipe together. First use chooses an account and execution target using the existing launch UI. Later invocations and the New button reuse those choices. A visible context banner identifies the source folder, actual session location, and account/target. Launch failures stay in the existing retry UI. This plan follows `.agents/PLANS.md`.
 
 ## Progress
 
 
+- [x] (2026-09-16) Restore the full dashboard and workspace navigation while retaining deterministic directory entry and scoped New behavior.
+- [x] (2026-09-16) Validate workspace switching, background launch ownership, and dashboard rendering; build the client and prepare the updated PR description.
 - [x] (2026-09-16) Inspect startup, session creation, background jobs, configuration persistence, and TUI controls.
 - [x] (2026-09-16) Implement saved global defaults and per-folder recipes, the go command, and initial setup.
 - [x] (2026-09-16) Connect New and Change setup, visible context, and in-app launch failures.
@@ -25,6 +27,8 @@ Plain `mj` opens the most recently used organizational workspace. A workspace is
 ## Decision Log
 
 
+User feedback on 2026-09-16 supersedes the restricted-screen decision: the dashboard information and workspace navigation are useful. Go is a directory-aware entry and remembered-launch workflow, not a separate restricted interface. Restore the shared dashboard, commands, and focus traversal. Keep the readable names and current-context banner. Load saved workspace recipes before opening the UI, switch the active recipe with the workspace, and use the launch's originating workspace when a background preparation completes. Unbound workspaces use ordinary setup instead of inheriting another folder's recipe.
+
 Use the existing session creation and failure/retry machinery. Keep go preferences in a separately versioned file beside config, using the shared lock and atomic-write helpers, so old config parsers and the database need no migration. Remember full recipes per canonical source folder and reusable account/target defaults globally. Never infer a remote bare path from a local path. Keep commits on the current branch as instructed, and publish a dedicated remote PR head without pushing master.
 
 ## Outcomes & Retrospective
@@ -32,7 +36,7 @@ Use the existing session creation and failure/retry machinery. Keep go preferenc
 
 Implemented the additive workflow. Go preferences are stored under the instance config directory in `go.json`. First setup establishes global defaults, subsequent setups remember per-project choices, and `--global-default` explicitly changes defaults for new projects. New and Alt-N reuse the recipe; plain mj retains the original wizard. The selected session's checkout and branch are read through the shared target command helper on a background job with a three-second process timeout and a five-second refresh interval. A failed observation is displayed as unavailable instead of retaining the previous path.
 
-Cold target provisioning still takes the runtime's normal startup time; this change removes repeat setup navigation, not container boot or network latency. Live provider/runtimes are not exercised during development. Following screenshot review, fast mode uses a compact conversation navigator instead of the dashboard's project-grouped session rows. Launch errors offer retry and settings; manual host repair can still be needed, but prerequisite errors no longer require a doctor command.
+Cold target provisioning still takes the runtime's normal startup time; this change removes repeat setup navigation, not container boot or network latency. Live provider/runtimes are not exercised during development. The compact navigator was an overcorrection: the latest user feedback restores the ordinary dashboard and workspace navigation, retaining friendly conversation titles and remembered launch behavior. Launch errors offer retry and settings; manual host repair can still be needed, but prerequisite errors no longer require a doctor command.
 
 The correction stores workspace IDs and last-selected conversation IDs alongside recipes in version 2 of go.json, retaining version 1 read support. Legacy hashed names are renamed through the daemon API, while directory identity is persisted separately from display names. Existing user-renamed bound workspaces keep their names. Reopening prefers the remembered eligible conversation, excluding other workspaces, archived sessions, and subagents; without a remembered choice it uses latest recorded update time. Stopped conversations still use the existing recovery wizard. Plain mj remains unchanged.
 
@@ -82,3 +86,9 @@ Reopened 2026-09-16 following the user's screenshot: minimized dashboard panels,
 Correction validated 2026-09-16: all 14 focused go tests pass, the full dev-profile suite passes, and Clippy, formatting, diff checks, and CLI help pass. A terminal-buffer SVG captured by the rendered-context test was rasterized with Quick Look and visually inspected. The tested client was built with `cargo build -p brokk-mjolnir`; existing worker binaries and the daemon protocol are unchanged. No live provider session was started for validation.
 
 The local client at `/Users/ryansvihla/.local/bin/mj` was replaced by atomic rename after retaining the previous executable at `/private/tmp/mj-go-review.R3b6z4/mj.previous`. The next terminal attachment uses the correction; already-running terminal UIs and sessions are left untouched. Detach with Alt-Q, then run `mj go` from the project folder.
+
+Revised 2026-09-16 after the user approved the direction but requested useful dashboard information and workspace switching back. The new acceptance scenario is: run go in A, switch to an existing directory-linked B and use B's New recipe, then run go in A again and return to A regardless of the most recently visited workspace. A different unbound directory must get a new bound workspace, never borrow the active workspace merely because it is open. The first milestone restores shared rendering/navigation; the second scopes cached project recipes and delayed launch completions to workspace IDs; the third runs focused and full validation, installs the client without stopping sessions, and updates PR #1046.
+
+Dashboard restoration validated 2026-09-16: the full dev-profile test suite, Clippy, changed-crate formatting checks, CLI help, and diff checks pass. The renderer capture includes workspace navigation, session information, target/quota panels, friendly titles, and the source/working-directory banner. Workspace-wide formatting reports an unrelated existing difference in `mj-controller/src/review_host.rs`; that file is deliberately left unchanged. No live provider provisioning was tested. The previous client is backed up at `/private/tmp/mj-go-dashboard.BTNpgF/mj.previous`; the validated replacement is installed by atomic rename without restarting live sessions.
+
+A concurrent git pull rebased the earlier three feature commits onto updated master. `git range-diff` confirms all three patches are unchanged. PR delivery therefore uses an exact-old-head lease on the feature ref only; remote master remains untouched.

@@ -101,7 +101,11 @@ fn heading_for(dashboard: &DashboardState, scope: Scope) -> String {
     if scope == Scope::Session
         && let Some(session) = dashboard.selected_session()
     {
-        return session.display_title().to_owned();
+        return if dashboard.go.is_some() {
+            dashboard.go_conversation_title(&session.id)
+        } else {
+            session.display_title().to_owned()
+        };
     }
     scope.heading().to_owned()
 }
@@ -167,25 +171,6 @@ fn rank(entries: Vec<PaletteEntry>, query: &str) -> Vec<PaletteEntry> {
 /// [`hidden_from_palette`] names because a visible dashboard control already
 /// runs them.
 pub(crate) fn palette_entries(dashboard: &DashboardState, query: &str) -> Vec<PaletteEntry> {
-    if dashboard.go.is_some() {
-        return rank(
-            [
-                CommandId::ChangeGoSetup,
-                CommandId::RenameSession,
-                CommandId::ResumeDialog,
-                CommandId::OpenConfig,
-                CommandId::StopSession,
-                CommandId::QuitDetach,
-            ]
-            .into_iter()
-            .filter_map(|id| {
-                let availability = (spec(id).available)(dashboard);
-                (availability != Availability::Hidden).then_some(PaletteEntry { id, availability })
-            })
-            .collect(),
-            query,
-        );
-    }
     let mut entries = Vec::new();
     for scope in scope_order(dashboard) {
         for spec in COMMANDS.iter().filter(|spec| spec.scope == scope) {

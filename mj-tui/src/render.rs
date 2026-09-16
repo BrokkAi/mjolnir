@@ -476,6 +476,14 @@ fn drawn_session_rows_with_options(
                 let Some(session) = sessions.get(index) else {
                     continue;
                 };
+                // Supply a display-only title without changing the durable session record.
+                let named_session = dashboard.go.is_some().then(|| {
+                    let mut named = (*session).clone();
+                    named.session_title_override =
+                        Some(dashboard.go_conversation_title(&session.id));
+                    named
+                });
+                let session = named_session.as_ref().unwrap_or(session);
                 let detail = dashboard.session_details.get(&session.id);
                 let review = dashboard.session_review(&session.id);
                 let unreachable = dashboard.unreachable_sessions.contains(&session.id);
@@ -2511,29 +2519,12 @@ pub(crate) fn footer_commands(
 ) -> Vec<(crate::CommandId, String)> {
     let mut hints = crate::actions::available(dashboard, None)
         .into_iter()
-        .filter(|id| {
-            dashboard.go.is_none()
-                || matches!(
-                    id,
-                    crate::CommandId::NewSessionWizard
-                        | crate::CommandId::Palette
-                        | crate::CommandId::QuitDetach
-                        | crate::CommandId::CancelOperation
-                        | crate::CommandId::CycleFocus
-                )
-        })
         .filter_map(|id| {
             let spec = crate::actions::spec(id);
             if spec.footer_group != group {
                 return None;
             }
-            let word = if dashboard.go.is_some() && id == crate::CommandId::NewSessionWizard {
-                "new".to_owned()
-            } else if dashboard.go.is_some() && id == crate::CommandId::Palette {
-                "menu".to_owned()
-            } else {
-                (spec.footer)(dashboard)?
-            };
+            let word = (spec.footer)(dashboard)?;
             let hint = spec.keys.first()?;
             Some((spec.footer_rank, id, format!("{} {word}", hint.label)))
         })

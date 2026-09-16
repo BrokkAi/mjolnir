@@ -1860,17 +1860,18 @@ impl DashboardContext {
             } => match *result {
                 Ok((config, recipe)) => {
                     self.controller.config = config.clone();
-                    let mut action = self.dashboard.go_launch_action(config, recipe);
-                    if let DashboardAction::CreateSession {
-                        workspace_id: destination,
-                        ..
-                    } = &mut action
-                    {
-                        *destination = workspace_id;
-                    }
+                    let action = self
+                        .dashboard
+                        .go_launch_action(workspace_id, config, recipe);
                     super::actions::start_session_launch(self, action);
                 }
-                Err(error) => self.dashboard.show_launch_failure(error, Some(*retry)),
+                Err(error) => {
+                    if self.dashboard.active_workspace_id() == Some(workspace_id.as_str()) {
+                        self.dashboard.show_launch_failure(error, Some(*retry));
+                    } else {
+                        self.dashboard.set_failure_notice(format!("Session preparation failed in workspace {workspace_id}: {error}. Return to that workspace to retry."));
+                    }
+                }
             },
             DashboardIoUpdate::CreateSession(update) => self.apply_create_session_update(*update),
             DashboardIoUpdate::RemotePreflight {

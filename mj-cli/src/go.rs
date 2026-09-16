@@ -52,15 +52,7 @@ pub(crate) async fn resolve_workspace(
 ) -> Result<String> {
     let workspaces = daemon.list_workspaces().await?;
     let legacy_name = GoPreferences::workspace_name(&mode.directory);
-    let existing = mode
-        .workspace_id
-        .as_ref()
-        .and_then(|id| workspaces.iter().find(|entry| &entry.workspace.id == id))
-        .or_else(|| {
-            workspaces
-                .iter()
-                .find(|entry| entry.workspace.name == legacy_name)
-        });
+    let existing = directory_workspace(&workspaces, mode.workspace_id.as_deref(), &legacy_name);
     let base = GoPreferences::directory_label(&mode.directory);
     let name = available_workspace_name(
         &base,
@@ -93,6 +85,34 @@ pub(crate) async fn resolve_workspace(
     .await
     .context("save project workspace task failed")??;
     Ok(id)
+}
+
+pub(crate) fn saved_workspace_modes() -> Result<Vec<mj_tui::GoMode>> {
+    let preferences = GoPreferences::load(&GoPreferences::path())?;
+    Ok(preferences
+        .workspaces()
+        .map(|binding| mj_tui::GoMode {
+            workspace_id: Some(binding.workspace_id.clone()),
+            last_session_id: binding.last_session_id.clone(),
+            directory: binding.directory.clone(),
+            recipe: preferences.recipe(&binding.directory),
+            save_as_default: false,
+        })
+        .collect())
+}
+
+fn directory_workspace<'a>(
+    workspaces: &'a [crate::daemon::WorkspaceListing],
+    bound_id: Option<&str>,
+    legacy_name: &str,
+) -> Option<&'a crate::daemon::WorkspaceListing> {
+    bound_id
+        .and_then(|id| workspaces.iter().find(|entry| entry.workspace.id == id))
+        .or_else(|| {
+            workspaces
+                .iter()
+                .find(|entry| entry.workspace.name == legacy_name)
+        })
 }
 
 fn available_workspace_name<'a>(base: &str, names: impl Iterator<Item = &'a str>) -> String {
@@ -155,6 +175,40 @@ pub(crate) fn resolve_recipe(
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+
+    #[test]
+    fn directory_entry_ignores_recent_workspace_and_name_collisions() {
+        let entry = |id: &str, name: &str| crate::daemon::WorkspaceListing {
+            workspace: mj_core::workspace::WorkspaceRecord {
+                id: id.into(),
+                name: name.into(),
+                created_at: String::new(),
+                last_opened_at: String::new(),
+                session_count: 1,
+            },
+        };
+        let workspaces = [
+            entry("recent", "project"),
+            entry("bound", "renamed by user"),
+        ];
+        assert_eq!(
+            super::directory_workspace(&workspaces, Some("bound"), "legacy")
+                .unwrap()
+                .workspace
+                .id,
+            "bound"
+        );
+        assert!(super::directory_workspace(&workspaces, None, "legacy").is_none());
+        assert!(super::directory_workspace(&workspaces, Some("deleted"), "legacy").is_none());
+        let legacy = [entry("original", "legacy")];
+        assert_eq!(
+            super::directory_workspace(&legacy, None, "legacy")
+                .unwrap()
+                .workspace
+                .id,
+            "original"
+        );
+    }
 
     #[test]
     fn directory_names_are_readable_and_disambiguated_without_hashes() {

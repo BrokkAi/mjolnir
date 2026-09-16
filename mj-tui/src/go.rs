@@ -17,19 +17,22 @@ pub struct GoMode {
 }
 
 impl DashboardState {
-    pub(crate) fn go_command_allowed(&self, id: crate::CommandId) -> bool {
-        use crate::CommandId;
-        self.go.is_none()
-            || !matches!(
-                id,
-                CommandId::Workspaces
-                    | CommandId::SelectWorkspacePrevious
-                    | CommandId::SelectWorkspaceNext
-                    | CommandId::TogglePanePreset
-                    | CommandId::CycleFocusedPaneSize
-                    | CommandId::TargetActions
-                    | CommandId::EditProfile
-            )
+    pub fn register_go_workspaces(&mut self, modes: impl IntoIterator<Item = GoMode>) {
+        for mode in modes {
+            if let Some(id) = &mode.workspace_id {
+                self.go_workspaces.insert(id.clone(), mode);
+            }
+        }
+    }
+
+    pub(crate) fn switch_go_workspace(&mut self, workspace_id: Option<&str>) {
+        if let Some(mut mode) = self.go.take()
+            && let Some(id) = mode.workspace_id.clone()
+        {
+            mode.last_session_id = self.selected_session_id.clone();
+            self.go_workspaces.insert(id, mode);
+        }
+        self.go = workspace_id.and_then(|id| self.go_workspaces.get(id).cloned());
     }
     pub fn set_go_context(
         &mut self,
@@ -142,13 +145,15 @@ impl DashboardState {
         action
     }
 
-    pub fn go_launch_action(&mut self, config: Config, recipe: GoRecipe) -> DashboardAction {
+    pub fn go_launch_action(
+        &mut self,
+        workspace_id: String,
+        config: Config,
+        recipe: GoRecipe,
+    ) -> DashboardAction {
         self.set_config(config);
-        if let Some(go) = &mut self.go {
-            go.recipe = Some(recipe.clone());
-        }
         DashboardAction::CreateSession {
-            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
+            workspace_id,
             profile_id: recipe.profile_id,
             target_template_id: recipe.target_id,
             bundle_id: recipe.bundle_id.unwrap_or_else(|| {
@@ -174,6 +179,7 @@ impl DashboardState {
         action: &DashboardAction,
     ) -> Option<(PathBuf, GoRecipe, bool)> {
         let DashboardAction::CreateSession {
+            workspace_id,
             profile_id,
             target_template_id,
             bundle_id,
@@ -187,7 +193,15 @@ impl DashboardState {
         else {
             return None;
         };
-        let go = self.go.as_mut()?;
+        let go = if self
+            .go
+            .as_ref()
+            .is_some_and(|go| go.workspace_id.as_ref() == Some(workspace_id))
+        {
+            self.go.as_mut()?
+        } else {
+            self.go_workspaces.get_mut(workspace_id)?
+        };
         let recipe = GoRecipe {
             profile_id: profile_id.clone(),
             target_id: target_template_id.clone(),
@@ -238,64 +252,6 @@ impl DashboardState {
     }
 }
 
-pub(crate) fn render_conversations(
-    frame: &mut ratatui::Frame,
-    area: ratatui::layout::Rect,
-    dashboard: &DashboardState,
-) -> crate::render::SessionRowsRendered {
-    use mj_chat::theme;
-    use ratatui::layout::Rect;
-    use ratatui::widgets::Paragraph;
-    frame.render_widget(
-        theme::panel(dashboard.focus() == crate::Focus::Sessions).title(" Conversations "),
-        area,
-    );
-    let inner = crate::widgets::bordered_content(area);
-    crate::surface_controls::render_session_buttons(
-        frame,
-        Rect::new(inner.x, inner.y, inner.width, inner.height.min(1)),
-        dashboard,
-    );
-    let rows = inner.height.saturating_sub(2) as usize;
-    let sessions = dashboard.ordered_sessions();
-    let selected = sessions
-        .iter()
-        .position(|session| Some(session.id.as_str()) == dashboard.selected_session_id())
-        .unwrap_or(0);
-    let start = dashboard
-        .sessions_scroll
-        .get()
-        .min(selected)
-        .max(selected.saturating_add(1).saturating_sub(rows));
-    dashboard.sessions_scroll.set(start);
-    let mut session_row_areas = Vec::new();
-    for (index, session) in sessions.iter().enumerate().skip(start).take(rows) {
-        let rect = Rect::new(
-            inner.x,
-            inner.y + 2 + (index - start) as u16,
-            inner.width,
-            1,
-        );
-        let selected = Some(session.id.as_str()) == dashboard.selected_session_id();
-        let text = format!(
-            "{} {}",
-            if selected { "›" } else { " " },
-            dashboard.go_conversation_title(&session.id)
-        );
-        let style = if selected {
-            theme::selection(true)
-        } else {
-            theme::base()
-        };
-        frame.render_widget(Paragraph::new(text).style(style), rect);
-        session_row_areas.push((index, rect));
-    }
-    crate::render::SessionRowsRendered {
-        session_row_areas,
-        project_heading_areas: Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,7 +260,7 @@ mod tests {
 
     fn mode() -> GoMode {
         GoMode {
-            workspace_id: None,
+            workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.into()),
             last_session_id: None,
             directory: "/projects/current".into(),
             save_as_default: false,
@@ -373,21 +329,69 @@ mod tests {
     }
 
     #[test]
-    fn hidden_dashboard_commands_cannot_escape_the_focused_screen() {
+    fn workspace_management_remains_available_from_go() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_go(mode(), false);
-        for command in [
-            CommandId::Workspaces,
-            CommandId::SelectWorkspaceNext,
-            CommandId::TogglePanePreset,
-            CommandId::TargetActions,
-        ] {
-            assert!(!dashboard.global_chord_allowed(command));
-            assert_eq!(dashboard.dispatch_command(command), DashboardAction::None);
-            assert!(matches!(dashboard.mode, Mode::Dashboard));
-        }
-        dashboard.dispatch_command(CommandId::Palette);
-        assert!(!matches!(dashboard.mode, Mode::Dashboard));
+        assert!(dashboard.global_chord_allowed(CommandId::Workspaces));
+        dashboard.dispatch_command(CommandId::Workspaces);
+        assert!(matches!(dashboard.mode, Mode::WorkspaceManager(_)));
+    }
+
+    #[test]
+    fn switching_workspaces_changes_new_and_context_without_rebinding_the_launch_directory() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let first = mode();
+        let first_id = first.workspace_id.clone().unwrap();
+        let mut second = mode();
+        second.workspace_id = Some("project-b".into());
+        second.directory = "/projects/second".into();
+        second.recipe.as_mut().unwrap().target_id = "other-runtime".into();
+        dashboard.register_go_workspaces([second.clone()]);
+        dashboard.begin_go(first.clone(), false);
+        dashboard.set_active_workspace(second.workspace_id.clone());
+        assert!(
+            dashboard
+                .go_context()
+                .join("\n")
+                .contains("/projects/second")
+        );
+        assert!(
+            !dashboard
+                .go_context()
+                .join("\n")
+                .contains("/projects/current")
+        );
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::NewSessionWizard),
+            DashboardAction::GoLaunch {
+                recipe: second.recipe.clone().unwrap()
+            }
+        );
+
+        // Preparation from A may finish while B is selected: never overwrite B's recipe.
+        let mut prepared = first.recipe.clone().unwrap();
+        prepared.bundle_id = Some("prepared-a".into());
+        let action = dashboard.go_launch_action(
+            first_id.clone(),
+            dashboard.config.clone(),
+            prepared.clone(),
+        );
+        let saved = dashboard.remember_go_launch(&action).unwrap();
+        assert_eq!(saved.0, first.directory);
+        assert_eq!(dashboard.go_mode().unwrap().recipe, second.recipe);
+
+        dashboard.set_active_workspace(Some("unbound-workspace".into()));
+        assert!(dashboard.go_mode().is_none());
+        assert!(dashboard.go_context().is_empty());
+        dashboard.dispatch_command(CommandId::NewSessionWizard);
+        assert!(matches!(dashboard.mode, Mode::New(_)));
+        dashboard.cancel_modal();
+        dashboard.set_active_workspace(Some(first_id));
+        assert_eq!(dashboard.go_mode().unwrap().directory, first.directory);
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::NewSessionWizard),
+            DashboardAction::GoLaunch { recipe: prepared }
+        );
     }
 
     #[test]
@@ -432,22 +436,16 @@ mod tests {
         assert!(rendered.contains("Working: /actual/checkout"));
         assert!(rendered.contains("branch: feature-x"));
         assert!(rendered.contains(" Menu "));
-        for hidden in [
-            "Workspaces",
-            "Targets",
-            "Quota",
-            "Change setup",
-            "session-1",
-            "Alt-G",
-        ] {
+        for visible in ["Workspaces", "Targets", "Quota", "Alt-G"] {
             assert!(
-                !rendered.contains(hidden),
-                "unexpected dashboard detail: {hidden}"
+                rendered.contains(visible),
+                "missing dashboard detail: {visible}"
             );
         }
+        assert!(!rendered.contains("session-1"));
         assert!(rendered.contains("Conversation 1"));
-        assert!(dashboard.workspace_pane_area.is_none());
-        assert!(dashboard.pane_size_control_areas.is_empty());
+        assert!(dashboard.workspace_pane_area.is_some());
+        assert!(!dashboard.pane_size_control_areas.is_empty());
         if let Some(path) = std::env::var_os("MJ_GO_CAPTURE_PATH") {
             std::fs::write(
                 path,

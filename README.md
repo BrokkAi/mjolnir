@@ -138,8 +138,11 @@ Choose an account and target on first use, including Docker, Podman, SSH,
 EC2, or a configured custom target. The first setup becomes the default for
 new projects; each folder remembers its own setup and reuses a workspace named
 after the directory. Returning with `mj go` opens your last conversation.
-The focused screen shows conversations and chat, without the workspace,
-target, or quota panels. **New** (or **Alt-N**) starts another concurrent
+The dashboard keeps its workspace tabs, session details, targets, and quotas.
+Switching to another directory-linked workspace also switches the folder and
+saved setup used by **New**; unlinked workspaces keep the normal launch wizard.
+Running `mj go` again selects the invoking directory's workspace regardless of
+which workspace you last visited. **New** (or **Alt-N**) starts another concurrent
 session with those choices. **Menu → Change setup** changes
 this project's next launch; `mj go --global-default` also changes the default
 for new projects. `mj go --setup` opens that setup directly.

@@ -67,6 +67,10 @@ impl Default for GoPreferences {
 }
 
 impl GoPreferences {
+    pub fn workspaces(&self) -> impl Iterator<Item = &GoWorkspace> {
+        self.workspaces.iter()
+    }
+
     pub fn workspace(&self, directory: &Path) -> Option<&GoWorkspace> {
         self.workspaces
             .iter()

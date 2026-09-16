@@ -627,6 +627,7 @@ pub struct DashboardState {
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
     pub(crate) go: Option<go::GoMode>,
+    pub(crate) go_workspaces: BTreeMap<String, go::GoMode>,
     pub(crate) go_contexts: BTreeMap<String, Result<(std::path::PathBuf, String), String>>,
     modal_click_transition: Option<(u16, u16, Instant)>,
     suppress_modal_release: bool,
@@ -728,6 +729,7 @@ impl DashboardState {
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             go: None,
+            go_workspaces: BTreeMap::new(),
             go_contexts: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
@@ -903,6 +905,7 @@ impl DashboardState {
                 .insert(current, WorkspaceViewState::from_dashboard(self));
         }
 
+        self.switch_go_workspace(workspace_id.as_deref());
         self.active_workspace_id = workspace_id.clone();
         self.workspace_name = workspace_id
             .as_deref()
@@ -922,7 +925,10 @@ impl DashboardState {
                 self.collapsed_project_keys = view.collapsed_project_keys;
                 self.focus = view.focus;
             } else {
-                self.selected_session_id = None;
+                self.selected_session_id = self
+                    .go
+                    .as_ref()
+                    .and_then(|mode| mode.last_session_id.clone());
                 self.sessions_scroll.set(0);
                 self.targets_scroll.set(0);
                 self.quota_scroll.set(0);
@@ -1071,11 +1077,7 @@ impl DashboardState {
     /// Pane sizes are the user's setting, so Tab never changes them.
     pub fn cycle_focus(&mut self, reverse: bool) -> bool {
         let previous = self.focus;
-        self.focus = if self.go.is_some() {
-            cycle_control(self.focus, &[Focus::Sessions, Focus::Prompt], reverse)
-        } else {
-            cycle_control(self.focus, &FOCUS_ORDER, reverse)
-        };
+        self.focus = cycle_control(self.focus, &FOCUS_ORDER, reverse);
         self.workspace_control_focus =
             if reverse && previous == Focus::Sessions && self.focus == Focus::Workspaces {
                 WorkspaceControlFocus::Menu
