@@ -1597,6 +1597,7 @@ mod tests {
         CONFIG_VERSION, ContainerTemplate, HarnessProfile, ProjectBundle, ProjectRepository,
         TargetTemplate,
     };
+    use crate::targets::MountAccess;
 
     fn user_item(position: u64, text: &str) -> Arc<TranscriptItem> {
         Arc::new(TranscriptItem {
@@ -1736,7 +1737,7 @@ mod tests {
             additional_mounts: vec![AdditionalMount {
                 source: PathBuf::from("/home/test/cache"),
                 destination: PathBuf::from("/mnt/cache"),
-                read_only: false,
+                access: MountAccess::Cow,
             }],
             state: SessionState::Running,
             target: Some(TargetLocator::LocalPodman {
@@ -2319,12 +2320,12 @@ mod tests {
                 AdditionalMount {
                     source: "/srv/first".into(),
                     destination: "/mnt/first".into(),
-                    read_only: false,
+                    access: MountAccess::Cow,
                 },
                 AdditionalMount {
                     source: "/srv/second".into(),
                     destination: "/mnt/second".into(),
-                    read_only: false,
+                    access: MountAccess::Cow,
                 },
             ],
         );
@@ -2333,7 +2334,7 @@ mod tests {
             &[AdditionalMount {
                 source: "/srv/first".into(),
                 destination: "/mnt/again".into(),
-                read_only: false,
+                access: MountAccess::Cow,
             }],
         );
 

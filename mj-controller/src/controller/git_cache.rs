@@ -242,7 +242,7 @@ pub(super) fn prepare(
     mounts.push(AdditionalMount {
         source: session_root.clone(),
         destination: PathBuf::from(CACHE_CONTAINER_ROOT),
-        read_only: true,
+        access: crate::targets::MountAccess::Ro,
     });
 
     let mut live_sessions = match host.managed_sessions(executor) {

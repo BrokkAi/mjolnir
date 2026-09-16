@@ -316,6 +316,10 @@ impl Controller {
             for notice in enforce_overlay_capable_mounts(&target, &mut runtime_mounts, executor) {
                 executor.notify_notice(&notice);
             }
+            // The image's user is a property of the host's copy of the image,
+            // so it is read here, once per image per daemon, and handed to the
+            // plan rather than stored on the session.
+            let image_user = podman_image_user(&target, executor);
             let mut bundle = if session.project_directory.is_some() {
                 None
             } else if failure_disposition == ProvisioningFailureDisposition::Preserve {
@@ -358,7 +362,13 @@ impl Controller {
                     .as_ref()
                     .context("project bundle disappeared during provisioning")
                     .and_then(|bundle| {
-                        targets::provision_plan(&target, session_id, bundle, &runtime_mounts)
+                        targets::provision_plan(
+                            &target,
+                            session_id,
+                            bundle,
+                            &runtime_mounts,
+                            image_user,
+                        )
                     })
             };
             let mut provision = match provision {
@@ -1012,7 +1022,7 @@ pub(super) fn enforce_overlay_capable_mounts(
     };
     let overlaid = mounts
         .iter()
-        .filter(|mount| !mount.read_only)
+        .filter(|mount| mount.access == targets::MountAccess::Cow)
         .map(|mount| mount.source.clone())
         .collect::<Vec<_>>();
     if overlaid.is_empty() {
@@ -1034,19 +1044,73 @@ pub(super) fn enforce_overlay_capable_mounts(
     let mut notices = Vec::new();
     for (mount, filesystem) in mounts
         .iter_mut()
-        .filter(|mount| !mount.read_only)
+        .filter(|mount| mount.access == targets::MountAccess::Cow)
         .zip(filesystems)
     {
         let Some(reason) = targets::overlay_unsupported_filesystem(&filesystem) else {
             continue;
         };
-        mount.read_only = true;
+        mount.access = mount.access.without_overlay();
         notices.push(format!(
             "Mounted {} read-only: the overlay is unreliable on {filesystem} ({reason}).",
             mount.source.display()
         ));
     }
     notices
+}
+
+/// The image users already probed, keyed by container host and image
+/// reference. An image's
+/// configured user does not change under a fixed reference, and reading it
+/// costs a container start, so each daemon asks a host once.
+static IMAGE_USERS: std::sync::LazyLock<std::sync::Mutex<BTreeMap<String, targets::ImageUser>>> =
+    std::sync::LazyLock::new(std::sync::Mutex::default);
+
+/// The uid and gid a Podman session container maps onto the host user.
+///
+/// Only Podman is asked: Docker and Apple's `container` engine are left with
+/// their own defaults. A probe that cannot answer is not a launch failure —
+/// the container falls back to plain `--userns=keep-id`, which maps the
+/// image's default user, and the user is told what happened.
+pub(super) fn podman_image_user(
+    target: &targets::TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Option<targets::ImageUser> {
+    let (ssh, container) = match target {
+        targets::TargetTemplate::LocalPodman(container) => (None, container),
+        targets::TargetTemplate::SshPodman { ssh, container } => (Some(ssh), container),
+        _ => return None,
+    };
+    let image = container.image.as_str();
+    let key = format!(
+        "{}|{image}",
+        ssh.map_or("local", |ssh| ssh.destination.as_str())
+    );
+    if let Some(cached) = IMAGE_USERS.lock().expect("image user cache").get(&key) {
+        return Some(*cached);
+    }
+    match targets::probe_image_user(ssh, container, executor) {
+        Ok(user) => {
+            IMAGE_USERS
+                .lock()
+                .expect("image user cache")
+                .insert(key, user);
+            Some(user)
+        }
+        Err(error) => {
+            tracing::warn!(
+                image,
+                error = format!("{error:#}"),
+                "could not read the container image user; keeping Podman's default user mapping"
+            );
+            executor.notify_notice(&format!(
+                "Could not read the user of image {image}, so the container runs with Podman's \
+                 default user mapping and may not be able to write to an attached directory: \
+                 {error:#}"
+            ));
+            None
+        }
+    }
 }
 
 /// Reports every command an installer issues as one launch stage, so progress
@@ -1352,12 +1416,12 @@ mod tests {
         let mut mounts = vec![AdditionalMount {
             source: PathBuf::from("/nfs/share"),
             destination: PathBuf::from("/mnt/share"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         }];
 
         let notices = enforce_overlay_capable_mounts(&podman_target(), &mut mounts, &executor);
 
-        assert!(mounts[0].read_only);
+        assert_eq!(mounts[0].access, targets::MountAccess::Ro);
         assert_eq!(notices.len(), 1);
         assert!(
             notices[0]
@@ -1369,6 +1433,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
             &probe_bundle(),
             &mounts,
+            None,
         )
         .unwrap();
         assert!(
@@ -1387,12 +1452,12 @@ mod tests {
         let mut mounts = vec![AdditionalMount {
             source: PathBuf::from("/host/cache"),
             destination: PathBuf::from("/mnt/cache"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         }];
 
         let notices = enforce_overlay_capable_mounts(&podman_target(), &mut mounts, &executor);
 
-        assert!(!mounts[0].read_only);
+        assert_eq!(mounts[0].access, targets::MountAccess::Cow);
         assert_eq!(notices.len(), 1);
         assert!(
             notices[0].contains("keep the copy-on-write overlay")
@@ -1404,6 +1469,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
             &probe_bundle(),
             &mounts,
+            None,
         )
         .unwrap();
         assert!(
@@ -1414,6 +1480,159 @@ mod tests {
             "{:?}",
             plan.commands[0].args
         );
+    }
+
+    /// Answers the image-user probe, and records every notice and command.
+    struct ImageUserExecutor {
+        answer: std::result::Result<&'static str, &'static str>,
+        seen: Mutex<Vec<CommandSpec>>,
+        notices: Mutex<Vec<String>>,
+    }
+
+    impl ImageUserExecutor {
+        fn new(answer: std::result::Result<&'static str, &'static str>) -> Self {
+            Self {
+                answer,
+                seen: Mutex::new(Vec::new()),
+                notices: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandExecutor for ImageUserExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.seen.lock().unwrap().push(command.clone());
+            Ok(match self.answer {
+                Ok(ids) => CommandOutput {
+                    status: 0,
+                    stdout: ids.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                },
+                Err(stderr) => CommandOutput {
+                    status: 125,
+                    stdout: Vec::new(),
+                    stderr: stderr.as_bytes().to_vec(),
+                },
+            })
+        }
+
+        fn notify_notice(&self, notice: &str) {
+            self.notices.lock().unwrap().push(notice.to_owned());
+        }
+    }
+
+    fn podman_target_with_image(image: &str) -> targets::TargetTemplate {
+        targets::TargetTemplate::LocalPodman(ContainerTemplate {
+            image: image.into(),
+            pull_policy: Default::default(),
+            extra_run_args: Vec::new(),
+            workspace_storage: Default::default(),
+        })
+    }
+
+    #[test]
+    fn the_image_user_is_probed_once_per_image_and_reaches_the_run_arguments() {
+        let target = podman_target_with_image("ghcr.io/example/probed-once:1");
+        let executor = ImageUserExecutor::new(Ok("1000\n1000\n"));
+
+        let image_user = podman_image_user(&target, &executor);
+
+        assert_eq!(
+            image_user,
+            Some(targets::ImageUser {
+                uid: 1000,
+                gid: 1000
+            })
+        );
+        assert!(executor.notices.lock().unwrap().is_empty());
+        // The answer is cached for the daemon's lifetime.
+        assert_eq!(podman_image_user(&target, &executor), image_user);
+        assert_eq!(executor.seen.lock().unwrap().len(), 1);
+
+        let plan = targets::provision_plan(
+            &target,
+            "0123456789abcdef0123456789abcdef",
+            &probe_bundle(),
+            &[],
+            image_user,
+        )
+        .unwrap();
+        assert!(
+            plan.commands[0]
+                .args
+                .contains(&"--userns=keep-id:uid=1000,gid=1000".to_owned()),
+            "{:?}",
+            plan.commands[0].args
+        );
+    }
+
+    #[test]
+    fn an_image_user_probe_that_fails_keeps_podmans_default_mapping_and_says_so() {
+        let target = podman_target_with_image("ghcr.io/example/unreadable-user:1");
+        let executor = ImageUserExecutor::new(Err("image not known"));
+
+        let image_user = podman_image_user(&target, &executor);
+
+        assert_eq!(image_user, None);
+        let notices = executor.notices.lock().unwrap().clone();
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("ghcr.io/example/unreadable-user:1")
+                && notices[0].contains("image not known"),
+            "{notices:?}"
+        );
+        // A failed probe is never fatal, and never cached.
+        assert_eq!(podman_image_user(&target, &executor), None);
+        assert_eq!(executor.seen.lock().unwrap().len(), 2);
+
+        let plan = targets::provision_plan(
+            &target,
+            "0123456789abcdef0123456789abcdef",
+            &probe_bundle(),
+            &[],
+            image_user,
+        )
+        .unwrap();
+        // Plain `keep-id` would demote a root image to uid 1000, so a
+        // container whose image user is unknown keeps Podman's own mapping.
+        assert!(
+            !plan.commands[0]
+                .args
+                .iter()
+                .any(|argument| argument.starts_with("--userns")),
+            "{:?}",
+            plan.commands[0].args
+        );
+    }
+
+    /// Docker and Apple's engine keep their own user namespaces, so nothing is
+    /// probed for them.
+    #[test]
+    fn only_podman_targets_probe_the_image_user() {
+        struct UnusedExecutor;
+
+        impl CommandExecutor for UnusedExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                panic!("this target must not probe: {}", command.program)
+            }
+        }
+
+        for target in [
+            targets::TargetTemplate::LocalDocker(ContainerTemplate {
+                image: "ubuntu:24.04".into(),
+                pull_policy: Default::default(),
+                extra_run_args: Vec::new(),
+                workspace_storage: Default::default(),
+            }),
+            targets::TargetTemplate::AppleContainer(ContainerTemplate {
+                image: "ubuntu:24.04".into(),
+                pull_policy: Default::default(),
+                extra_run_args: Vec::new(),
+                workspace_storage: Default::default(),
+            }),
+        ] {
+            assert_eq!(podman_image_user(&target, &UnusedExecutor), None);
+        }
     }
 
     #[test]
@@ -1429,7 +1648,7 @@ mod tests {
         let mut mounts = vec![AdditionalMount {
             source: PathBuf::from("/host/cache"),
             destination: PathBuf::from("/mnt/cache"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         }];
         for target in [
             targets::TargetTemplate::AppleContainer(ContainerTemplate {
@@ -1453,27 +1672,37 @@ mod tests {
             assert!(
                 enforce_overlay_capable_mounts(&target, &mut mounts, &UnusedExecutor).is_empty()
             );
-            assert!(!mounts[0].read_only);
+            assert_eq!(mounts[0].access, targets::MountAccess::Cow);
         }
     }
 
     /// A mount the user already marked read-only has no overlay to protect, so
     /// the probe never has to reach a host that may not answer.
     #[test]
-    fn mounts_already_read_only_are_not_probed() {
+    fn mounts_without_an_overlay_are_not_probed() {
         struct UnusedExecutor;
 
         impl CommandExecutor for UnusedExecutor {
             fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                panic!("a read-only mount must not probe: {}", command.program)
+                panic!(
+                    "a mount without an overlay must not probe: {}",
+                    command.program
+                )
             }
         }
 
-        let mut mounts = vec![AdditionalMount {
-            source: PathBuf::from("/host/cache"),
-            destination: PathBuf::from("/mnt/cache"),
-            read_only: true,
-        }];
+        let mut mounts = vec![
+            AdditionalMount {
+                source: PathBuf::from("/host/cache"),
+                destination: PathBuf::from("/mnt/cache"),
+                access: crate::targets::MountAccess::Ro,
+            },
+            AdditionalMount {
+                source: PathBuf::from("/host/build-cache"),
+                destination: PathBuf::from("/mnt/build-cache"),
+                access: crate::targets::MountAccess::Rw,
+            },
+        ];
 
         assert!(
             enforce_overlay_capable_mounts(&podman_target(), &mut mounts, &UnusedExecutor)
@@ -2047,8 +2276,9 @@ mod tests {
     fn a_failure_after_the_container_exists_removes_it_and_keeps_the_original_error() {
         let name = targets::resource_name(PROVISIONED_SESSION).unwrap();
         for target in container_targets() {
-            let plan = targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[])
-                .unwrap();
+            let plan =
+                targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
+                    .unwrap();
             let executor = RecordingExecutor::failing("clone app");
 
             let error = provision_target(&plan, &target, PROVISIONED_SESSION, &executor, |_| {
@@ -2075,7 +2305,8 @@ mod tests {
     fn target_creation_returns_repository_setup_without_running_it() {
         let target = podman_target();
         let plan =
-            targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[]).unwrap();
+            targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
+                .unwrap();
         let executor = RecordingExecutor::succeeding();
 
         let (_, repositories) =
@@ -2099,8 +2330,9 @@ mod tests {
     #[test]
     fn a_target_whose_creation_failed_is_never_torn_down() {
         for target in container_targets() {
-            let plan = targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[])
-                .unwrap();
+            let plan =
+                targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
+                    .unwrap();
             let creation = plan.split_at_target_creation().unwrap().0;
             let executor =
                 RecordingExecutor::failing(creation.commands.last().unwrap().purpose.clone());
@@ -2127,7 +2359,8 @@ mod tests {
     fn a_target_whose_locator_cannot_be_discovered_is_removed_again() {
         let target = podman_target();
         let plan =
-            targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[]).unwrap();
+            targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None)
+                .unwrap();
         let executor = RecordingExecutor::succeeding();
 
         let error = provision_target(&plan, &target, PROVISIONED_SESSION, &executor, |_| {

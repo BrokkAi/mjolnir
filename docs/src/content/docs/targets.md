@@ -154,7 +154,7 @@ kind = "local-podman"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
-Rootless Podman 4.0 or newer is the reference Linux/WSL2 runtime. It is the only
+Rootless Podman 4.3 or newer is the reference Linux/WSL2 runtime. It is the only
 runtime with configurable workspace backing: a named volume by default, the
 container layer, or a host path managed through an operator-supplied helper.
 See [Podman](/podman/).

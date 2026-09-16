@@ -9,7 +9,7 @@ use ratatui::layout::Position;
 use mj_core::config::{HarnessKind, HarnessProfile, SshConnection, TargetTemplate};
 use mj_core::state::{HostContainerSize, STATE_VERSION, SessionResourceAllocation, State};
 
-use mj_core::targets::AdditionalMount;
+use mj_core::targets::{AdditionalMount, MountAccess};
 
 use super::*;
 use crate::test_support::*;
@@ -1099,17 +1099,33 @@ fn wizard_mounts(dashboard: &DashboardState) -> &MountWizard {
     &wizard.mounts
 }
 
+/// Open the focused access combobox, move down `steps` choices, and accept.
+fn choose_mount_access(dashboard: &mut DashboardState, steps: usize) {
+    ready_key(dashboard, key(KeyCode::Enter));
+    assert!(
+        wizard_mounts(dashboard)
+            .access_combo
+            .is_open(WizardControl::MountAccess)
+    );
+    for _ in 0..steps {
+        ready_key(dashboard, key(KeyCode::Down));
+    }
+    ready_key(dashboard, key(KeyCode::Enter));
+    assert!(wizard_mounts(dashboard).access_combo.open_id().is_none());
+}
+
 #[test]
-fn the_read_only_checkbox_rides_the_mount_into_the_created_session() {
+fn a_new_attachment_starts_read_only_and_the_combobox_picks_its_access() {
     let mut dashboard = dashboard_at_mount_editor("/opt/cache");
 
     ready_key(&mut dashboard, key(KeyCode::Tab));
     assert_eq!(
         new_wizard_focus(&dashboard),
-        Some(WizardControl::MountReadOnly)
+        Some(WizardControl::MountAccess)
     );
-    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
-    assert!(wizard_mounts(&dashboard).read_only);
+    assert_eq!(wizard_mounts(&dashboard).access, MountAccess::Ro);
+    choose_mount_access(&mut dashboard, 2);
+    assert_eq!(wizard_mounts(&dashboard).access, MountAccess::Rw);
 
     // Tab past Cancel and Back to the add button, then commit.
     for _ in 0..3 {
@@ -1129,18 +1145,24 @@ fn the_read_only_checkbox_rides_the_mount_into_the_created_session() {
         vec![AdditionalMount {
             source: "/opt/cache".into(),
             destination: "/mnt/cache".into(),
-            read_only: true,
+            access: MountAccess::Rw,
         }]
     );
-    // The next entry starts unchecked again.
-    assert!(!wizard_mounts(&dashboard).read_only);
+    // The next entry starts read-only again.
+    assert_eq!(wizard_mounts(&dashboard).access, MountAccess::Ro);
 }
 
 #[test]
-fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
+fn a_source_that_cannot_hold_the_overlay_skips_copy_on_write() {
     let mut dashboard = dashboard_at_mount_editor("/nfs/share");
 
-    assert!(!wizard_mounts(&dashboard).read_only);
+    // Choose copy-on-write before the host reports the filesystem.
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    choose_mount_access(&mut dashboard, 1);
+    assert_eq!(wizard_mounts(&dashboard).access, MountAccess::Cow);
+    for _ in 0..3 {
+        ready_key(&mut dashboard, key(KeyCode::Tab));
+    }
     ready_key(&mut dashboard, key(KeyCode::Enter));
     dashboard
         .apply_mount_source_validation("/nfs/share", Ok(Some("nfs (network filesystem)".into())));
@@ -1149,32 +1171,32 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
         vec![AdditionalMount {
             source: "/nfs/share".into(),
             destination: "/mnt/share".into(),
-            read_only: true,
+            access: MountAccess::Ro,
         }]
     );
 
-    // Reopen the entry: the checkbox is checked, locked, and named.
+    // Reopen the entry: read-only and read-write remain, copy-on-write does not.
     ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(wizard_mounts(&dashboard).read_only);
+    assert_eq!(wizard_mounts(&dashboard).access, MountAccess::Ro);
     assert_eq!(
-        wizard_mounts(&dashboard).forced_read_only(),
+        wizard_mounts(&dashboard).overlay_unavailable(),
         Some("nfs (network filesystem)")
     );
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Tab));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected mount editor");
-    };
-    // The locked checkbox is disabled in the shared form, so traversal skips
-    // it and lands on Cancel. Space therefore belongs to the button rather
-    // than attempting to toggle the forced read-only state.
-    assert_eq!(wizard.form.borrow().focused(), Some(WizardControl::Cancel));
-    assert_eq!(new_wizard_focus(&dashboard), Some(WizardControl::Cancel));
-    assert!(
-        wizard_mounts(&dashboard).read_only,
-        "a forced source must stay read-only"
+    assert_eq!(
+        new_wizard_focus(&dashboard),
+        Some(WizardControl::MountAccess)
     );
+    assert_eq!(
+        wizard_mounts(&dashboard).access_choices(),
+        vec![MountAccess::Ro, MountAccess::Rw]
+    );
+    choose_mount_access(&mut dashboard, 1);
+    assert_eq!(wizard_mounts(&dashboard).access, MountAccess::Rw);
 
+    // The open list offers only the two usable modes.
+    ready_key(&mut dashboard, key(KeyCode::Enter));
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -1186,17 +1208,17 @@ fn a_source_the_host_forces_read_only_cannot_be_unchecked() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("[✓] Read-only (locked)"));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Esc)),
-        DashboardAction::None
-    );
-    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Review));
+    assert!(rendered.contains("rw · writes reach the host directory"));
+    assert!(rendered.contains("ro · read-only"));
+    assert!(!rendered.contains("cow ·"));
+
+    // Escape closes only the list; the changed mode is an unsaved edit, so
+    // leaving the editor then asks before discarding it.
+    ready_key(&mut dashboard, key(KeyCode::Esc));
+    assert!(wizard_mounts(&dashboard).access_combo.open_id().is_none());
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Mounts));
     ready_key(&mut dashboard, key(KeyCode::Esc));
     assert!(dashboard.dialog_confirmation_open());
-    ready_key(&mut dashboard, key(KeyCode::Right));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -1256,7 +1278,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
             mounts: vec![AdditionalMount {
                 source: "/opt/cache".into(),
                 destination: "/mnt/cache".into(),
-                read_only: false,
+                access: MountAccess::Ro,
             }],
             launch: Box::new(DashboardAction::CreateSession {
                 mjolnir_subagents: Some(true),
@@ -1269,7 +1291,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                 additional_mounts: vec![AdditionalMount {
                     source: "/opt/cache".into(),
                     destination: "/mnt/cache".into(),
-                    read_only: false,
+                    access: MountAccess::Ro,
                 }],
                 allow_dirty_local: false,
                 resource_allocation: Some(SessionResourceAllocation::Container {
@@ -1801,7 +1823,7 @@ fn resume_dialog_attaches_an_additional_resource() {
             mounts: vec![AdditionalMount {
                 source: "/opt/cache".into(),
                 destination: "/mnt/cache".into(),
-                read_only: false,
+                access: MountAccess::Ro,
             }],
             launch: Box::new(DashboardAction::PreflightResumeRepositories {
                 launch: Box::new(DashboardAction::ResumeSession {
@@ -1812,7 +1834,7 @@ fn resume_dialog_attaches_an_additional_resource() {
                     additional_mounts: vec![AdditionalMount {
                         source: "/opt/cache".into(),
                         destination: "/mnt/cache".into(),
-                        read_only: false,
+                        access: MountAccess::Ro,
                     }],
                     resource_allocation: Some(SessionResourceAllocation::Container {
                         cpus: BASELINE_CPUS,
@@ -1831,7 +1853,7 @@ fn resume_dialog_can_remove_a_previous_resource() {
     session.additional_mounts = vec![AdditionalMount {
         source: "/opt/old-cache".into(),
         destination: "/mnt/old-cache".into(),
-        read_only: false,
+        access: MountAccess::Cow,
     }];
     let mut dashboard = dashboard_with_session(session);
     open_resume_wizard(&mut dashboard);
@@ -1852,7 +1874,7 @@ fn resume_review_edits_an_existing_attached_directory_in_place() {
     session.additional_mounts = vec![AdditionalMount {
         source: "/opt/cache".into(),
         destination: "/mnt/cache".into(),
-        read_only: false,
+        access: MountAccess::Cow,
     }];
     let mut dashboard = dashboard_with_session(session);
     open_resume_wizard(&mut dashboard);
@@ -2263,7 +2285,7 @@ fn removing_a_move_attachment_invalidates_and_reprepares_the_review() {
     session.additional_mounts = vec![AdditionalMount {
         source: "/opt/cache".into(),
         destination: "/mnt/cache".into(),
-        read_only: false,
+        access: MountAccess::Cow,
     }];
     let mut dashboard = dashboard_with_session(session);
     let old_request_id = open_move_review(&mut dashboard);

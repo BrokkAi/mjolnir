@@ -1201,7 +1201,7 @@ mod tests {
             additional_mounts: vec![AdditionalMount {
                 source: source.path().to_path_buf(),
                 destination: "/home/ubuntu/mj-resources/data".into(),
-                read_only: false,
+                access: crate::targets::MountAccess::Cow,
             }],
             state: SessionState::Disconnected,
             target: None,
@@ -1748,7 +1748,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("mj doctor"));
-        assert!(error.contains("Podman 4.0.0"));
+        assert!(error.contains("Podman 4.3.0"));
     }
     #[test]
     fn ssh_podman_preflight_failures_name_the_destination_and_recommend_doctor() {
@@ -1783,7 +1783,7 @@ mod tests {
             .to_string();
         assert!(error.contains("mj doctor"));
         assert!(error.contains("dev@example.test"));
-        assert!(error.contains("Podman 4.0.0"));
+        assert!(error.contains("Podman 4.3.0"));
     }
     #[test]
     fn ssh_podman_preflight_notifies_when_remote_user_lingering_is_disabled() {

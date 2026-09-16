@@ -29,13 +29,15 @@ use mj_chat::components::{
 use mj_chat::selection::FrameSurfaces;
 use mj_chat::text_input::TextInput;
 use mj_chat::{components::PathField, path_input::PathInput};
-use mj_core::targets::{AdditionalMount, default_mount_destination, validate_additional_mounts};
+use mj_core::targets::{
+    AdditionalMount, MountAccess, default_mount_destination, validate_additional_mounts,
+};
 
 use crate::widgets::{
     centered_modal, centered_modal_fixed, dismissible_modal_title, modal_area, popup_height,
     truncate_text,
 };
-use crate::wizards::read_only_marker;
+use crate::wizards::{access_marker, render_access_combo};
 use crate::{
     DashboardAction, DashboardState, Mode, WebListenerProcess, WebViewerAccess, WebViewerRecovery,
 };
@@ -3063,7 +3065,7 @@ mod tests {
         session.additional_mounts = vec![AdditionalMount {
             source: PathBuf::from("/srv/data"),
             destination: PathBuf::from("/mnt/data"),
-            read_only: false,
+            access: MountAccess::Cow,
         }];
         let mut dashboard = dashboard_with_session(session);
         dashboard
@@ -3170,12 +3172,12 @@ mod tests {
                 AdditionalMount {
                     source: PathBuf::from("/srv/data"),
                     destination: PathBuf::from("/mnt/data"),
-                    read_only: false,
+                    access: MountAccess::Cow,
                 },
                 AdditionalMount {
                     source: PathBuf::from("/srv/models"),
                     destination: PathBuf::from("/mnt/models"),
-                    read_only: false,
+                    access: MountAccess::Ro,
                 },
             ]
         );
@@ -3205,7 +3207,7 @@ mod tests {
                 additional_mounts: vec![AdditionalMount {
                     source: PathBuf::from("/srv/models"),
                     destination: PathBuf::from("/mnt/models"),
-                    read_only: false,
+                    access: MountAccess::Ro,
                 }],
                 mount_history: Vec::new(),
             }
@@ -3214,11 +3216,12 @@ mod tests {
     }
 
     #[test]
-    fn container_editor_marks_new_and_existing_mounts_read_only() {
+    fn container_editor_edits_a_listed_mount_in_place() {
         let mut dashboard = dashboard_with_container_session();
         open_container_editor(&mut dashboard);
 
-        // Space on the checkbox attaches the next directory read-only.
+        // A new directory starts read-only; the combobox moves it to
+        // copy-on-write.
         while container_editor(&dashboard).focused() != ContainerEditFocus::Source {
             dashboard.handle_key(key(KeyCode::Tab));
         }
@@ -3229,22 +3232,57 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Tab));
         assert_eq!(
             container_editor(&dashboard).focused(),
-            ContainerEditFocus::ReadOnly
+            ContainerEditFocus::Access
         );
-        dashboard.handle_key(key(KeyCode::Char(' ')));
-        assert!(container_editor(&dashboard).read_only);
+        assert_eq!(container_editor(&dashboard).access, MountAccess::Ro);
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(
+            container_editor(&dashboard)
+                .access_combo
+                .is_open(ContainerEditFocus::Access)
+        );
+        dashboard.handle_key(key(KeyCode::Down));
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert_eq!(container_editor(&dashboard).access, MountAccess::Cow);
         while container_editor(&dashboard).focused() != ContainerEditFocus::Source {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         dashboard.handle_key(key(KeyCode::Enter));
+        assert_eq!(container_editor(&dashboard).mounts.len(), 2);
 
-        // Space on a listed row toggles that row, and the flag is saved.
+        // Space on a listed row loads that attachment into the editor fields,
+        // where the combobox is the only way to change its access mode.
         while container_editor(&dashboard).focused() != ContainerEditFocus::Mounts {
             dashboard.handle_key(key(KeyCode::Tab));
         }
         dashboard.handle_key(key(KeyCode::Up));
         assert_eq!(container_editor(&dashboard).mount_index, 0);
         dashboard.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(
+            container_editor(&dashboard).focused(),
+            ContainerEditFocus::Source
+        );
+        assert_eq!(container_editor(&dashboard).source, "/srv/data");
+        assert_eq!(container_editor(&dashboard).destination, "/mnt/data");
+        assert_eq!(container_editor(&dashboard).access, MountAccess::Cow);
+        assert_eq!(container_editor(&dashboard).editing_mount, Some(0));
+
+        while container_editor(&dashboard).focused() != ContainerEditFocus::Access {
+            dashboard.handle_key(key(KeyCode::Tab));
+        }
+        dashboard.handle_key(key(KeyCode::Enter));
+        dashboard.handle_key(key(KeyCode::Down));
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert_eq!(container_editor(&dashboard).access, MountAccess::Rw);
+
+        // Accepting the edited entry replaces the row it came from instead of
+        // attaching the same directory twice.
+        while container_editor(&dashboard).focused() != ContainerEditFocus::Source {
+            dashboard.handle_key(key(KeyCode::Tab));
+        }
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert_eq!(container_editor(&dashboard).editing_mount, None);
+        assert!(container_editor(&dashboard).source.trim().is_empty());
 
         while container_editor(&dashboard).focused() != ContainerEditFocus::Save {
             dashboard.handle_key(key(KeyCode::Tab));
@@ -3259,12 +3297,12 @@ mod tests {
                     AdditionalMount {
                         source: PathBuf::from("/srv/data"),
                         destination: PathBuf::from("/mnt/data"),
-                        read_only: true,
+                        access: MountAccess::Rw,
                     },
                     AdditionalMount {
                         source: PathBuf::from("/nfs/share"),
                         destination: PathBuf::from("/mnt/share"),
-                        read_only: true,
+                        access: MountAccess::Cow,
                     },
                 ],
                 mount_history: vec![PathBuf::from("/srv/models")],

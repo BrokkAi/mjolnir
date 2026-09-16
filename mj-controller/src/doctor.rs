@@ -1135,7 +1135,7 @@ fn podman_remediation(detail: &str) -> &'static str {
 
 /// Map a Podman preflight failure to its specific remediation, if one applies.
 fn podman_remediation_match(detail: &str) -> Option<&'static str> {
-    if detail.contains("Podman 4.0.0") {
+    if detail.contains("Podman 4.3.0") {
         Some(
             "Upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`.",
         )
@@ -2697,7 +2697,7 @@ mod tests {
         assert!(instructions.contains("mj doctor --json"));
         assert!(instructions.contains("mj doctor --json --smoke"));
         assert!(instructions.contains("podman unshare cat /proc/self/uid_map"));
-        assert!(instructions.contains("Podman **4.0.0 or newer**"));
+        assert!(instructions.contains("Podman **4.3.0 or newer**"));
         assert!(instructions.contains("kind = \"local-docker\""));
         assert!(instructions.contains("--opt type=overlay"));
     }

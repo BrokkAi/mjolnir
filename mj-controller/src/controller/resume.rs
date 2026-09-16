@@ -3181,13 +3181,13 @@ mod tests {
         session.additional_mounts = vec![AdditionalMount {
             source: PathBuf::from("/host/old"),
             destination: PathBuf::from("/mnt/old"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         }];
         let previous = session.clone();
         let resumed_mounts = vec![AdditionalMount {
             source: PathBuf::from("/host/new"),
             destination: PathBuf::from("/mnt/new"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         }];
         let profile_home = data_directory.join("profile");
         std::fs::create_dir_all(&profile_home).unwrap();

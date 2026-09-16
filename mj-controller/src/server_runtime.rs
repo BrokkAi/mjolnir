@@ -3837,7 +3837,7 @@ mod tests {
                 additional_mounts: Some(vec![crate::targets::AdditionalMount {
                     source: "/destination/source".into(),
                     destination: "/destination/target".into(),
-                    read_only: true,
+                    access: crate::targets::MountAccess::Ro,
                 }]),
                 resource_allocation: None,
             },
@@ -3848,7 +3848,7 @@ mod tests {
             source_additional_mounts: vec![crate::targets::AdditionalMount {
                 source: "/source/source".into(),
                 destination: "/source/target".into(),
-                read_only: false,
+                access: crate::targets::MountAccess::Cow,
             }],
             source_resource_allocation: Some(
                 mj_core::state::SessionResourceAllocation::Container {

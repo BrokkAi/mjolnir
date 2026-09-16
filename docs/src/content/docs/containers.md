@@ -42,7 +42,7 @@ below.
 
 Install each runtime you want to use as a target:
 
-- **Rootless Podman 4.0 or newer** on Linux or WSL2. See
+- **Rootless Podman 4.3 or newer** on Linux or WSL2. See
   [Podman for Mjolnir](/podman/) for installation and verification steps.
 - **Docker with a reachable Linux daemon** on Linux or WSL2. See
   [Docker for Mjolnir](/docker/) for its OverlayFS and lifecycle contract.
@@ -188,15 +188,27 @@ wizard starts with the allocation remembered for that physical host, or with
 | `r` | Resets to the 8-CPU/32-GiB baseline |
 
 The wizard ends on a review screen where you can add, edit, or remove
-attached directories before launch. On container targets, each attached
-directory is mounted using the runtime's isolated mount mode, so a container
-can't write back into your host filesystem through it.
+attached directories before launch. Each attached directory has an access
+mode:
 
-Each attached directory also has a read-only checkbox. Podman and Docker use
-copy-on-write OverlayFS mounts, which some filesystems cannot host: when Mjolnir finds
-a source on NFS, SMB, FUSE, a FAT-family filesystem, or another overlay, it
-attaches that directory read-only instead and says so while the session
-launches.
+| Mode | Effect |
+| --- | --- |
+| `ro` (default) | The container can read the directory but not change it. |
+| `cow` | The container writes to a private copy-on-write overlay. Your host directory never changes. |
+| `rw` | The container's writes go straight to your host directory. |
+
+Podman and Docker build `cow` from OverlayFS, which some filesystems cannot
+host. When Mjolnir finds a source on NFS, SMB, FUSE, a FAT-family filesystem,
+or another overlay, the wizard doesn't offer `cow` for it, and an existing
+`cow` attachment is mounted read-only instead, with a notice while the
+session launches.
+
+On rootless Podman, every session container runs in a user namespace that
+maps the image's user onto your host user, so an `rw` attachment is writable
+and the files the container creates in it are owned by you. Mjolnir reads the
+image's user and group ids once per image before it creates the container. If
+that read fails, the container runs with Podman's default user mapping, the
+way it did before this mapping existed, and the session log says so.
 
 ## Two useful facts
 

@@ -816,6 +816,29 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Compatible: adds one table. Older readers ignore it and treat read-write
+    // mounts as copy-on-write, a behaviour difference rather than lost data.
+    // Older writers rewrite `session_mounts` but never touch this table, so its
+    // rows survive their updates; a row only applies while a mount with the same
+    // source and destination is still not read-only, so an older build that
+    // makes the mount read-only or removes it keeps that choice. The
+    // compatibility floor stays where it is.
+    if version < 34 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS session_mount_access (
+                 session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 source BLOB NOT NULL,
+                 destination BLOB NOT NULL,
+                 access TEXT NOT NULL CHECK(access IN ('rw')),
+                 PRIMARY KEY(session_id, destination)
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (34, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 34;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

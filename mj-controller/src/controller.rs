@@ -2167,7 +2167,7 @@ mod tests {
                 launch_options(vec![AdditionalMount {
                     source: PathBuf::from("/host/models"),
                     destination: PathBuf::from("/mnt/models"),
-                    read_only: false,
+                    access: crate::targets::MountAccess::Cow,
                 }]),
             )
             .expect("a suggestion list that cannot be written must not fail a registration");

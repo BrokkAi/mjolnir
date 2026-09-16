@@ -234,9 +234,35 @@ fn podman_preflight_rejects_unsupported_version_with_upgrade_remediation() {
         PodmanPreflightExecutor::with_outputs([podman_output(b"podman version 3.4.7\n")]);
 
     let error = verify_local_podman(&executor).unwrap_err().to_string();
-    assert!(error.contains("Podman 4.0.0 or newer"));
+    assert!(error.contains("Podman 4.3.0 or newer"));
     assert!(error.contains("apt install -y podman uidmap"));
     assert!(error.contains(PODMAN_DOCUMENTATION_PATH));
+}
+
+/// The floor is 4.3.0, not 4: `--userns=keep-id:uid=,gid=` is what every
+/// session container maps its image user with, and 4.2 does not have it.
+#[test]
+fn podman_preflight_rejects_a_four_series_release_older_than_the_keep_id_mapping() {
+    for version in ["4.0.3", "4.2.0", "4"] {
+        let executor = PodmanPreflightExecutor::with_outputs([podman_output(
+            format!("podman version {version}\n").as_bytes(),
+        )]);
+
+        let error = verify_local_podman(&executor).unwrap_err().to_string();
+
+        assert!(
+            error.contains("Podman 4.3.0 or newer"),
+            "{version}: {error}"
+        );
+    }
+
+    // 4.3.0 itself passes the version probe and moves on to the next one.
+    let executor = PodmanPreflightExecutor::with_outputs([
+        podman_output(b"podman version 4.3.0\n"),
+        podman_output(b"true\n"),
+        podman_output(b"         0       1000          1\n         1     100000      65536\n"),
+    ]);
+    assert_eq!(verify_local_podman(&executor).unwrap().version, "4.3.0");
 }
 
 #[test]
@@ -379,7 +405,7 @@ fn ssh_podman_preflight_reports_an_unreachable_host_separately_from_podman() {
 
     assert!(error.contains("SSH could not run the probes on dev@example.test"));
     assert!(error.contains("Connection timed out"));
-    assert!(!error.contains("Podman 4.0.0"));
+    assert!(!error.contains("Podman 4.3.0"));
 }
 
 #[test]
@@ -694,6 +720,7 @@ fn podman_plan_uses_owned_name_label_and_argv_clones() {
         SESSION,
         &bundle(),
         &[],
+        None,
     )
     .unwrap();
     let name = resource_name(SESSION).unwrap();
@@ -744,6 +771,7 @@ fn podman_volume_workspace_is_per_session_and_mounted_for_local_and_ssh_targets(
         SESSION,
         &bundle(),
         &[],
+        None,
     )
     .unwrap();
     let volume = format!("{}-workspace", resource_name(SESSION).unwrap());
@@ -775,6 +803,7 @@ fn podman_volume_workspace_is_per_session_and_mounted_for_local_and_ssh_targets(
         SESSION,
         &bundle(),
         &[],
+        None,
     )
     .unwrap();
     let remote = remote.commands[0].args.last().unwrap();
@@ -804,6 +833,7 @@ fn podman_host_helper_creates_the_exact_workspace_before_launch() {
         SESSION,
         &bundle(),
         &[],
+        None,
     )
     .unwrap();
     let resource = format!("{}-workspace", resource_name(SESSION).unwrap());
@@ -831,6 +861,7 @@ fn container_clone_borrows_from_an_optional_read_only_reference() {
         SESSION,
         &cached,
         &[],
+        None,
     )
     .unwrap();
 
@@ -900,7 +931,7 @@ fn container_secret_is_streamed_without_entering_remote_ssh_arguments() {
             workspace_storage: Default::default(),
         },
     };
-    let mut plan = provision_plan(&target, SESSION, &bundle(), &[]).unwrap();
+    let mut plan = provision_plan(&target, SESSION, &bundle(), &[], None).unwrap();
 
     plan.provide_target_environment_secret(&target, "GH_TOKEN", secret)
         .unwrap();
@@ -936,6 +967,7 @@ fn podman_plan_only_marks_per_repository_clone_commands_for_parallel_execution()
         SESSION,
         &bundle(),
         &[],
+        None,
     )
     .unwrap();
 
@@ -979,6 +1011,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
         SESSION,
         &bundle(),
         &[],
+        None,
     )
     .unwrap();
     assert_eq!(podman.commands[0].args[0], "run");
@@ -997,6 +1030,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
         SESSION,
         &bundle(),
         &[],
+        None,
     )
     .unwrap();
     assert!(
@@ -1017,6 +1051,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
         SESSION,
         &bundle(),
         &[],
+        None,
     )
     .unwrap();
     assert_eq!(apple.commands[1].args[0], "run");
@@ -1048,6 +1083,7 @@ fn an_automatic_pull_policy_never_pulls_during_a_launch() {
                 "container-name",
                 SESSION,
                 &[],
+                None,
                 None,
             )
             .unwrap();
@@ -1086,6 +1122,7 @@ fn an_explicit_newer_pull_policy_still_pulls_during_a_launch() {
             SESSION,
             &[],
             None,
+            None,
         )
         .unwrap();
         assert!(
@@ -1114,6 +1151,7 @@ fn explicit_podman_pull_policy_overrides_image_tag_defaults() {
             "container-name",
             SESSION,
             &[],
+            None,
             None,
         )
         .unwrap();
@@ -1147,11 +1185,204 @@ fn docker_pull_policy_uses_supported_digest_aware_run_modes() {
             SESSION,
             &[],
             None,
+            None,
         )
         .unwrap();
         assert!(args.contains(&expected.to_owned()), "{args:?}");
         assert!(!args.contains(&"--pull=newer".to_owned()), "{args:?}");
     }
+}
+
+/// Rootless Podman otherwise runs the image's user as a subordinate id, which
+/// cannot write to a host-owned bind mount and leaves unreadable files where
+/// it can write. Every Podman container maps that user back, whatever its
+/// mounts are; the other engines are left alone.
+#[test]
+fn podman_containers_always_map_the_image_user_onto_the_host_user() {
+    let template = ContainerTemplate {
+        image: "ghcr.io/example/dev:1.2.3".to_owned(),
+        pull_policy: ImagePullPolicy::Missing,
+        extra_run_args: vec![],
+        workspace_storage: Default::default(),
+    };
+    let args = |engine: &str, image_user| {
+        container_run_args(
+            engine,
+            &template,
+            "container-name",
+            SESSION,
+            &[],
+            None,
+            image_user,
+        )
+        .unwrap()
+    };
+
+    assert!(
+        args(
+            "podman",
+            Some(ImageUser {
+                uid: 1000,
+                gid: 1000
+            })
+        )
+        .contains(&"--userns=keep-id:uid=1000,gid=1000".to_owned())
+    );
+    // Plain keep-id would map the host user onto uid 1000 and demote an image
+    // that runs as root, so an unprobed image keeps Podman's own mapping.
+    let unprobed = args("podman", None);
+    assert!(
+        !unprobed
+            .iter()
+            .any(|argument| argument.starts_with("--userns")),
+        "{unprobed:?}"
+    );
+
+    for engine in ["docker", "container"] {
+        assert!(
+            !args(
+                engine,
+                Some(ImageUser {
+                    uid: 1000,
+                    gid: 1000
+                })
+            )
+            .iter()
+            .any(|argument| argument.starts_with("--userns")),
+            "{engine} must keep its own user namespace"
+        );
+    }
+}
+
+fn probe_template(pull_policy: ImagePullPolicy) -> ContainerTemplate {
+    ContainerTemplate {
+        image: "ghcr.io/example/dev:1.2.3".to_owned(),
+        pull_policy,
+        extra_run_args: vec![],
+        workspace_storage: Default::default(),
+    }
+}
+
+#[test]
+fn the_image_user_probe_reads_the_configured_uid_and_gid() {
+    let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 0,
+        stdout: b"1000\n1000\n".to_vec(),
+        stderr: Vec::new(),
+    }]);
+
+    let user =
+        probe_image_user(None, &probe_template(ImagePullPolicy::Missing), &executor).unwrap();
+
+    assert_eq!(
+        user,
+        ImageUser {
+            uid: 1000,
+            gid: 1000
+        }
+    );
+    let command = &executor.seen.borrow()[0];
+    assert_eq!(command.program, "podman");
+    assert_eq!(
+        command.args,
+        [
+            "run",
+            "--rm",
+            "--entrypoint",
+            "",
+            "ghcr.io/example/dev:1.2.3",
+            "sh",
+            "-c",
+            "id -u; id -g"
+        ]
+    );
+}
+
+#[test]
+fn the_image_user_probe_runs_on_the_remote_podman_host() {
+    let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 0,
+        stdout: b"0\n0\n".to_vec(),
+        stderr: Vec::new(),
+    }]);
+
+    let user = probe_image_user(
+        Some(&ssh()),
+        &probe_template(ImagePullPolicy::Missing),
+        &executor,
+    )
+    .unwrap();
+
+    assert_eq!(user, ImageUser { uid: 0, gid: 0 });
+    assert_eq!(executor.seen.borrow()[0].program, "ssh");
+}
+
+/// The probe is a `podman run` like any other, so it must not reach a registry
+/// a launch would refuse to reach, and must read the image the launch will run.
+#[test]
+fn the_image_user_probe_carries_the_targets_pull_policy() {
+    for (policy, expected) in [
+        (ImagePullPolicy::Never, Some("--pull=never")),
+        (ImagePullPolicy::Always, Some("--pull=always")),
+        (ImagePullPolicy::Newer, Some("--pull=newer")),
+        (ImagePullPolicy::Missing, None),
+    ] {
+        let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+            status: 0,
+            stdout: b"1000\n1000\n".to_vec(),
+            stderr: Vec::new(),
+        }]);
+
+        probe_image_user(None, &probe_template(policy), &executor).unwrap();
+
+        let command = &executor.seen.borrow()[0];
+        assert_eq!(
+            command
+                .args
+                .iter()
+                .find(|argument| argument.starts_with("--pull="))
+                .map(String::as_str),
+            expected,
+            "{:?}",
+            command.args
+        );
+        // Whatever the policy, the run arguments agree with it.
+        let run = container_run_args(
+            "podman",
+            &probe_template(policy),
+            "container-name",
+            SESSION,
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            run.iter()
+                .find(|argument| argument.starts_with("--pull="))
+                .map(String::as_str),
+            expected
+        );
+    }
+}
+
+#[test]
+fn an_unreadable_image_user_probe_is_an_error() {
+    let refused = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 125,
+        stdout: Vec::new(),
+        stderr: b"image not known".to_vec(),
+    }]);
+    let error =
+        probe_image_user(None, &probe_template(ImagePullPolicy::Missing), &refused).unwrap_err();
+    assert!(format!("{error:#}").contains("image not known"));
+
+    let garbled = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 0,
+        stdout: b"root\n".to_vec(),
+        stderr: Vec::new(),
+    }]);
+    assert!(probe_image_user(None, &probe_template(ImagePullPolicy::Missing), &garbled).is_err());
 }
 
 #[test]
@@ -1160,12 +1391,17 @@ fn podman_additional_mounts_use_copy_on_write_overlay_volumes() {
         AdditionalMount {
             source: PathBuf::from("/host/cache"),
             destination: PathBuf::from("/mnt/cache"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         },
         AdditionalMount {
             source: PathBuf::from("/host/models"),
             destination: PathBuf::from("/mnt/models"),
-            read_only: true,
+            access: crate::targets::MountAccess::Ro,
+        },
+        AdditionalMount {
+            source: PathBuf::from("/host/build-cache"),
+            destination: PathBuf::from("/mnt/build-cache"),
+            access: crate::targets::MountAccess::Rw,
         },
     ];
     let plan = provision_plan(
@@ -1178,6 +1414,7 @@ fn podman_additional_mounts_use_copy_on_write_overlay_volumes() {
         SESSION,
         &bundle(),
         &mounts,
+        None,
     )
     .unwrap();
 
@@ -1193,6 +1430,58 @@ fn podman_additional_mounts_use_copy_on_write_overlay_volumes() {
             .windows(2)
             .any(|args| args == ["--volume", "/host/models:/mnt/models:ro"])
     );
+    assert!(
+        plan.commands[0]
+            .args
+            .windows(2)
+            .any(|args| args == ["--volume", "/host/build-cache:/mnt/build-cache:rw"])
+    );
+}
+
+#[test]
+fn additional_mounts_keep_the_legacy_shape_unless_read_write() {
+    let parse = |json: &str| {
+        serde_json::from_str::<AdditionalMount>(json)
+            .unwrap()
+            .access
+    };
+    assert_eq!(
+        parse(r#"{"source":"/a","destination":"/b","read_only":true}"#),
+        crate::targets::MountAccess::Ro
+    );
+    assert_eq!(
+        parse(r#"{"source":"/a","destination":"/b","read_only":false}"#),
+        crate::targets::MountAccess::Cow
+    );
+    assert_eq!(
+        parse(r#"{"source":"/a","destination":"/b"}"#),
+        crate::targets::MountAccess::Cow
+    );
+
+    let mount = |access| AdditionalMount {
+        source: PathBuf::from("/a"),
+        destination: PathBuf::from("/b"),
+        access,
+    };
+    // Older builds reject unknown fields, so only read-write may add one.
+    assert_eq!(
+        serde_json::to_value(mount(crate::targets::MountAccess::Ro)).unwrap(),
+        serde_json::json!({"source": "/a", "destination": "/b", "read_only": true})
+    );
+    assert_eq!(
+        serde_json::to_value(mount(crate::targets::MountAccess::Cow)).unwrap(),
+        serde_json::json!({"source": "/a", "destination": "/b", "read_only": false})
+    );
+    let read_write = mount(crate::targets::MountAccess::Rw);
+    let json = serde_json::to_string(&read_write).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+        serde_json::json!({"source": "/a", "destination": "/b", "read_only": false, "access": "rw"})
+    );
+    assert_eq!(
+        serde_json::from_str::<AdditionalMount>(&json).unwrap(),
+        read_write
+    );
 }
 
 #[test]
@@ -1201,12 +1490,17 @@ fn docker_additional_mounts_use_managed_overlay_and_read_only_bind_volumes() {
         AdditionalMount {
             source: PathBuf::from("/host/cache"),
             destination: PathBuf::from("/mnt/cache"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         },
         AdditionalMount {
             source: PathBuf::from("/host/models"),
             destination: PathBuf::from("/mnt/models"),
-            read_only: true,
+            access: crate::targets::MountAccess::Ro,
+        },
+        AdditionalMount {
+            source: PathBuf::from("/host/build-cache"),
+            destination: PathBuf::from("/mnt/build-cache"),
+            access: crate::targets::MountAccess::Rw,
         },
     ];
     let plan = provision_plan(
@@ -1219,6 +1513,7 @@ fn docker_additional_mounts_use_managed_overlay_and_read_only_bind_volumes() {
         SESSION,
         &bundle(),
         &mounts,
+        None,
     )
     .unwrap();
 
@@ -1244,6 +1539,35 @@ fn docker_additional_mounts_use_managed_overlay_and_read_only_bind_volumes() {
             .args
             .windows(2)
             .any(|args| args == ["--volume", "/host/models:/mnt/models:ro"])
+    );
+    // A read-write mount is a plain bind: no overlay volume is created for it.
+    assert!(
+        create
+            .args
+            .windows(2)
+            .any(|args| args == ["--volume", "/host/build-cache:/mnt/build-cache"])
+    );
+    // The overlay script reads its own leading arguments and then one
+    // `ordinal source volume` triple per copy-on-write attachment, up to the
+    // `--` separator. Only the copy-on-write source is handed to it.
+    let separator = create
+        .args
+        .iter()
+        .position(|argument| argument == "--")
+        .expect("the overlay script separates its arguments from the run command");
+    assert_eq!(
+        &create.args[2..7],
+        [
+            "hel-docker-run",
+            SESSION,
+            name.as_str(),
+            "ubuntu:24.04",
+            "missing"
+        ]
+    );
+    assert_eq!(
+        &create.args[7..separator],
+        ["0", "/host/cache", volume.as_str()]
     );
     assert!(create.args.contains(&"--pull=missing".to_owned()));
     assert!(create.args.contains(&"--init".to_owned()));
@@ -1354,7 +1678,7 @@ fn apple_additional_mounts_use_read_only_bind_fallback() {
     let mounts = [AdditionalMount {
         source: PathBuf::from("/Users/me/assets"),
         destination: PathBuf::from("/mnt/assets"),
-        read_only: false,
+        access: crate::targets::MountAccess::Cow,
     }];
     let plan = provision_plan(
         &TargetTemplate::AppleContainer(ContainerTemplate {
@@ -1366,6 +1690,7 @@ fn apple_additional_mounts_use_read_only_bind_fallback() {
         SESSION,
         &bundle(),
         &mounts,
+        None,
     )
     .unwrap();
 
@@ -1389,6 +1714,7 @@ fn apple_plan_preflights_and_uses_container_cli() {
         SESSION,
         &bundle(),
         &[],
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1620,6 +1946,7 @@ fn remote_podman_is_ssh_plus_podman_not_remote_api() {
         SESSION,
         &bundle(),
         &[],
+        None,
     )
     .unwrap();
     assert!(plan.commands.iter().all(|command| command.program == "ssh"));
@@ -2021,7 +2348,7 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
         ),
     ];
     for (template, purpose) in creating {
-        let plan = provision_plan(&template, SESSION, &bundle(), &[]).unwrap();
+        let plan = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
         assert_eq!(
             plan.description,
             format!("provision Mjolnir session {SESSION}")
@@ -2077,7 +2404,7 @@ fn aws_plan_tags_instance_and_close_uses_recorded_id() {
         instance_type: Some("m8i-flex.2xlarge".into()),
         ssh: ssh(),
     });
-    let provision = provision_plan(&template, SESSION, &bundle(), &[]).unwrap();
+    let provision = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
     assert_eq!(provision.commands.len(), 1);
     assert!(
         provision.commands[0].args.windows(2).any(|args| args
@@ -2801,7 +3128,7 @@ fn docker_overlay_run_rollback_removes_owned_mj_directory_after_run_failure() {
         &[AdditionalMount {
             source: lower.path().to_path_buf(),
             destination: PathBuf::from("/mnt/cache"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         }],
     )
     .unwrap();
@@ -3315,9 +3642,9 @@ fn ssh_docker_provisions_overlay_mounts_and_streams_secret_without_local_docker(
     let mount = AdditionalMount {
         source: PathBuf::from("/srv/source with 'quotes'"),
         destination: PathBuf::from("/mnt/source"),
-        read_only: false,
+        access: crate::targets::MountAccess::Cow,
     };
-    let mut plan = provision_plan(&template, SESSION, &bundle(), &[mount]).unwrap();
+    let mut plan = provision_plan(&template, SESSION, &bundle(), &[mount], None).unwrap();
     assert!(plan.commands.iter().all(|command| command.program == "ssh"));
     let create = &plan.commands[0];
     assert!(create.creates_target);
@@ -3484,7 +3811,7 @@ fn docker_attachment_init_failure_stops_helper_and_removes_backing_storage() {
         &[AdditionalMount {
             source: PathBuf::from("/macOS/private temp/source"),
             destination: PathBuf::from("/mnt/cache"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         }],
     )
     .unwrap();
@@ -3547,7 +3874,7 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
             &[AdditionalMount {
                 source: source.path().to_owned(),
                 destination: PathBuf::from("/mnt/source"),
-                read_only: false,
+                access: crate::targets::MountAccess::Cow,
             }],
         )?;
         execute_checked(&ProcessExecutor, &create)?;

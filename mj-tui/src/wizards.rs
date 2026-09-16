@@ -24,11 +24,11 @@ use mj_core::state::{
 
 use mj_chat::components::PathField;
 use mj_chat::components::{
-    Checkbox, ChoiceList, ConsumedEvent, ControlKind, Dialog, FieldEdit, FormViewport, Interaction,
-    Outcome,
+    Checkbox, ChoiceList, ComboBox, ComboBoxState, ConsumedEvent, ControlKind, Dialog, FieldEdit,
+    Form, FormViewport, Interaction, Outcome, PopupSide,
 };
 use mj_chat::selection::FrameSurfaces;
-use mj_core::targets::{AdditionalMount, default_mount_destination, path_completion};
+use mj_core::targets::{AdditionalMount, MountAccess, default_mount_destination, path_completion};
 
 use crate::widgets::{centered_modal, dismissible_modal_title, format_resource_bytes};
 use crate::{
@@ -64,7 +64,7 @@ pub(crate) enum WizardControl {
     NewBundleRemove,
     MountSource,
     MountDestination,
-    MountReadOnly,
+    MountAccess,
     ReviewAttachments,
     CreateManagedWorktree,
     MjolnirSubagents,
@@ -156,7 +156,8 @@ pub(crate) struct MountWizard {
     pub(crate) source: PathInput,
     pub(crate) destination: PathInput,
 
-    pub(crate) read_only: bool,
+    pub(crate) access: MountAccess,
+    pub(crate) access_combo: ComboBoxState<WizardControl>,
     pub(crate) mounts: Vec<AdditionalMount>,
     pub(crate) history: Vec<std::path::PathBuf>,
     history_index: usize,
@@ -176,7 +177,8 @@ impl MountWizard {
             source: PathInput::new(),
             destination: PathInput::new(),
 
-            read_only: false,
+            access: MountAccess::Ro,
+            access_combo: ComboBoxState::default(),
             mounts: Vec::new(),
             history,
             history_index: 0,
@@ -195,27 +197,29 @@ impl MountWizard {
         wizard
     }
 
-    /// Why the source under edit can only be attached read-only, if it can.
-    pub(crate) fn forced_read_only(&self) -> Option<&str> {
+    /// Why the source under edit cannot use the copy-on-write overlay, if it
+    /// cannot.
+    pub(crate) fn overlay_unavailable(&self) -> Option<&str> {
         self.forced_sources
             .get(self.source.trim())
             .map(String::as_str)
     }
 
-    /// Space and Enter toggle the checkbox, except where the host's filesystem
-    /// has already settled the answer.
-    fn toggle_read_only(&mut self) {
-        if self.forced_read_only().is_some() {
-            return;
-        }
-        self.read_only = !self.read_only;
+    /// The access modes the entry under edit may use.
+    pub(crate) fn access_choices(&self) -> Vec<MountAccess> {
+        access_choices(self.overlay_unavailable().is_some())
+    }
+
+    /// Settle the access mode after the host reported the overlay unusable.
+    pub(crate) fn forbid_overlay(&mut self) {
+        self.access = self.access.without_overlay();
     }
 
     fn add_validated_mount(&mut self) {
         let mount = AdditionalMount {
             source: self.source.to_string().into(),
             destination: self.destination.to_string().into(),
-            read_only: self.read_only,
+            access: self.access,
         };
         if let Some(index) = self.editing_mount.take() {
             self.mounts[index] = mount;
@@ -224,7 +228,7 @@ impl MountWizard {
         }
         self.source.clear();
         self.destination.clear();
-        self.read_only = false;
+        self.access = MountAccess::Ro;
         self.completion_candidates.clear();
         self.error = None;
     }
@@ -276,7 +280,7 @@ impl NewWizard {
                 vec![
                     self.mounts.source.to_string(),
                     self.mounts.destination.to_string(),
-                    self.mounts.read_only.to_string(),
+                    format!("{:?}", self.mounts.access),
                 ],
             );
         }
@@ -332,7 +336,7 @@ impl ResumeWizard {
                 vec![
                     self.mounts.source.to_string(),
                     self.mounts.destination.to_string(),
-                    self.mounts.read_only.to_string(),
+                    format!("{:?}", self.mounts.access),
                 ],
             );
         }
@@ -439,7 +443,7 @@ fn remove_selected_mount(mounts: &mut MountWizard) {
 fn prepare_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard) {
     mounts.source.clear();
     mounts.destination.clear();
-    mounts.read_only = false;
+    mounts.access = MountAccess::Ro;
     mounts.error = None;
     mounts.editing_mount = None;
     mounts.completion_candidates.clear();
@@ -454,7 +458,10 @@ fn prepare_selected_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard
     let mount = mounts.mounts[index].clone();
     mounts.source = mount.source.to_string_lossy().into_owned().into();
     mounts.destination = mount.destination.to_string_lossy().into_owned().into();
-    mounts.read_only = mount.read_only || mounts.forced_read_only().is_some();
+    mounts.access = mount.access;
+    if mounts.overlay_unavailable().is_some() {
+        mounts.forbid_overlay();
+    }
     mounts.error = None;
     mounts.editing_mount = Some(index);
     mounts.completion_candidates.clear();
@@ -494,7 +501,7 @@ fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
     let mount = AdditionalMount {
         source: mounts.source.to_string().into(),
         destination: mounts.destination.to_string().into(),
-        read_only: mounts.read_only,
+        access: mounts.access,
     };
     if let Err(error) = mj_core::targets::validate_mount_destination(&mount.destination) {
         return Some(error.to_string());
@@ -1837,7 +1844,7 @@ fn render_review_wizard(
                     "{} → {}{}",
                     mount.source.display(),
                     mount.destination.display(),
-                    read_only_marker(mount.read_only)
+                    access_marker(mount.access)
                 ))
             })
             .collect::<Vec<_>>();
@@ -1950,9 +1957,84 @@ fn render_review_wizard(
     );
 }
 
-/// Suffix that marks an attached directory as read-only in a list row.
-pub(crate) fn read_only_marker(read_only: bool) -> &'static str {
-    if read_only { " · ro" } else { "" }
+/// Suffix that shows an attached directory's access mode in a list row.
+pub(crate) fn access_marker(access: MountAccess) -> String {
+    format!(" · {}", access.label())
+}
+
+/// The access modes offered for an attachment, as the shared rule in
+/// [`MountAccess::offered`] defines them.
+pub(crate) fn access_choices(overlay_unavailable: bool) -> Vec<MountAccess> {
+    MountAccess::offered(!overlay_unavailable)
+}
+
+fn access_description(access: MountAccess) -> &'static str {
+    match access {
+        MountAccess::Ro => "ro · read-only",
+        MountAccess::Cow => "cow · container-private copy-on-write",
+        MountAccess::Rw => "rw · writes reach the host directory",
+    }
+}
+
+/// The form control kind for an access-mode combobox.
+pub(crate) fn access_combo_kind<K: Copy + Eq>(
+    combo: &ComboBoxState<K>,
+    choices: &[MountAccess],
+    access: MountAccess,
+    id: K,
+) -> ControlKind {
+    ControlKind::ComboBox {
+        len: choices.len(),
+        selected: combo.selection(id, access_index(choices, access)),
+        expanded: combo.is_open(id),
+    }
+}
+
+pub(crate) fn access_index(choices: &[MountAccess], access: MountAccess) -> usize {
+    choices
+        .iter()
+        .position(|choice| *choice == access)
+        .unwrap_or(0)
+}
+
+/// Draw the access-mode combobox for an attachment under edit. Screens call
+/// this once in place and, while it is open, again after everything else so
+/// the popup stays on top.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_access_combo<K: Copy + Eq>(
+    frame: &mut Frame<'_>,
+    bounds: Rect,
+    field: Rect,
+    access: MountAccess,
+    choices: &[MountAccess],
+    combo: &ComboBoxState<K>,
+    expanded: bool,
+    form: &mut Form<K>,
+    id: K,
+) {
+    let selected = combo.selection(id, access_index(choices, access));
+    let value = choices
+        .get(selected)
+        .map(|choice| ComboBox::display_value(access_description(*choice)))
+        .unwrap_or_default();
+    let options = choices
+        .iter()
+        .map(|choice| Line::raw(access_description(*choice)))
+        .collect::<Vec<_>>();
+    ComboBox::render(
+        frame,
+        bounds,
+        field,
+        &value,
+        &options,
+        selected,
+        expanded,
+        true,
+        " access · ↑/↓ select · Enter accept ",
+        PopupSide::Below,
+        form,
+        id,
+    );
 }
 
 // Domain mount data, navigation, and the shared form are separate inputs.
@@ -2002,7 +2084,7 @@ fn render_mount_wizard(
                 "  {} → {}{}",
                 mount.source.display(),
                 mount.destination.display(),
-                read_only_marker(mount.read_only)
+                access_marker(mount.access)
             ))
         }));
     }
@@ -2086,7 +2168,7 @@ fn render_mount_wizard(
     let focused_row = match form.focused() {
         Some(WizardControl::MountSource) => Some(info_height),
         Some(WizardControl::MountDestination) => Some(info_height.saturating_add(1)),
-        Some(WizardControl::MountReadOnly) => Some(info_height.saturating_add(2)),
+        Some(WizardControl::MountAccess) => Some(info_height.saturating_add(2)),
         _ => None,
     };
     let viewport = FormViewport::new(body, total_height, 0, focused_row);
@@ -2139,20 +2221,33 @@ fn render_mount_wizard(
         form,
         WizardControl::MountDestination,
     );
-    let readonly_row = viewport.row(info_height.saturating_add(2), 1);
-    let readonly_label = if mounts.forced_read_only().is_some() {
-        "Read-only (locked)"
-    } else {
-        "Read-only"
-    };
-    Checkbox::render(
+    let access_row = viewport.row(info_height.saturating_add(2), 1);
+    frame.render_widget(
+        Paragraph::new("Access:"),
+        Rect::new(
+            access_row.x,
+            access_row.y,
+            10.min(access_row.width),
+            access_row.height,
+        ),
+    );
+    let access_field = Rect::new(
+        access_row.x.saturating_add(10),
+        access_row.y,
+        field_width,
+        access_row.height,
+    );
+    let access_choices = mounts.access_choices();
+    render_access_combo(
         frame,
-        readonly_row,
-        readonly_label,
-        mounts.read_only,
-        mounts.forced_read_only().is_none(),
+        inner,
+        access_field,
+        mounts.access,
+        &access_choices,
+        &mounts.access_combo,
+        false,
         form,
-        WizardControl::MountReadOnly,
+        WizardControl::MountAccess,
     );
     Dialog::render_actions(
         frame,
@@ -2164,6 +2259,19 @@ fn render_mount_wizard(
         ],
         form,
     );
+    if mounts.access_combo.is_open(WizardControl::MountAccess) {
+        render_access_combo(
+            frame,
+            inner,
+            access_field,
+            mounts.access,
+            &access_choices,
+            &mounts.access_combo,
+            true,
+            form,
+            WizardControl::MountAccess,
+        );
+    }
 }
 
 pub(crate) fn render_resume_wizard(
