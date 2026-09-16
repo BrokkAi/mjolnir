@@ -15,7 +15,7 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 ## Progress
 
 - [x] (2026-09-16 18:00Z) Plan written and committed (milestone 0).
-- [ ] Milestone 1: rusqlite 0.40 bump in mj-worker, mj-cli, mj-controller; full `cargo test`; commit.
+- [x] (2026-09-16 20:05Z) Milestone 1: rusqlite 0.40 bump in mj-worker, mj-cli, mj-controller; full `cargo test`; commit `4994dc15`.
 - [ ] Milestone 2: SessionWiki fork branch with three library changes, tests, tag `v0.26.0-mj.1`, pushed to `jbellis/sessionwiki`; upstream PR opened; Mjolnir git dependency added and building.
 - [ ] Milestone 3: `[sessionwiki]` config section, Mjolnir adapter, daemon indexer; `sessionwiki list --tool mjolnir` shows a closed session.
 - [ ] Milestone 4: HTTP API and client wrappers; terminal Resume dialog search, preview, Archived tab, restore.
@@ -30,6 +30,12 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
   Evidence: `src/index.rs` lines 878-919 in the fork's `main` at commit f3e1d8c. With two Mjolnir instances each listing only its own sessions, each sync would archive the other's rows and the next sync would un-archive them. This drove the `reconcile_scope` fork change below.
 - Observation: Mjolnir publishes every crate to crates.io, and users install with `cargo install --locked brokk-mjolnir`.
   Evidence: `.github/workflows/publish.yml` line 143 and `docs/src/content/docs/install.md` line 73. A git dependency cannot be published, so milestone 8 exists.
+- Observation: rusqlite 0.40 moved the `u64` and `usize` `ToSql`/`FromSql` implementations behind a new `fallible_uint` feature, because those conversions can fail.
+  Evidence: `rusqlite-0.40.2/src/types/from_sql.rs` lines 141-145 and `src/types/to_sql.rs` lines 272-280. Mjolnir reads and writes many `u64` columns, so the bump produced 57 trait-bound errors in `mj-controller/src/database.rs` and its submodules. Enabling `fallible_uint` in the three manifests restores the 0.37 behaviour exactly; no call site changed.
+- Observation: `mj-controller/src/controller/recovery_scan.rs` did not compile under `--all-targets` before this milestone: its `candidate` test helper was missing the `borrowed_from` field that an earlier merge added to `TargetLocator::LocalDocker`.
+  Evidence: `mj-core/src/state.rs` line 649 against `recovery_scan.rs` line 1306. Fixed in the same commit because it blocked `cargo test`.
+- Observation: `mj-worker`'s `acp::tests::ten_large_photos_reach_acp_for_both_prompt_and_steering` failed once under whole-workspace load and passed alone and in its own crate suite. It is timing-sensitive, not a rusqlite regression.
+  Evidence: the workspace run took 207s for that suite against 86s for the crate alone.
 - Observation: SessionWiki drops and rebuilds its entire cache when the SQLite `user_version` differs from the library's `SCHEMA_VERSION` constant.
   Evidence: `src/index.rs` lines 375-395. A `sessionwiki` binary at a different schema version than the library Mjolnir links would force a full re-index on every alternation. Documented in milestone 7.
 
