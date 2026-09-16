@@ -1,9 +1,11 @@
 //! Controller-side lifecycle transitions and canonical-to-backend conversion.
 
 mod backend;
+mod cache_host;
 mod checkpoint;
 mod git_cache;
 mod lifecycle;
+mod mbx;
 pub mod move_session;
 mod network_git;
 pub mod profile_config;
@@ -796,6 +798,7 @@ impl Controller {
         let id = new_session_id()?;
         let now = now();
         let record = SessionRecord {
+            build_cache: None,
             create_managed_worktree,
             mjolnir_subagents,
             archived: false,
@@ -1480,6 +1483,7 @@ mod tests {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ConfigContainer {
+                    build_cache: None,
                     image: "example.invalid/hel-test:latest".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -2259,6 +2263,7 @@ mod tests {
             "local".into(),
             TargetTemplate::LocalPodman {
                 container: ConfigContainer {
+                    build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),
                     platform: None,

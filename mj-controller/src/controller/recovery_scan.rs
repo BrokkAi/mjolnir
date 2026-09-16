@@ -317,6 +317,7 @@ fn adopted_session_record(
 ) -> SessionRecord {
     let now = now();
     SessionRecord {
+        build_cache: None,
         mjolnir_subagents: None,
         // The adopting caller probes the running container for this.
         container_workspace: None,
@@ -1164,6 +1165,7 @@ mod tests {
     fn recovery_container_scan_requires_both_managed_and_session_labels() {
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -1192,6 +1194,7 @@ mod tests {
     fn recovery_docker_scan_accepts_json_lines_and_builds_a_docker_locator() {
         let template = TargetTemplate::LocalDocker {
             container: ConfigContainer {
+                build_cache: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),
                 platform: None,

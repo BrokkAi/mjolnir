@@ -48,6 +48,7 @@ fn test_config() -> Config {
                 "podman".to_owned(),
                 TargetTemplate::LocalPodman {
                     container: mj_core::config::ContainerTemplate {
+                        build_cache: None,
                         image: "agent-dev:latest".to_owned(),
                         pull_policy: Default::default(),
                         platform: None,

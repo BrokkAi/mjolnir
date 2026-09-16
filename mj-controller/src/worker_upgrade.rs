@@ -334,6 +334,7 @@ mod tests {
 
     fn session_record(state: SessionState) -> SessionRecord {
         SessionRecord {
+            build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,

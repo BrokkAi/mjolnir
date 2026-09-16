@@ -2511,6 +2511,7 @@ fn import_claude_session_inner(
     state.sessions.insert(
         session_id.clone(),
         SessionRecord {
+            build_cache: None,
             mjolnir_subagents: None,
             // An imported history is a new session: when it is resumed into a
             // container it gets its own workspace, like any session created
@@ -2845,6 +2846,7 @@ pub fn import_native_session(
     state.sessions.insert(
         session_id.clone(),
         SessionRecord {
+            build_cache: None,
             mjolnir_subagents: None,
             // An imported history is a new session: when it is resumed into a
             // container it gets its own workspace, like any session created

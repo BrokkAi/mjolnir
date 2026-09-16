@@ -430,6 +430,7 @@ fn setup_smoke_plan_wraps_every_ssh_podman_command_in_ssh() {
         &TargetTemplate::SshPodman {
             ssh: ssh(),
             container: ContainerTemplate {
+                build_cache: None,
                 image: "ubuntu:24.04".to_owned(),
                 pull_policy: ImagePullPolicy::Auto,
                 extra_run_args: vec![],
@@ -490,6 +491,7 @@ fn managed_resource_identity_args_build_container_labels_and_ec2_tags() {
 #[test]
 fn container_template_ownership_errors_name_mjolnir() {
     let template = ContainerTemplate {
+        build_cache: None,
         image: "ubuntu:24.04".to_owned(),
         pull_policy: ImagePullPolicy::Auto,
         extra_run_args: vec!["--label=dev.mj.managed=false".to_owned()],
@@ -712,6 +714,7 @@ fn podman_inspect_or_start_failures_stop_recovery() {
 fn podman_plan_uses_owned_name_label_and_argv_clones() {
     let plan = provision_plan(
         &TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec!["--cpus=4".to_owned()],
@@ -762,6 +765,7 @@ fn podman_plan_uses_owned_name_label_and_argv_clones() {
 #[test]
 fn podman_volume_workspace_is_per_session_and_mounted_for_local_and_ssh_targets() {
     let container = ContainerTemplate {
+        build_cache: None,
         image: "ubuntu:24.04".to_owned(),
         pull_policy: ImagePullPolicy::Auto,
         extra_run_args: vec![],
@@ -819,6 +823,7 @@ fn podman_volume_workspace_is_per_session_and_mounted_for_local_and_ssh_targets(
 /// plan clones into and mounts can be checked the same way for all of them.
 fn container_plans_for(workspace: Option<&Path>) -> Vec<(&'static str, CommandPlan)> {
     let container = |storage: PodmanWorkspaceStorage| ContainerTemplate {
+        build_cache: None,
         image: "ubuntu:24.04".to_owned(),
         pull_policy: ImagePullPolicy::Auto,
         extra_run_args: vec![],
@@ -933,6 +938,7 @@ fn podman_host_helper_creates_the_exact_workspace_before_launch() {
     ];
     let plan = provision_plan(
         &TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -965,6 +971,7 @@ fn container_clone_borrows_from_an_optional_read_only_reference() {
     cached.repositories[0].reference = Some("/run/hel/git-cache/app.git".to_owned());
     let plan = provision_plan(
         &TargetTemplate::AppleContainer(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -1000,6 +1007,7 @@ fn container_clone_borrows_from_an_optional_read_only_reference() {
 fn container_secret_is_streamed_without_entering_local_command_arguments() {
     let secret = "github-token-that-must-not-reach-argv";
     let target = TargetTemplate::LocalPodman(ContainerTemplate {
+        build_cache: None,
         image: "ubuntu:24.04".to_owned(),
         pull_policy: ImagePullPolicy::Auto,
         extra_run_args: vec!["--env".to_owned(), "GH_TOKEN".to_owned()],
@@ -1038,6 +1046,7 @@ fn container_secret_is_streamed_without_entering_remote_ssh_arguments() {
     let target = TargetTemplate::SshPodman {
         ssh: ssh(),
         container: ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec!["--env".to_owned(), "GH_TOKEN".to_owned()],
@@ -1072,6 +1081,7 @@ fn container_secret_is_streamed_without_entering_remote_ssh_arguments() {
 fn podman_plan_only_marks_per_repository_clone_commands_for_parallel_execution() {
     let plan = provision_plan(
         &TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -1117,6 +1127,7 @@ fn podman_plan_only_marks_per_repository_clone_commands_for_parallel_execution()
 fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
     let podman = provision_plan(
         &TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -1136,6 +1147,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
         &TargetTemplate::SshPodman {
             ssh: ssh(),
             container: ContainerTemplate {
+                build_cache: None,
                 image: "dev:1".to_owned(),
                 pull_policy: ImagePullPolicy::Auto,
                 extra_run_args: vec![],
@@ -1159,6 +1171,7 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
 
     let apple = provision_plan(
         &TargetTemplate::AppleContainer(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -1192,6 +1205,7 @@ fn an_automatic_pull_policy_never_pulls_during_a_launch() {
             let args = container_run_args(
                 engine,
                 &ContainerTemplate {
+                    build_cache: None,
                     image: image.to_owned(),
                     pull_policy: ImagePullPolicy::Auto,
                     extra_run_args: vec![],
@@ -1231,6 +1245,7 @@ fn an_explicit_newer_pull_policy_still_pulls_during_a_launch() {
         let args = container_run_args(
             "podman",
             &ContainerTemplate {
+                build_cache: None,
                 image: image.to_owned(),
                 pull_policy: ImagePullPolicy::Newer,
                 extra_run_args: vec![],
@@ -1262,6 +1277,7 @@ fn explicit_podman_pull_policy_overrides_image_tag_defaults() {
         let args = container_run_args(
             "podman",
             &ContainerTemplate {
+                build_cache: None,
                 image: "ghcr.io/example/dev:1.2.3".to_owned(),
                 pull_policy: policy,
                 extra_run_args: vec![],
@@ -1296,6 +1312,7 @@ fn docker_pull_policy_uses_supported_digest_aware_run_modes() {
         let args = container_run_args(
             "docker",
             &ContainerTemplate {
+                build_cache: None,
                 image: "ghcr.io/example/dev:1.2.3".to_owned(),
                 pull_policy: policy,
                 extra_run_args: vec![],
@@ -1321,6 +1338,7 @@ fn docker_pull_policy_uses_supported_digest_aware_run_modes() {
 #[test]
 fn podman_containers_always_map_the_image_user_onto_the_host_user() {
     let template = ContainerTemplate {
+        build_cache: None,
         image: "ghcr.io/example/dev:1.2.3".to_owned(),
         pull_policy: ImagePullPolicy::Missing,
         extra_run_args: vec![],
@@ -1378,6 +1396,7 @@ fn podman_containers_always_map_the_image_user_onto_the_host_user() {
 
 fn probe_template(pull_policy: ImagePullPolicy) -> ContainerTemplate {
     ContainerTemplate {
+        build_cache: None,
         image: "ghcr.io/example/dev:1.2.3".to_owned(),
         pull_policy,
         extra_run_args: vec![],
@@ -1529,6 +1548,7 @@ fn podman_additional_mounts_use_copy_on_write_overlay_volumes() {
     ];
     let plan = provision_plan(
         &TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -1629,6 +1649,7 @@ fn docker_additional_mounts_use_managed_overlay_and_read_only_bind_volumes() {
     ];
     let plan = provision_plan(
         &TargetTemplate::LocalDocker(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -1807,6 +1828,7 @@ fn apple_additional_mounts_use_read_only_bind_fallback() {
     }];
     let plan = provision_plan(
         &TargetTemplate::AppleContainer(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -1832,6 +1854,7 @@ fn apple_additional_mounts_use_read_only_bind_fallback() {
 fn apple_plan_preflights_and_uses_container_cli() {
     let plan = provision_plan(
         &TargetTemplate::AppleContainer(ContainerTemplate {
+            build_cache: None,
             image: "ghcr.io/example/dev:latest".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -1884,6 +1907,7 @@ fn apple_pull_policy_prepares_mutable_and_pinned_images() {
         (ImagePullPolicy::Missing, None),
     ] {
         let commands = apple_image_prepare_commands(&ContainerTemplate {
+            build_cache: None,
             image: "ghcr.io/example/dev:1".to_owned(),
             pull_policy: policy,
             extra_run_args: vec![],
@@ -2010,6 +2034,7 @@ fn remote_podman_cleanup_confirmation_uses_the_recorded_helper_resource() {
 fn setup_smoke_plan_uses_the_configured_local_runtime_and_cleans_up() {
     let plan = setup_smoke_plan(
         &TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -2044,6 +2069,7 @@ fn setup_smoke_test_removes_a_container_after_a_failed_exec() {
     assert!(
         run_setup_smoke_test(
             &TargetTemplate::AppleContainer(ContainerTemplate {
+                build_cache: None,
                 image: "ubuntu:24.04".to_owned(),
                 pull_policy: ImagePullPolicy::Auto,
                 extra_run_args: vec![],
@@ -2064,6 +2090,7 @@ fn remote_podman_is_ssh_plus_podman_not_remote_api() {
         &TargetTemplate::SshPodman {
             ssh: ssh(),
             container: ContainerTemplate {
+                build_cache: None,
                 image: "ghcr.io/example/dev:latest".to_owned(),
                 pull_policy: ImagePullPolicy::Auto,
                 extra_run_args: vec![],
@@ -2431,6 +2458,7 @@ fn ssh_path_completion_uses_short_timeout_and_fake_executor() {
 #[test]
 fn every_provisioning_plan_names_the_command_that_creates_its_target() {
     let container = ContainerTemplate {
+        build_cache: None,
         image: "ubuntu:24.04".to_owned(),
         pull_policy: ImagePullPolicy::Auto,
         extra_run_args: vec![],
@@ -3246,6 +3274,7 @@ fn docker_overlay_run_rollback_removes_owned_mj_directory_after_run_failure() {
     std::fs::write(lower.path().join("original.txt"), b"lower\n").unwrap();
     let command = docker_container_run(
         &ContainerTemplate {
+            build_cache: None,
             image: "fake:image".to_owned(),
             pull_policy: ImagePullPolicy::Never,
             extra_run_args: vec![],
@@ -3757,6 +3786,7 @@ fn ssh_docker_template() -> TargetTemplate {
     TargetTemplate::SshDocker {
         ssh: ssh(),
         container: ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".into(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: vec![],
@@ -3930,6 +3960,7 @@ fn docker_attachment_init_failure_stops_helper_and_removes_backing_storage() {
     let name = resource_name(SESSION).unwrap();
     let command = docker_container_run(
         &ContainerTemplate {
+            build_cache: None,
             image: "fake:image".to_owned(),
             pull_policy: ImagePullPolicy::Never,
             extra_run_args: vec![],
@@ -3991,6 +4022,7 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
     .unwrap();
     std::os::unix::fs::symlink("payload", source.path().join("link")).unwrap();
     let template = ContainerTemplate {
+        build_cache: None,
         image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
         pull_policy: ImagePullPolicy::Never,
         extra_run_args: vec![],

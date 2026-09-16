@@ -3945,6 +3945,7 @@ mod tests {
 
     pub(super) fn sample_config_state() -> (Config, AppState) {
         let config = Config {
+            build_cache: Default::default(),
             subagents: Default::default(),
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
@@ -3985,6 +3986,7 @@ mod tests {
                     "podman".into(),
                     TargetTemplate::LocalPodman {
                         container: ContainerTemplate {
+                            build_cache: None,
                             image: "secret.registry/image".into(),
                             pull_policy: Default::default(),
                             platform: None,
@@ -4004,6 +4006,7 @@ mod tests {
             sessions: BTreeMap::from([(
                 "session-1".into(),
                 SessionRecord {
+                    build_cache: None,
                     container_workspace: None,
                     mjolnir_subagents: None,
                     create_managed_worktree: None,

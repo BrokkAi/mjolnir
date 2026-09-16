@@ -436,6 +436,7 @@ fn event_digest(value: u64) -> String {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
@@ -730,6 +731,7 @@ fn migration_twenty_two_preserves_existing_podman_targets_as_container_layers() 
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
              ALTER TABLE session_targets DROP COLUMN workspace_storage;
+             ALTER TABLE sessions DROP COLUMN build_cache_json;
              ALTER TABLE sessions DROP COLUMN container_workspace;
              ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
@@ -1243,7 +1245,8 @@ fn rewind_schema_to(connection: &Connection, version: i64) {
     }
     connection
         .execute_batch(&format!(
-            "ALTER TABLE sessions DROP COLUMN container_workspace;
+            "ALTER TABLE sessions DROP COLUMN build_cache_json;
+             ALTER TABLE sessions DROP COLUMN container_workspace;
              ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DROP TABLE schema_compatibility;
@@ -2341,6 +2344,7 @@ fn muse_migration_preserves_existing_sessions_hidden_entries_and_indexes() {
         UPDATE sqlite_schema SET sql=replace(replace(sql, ',''zcode''', ''), ',''muse''', '') WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
         PRAGMA writable_schema=OFF;
         PRAGMA schema_version=1000;
+        ALTER TABLE sessions DROP COLUMN build_cache_json;
         ALTER TABLE sessions DROP COLUMN container_workspace;
         ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
@@ -2465,12 +2469,14 @@ fn zcode_migration_preserves_revision_31_rows_indexes_and_foreign_keys() {
              PRAGMA schema_version=2000;
              UPDATE schema_compatibility SET minimum_compatible_version=31;
              DELETE FROM schema_migrations WHERE version=32;
+             ALTER TABLE sessions DROP COLUMN build_cache_json;
              ALTER TABLE sessions DROP COLUMN container_workspace;
              ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              DELETE FROM schema_migrations WHERE version=33;
              DROP TABLE session_mount_access;
              DELETE FROM schema_migrations WHERE version=34;
              DELETE FROM schema_migrations WHERE version=35;
+             DELETE FROM schema_migrations WHERE version=36;
              PRAGMA user_version=31;",
         )
         .unwrap();
@@ -4178,6 +4184,7 @@ fn migration_twenty_five_adds_pane_sizes_without_losing_workspaces() {
         .execute_batch(
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
+             ALTER TABLE sessions DROP COLUMN build_cache_json;
              ALTER TABLE sessions DROP COLUMN container_workspace;
              ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
@@ -4728,6 +4735,7 @@ fn migration_twenty_one_drops_the_workspace_review_settings() {
         .execute_batch(
             "DROP TABLE session_moves;
              DROP TABLE workspace_pane_sizes;
+             ALTER TABLE sessions DROP COLUMN build_cache_json;
              ALTER TABLE sessions DROP COLUMN container_workspace;
              ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
@@ -4853,6 +4861,7 @@ fn migration_twenty_four_preserves_targets_and_accepts_ssh_docker() {
         PRAGMA writable_schema = OFF;
         DROP TABLE session_moves;
         DROP TABLE workspace_pane_sizes;
+        ALTER TABLE sessions DROP COLUMN build_cache_json;
         ALTER TABLE sessions DROP COLUMN container_workspace;
         ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
@@ -5093,6 +5102,7 @@ fn a_version_twenty_seven_database_migrates_and_reports_no_turn_history() {
                  WHERE name = 'materialized_sessions';
              PRAGMA writable_schema = OFF;
              DROP TABLE api_idempotency;
+             ALTER TABLE sessions DROP COLUMN build_cache_json;
              ALTER TABLE sessions DROP COLUMN container_workspace;
              ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
@@ -5323,7 +5333,8 @@ fn subagent_choice_migrates_as_automatic_and_survives_both_session_writers() {
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE sessions DROP COLUMN container_workspace;
+            "ALTER TABLE sessions DROP COLUMN build_cache_json;
+             ALTER TABLE sessions DROP COLUMN container_workspace;
              ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              DELETE FROM schema_migrations WHERE version >= 33;
              PRAGMA user_version = 32;",
@@ -5365,7 +5376,8 @@ fn the_container_workspace_migrates_as_the_shared_one_and_survives_both_session_
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE sessions DROP COLUMN container_workspace;
+            "ALTER TABLE sessions DROP COLUMN build_cache_json;
+             ALTER TABLE sessions DROP COLUMN container_workspace;
              DELETE FROM schema_migrations WHERE version >= 35;
              PRAGMA user_version = 34;",
         )
@@ -5396,6 +5408,61 @@ fn the_container_workspace_migrates_as_the_shared_one_and_survives_both_session_
 }
 
 #[test]
+fn the_build_cache_migrates_as_absent_and_survives_both_session_writers() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("mj.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.build_cache = Some(mj_core::state::SessionBuildCache {
+        host: "local-podman".into(),
+        directory: PathBuf::from("/mnt/fast/mbx-cache"),
+        max_size: Some("100000000000B".into()),
+        target_root: Some(PathBuf::from("/mnt/fast/mbx-targets")),
+    });
+    save_session_to(&database, &record).unwrap();
+    let connection = open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE sessions DROP COLUMN build_cache_json;
+             DELETE FROM schema_migrations WHERE version >= 36;
+             PRAGMA user_version = 35;",
+        )
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&database);
+    // Migration 36 runs on open. A row that predates it records no build
+    // cache, which is how a container built before this feature keeps running
+    // without one.
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].build_cache,
+        None
+    );
+    for build_cache in [
+        Some(mj_core::state::SessionBuildCache {
+            host: "local-podman".into(),
+            directory: PathBuf::from("/mnt/fast/mbx-cache"),
+            max_size: Some("250GiB".into()),
+            target_root: None,
+        }),
+        Some(mj_core::state::SessionBuildCache {
+            host: "ssh-podman:dev@example.test".into(),
+            directory: PathBuf::from("/home/dev/.cache/mbx"),
+            max_size: None,
+            target_root: Some(PathBuf::from("/mnt/fast/mbx-targets")),
+        }),
+        None,
+    ] {
+        record.build_cache = build_cache.clone();
+        save_session_to(&database, &record).unwrap();
+        record.state = SessionState::Stopped;
+        save_lifecycle_session_to(&database, &record).unwrap();
+        assert_eq!(
+            load_state_from(&database).unwrap().sessions[&record.id].build_cache,
+            build_cache
+        );
+    }
+}
+
+#[test]
 fn worktree_choice_migrates_as_automatic_and_survives_both_session_writers() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("mj.sqlite3");
@@ -5404,7 +5471,8 @@ fn worktree_choice_migrates_as_automatic_and_survives_both_session_writers() {
     let connection = open(&database).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE sessions DROP COLUMN container_workspace;
+            "ALTER TABLE sessions DROP COLUMN build_cache_json;
+             ALTER TABLE sessions DROP COLUMN container_workspace;
              ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
              ALTER TABLE sessions DROP COLUMN create_managed_worktree;
              DROP TABLE schema_compatibility;

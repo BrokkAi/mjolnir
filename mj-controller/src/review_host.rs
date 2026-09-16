@@ -2980,6 +2980,7 @@ mod tests {
     #[test]
     fn the_reviewer_profile_must_be_separate_from_the_primary_profile() {
         let session = mj_core::state::SessionRecord {
+            build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,

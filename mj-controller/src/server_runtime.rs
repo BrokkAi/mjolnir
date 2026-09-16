@@ -3924,6 +3924,7 @@ mod tests {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: mj_core::config::ContainerTemplate {
+                    build_cache: None,
                     image: "test-image".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -4232,6 +4233,7 @@ mod tests {
     fn controller_with_profiles(ids: &[&str]) -> Controller {
         Controller {
             config: Config {
+                build_cache: Default::default(),
                 subagents: Default::default(),
                 version: CONFIG_VERSION,
                 sessions_side: Default::default(),
@@ -4479,6 +4481,7 @@ mod tests {
 
     fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         SessionRecord {
+            build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,

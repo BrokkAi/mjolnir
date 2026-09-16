@@ -23,6 +23,7 @@ use super::worktree::{
 
 pub(super) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
+        build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
@@ -188,6 +189,7 @@ pub(super) fn resume_compatibility_config() -> Config {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "example.invalid/hel-test:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,

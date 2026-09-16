@@ -569,6 +569,7 @@ fn podman_image_check(
     let title = format!("Podman image for target {id}");
     if smoke {
         let target = RuntimeTargetTemplate::LocalPodman(RuntimeContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
@@ -696,6 +697,7 @@ fn docker_image_check(
     let title = format!("Docker image for target {id}");
     if smoke {
         let target = RuntimeTargetTemplate::LocalDocker(RuntimeContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
@@ -944,6 +946,7 @@ fn ssh_podman_check(
     let target = RuntimeTargetTemplate::SshPodman {
         ssh: ssh.clone(),
         container: RuntimeContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
@@ -1045,6 +1048,7 @@ fn ssh_docker_check(
         let target = RuntimeTargetTemplate::SshDocker {
             ssh: ssh.clone(),
             container: RuntimeContainerTemplate {
+                build_cache: None,
                 image: image.to_owned(),
                 pull_policy: Default::default(),
                 extra_run_args: vec![],
@@ -1475,6 +1479,7 @@ pub fn apple_container_check(
     }
 
     let target = RuntimeTargetTemplate::AppleContainer(RuntimeContainerTemplate {
+        build_cache: None,
         image,
         pull_policy: Default::default(),
         extra_run_args: vec![],
@@ -1651,6 +1656,7 @@ mod tests {
 
     fn container(image: &str) -> ContainerTemplate {
         ContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             platform: None,

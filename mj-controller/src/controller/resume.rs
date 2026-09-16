@@ -3007,6 +3007,7 @@ mod tests {
     #[test]
     fn failed_resume_rolls_back_only_after_target_cleanup() {
         let previous = SessionRecord {
+            build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
@@ -3234,6 +3235,7 @@ mod tests {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ConfigContainer {
+                    build_cache: None,
                     image: "example.invalid/hel-test:latest".into(),
                     pull_policy: Default::default(),
                     platform: None,

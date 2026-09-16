@@ -2186,6 +2186,7 @@ mod tests {
             "podman".into(),
             mj_core::config::TargetTemplate::LocalPodman {
                 container: mj_core::config::ContainerTemplate {
+                    build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -2213,6 +2214,7 @@ mod tests {
         app_state.sessions.insert(
             session_id.into(),
             mj_core::state::SessionRecord {
+                build_cache: None,
                 container_workspace: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,

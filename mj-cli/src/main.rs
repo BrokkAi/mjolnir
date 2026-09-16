@@ -1601,6 +1601,7 @@ mod tests {
         state.sessions.insert(
             session_id.into(),
             SessionRecord {
+                build_cache: None,
                 container_workspace: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,

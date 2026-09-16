@@ -653,6 +653,7 @@ fn backend_container(
         pull_policy: container.pull_policy,
         extra_run_args,
         workspace_storage: targets::PodmanWorkspaceStorage::ContainerLayer,
+        build_cache: container.build_cache.clone(),
     }
 }
 
@@ -1183,6 +1184,7 @@ mod tests {
         std::fs::write(source.path().join("many/files/two"), b"two").unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
         let record = SessionRecord {
+            build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
@@ -1284,6 +1286,7 @@ mod tests {
     fn container_resources_and_environment_become_argv() {
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "dev:1".into(),
                 pull_policy: mj_core::config::ImagePullPolicy::Never,
                 platform: Some("linux/arm64".into()),
@@ -1309,6 +1312,7 @@ mod tests {
     fn session_size_overrides_beat_the_target_template_and_its_allocation() {
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "dev:1".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -1344,6 +1348,7 @@ mod tests {
     #[test]
     fn github_token_is_inherited_only_by_managed_containers() {
         let mut podman = targets::TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
             image: "dev:1".into(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
@@ -1403,6 +1408,7 @@ mod tests {
         pull_policy: mj_core::config::ImagePullPolicy,
     ) -> ConfigContainer {
         ConfigContainer {
+            build_cache: None,
             image: image.into(),
             pull_policy,
             platform: None,
@@ -1545,6 +1551,7 @@ mod tests {
                     extra_args: Vec::new(),
                 },
                 container: ConfigContainer {
+                    build_cache: None,
                     image: "ghcr.io/example/dev:latest".into(),
                     pull_policy: ImagePullPolicy::Auto,
                     platform: Some("linux/amd64".into()),
@@ -1622,6 +1629,7 @@ mod tests {
     #[test]
     fn deployment_capacity_groups_local_and_same_host_targets() {
         let container = || ConfigContainer {
+            build_cache: None,
             image: "dev:1".into(),
             pull_policy: Default::default(),
             platform: None,
@@ -1637,6 +1645,7 @@ mod tests {
             extra_args: Vec::new(),
         };
         let config = Config {
+            build_cache: Default::default(),
             subagents: Default::default(),
             version: mj_core::config::CONFIG_VERSION,
             sessions_side: Default::default(),
@@ -1727,6 +1736,7 @@ mod tests {
     fn local_podman_preflight_failures_recommend_doctor() {
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -1761,6 +1771,7 @@ mod tests {
                 extra_args: vec![],
             },
             container: ConfigContainer {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -1796,6 +1807,7 @@ mod tests {
                 extra_args: vec![],
             },
             container: ConfigContainer {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -1842,6 +1854,7 @@ mod tests {
     fn apple_container_preflight_failures_recommend_doctor() {
         let template = TargetTemplate::AppleContainer {
             container: ConfigContainer {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 platform: None,

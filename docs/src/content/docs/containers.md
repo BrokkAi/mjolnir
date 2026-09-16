@@ -213,6 +213,53 @@ image's user and group ids once per image before it creates the container. If
 that read fails, the container runs with Podman's default user mapping, the
 way it did before this mapping existed, and the session log says so.
 
+## Build cache (mbx)
+
+Rust sessions on Podman and Docker container targets share one
+[mbx](https://github.com/jdx/mr-boxington) build cache per container host, with
+no setup. mbx wraps Cargo: it looks each compiler action up in a
+content-addressed store and restores the cached output instead of recompiling.
+The second session to build a project on a host reuses the first one's work.
+
+Mjolnir turns this on for a session when all of the following hold:
+
+- The target is Podman or Docker, local or over SSH. Apple `container`, bare
+  targets, and EC2 targets never get a build cache.
+- The primary repository has a `Cargo.toml` at its root. A Cargo workspace in
+  a subdirectory is not detected.
+- The resolved cache directory is on a filesystem that supports reflinks, which
+  is what makes restoring a cached output nearly free.
+- The container host either has no mbx of its own, or has one at least as new
+  as the version Mjolnir installs into containers. An older native mbx must not
+  write the same store, so Mjolnir runs those sessions without the cache.
+
+The cache directory lives on the container host and is mounted read-write into
+the container at the same absolute path. Nothing is synchronized between hosts,
+and Mjolnir never runs mbx garbage collection: the host's own mbx and the
+automatic collection inside containers are the only collectors.
+
+### Settings
+
+There is a global switch, **Build cache (mbx)**, that turns the feature off
+everywhere. Each container target can override three values:
+
+| Setting | Default when blank |
+| --- | --- |
+| Enabled | On when the cache filesystem supports reflinks. |
+| Cache directory | The host's native mbx cache if mbx is installed there, otherwise `~/.cache/mbx` on that host. |
+| Cache size limit | The host's own mbx limits if it has a configuration file, otherwise the smaller of 100 GB and a quarter of the free space. |
+
+When the host has `~/.config/mbx/config.toml`, Mjolnir copies it into the
+container so the container's mbx uses the host's own budgets. If that file
+relocates `[target] root` outside the cache directory, that directory is
+mounted read-write at its own path too.
+
+Inside the session, `cargo` is the mbx shim, which runs the image's real Cargo
+underneath. `mbx stats` reports what the cache holds.
+
+`MJ_MBX_BINARY` overrides the pinned download with a local mbx binary, for
+development against an unreleased mbx.
+
 ## Two useful facts
 
 If the `gh` CLI on the machine running Mjolnir is authenticated, Mjolnir continuously

@@ -351,6 +351,17 @@ impl Controller {
                     executor,
                 )
             });
+            // Mounts are fixed when the container is created, so the build
+            // cache is decided here, before the provisioning plan is built.
+            let build_cache = super::mbx::prepare(
+                &target,
+                &self.config.build_cache,
+                &session,
+                bundle.as_ref(),
+                prepared_cache.as_ref(),
+                &mut runtime_mounts,
+                executor,
+            );
             let provision = if let Some(project_directory) = &session.project_directory {
                 targets::provision_bare_project_plan(
                     &target,
@@ -402,7 +413,7 @@ impl Controller {
                         executor,
                     )
                 })
-                .map(|(locator, remainder)| (locator, remainder, bundle));
+                .map(|(locator, remainder)| (locator, remainder, bundle, build_cache));
             if result.is_err()
                 && let Some(cache) = &prepared_cache
             {
@@ -449,8 +460,13 @@ impl Controller {
                     ))),
                 };
             }
-            Ok((locator, remainder, bundle)) => {
+            Ok((locator, remainder, bundle, build_cache)) => {
                 apply_new_session_provisioning_result(&mut self.state, session_id, Ok(locator))?;
+                self.state
+                    .sessions
+                    .get_mut(session_id)
+                    .expect("session retained after provisioning")
+                    .build_cache = build_cache;
                 let session = &self.state.sessions[session_id];
                 let backend = backend_locator(
                     session
@@ -1342,6 +1358,7 @@ mod tests {
 
     fn podman_target() -> targets::TargetTemplate {
         targets::TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".into(),
             pull_policy: Default::default(),
             extra_run_args: Vec::new(),
@@ -1398,6 +1415,7 @@ mod tests {
                     extra_args: Vec::new(),
                 },
                 container: ConfigContainer {
+                    build_cache: None,
                     image: "failimage:never".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -1409,6 +1427,42 @@ mod tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn the_build_cache_is_mounted_read_write_at_its_host_path() {
+        let mut mounts = Vec::new();
+        super::super::mbx::attach_mounts_for_tests(
+            &mj_core::state::SessionBuildCache {
+                host: "local-podman".into(),
+                directory: PathBuf::from("/mnt/fast/mbx-cache"),
+                max_size: None,
+                target_root: Some(PathBuf::from("/mnt/fast/mbx-targets")),
+            },
+            &mut mounts,
+        );
+
+        let plan = targets::provision_plan(
+            &podman_target(),
+            "0123456789abcdef0123456789abcdef",
+            &probe_bundle(),
+            &mounts,
+            None,
+            None,
+        )
+        .unwrap();
+
+        for directory in ["/mnt/fast/mbx-cache", "/mnt/fast/mbx-targets"] {
+            let expected = format!("{directory}:{directory}:rw");
+            assert!(
+                plan.commands[0]
+                    .args
+                    .windows(2)
+                    .any(|args| args == ["--volume", expected.as_str()]),
+                "{:?}",
+                plan.commands[0].args
+            );
+        }
     }
 
     #[test]
@@ -1526,6 +1580,7 @@ mod tests {
 
     fn podman_target_with_image(image: &str) -> targets::TargetTemplate {
         targets::TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
             image: image.into(),
             pull_policy: Default::default(),
             extra_run_args: Vec::new(),
@@ -1624,12 +1679,14 @@ mod tests {
 
         for target in [
             targets::TargetTemplate::LocalDocker(ContainerTemplate {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 extra_run_args: Vec::new(),
                 workspace_storage: Default::default(),
             }),
             targets::TargetTemplate::AppleContainer(ContainerTemplate {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 extra_run_args: Vec::new(),
@@ -1657,6 +1714,7 @@ mod tests {
         }];
         for target in [
             targets::TargetTemplate::AppleContainer(ContainerTemplate {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 extra_run_args: Vec::new(),
@@ -1719,6 +1777,7 @@ mod tests {
     fn failed_new_session_provisioning_retains_error_record() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let record = SessionRecord {
+            build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
@@ -1966,6 +2025,7 @@ mod tests {
     fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         let session_id = "0123456789abcdef0123456789abcdef";
         let mut session = SessionRecord {
+            build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
@@ -2188,6 +2248,7 @@ mod tests {
         let podman = TargetTemplate::SshPodman {
             ssh: ssh.clone(),
             container: mj_core::config::ContainerTemplate {
+                build_cache: None,
                 image: "example.invalid/agent:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -2261,6 +2322,7 @@ mod tests {
 
     fn container_targets() -> Vec<targets::TargetTemplate> {
         let container = ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".into(),
             pull_policy: Default::default(),
             extra_run_args: Vec::new(),

@@ -1297,6 +1297,10 @@ pub struct ContainerTemplate {
     pub extra_run_args: Vec<String>,
     #[serde(default)]
     pub workspace_storage: PodmanWorkspaceStorage,
+    /// Per-target mbx build cache overrides, carried from the user
+    /// configuration so cache resolution can read them off a runtime target.
+    #[serde(default)]
+    pub build_cache: Option<crate::config::TargetBuildCache>,
 }
 
 impl ImagePullPolicy {

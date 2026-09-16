@@ -855,6 +855,21 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Compatible: adds one nullable column. Older readers ignore it, and the
+    // older writer's session upsert lists columns explicitly, so it preserves
+    // the value. An older executable launching such a session runs it without
+    // the mbx build cache, which is a behaviour difference, not data loss. The
+    // compatibility floor stays where it is.
+    if version < 36 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE sessions ADD COLUMN build_cache_json TEXT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (36, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 36;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1819,6 +1834,7 @@ mod reader_tests {
             .execute_batch(
                 "DROP TABLE schema_compatibility;
              ALTER TABLE sessions DROP COLUMN mjolnir_subagents;
+             ALTER TABLE sessions DROP COLUMN build_cache_json;
              ALTER TABLE sessions DROP COLUMN container_workspace;
              DELETE FROM schema_migrations WHERE version >= 30;
              PRAGMA user_version = 29;

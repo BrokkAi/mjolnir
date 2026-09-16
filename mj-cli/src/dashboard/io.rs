@@ -2821,6 +2821,7 @@ mod tests {
             "podman".into(),
             mj_core::config::TargetTemplate::LocalPodman {
                 container: mj_core::config::ContainerTemplate {
+                    build_cache: None,
                     image: "example.invalid/hel-test:latest".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -2891,6 +2892,7 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
