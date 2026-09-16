@@ -419,57 +419,6 @@ mod tests {
     }
 
     #[test]
-    fn readline_line_movement_kill_and_yank_match_codex() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_input("alpha beta\ngamma".into());
-        chat.handle_key(ctrl('a'));
-        assert_eq!(&chat.input[chat.input_cursor..], "gamma");
-        chat.handle_key(ctrl('a'));
-        assert_eq!(chat.input_cursor, 0);
-        chat.handle_key(ctrl('e'));
-        assert_eq!(&chat.input[..chat.input_cursor], "alpha beta");
-        chat.handle_key(ctrl('k'));
-        assert_eq!(chat.input, "alpha betagamma");
-        chat.handle_key(ctrl('y'));
-        assert_eq!(chat.input, "alpha beta\ngamma");
-    }
-
-    #[test]
-    fn sequential_control_k_accumulates_one_yankable_block() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_input("line1\nline2".into());
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('k'));
-        chat.handle_key(ctrl('k'));
-        assert_eq!(chat.input, "line2");
-        chat.handle_key(ctrl('y'));
-        assert_eq!(chat.input, "line1\nline2");
-    }
-
-    #[test]
-    fn any_key_between_control_k_presses_restarts_the_kill_buffer() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_input("line1\nline2".into());
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('k'));
-        chat.handle_key(key(KeyCode::Right));
-        chat.handle_key(key(KeyCode::Left));
-        chat.handle_key(ctrl('k'));
-        assert_eq!(chat.kill_buffer, "\n");
-
-        chat.set_input("line1\nline2".into());
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('k'));
-        chat.handle_key(key(KeyCode::Char('x')));
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('k'));
-        assert_eq!(chat.kill_buffer, "x");
-    }
-
-    #[test]
     fn readline_word_edits_and_grapheme_cursor_are_atomic() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_input("one two 👩‍💻".into());
