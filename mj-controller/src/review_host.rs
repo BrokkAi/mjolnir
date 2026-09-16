@@ -1025,7 +1025,8 @@ impl HostState {
     /// transcript) does not linger. The in-flight review state in `reviews`/
     /// `closing` is separate and keeps its own lifetime.
     fn retain_sessions(&mut self, live: &std::collections::BTreeSet<String>) {
-        self.sessions.retain(|session_id, _| live.contains(session_id));
+        self.sessions
+            .retain(|session_id, _| live.contains(session_id));
     }
 
     /// Watches one session for the edge that arms an automatic review.
