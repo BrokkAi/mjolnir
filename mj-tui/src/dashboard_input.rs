@@ -1,0 +1,620 @@
+use super::*;
+
+impl DashboardState {
+    /// Whether the pointer is over the conversation the surface is drawing.
+    /// A click there belongs to the chat, whatever has focus.
+    pub fn chat_region_contains(&self, column: u16, row: u16) -> bool {
+        [self.chat_transcript_area, self.chat_prompt_area]
+            .into_iter()
+            .flatten()
+            .any(|area| rect_contains(area, column, row))
+    }
+
+    /// Opens the web-access dialog and asks the controller to load it.
+    pub fn open_web_dialog(&mut self) -> DashboardAction {
+        self.mode = Mode::Web(WebDialog::loading());
+        self.mark_render_changed();
+        DashboardAction::LoadWebAccess
+    }
+
+    /// Handles one terminal event and preserves both whether the event was
+    /// consumed and whether it changed the visible dashboard. The legacy
+    /// key and mouse wrappers below remain available to callers that only
+    /// need the action.
+    pub fn handle_event_result(&mut self, event: Event) -> EventResult<DashboardAction> {
+        self.last_event_outcome.set(Outcome::Continue);
+        let revision = self.render_change_revision();
+        let notice_generation = self.notices.generation();
+        let action = match event {
+            Event::Key(key) => self.handle_key_at(key, Instant::now()),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Paste(pasted) => {
+                self.handle_paste(&pasted);
+                DashboardAction::None
+            }
+            // The controller owns terminal-size comparison; focus events do
+            // not mutate dashboard state by themselves.
+            Event::Resize(_, _) | Event::FocusLost => {
+                self.cancel_component_pointer();
+                DashboardAction::None
+            }
+            Event::FocusGained => DashboardAction::None,
+        };
+        let changed = self.render_change_revision() != revision
+            || self.notices.generation() != notice_generation;
+        let outcome = if changed {
+            Outcome::Changed
+        } else if self.last_event_outcome.get() == Outcome::Unchanged
+            || !matches!(&action, DashboardAction::None)
+        {
+            Outcome::Unchanged
+        } else {
+            self.last_event_outcome.get()
+        };
+        EventResult {
+            outcome,
+            action: (!matches!(&action, DashboardAction::None)).then_some(action),
+        }
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> DashboardAction {
+        self.handle_key_at(key, Instant::now())
+    }
+
+    /// Handles one key with an explicit reading of the clock. `now` decides
+    /// whether the notice on screen has been readable long enough for this
+    /// key press to dismiss it.
+    pub fn handle_key_at(&mut self, key: KeyEvent, now: Instant) -> DashboardAction {
+        if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
+            return DashboardAction::None;
+        }
+        if key.kind == KeyEventKind::Press {
+            self.modal_click_transition = None;
+            self.suppress_modal_release = false;
+        }
+        if is_paste_shortcut(key) {
+            self.record_event_handled();
+            return DashboardAction::PasteFromClipboard;
+        }
+        let text_focused = self.text_input_focused();
+        let cancel_shortcut = key.code == KeyCode::Char('c')
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || dashboard_accelerator(key.modifiers));
+        if text_focused && cancel_shortcut && self.component_modal_open() {
+            return self.handle_component_event(Event::Key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )));
+        }
+        // Ctrl-C belongs to the prompt or a text field. Everywhere else it is
+        // intentionally inert, including modal controls that happen to use
+        // the letter `c` for another purpose.
+        if cancel_shortcut {
+            self.record_event_handled();
+            return DashboardAction::None;
+        }
+
+        // Retire the notice this key press is stepping past, but only once it
+        // has been on screen long enough to read: for a background failure
+        // this bar is the only report there is.
+        self.notices.dismiss(now);
+        if !self.modal_open() && key.modifiers.contains(KeyModifiers::CONTROL) {
+            let workspace_command = match key.code {
+                KeyCode::PageUp => Some(CommandId::SelectWorkspacePrevious),
+                KeyCode::PageDown => Some(CommandId::SelectWorkspaceNext),
+                _ => None,
+            };
+            if let Some(command) = workspace_command {
+                return self.dispatch_command(command);
+            }
+        }
+        if self.component_modal_open() {
+            return self.handle_component_event(crossterm::event::Event::Key(key));
+        }
+        if matches!(self.mode, Mode::Help(_)) {
+            return self.handle_help_key(key);
+        }
+        self.handle_dashboard_key(key)
+    }
+
+    pub(crate) fn text_input_focused(&self) -> bool {
+        match &self.mode {
+            Mode::Rename(editor) => editor
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::Field),
+            Mode::RepositoryOrigin(dialog) => dialog
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::Field),
+            Mode::EditContainer(editor) => editor.field().is_some(),
+            Mode::ResumeDialog(dialog) => dialog.focused() == crate::resume::ResumeFocus::Search,
+            // The palette's query is a text field, so Ctrl-C closes it and a
+            // paste lands in the query rather than on the dashboard.
+            Mode::Palette(palette) => palette
+                .form
+                .borrow()
+                .is_focused(palette::PaletteControl::Query),
+            Mode::ConfigId(editor) => editor
+                .form
+                .borrow()
+                .is_focused(dialogs::DialogControl::Field),
+            Mode::New(wizard) => wizard.text_input_focused(),
+            Mode::Resume(wizard) => wizard.text_input_focused(),
+            Mode::Setup(dialog) => dialog.form.borrow().is_focused(setup::SetupControl::Field),
+            Mode::WorkspaceManager(dialog) => dialog
+                .form
+                .borrow()
+                .is_focused(crate::workspaces::WorkspaceControl::Name),
+            _ => false,
+        }
+    }
+
+    pub fn handle_paste(&mut self, pasted: &str) {
+        if self.component_modal_open() {
+            self.handle_component_event(crossterm::event::Event::Paste(pasted.to_owned()));
+            return;
+        }
+        if self.focus == Focus::Prompt
+            && let Some(session_id) = self.standby_prompt_session()
+        {
+            let session_id = session_id.to_owned();
+            let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
+            let standby = self.standby_prompt_mut(&session_id);
+            standby.paste(&normalized);
+            if standby.take_render_changed() {
+                self.mark_render_changed();
+            }
+        }
+    }
+
+    /// The surfaces the last frame registered, for the selection engine.
+    pub fn frame_surfaces(&self) -> &FrameSurfaces {
+        &self.frame_surfaces
+    }
+
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
+        let now = Instant::now();
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.suppress_modal_release =
+                self.modal_click_transition
+                    .take()
+                    .is_some_and(|(x, y, at)| {
+                        x == mouse.column
+                            && y == mouse.row
+                            && now.saturating_duration_since(at)
+                                <= mj_chat::components::DOUBLE_CLICK_INTERVAL
+                    });
+            if self.suppress_modal_release {
+                return DashboardAction::None;
+            }
+        }
+        if mouse.kind == MouseEventKind::Up(MouseButton::Left) && self.suppress_modal_release {
+            self.suppress_modal_release = false;
+            return DashboardAction::None;
+        }
+        let before = self.dialog_layer_key();
+        let action = self.handle_mouse_inner(mouse);
+        if mouse.kind == MouseEventKind::Up(MouseButton::Left) && before != self.dialog_layer_key()
+        {
+            self.modal_click_transition = Some((mouse.column, mouse.row, now));
+            self.cancel_component_pointer();
+        }
+        action
+    }
+
+    pub(crate) fn handle_mouse_inner(&mut self, mouse: MouseEvent) -> DashboardAction {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.notices.dismiss(Instant::now());
+        }
+        if matches!(self.mode, Mode::Help(_)) {
+            return self.handle_help_mouse(mouse);
+        }
+        if self.component_modal_open() {
+            return self.handle_component_event(crossterm::event::Event::Mouse(mouse));
+        }
+        if !matches!(self.mode, Mode::Dashboard) {
+            return DashboardAction::None;
+        }
+        if let Some(action) = self.handle_surface_mouse(mouse) {
+            return action;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(action) =
+                crate::workspaces::workspace_tab_click(self, mouse.column, mouse.row)
+            {
+                return action;
+            }
+
+            if self
+                .workspace_pane_area
+                .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
+            {
+                if self.focus != Focus::Workspaces {
+                    self.focus = Focus::Workspaces;
+                    self.mark_render_changed();
+                }
+                self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Tabs;
+                self.set_session_action_focus(None);
+                return DashboardAction::None;
+            }
+            if let Some(&(pane, size, _)) = self
+                .pane_size_control_areas
+                .iter()
+                .find(|(_, _, area)| rect_contains(*area, mouse.column, mouse.row))
+            {
+                if size == PaneSize::Maximized && !self.pane_maximize_enabled(pane) {
+                    // Defend against stale geometry if a resize arrives before
+                    // the next frame redraws the visible controls.
+                    return DashboardAction::None;
+                }
+                self.set_pane_size(pane, size);
+                return DashboardAction::None;
+            }
+            if let Some((project_key, _)) = self
+                .project_heading_areas
+                .iter()
+                .find(|(_, area)| rect_contains(*area, mouse.column, mouse.row))
+            {
+                let project_key = project_key.clone();
+                self.focus_sessions();
+                self.toggle_project(&project_key);
+                return DashboardAction::None;
+            }
+            if let Some(&(index, _)) = self
+                .session_row_areas
+                .iter()
+                .find(|(_, area)| rect_contains(*area, mouse.column, mouse.row))
+            {
+                return self.handle_row_click(Focus::Sessions, index);
+            }
+            // The click missed every row; forget any pending double click so
+            // a stray click elsewhere can't pair up with the next row click.
+            self.last_row_click = None;
+        }
+        // The workspace tabs are a single horizontal row, so the wheel over
+        // that pane switches tabs even when the pane is not focused.
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && self
+            .workspace_pane_area
+            .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
+        {
+            let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                -1
+            } else {
+                1
+            };
+            return self.select_adjacent_workspace(delta);
+        }
+        let hovered = self.pane_areas.and_then(|areas| {
+            areas
+                .into_iter()
+                .position(|area| rect_contains(area, mouse.column, mouse.row))
+                .map(|index| match index {
+                    0 => Focus::Sessions,
+                    1 => Focus::Targets,
+                    2 => Focus::Quota,
+                    _ => unreachable!("the surface has exactly three support panes"),
+                })
+        });
+        let Some(hovered) = hovered else {
+            return DashboardAction::None;
+        };
+        // Minimized Targets and Quota show no selected row. Their summary can
+        // take focus so Alt-Z can restore it, but hidden rows do not move or
+        // activate underneath the user.
+        let rows_visible = hovered == Focus::Sessions
+            || hovered
+                .support_pane()
+                .is_some_and(|pane| self.pane_size(pane) != PaneSize::Minimized);
+        match mouse.kind {
+            MouseEventKind::ScrollUp if rows_visible => self.scroll_selection_for(hovered, -1),
+            MouseEventKind::ScrollDown if rows_visible => self.scroll_selection_for(hovered, 1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.focus != hovered {
+                    self.focus = hovered;
+                    self.mark_render_changed();
+                }
+                if hovered != Focus::Sessions {
+                    self.set_session_action_focus(None);
+                }
+                self.clamp_selections();
+            }
+            _ => {}
+        }
+        DashboardAction::None
+    }
+
+    /// Selects the clicked row and, if it's the second click on the same row
+    /// within `DOUBLE_CLICK_INTERVAL`, performs the same action Enter would.
+    pub(crate) fn handle_row_click(&mut self, focus: Focus, index: usize) -> DashboardAction {
+        // Clicking a row selects it wherever the dial has left the pane.
+        self.scroll_lookahead.set(None);
+        let focus_changed = self.focus != focus;
+        self.focus = focus;
+        if focus_changed {
+            self.mark_render_changed();
+        }
+        self.set_session_action_focus(None);
+        if focus == Focus::Sessions {
+            let clicked = self
+                .ordered_sessions()
+                .get(index)
+                .map(|session| session.id.clone());
+            if clicked.is_some() && self.selected_session_id != clicked {
+                self.selected_session_id = clicked;
+                self.mark_render_changed();
+            }
+        } else {
+            self.set_selection_for(focus, index);
+        }
+        let now = Instant::now();
+        let is_double_click = matches!(
+            self.last_row_click,
+            Some((last_focus, last_index, last_time))
+                if last_focus == focus
+                    && last_index == index
+                    && now.saturating_duration_since(last_time) <= DOUBLE_CLICK_INTERVAL
+        );
+        if is_double_click {
+            self.last_row_click = None;
+            self.open_selected_session()
+        } else {
+            self.last_row_click = Some((focus, index, now));
+            DashboardAction::None
+        }
+    }
+
+    /// Keys for the combined surface's panes.
+    ///
+    /// The composer is a separate focus and never reaches here, so the pane
+    /// actions are plain letters rather than accelerated ones: no key typed at
+    /// a pane can be mistaken for text.
+    ///
+    /// Everything that runs a named command is looked up in the action
+    /// registry ([`crate::actions`]) rather than matched here, so the keys, the
+    /// footer, and the help overlay are all reading one table. What stays as
+    /// hand-written arms is the input that is not a command: list
+    /// navigation, and the two keys whose meaning depends on state.
+    pub(crate) fn handle_dashboard_key(&mut self, key: KeyEvent) -> DashboardAction {
+        let command = dashboard_accelerator(key.modifiers);
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        if let Some(action) = self.handle_workspace_pane_key(key) {
+            return action;
+        }
+        match (key.code, command) {
+            // Shift-Tab is the reverse of the registry's Tab.
+            (KeyCode::BackTab, _) => {
+                self.cycle_focus(true);
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+            // Escape belongs to the composer and to modals. On a pane it does
+            // nothing: the combined surface is quit with Alt-Q, and a stray
+            // Escape must never take the whole screen away.
+            (KeyCode::Esc, _) => {
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+            _ => {}
+        }
+        // The standby composer answers the same keys the focused prompt
+        // would — the full readline set — before list navigation can claim
+        // the arrows.
+        if let Some(action) = self.handle_standby_prompt_key(key) {
+            return action;
+        }
+        if plain
+            && self.focus == Focus::Sessions
+            && let Some(action) = self.handle_session_action_key(key)
+        {
+            self.last_event_outcome.set(Outcome::Unchanged);
+            return action;
+        }
+        // List navigation, shared by visible lists. It comes before the
+        // registry so `j`, `k`, Ctrl-N, and Ctrl-P keep moving the selection.
+        if self.focused_rows_visible() {
+            match (key.code, command) {
+                (KeyCode::Up | KeyCode::Char('k'), false) | (KeyCode::Char('p'), true) => {
+                    self.move_selection(-1);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
+                (KeyCode::Down | KeyCode::Char('j'), false) | (KeyCode::Char('n'), true) => {
+                    self.move_selection(1);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
+                (KeyCode::Home, _) => {
+                    self.set_selection_for(self.focus, 0);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
+                (KeyCode::End, _) => {
+                    let len = self.focus_len_for(self.focus);
+                    self.set_selection_for(self.focus, len.saturating_sub(1));
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
+                _ => {}
+            }
+        }
+        // Setup and the session editor never both apply: setup only opens
+        // while the config is empty, and an empty config has no sessions. The
+        // registry cannot resolve this on the key alone, because `e` is also
+        // the Sessions, Targets, and Quota panes' key, so the ambiguity is
+        // settled here and `Scope::Setup` is left out of `spec_for_key`.
+        if plain && key.code == KeyCode::Char('e') && self.config_is_empty() {
+            let action = self.dispatch_command(CommandId::OpenConfig);
+            self.record_event_handled();
+            return action;
+        }
+        // A digit picks a project by its number, and a registry command
+        // carries no argument, so this one stays a hand-written arm.
+        if self.focus == Focus::Sessions
+            && plain
+            && let KeyCode::Char(digit @ '1'..='9') = key.code
+        {
+            self.toggle_project_number(digit.to_digit(10).unwrap_or(0) as usize);
+            self.record_event_handled();
+            return DashboardAction::None;
+        }
+        match crate::actions::spec_for_key(key, self.focus) {
+            Some(id) => {
+                let action = self.dispatch_command(id);
+                self.record_event_handled();
+                action
+            }
+            None => DashboardAction::None,
+        }
+    }
+
+    /// Handles the small action row at the top of Sessions. The row is a
+    /// second selection target within the pane: Up from its first session
+    /// enters it, Down returns to the first session, and Left/Right skip any
+    /// disabled action. `None` means the regular dashboard key handling still
+    /// owns the key; `Some` means the key was consumed, including a no-op.
+    pub(crate) fn handle_session_action_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
+        let session_count = self.visible_session_indices().len();
+        let focused_action = self.session_action_focus;
+        let action = match (focused_action, key.code) {
+            (Some(id), KeyCode::Left | KeyCode::Right) => {
+                if let Some(next) = crate::surface_controls::adjacent_enabled_session_action(
+                    self,
+                    id,
+                    key.code == KeyCode::Right,
+                ) {
+                    self.session_action_focus = Some(next);
+                }
+                Some(DashboardAction::None)
+            }
+            (Some(_), KeyCode::Up) => Some(DashboardAction::None),
+            (Some(_), KeyCode::Down) if session_count > 0 => {
+                self.set_session_action_focus(None);
+                self.set_selection_for(Focus::Sessions, 0);
+                Some(DashboardAction::None)
+            }
+            (Some(_), KeyCode::Down) => Some(DashboardAction::None),
+            (Some(id), KeyCode::Enter) => {
+                self.set_session_action_focus(None);
+                Some(self.run_available_command(id))
+            }
+            (None, KeyCode::Up)
+                if session_count == 0 || self.selected_visible_index() == Some(0) =>
+            {
+                self.session_action_focus =
+                    crate::surface_controls::first_enabled_session_action(self);
+                Some(DashboardAction::None)
+            }
+            (None, KeyCode::Down) if session_count == 0 => {
+                self.session_action_focus =
+                    crate::surface_controls::first_enabled_session_action(self);
+                Some(DashboardAction::None)
+            }
+            (None, KeyCode::Left | KeyCode::Right) if session_count == 0 => {
+                let first = crate::surface_controls::first_enabled_session_action(self);
+                self.session_action_focus = if key.code == KeyCode::Right {
+                    first
+                } else {
+                    first.and_then(|id| {
+                        crate::surface_controls::adjacent_enabled_session_action(self, id, false)
+                            .or(Some(id))
+                    })
+                };
+                Some(DashboardAction::None)
+            }
+            _ => None,
+        };
+        if self.session_action_focus != focused_action {
+            self.mark_render_changed();
+        }
+        action
+    }
+
+    /// Opens the selected session's conversation and hands the keyboard to its
+    /// composer.
+    ///
+    /// The conversation already follows the selection, so Enter's job is to
+    /// take the user to the prompt for the row they are on. A failed session
+    /// is the one exception: it asks first, because reading what it did and
+    /// putting it back on a fresh target are both reasonable answers to the
+    /// same key. That is a prompt rather than the silent diversion into the
+    /// resume wizard this used to do - the row is red, and the dialog says
+    /// what failed.
+    pub(crate) fn open_selected_session(&mut self) -> DashboardAction {
+        let Some(session) = self.selected_session() else {
+            return DashboardAction::None;
+        };
+        if let Some(issue) = session.configuration_issue(&self.config) {
+            self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ConfigurationRepair {
+                session_id: session.id.clone(),
+                error: issue,
+                previous: Box::new(self.mode.clone()),
+            }));
+            self.mark_render_changed();
+            return DashboardAction::None;
+        }
+        if let Some(operation) = self.session_operations.get(&session.id) {
+            self.notices.set(format!(
+                "{} is in progress; press Alt-X to cancel it.",
+                operation.kind.label()
+            ));
+            return DashboardAction::None;
+        }
+        if let Some(transition) = self.transition_kind(&session.id) {
+            self.notices.set(format!(
+                "{} is in progress; select another session while it completes.",
+                transition.label()
+            ));
+            return DashboardAction::None;
+        }
+        if self.transition_failure_kind(&session.id).is_some() {
+            let confirmation = Confirmation::RecoverFailed {
+                session_id: session.id.clone(),
+                error: session.last_error.clone(),
+                recoverable: session.checkpoint.is_some(),
+            };
+            self.mode = Mode::Confirm(ConfirmDialog::new(confirmation));
+            self.mark_render_changed();
+            return DashboardAction::None;
+        }
+        if let Some(operation) = self
+            .move_operations
+            .get(&session.id)
+            .filter(|operation| {
+                matches!(
+                    operation.phase,
+                    mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
+                ) && (operation.checkpoint.is_some()
+                    || (operation.queue_admission_started && !operation.queue_admission_finished))
+            })
+            .cloned()
+        {
+            self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::RecoverMove {
+                operation: Box::new(operation),
+            }));
+            self.mark_render_changed();
+            return DashboardAction::None;
+        }
+        // A failed session has two reasonable answers - read what it did, or
+        // put it back on a fresh target - and recovery replaces the target, so
+        // the surface asks rather than guessing.
+        if session.state == SessionState::Error {
+            let confirmation = Confirmation::RecoverFailed {
+                session_id: session.id.clone(),
+                error: session.last_error.clone(),
+                recoverable: session.checkpoint.is_some(),
+            };
+            self.mode = Mode::Confirm(ConfirmDialog::new(confirmation));
+            self.mark_render_changed();
+            return DashboardAction::None;
+        }
+        let session_id = session.id.clone();
+        self.focus_prompt();
+        DashboardAction::Open { session_id }
+    }
+}
