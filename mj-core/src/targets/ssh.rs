@@ -784,13 +784,19 @@ mod tests {
         ssh_command(ssh, ["true"]).args
     }
 
+    #[cfg(unix)]
+    fn sharing_socket_dir() -> tempfile::TempDir {
+        // macOS's default temporary path leaves too little room for SSH's hash.
+        tempfile::tempdir_in("/tmp").expect("short control socket directory")
+    }
+
     #[test]
     #[cfg(unix)]
     fn connection_sharing_follows_user_supplied_ssh_args() {
         let _guard = SHARING_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let socket_dir = tempfile::tempdir().expect("temp dir");
+        let socket_dir = sharing_socket_dir();
         set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
             socket_dir.path().to_path_buf(),
         )));
@@ -835,7 +841,7 @@ mod tests {
         let _guard = SHARING_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let socket_dir = tempfile::tempdir().expect("temp dir");
+        let socket_dir = sharing_socket_dir();
         set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
             socket_dir.path().to_path_buf(),
         )));
@@ -951,7 +957,7 @@ mod tests {
             return;
         };
         let host = host.to_string_lossy().into_owned();
-        let socket_dir = tempfile::tempdir().expect("temp dir");
+        let socket_dir = sharing_socket_dir();
         set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
             socket_dir.path().to_path_buf(),
         )));
