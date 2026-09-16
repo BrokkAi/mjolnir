@@ -69,7 +69,11 @@ libc = "0.2"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 rayon = "1"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# `rustls-no-provider` takes the process-wide rustls provider instead of
+# pulling aws-lc-rs, which needs a C toolchain and complicates
+# cross-compilation. Every executable installs the ring provider at startup
+# through `mj_controller::server::install_rustls_crypto_provider`.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive"] }
