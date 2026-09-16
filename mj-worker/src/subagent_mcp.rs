@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -26,9 +27,25 @@ fn pending_reply(request_id: &str) -> Value {
 
 pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut output = stdout.lock();
-    for line in stdin.lock().lines() {
+    run(stdin.lock(), std::io::stdout(), socket)
+}
+
+/// Serve MCP over `reader`/`writer` against the worker `socket`.
+///
+/// Each `tools/call` runs on its own thread and its own socket connection, so a
+/// long `wait` never head-of-line blocks a cheap `list_agents` queued after it.
+/// JSON-RPC lets a response arrive in any order because it carries the request
+/// id, and every write to `writer` is serialized behind one lock so concurrent
+/// responses never interleave.
+fn run<R: BufRead, W: Write + Send + 'static>(
+    reader: R,
+    writer: W,
+    socket: &Path,
+) -> Result<()> {
+    let output = Arc::new(Mutex::new(writer));
+    let socket = socket.to_path_buf();
+    let mut calls = Vec::new();
+    for line in reader.lines() {
         let line = line.context("read sub-agent MCP request")?;
         if line.trim().is_empty() {
             continue;
@@ -36,10 +53,7 @@ pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
         let request: Value = match serde_json::from_str(&line) {
             Ok(request) => request,
             Err(error) => {
-                write_line(
-                    &mut output,
-                    &rpc_error(Value::Null, -32700, error.to_string()),
-                )?;
+                write_line(&output, &rpc_error(Value::Null, -32700, error.to_string()))?;
                 continue;
             }
         };
@@ -47,32 +61,56 @@ pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
             continue;
         };
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-        let response = match method {
-            "initialize" => rpc_result(
-                id,
-                json!({
-                    "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
-                    "capabilities":{"tools":{"listChanged":false}},
-                    "serverInfo":{"name":"mj-agents","version":env!("CARGO_PKG_VERSION")},
-                    "instructions": SERVER_INSTRUCTIONS
-                }),
-            ),
-            "ping" => rpc_result(id, json!({})),
-            "tools/list" => rpc_result(id, json!({"tools": tool_definitions()})),
-            "tools/call" => match call(socket, request.get("params")) {
-                Ok((value, is_error)) => rpc_result(
+        match method {
+            "initialize" => write_line(
+                &output,
+                &rpc_result(
                     id,
                     json!({
-                        "content":[{"type":"text","text":serde_json::to_string_pretty(&value)?}],
-                        "structuredContent":value,
-                        "isError":is_error
+                        "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
+                        "capabilities":{"tools":{"listChanged":false}},
+                        "serverInfo":{"name":"mj-agents","version":env!("CARGO_PKG_VERSION")},
+                        "instructions": SERVER_INSTRUCTIONS
                     }),
                 ),
-                Err(error) => rpc_error(id, -32602, format!("{error:#}")),
-            },
-            _ => rpc_error(id, -32601, format!("unknown MCP method {method:?}")),
-        };
-        write_line(&mut output, &response)?;
+            )?,
+            "ping" => write_line(&output, &rpc_result(id, json!({})))?,
+            "tools/list" => {
+                write_line(&output, &rpc_result(id, json!({"tools": tool_definitions()})))?
+            }
+            "tools/call" => {
+                // Dispatch on its own thread and socket connection. The read
+                // loop stays free to accept and dispatch the next request while
+                // this call blocks on the worker (a `wait` can block for up to
+                // an hour).
+                let output = Arc::clone(&output);
+                let socket = socket.clone();
+                let params = request.get("params").cloned();
+                calls.push(std::thread::spawn(move || {
+                    let response = match call(&socket, params.as_ref()) {
+                        Ok((value, is_error)) => rpc_result(
+                            id,
+                            json!({
+                                "content":[{"type":"text","text": serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())}],
+                                "structuredContent":value,
+                                "isError":is_error
+                            }),
+                        ),
+                        Err(error) => rpc_error(id, -32602, format!("{error:#}")),
+                    };
+                    let _ = write_line(&output, &response);
+                }));
+            }
+            _ => write_line(
+                &output,
+                &rpc_error(id, -32601, format!("unknown MCP method {method:?}")),
+            )?,
+        }
+    }
+    // stdin closed: the harness is gone. Let in-flight calls finish so their
+    // worker sockets close cleanly rather than being torn down mid-exchange.
+    for call in calls {
+        let _ = call.join();
     }
     Ok(())
 }
@@ -281,9 +319,13 @@ fn rpc_error(id: Value, code: i64, message: String) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
 
-fn write_line(output: &mut impl Write, value: &Value) -> Result<()> {
-    serde_json::to_writer(&mut *output, value)?;
-    output.write_all(b"\n")?;
+fn write_line<W: Write>(output: &Mutex<W>, value: &Value) -> Result<()> {
+    // Serialize into one buffer, then take the lock for a single write, so a
+    // response from one call thread never interleaves with another's.
+    let mut buf = serde_json::to_vec(value)?;
+    buf.push(b'\n');
+    let mut output = output.lock().expect("sub-agent MCP stdout lock poisoned");
+    output.write_all(&buf)?;
     output.flush()?;
     Ok(())
 }
@@ -352,5 +394,84 @@ mod tests {
             .expect("working_directory description");
         assert!(description.contains("Absolute"), "{description}");
         assert!(description.contains("relative"), "{description}");
+    }
+
+    /// A writer shared with the test so `run` (which takes the writer by value)
+    /// can be observed after it returns.
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("shared writer poisoned").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_slow_tool_call_does_not_block_a_later_one() {
+        use std::io::{BufReader, Read};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("subagents.sock");
+
+        // Fake worker: reply to any non-wait call at once, delay `wait_agents`,
+        // and serve each accepted connection on its own thread so the delay
+        // cannot serialize the two calls at the socket layer.
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let request: Value = serde_json::from_str(line.trim()).unwrap();
+                    let action = request["action"]["action"].as_str().unwrap_or_default().to_owned();
+                    if action == "wait_agents" {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                    let reply = json!({"accepted": true, "result": {"action": action}});
+                    let mut body = serde_json::to_vec(&reply).unwrap();
+                    body.push(b'\n');
+                    let mut stream = reader.into_inner();
+                    stream.write_all(&body).unwrap();
+                    stream.flush().unwrap();
+                    // Hold the connection open until the client has read the
+                    // reply, mirroring the real worker's `serve_one`.
+                    let _ = stream.read(&mut [0u8; 1]);
+                });
+            }
+        });
+
+        // The slow `wait` is sent first, the cheap `list_agents` second. Serial
+        // dispatch would answer `wait` first; concurrent dispatch answers the
+        // cheap call first because it does not wait behind the slow one.
+        let input = format!(
+            "{}\n{}\n",
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wait","arguments":{"child_session_ids":["c1"],"timeout_seconds":1}}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_agents"}}),
+        );
+        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        run(input.as_bytes(), SharedWriter(Arc::clone(&buffer)), &socket).unwrap();
+
+        let written = buffer.lock().unwrap();
+        let first: Value = serde_json::from_str(
+            std::str::from_utf8(&written)
+                .unwrap()
+                .lines()
+                .next()
+                .expect("at least one response"),
+        )
+        .unwrap();
+        assert_eq!(
+            first["id"], 2,
+            "the cheap list_agents response must be written before the slow wait: {}",
+            String::from_utf8_lossy(&written)
+        );
     }
 }
