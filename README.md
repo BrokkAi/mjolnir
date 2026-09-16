@@ -136,8 +136,11 @@ mj go ../my-project   # work in a specific folder
 
 Choose an account and target on first use, including Docker, Podman, SSH,
 EC2, or a configured custom target. The first setup becomes the default for
-new projects; each folder remembers its own setup. **New** (or **Alt-N**)
-starts another concurrent session with those choices. **Change setup** changes
+new projects; each folder remembers its own setup and reuses a workspace named
+after the directory. Returning with `mj go` opens your last conversation.
+The focused screen shows conversations and chat, without the workspace,
+target, or quota panels. **New** (or **Alt-N**) starts another concurrent
+session with those choices. **Menu → Change setup** changes
 this project's next launch; `mj go --global-default` also changes the default
 for new projects. `mj go --setup` opens that setup directly.
 

@@ -832,17 +832,12 @@ fn print_move_human(outcome: &mj_core::state::MoveOutcome) {
 async fn run_workspace_dashboard(
     requested_workspace: Option<&str>,
     open_workspace_manager: bool,
-    go: Option<(mj_tui::GoMode, bool)>,
+    mut go: Option<(mj_tui::GoMode, bool)>,
 ) -> Result<DashboardExit> {
     let mut daemon = daemon::connect_or_start().await?;
     let workspaces = daemon.list_workspaces().await?;
-    let selected = if let Some((mode, _)) = &go {
-        let name = mj_core::go::GoPreferences::workspace_name(&mode.directory);
-        if let Some(workspace) = workspaces.iter().find(|entry| entry.workspace.name == name) {
-            workspace.workspace.id.clone()
-        } else {
-            daemon.create_workspace(name).await?.id
-        }
+    let selected = if let Some((mode, _)) = &mut go {
+        go::resolve_workspace(&mut daemon, mode).await?
     } else if let Some(requested) = requested_workspace {
         workspaces
             .iter()

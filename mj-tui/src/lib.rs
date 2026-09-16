@@ -1071,7 +1071,11 @@ impl DashboardState {
     /// Pane sizes are the user's setting, so Tab never changes them.
     pub fn cycle_focus(&mut self, reverse: bool) -> bool {
         let previous = self.focus;
-        self.focus = cycle_control(self.focus, &FOCUS_ORDER, reverse);
+        self.focus = if self.go.is_some() {
+            cycle_control(self.focus, &[Focus::Sessions, Focus::Prompt], reverse)
+        } else {
+            cycle_control(self.focus, &FOCUS_ORDER, reverse)
+        };
         self.workspace_control_focus =
             if reverse && previous == Focus::Sessions && self.focus == Focus::Workspaces {
                 WorkspaceControlFocus::Menu
@@ -1357,9 +1361,13 @@ impl DashboardState {
             profile: session
                 .as_ref()
                 .map_or(String::new(), |session| session.last_profile.clone()),
-            title: session
-                .as_ref()
-                .map_or(String::new(), |session| session.display_title().to_owned()),
+            title: session.as_ref().map_or(String::new(), |session| {
+                if self.go.is_some() {
+                    self.go_conversation_title(&session.id)
+                } else {
+                    session.display_title().to_owned()
+                }
+            }),
             harness_kind: session.as_ref().map(|session| session.harness_kind),
             subagent_count: self
                 .state

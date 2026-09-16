@@ -13,6 +13,9 @@
 - [x] (2026-09-16) Connect New and Change setup, visible context, and in-app launch failures.
 - [x] (2026-09-16) Add behavior tests and pass the full dev-profile test suite, Clippy, formatting, CLI help, and diff checks.
 - [x] (2026-09-16) Commit implementation as `526ffd93`, push `codex/mj-go-fast-start`, and open PR https://github.com/BrokkAi/mjolnir/pull/1046.
+- [x] (2026-09-16) Correct the reviewed UX: bind folders to friendly workspace names, reopen the last conversation, and remove management/support panes from fast mode.
+- [x] (2026-09-16) Verify the actual rendered fast screen, pass full dev-profile tests, Clippy, formatting, and CLI help checks.
+- [x] (2026-09-16) Prepare the validated correction and revised description for delivery through existing PR #1046.
 
 ## Surprises & Discoveries
 
@@ -29,7 +32,9 @@ Use the existing session creation and failure/retry machinery. Keep go preferenc
 
 Implemented the additive workflow. Go preferences are stored under the instance config directory in `go.json`. First setup establishes global defaults, subsequent setups remember per-project choices, and `--global-default` explicitly changes defaults for new projects. New and Alt-N reuse the recipe; plain mj retains the original wizard. The selected session's checkout and branch are read through the shared target command helper on a background job with a three-second process timeout and a five-second refresh interval. A failed observation is displayed as unavailable instead of retaining the previous path.
 
-Cold target provisioning still takes the runtime's normal startup time; this change removes repeat setup navigation, not container boot or network latency. Live provider/runtimes are not exercised during development. The existing session list is retained for concurrent conversation selection rather than adding a second tab system. Launch errors offer retry and settings; manual host repair can still be needed, but prerequisite errors no longer require a doctor command.
+Cold target provisioning still takes the runtime's normal startup time; this change removes repeat setup navigation, not container boot or network latency. Live provider/runtimes are not exercised during development. Following screenshot review, fast mode uses a compact conversation navigator instead of the dashboard's project-grouped session rows. Launch errors offer retry and settings; manual host repair can still be needed, but prerequisite errors no longer require a doctor command.
+
+The correction stores workspace IDs and last-selected conversation IDs alongside recipes in version 2 of go.json, retaining version 1 read support. Legacy hashed names are renamed through the daemon API, while directory identity is persisted separately from display names. Existing user-renamed bound workspaces keep their names. Reopening prefers the remembered eligible conversation, excluding other workspaces, archived sessions, and subagents; without a remembered choice it uses latest recorded update time. Stopped conversations still use the existing recovery wizard. Plain mj remains unchanged.
 
 ## Context and Orientation
 
@@ -71,3 +76,9 @@ Plan created 2026-09-16 to capture the authorized additive workflow and PR deliv
 Updated 2026-09-16 with implemented behavior, validation progress, and explicit runtime limitations.
 
 Completed 2026-09-16: implementation and validation delivered in PR #1046. Remote master was not changed.
+
+Reopened 2026-09-16 following the user's screenshot: minimized dashboard panels, hashed workspace names, and automatically creating a fresh session still violate the intended simple workflow. Add durable folder-to-workspace bindings and last-conversation selection in version 2 of go.json (read version 1, refuse unknown newer versions). Reuse and rename legacy hashed workspaces through existing daemon APIs. Render a small conversation navigator, New and Menu, and the conversation/composer; exclude workspace, quota, and target panels and their focus stops. Show conversation names instead of session IDs in fast-mode headers. Regression tests must assert both required controls and the absence of the unwanted panels, plus selection persistence and workspace reuse. Keep normal mj unchanged.
+
+Correction validated 2026-09-16: all 14 focused go tests pass, the full dev-profile suite passes, and Clippy, formatting, diff checks, and CLI help pass. A terminal-buffer SVG captured by the rendered-context test was rasterized with Quick Look and visually inspected. The tested client was built with `cargo build -p brokk-mjolnir`; existing worker binaries and the daemon protocol are unchanged. No live provider session was started for validation.
+
+The local client at `/Users/ryansvihla/.local/bin/mj` was replaced by atomic rename after retaining the previous executable at `/private/tmp/mj-go-review.R3b6z4/mj.previous`. The next terminal attachment uses the correction; already-running terminal UIs and sessions are left untouched. Detach with Alt-Q, then run `mj go` from the project folder.

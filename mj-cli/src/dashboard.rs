@@ -253,6 +253,8 @@ pub(crate) struct DashboardContext {
     startup: StartupSession,
     go_context_refresh: Option<(String, std::time::Instant)>,
     go_context_in_flight: bool,
+    go_selection_requested: Option<String>,
+    go_selection_in_flight: bool,
     /// The first pass always draws; subsequent frames require a visible change.
     pub(crate) dirty: bool,
     drawn_size: Option<(u16, u16)>,
@@ -659,6 +661,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.follow_selected_session();
             context.refresh_go_context();
         }
+        context.remember_go_selection();
         if context.shutdown_requested && context.refresh_shutdown_notice() {
             break;
         }
@@ -971,6 +974,8 @@ impl DashboardContext {
             startup: StartupSession::idle(),
             go_context_refresh: None,
             go_context_in_flight: false,
+            go_selection_requested: None,
+            go_selection_in_flight: false,
             dirty: true,
             drawn_size: None,
             drawn_notice_generation: 0,
@@ -1252,6 +1257,44 @@ impl DashboardContext {
                 session_id: report_id,
                 result,
             },
+        );
+    }
+
+    fn remember_go_selection(&mut self) {
+        if self.go_selection_in_flight {
+            return;
+        }
+        let Some(go) = self.dashboard.go_mode() else {
+            return;
+        };
+        let Some(session_id) = self.dashboard.selected_session_id().map(str::to_owned) else {
+            return;
+        };
+        if self.go_selection_requested.as_ref() == Some(&session_id) {
+            return;
+        }
+        let Some(workspace_id) = go.workspace_id.clone() else {
+            return;
+        };
+        if self.dashboard.active_workspace_id() != Some(workspace_id.as_str()) {
+            return;
+        }
+        let directory = go.directory.clone();
+        self.go_selection_requested = Some(session_id.clone());
+        self.go_selection_in_flight = true;
+        io::spawn_critical_io(
+            self.critical_operations.clone(),
+            "remembering conversation",
+            self.dashboard_io_tx.clone(),
+            move || {
+                mj_core::go::GoPreferences::remember_session(
+                    &mj_core::go::GoPreferences::path(),
+                    &directory,
+                    &workspace_id,
+                    session_id,
+                )
+            },
+            io::DashboardIoUpdate::GoSelectionSaved,
         );
     }
 
@@ -1733,7 +1776,11 @@ impl DashboardContext {
             target: session_record
                 .project_target(&self.controller.config, &session_record.target_template_id),
             profile: session_record.last_profile.clone(),
-            title: session_record.display_title().to_owned(),
+            title: if self.dashboard.go_mode().is_some() {
+                self.dashboard.go_conversation_title(session_id)
+            } else {
+                session_record.display_title().to_owned()
+            },
             harness_kind: Some(session_record.harness_kind),
             subagent_count: self
                 .controller
@@ -2230,6 +2277,9 @@ impl DashboardContext {
             &self.controller.config,
             self.controller.state.sessions.get(chat.session_id()),
         );
+        if self.dashboard.go_mode().is_some() {
+            chat.set_display_title(self.dashboard.go_conversation_title(chat.session_id()));
+        }
         let count = self
             .controller
             .state

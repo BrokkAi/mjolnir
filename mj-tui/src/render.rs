@@ -2511,12 +2511,29 @@ pub(crate) fn footer_commands(
 ) -> Vec<(crate::CommandId, String)> {
     let mut hints = crate::actions::available(dashboard, None)
         .into_iter()
+        .filter(|id| {
+            dashboard.go.is_none()
+                || matches!(
+                    id,
+                    crate::CommandId::NewSessionWizard
+                        | crate::CommandId::Palette
+                        | crate::CommandId::QuitDetach
+                        | crate::CommandId::CancelOperation
+                        | crate::CommandId::CycleFocus
+                )
+        })
         .filter_map(|id| {
             let spec = crate::actions::spec(id);
             if spec.footer_group != group {
                 return None;
             }
-            let word = (spec.footer)(dashboard)?;
+            let word = if dashboard.go.is_some() && id == crate::CommandId::NewSessionWizard {
+                "new".to_owned()
+            } else if dashboard.go.is_some() && id == crate::CommandId::Palette {
+                "menu".to_owned()
+            } else {
+                (spec.footer)(dashboard)?
+            };
             let hint = spec.keys.first()?;
             Some((spec.footer_rank, id, format!("{} {word}", hint.label)))
         })

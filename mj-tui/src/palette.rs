@@ -167,6 +167,25 @@ fn rank(entries: Vec<PaletteEntry>, query: &str) -> Vec<PaletteEntry> {
 /// [`hidden_from_palette`] names because a visible dashboard control already
 /// runs them.
 pub(crate) fn palette_entries(dashboard: &DashboardState, query: &str) -> Vec<PaletteEntry> {
+    if dashboard.go.is_some() {
+        return rank(
+            [
+                CommandId::ChangeGoSetup,
+                CommandId::RenameSession,
+                CommandId::ResumeDialog,
+                CommandId::OpenConfig,
+                CommandId::StopSession,
+                CommandId::QuitDetach,
+            ]
+            .into_iter()
+            .filter_map(|id| {
+                let availability = (spec(id).available)(dashboard);
+                (availability != Availability::Hidden).then_some(PaletteEntry { id, availability })
+            })
+            .collect(),
+            query,
+        );
+    }
     let mut entries = Vec::new();
     for scope in scope_order(dashboard) {
         for spec in COMMANDS.iter().filter(|spec| spec.scope == scope) {

@@ -886,6 +886,9 @@ impl DashboardState {
     /// the dialog to close — except over the help overlay, which is a
     /// reference rather than a decision.
     pub fn global_chord_allowed(&self, id: CommandId) -> bool {
+        if !self.go_command_allowed(id) {
+            return false;
+        }
         match id {
             // Refreshing is harmless over a modal: it asks the daemon for
             // fresh capacity and quota figures and changes nothing on screen
@@ -907,6 +910,9 @@ impl DashboardState {
     /// key handler used to call directly, so the footer, the help overlay, and
     /// the keyboard cannot disagree about what a command does.
     pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
+        if !self.go_command_allowed(id) {
+            return DashboardAction::None;
+        }
         if matches!(id, CommandId::StopSession | CommandId::RestartSession) {
             match (spec(id).available)(self) {
                 Availability::Hidden => return DashboardAction::None,

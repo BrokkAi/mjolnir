@@ -372,8 +372,12 @@ fn render_combined_themed(
         return;
     }
 
-    let sidebar_width =
-        sessions_sidebar_width(area.width, dashboard.pane_size(SupportPane::Sessions));
+    let fast = dashboard.go.is_some();
+    let sidebar_width = if fast {
+        28.min(area.width / 3)
+    } else {
+        sessions_sidebar_width(area.width, dashboard.pane_size(SupportPane::Sessions))
+    };
     let sidebar_right = dashboard.config.sessions_side == mj_core::config::SessionsSide::Right;
     let content_area = Rect::new(
         area.x + if sidebar_right { 0 } else { sidebar_width },
@@ -395,7 +399,11 @@ fn render_combined_themed(
         sidebar_area.x,
         sidebar_area.y,
         sidebar_area.width,
-        WORKSPACE_PANE_HEIGHT.min(sidebar_area.height),
+        if fast {
+            0
+        } else {
+            WORKSPACE_PANE_HEIGHT.min(sidebar_area.height)
+        },
     );
     let sidebar_top = workspace_area.height;
     let sessions_area = Rect::new(
@@ -505,8 +513,8 @@ fn render_combined_themed(
         full: 0,
         cap: 0,
     };
-    let targets = bands[1];
-    let quota = bands[2];
+    let targets = if fast { sessions } else { bands[1] };
+    let quota = if fast { sessions } else { bands[2] };
     // Keep the support panes stacked together, using the space left by the
     // current sidebar size to decide whether they fit beside Sessions.
     let supports_adjacent = support_panes_fit(content_area.width, dashboard);
@@ -581,24 +589,34 @@ fn render_combined_themed(
         ])
         .split(support_area);
     let (targets_area, quota_area) = (support_bands[0], support_bands[1]);
-    render_workspace_tabs(frame, workspace_area, dashboard);
+    if !fast {
+        render_workspace_tabs(frame, workspace_area, dashboard);
+    }
     let footer_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     dashboard.pane_areas = Some([sessions_area, targets_area, quota_area]);
-    for (pane, pane_area) in [
-        (SupportPane::Sessions, sessions_area),
-        (SupportPane::Targets, targets_area),
-        (SupportPane::Quota, quota_area),
-    ] {
-        let maximize_enabled = dashboard.pane_maximize_enabled(pane);
-        dashboard
-            .pane_size_control_areas
-            .extend(pane_size_control_areas(pane_area, pane, maximize_enabled));
+    if !fast {
+        for (pane, pane_area) in [
+            (SupportPane::Sessions, sessions_area),
+            (SupportPane::Targets, targets_area),
+            (SupportPane::Quota, quota_area),
+        ] {
+            let maximize_enabled = dashboard.pane_maximize_enabled(pane);
+            dashboard
+                .pane_size_control_areas
+                .extend(pane_size_control_areas(pane_area, pane, maximize_enabled));
+        }
     }
 
-    let rendered = render_sessions(frame, sessions_area, dashboard);
+    let rendered = if fast {
+        crate::go::render_conversations(frame, sessions_area, dashboard)
+    } else {
+        render_sessions(frame, sessions_area, dashboard)
+    };
     dashboard.session_row_areas = rendered.session_row_areas;
     dashboard.project_heading_areas = rendered.project_heading_areas;
-    crate::surface_controls::render_session_row_actions(frame, dashboard);
+    if !fast {
+        crate::surface_controls::render_session_row_actions(frame, dashboard);
+    }
     let sessions_content = bordered_content(sessions_area);
     dashboard.frame_surfaces.push(SurfaceFrame::fixed(
         SurfaceId::DashboardPane(0),
@@ -607,68 +625,70 @@ fn render_combined_themed(
 
     // Draw support panes before chat: chat modals can cover the whole screen.
     // Targets and Quota choose their representations independently.
-    if sizes[1].1 == PaneSize::Minimized {
-        let focused = dashboard.focus() == Focus::Targets;
-        frame.render_widget(
-            theme::panel(focused)
-                .borders(Borders::TOP)
-                .title(minimized_targets_line(
-                    dashboard,
-                    pane_title_content_width(
-                        targets_area.width,
+    if !fast {
+        if sizes[1].1 == PaneSize::Minimized {
+            let focused = dashboard.focus() == Focus::Targets;
+            frame.render_widget(
+                theme::panel(focused)
+                    .borders(Borders::TOP)
+                    .title(minimized_targets_line(
+                        dashboard,
+                        pane_title_content_width(
+                            targets_area.width,
+                            dashboard.pane_maximize_enabled(SupportPane::Targets),
+                        ),
+                        focused,
+                    ))
+                    .title(minimized_pane_size_controls(
+                        focused,
                         dashboard.pane_maximize_enabled(SupportPane::Targets),
-                    ),
-                    focused,
-                ))
-                .title(minimized_pane_size_controls(
-                    focused,
-                    dashboard.pane_maximize_enabled(SupportPane::Targets),
-                )),
-            targets_area,
-        );
-    } else {
-        render_capacity(frame, targets_area, dashboard, Some(sizes[1].1));
-    }
-    if sizes[2].1 == PaneSize::Minimized {
-        let focused = dashboard.focus() == Focus::Quota;
-        frame.render_widget(
-            theme::panel(focused)
-                .borders(Borders::TOP)
-                .title(minimized_quota_line(
-                    dashboard,
-                    pane_title_content_width(
-                        quota_area.width,
+                    )),
+                targets_area,
+            );
+        } else {
+            render_capacity(frame, targets_area, dashboard, Some(sizes[1].1));
+        }
+        if sizes[2].1 == PaneSize::Minimized {
+            let focused = dashboard.focus() == Focus::Quota;
+            frame.render_widget(
+                theme::panel(focused)
+                    .borders(Borders::TOP)
+                    .title(minimized_quota_line(
+                        dashboard,
+                        pane_title_content_width(
+                            quota_area.width,
+                            dashboard.pane_maximize_enabled(SupportPane::Quota),
+                        ),
+                        focused,
+                    ))
+                    .title(minimized_pane_size_controls(
+                        focused,
                         dashboard.pane_maximize_enabled(SupportPane::Quota),
-                    ),
-                    focused,
-                ))
-                .title(minimized_pane_size_controls(
-                    focused,
-                    dashboard.pane_maximize_enabled(SupportPane::Quota),
-                )),
-            quota_area,
-        );
-    } else {
-        render_quotas(frame, quota_area, dashboard, Some(sizes[2].1));
+                    )),
+                quota_area,
+            );
+        } else {
+            render_quotas(frame, quota_area, dashboard, Some(sizes[2].1));
+        }
+        let targets_content = if sizes[1].1 == PaneSize::Minimized {
+            targets_area
+        } else {
+            bordered_content(targets_area)
+        };
+        let quota_content = if sizes[2].1 == PaneSize::Minimized {
+            quota_area
+        } else {
+            bordered_content(quota_area)
+        };
+        dashboard.frame_surfaces.push(SurfaceFrame::fixed(
+            SurfaceId::DashboardPane(1),
+            targets_content,
+        ));
+        dashboard.frame_surfaces.push(SurfaceFrame::fixed(
+            SurfaceId::DashboardPane(2),
+            quota_content,
+        ));
     }
-    let targets_content = if sizes[1].1 == PaneSize::Minimized {
-        targets_area
-    } else {
-        bordered_content(targets_area)
-    };
-    let quota_content = if sizes[2].1 == PaneSize::Minimized {
-        quota_area
-    } else {
-        bordered_content(quota_area)
-    };
-    dashboard.frame_surfaces.push(SurfaceFrame::fixed(
-        SurfaceId::DashboardPane(1),
-        targets_content,
-    ));
-    dashboard.frame_surfaces.push(SurfaceFrame::fixed(
-        SurfaceId::DashboardPane(2),
-        quota_content,
-    ));
 
     dashboard.chat_transcript_area = Some(transcript_area);
     dashboard.chat_prompt_area = Some(prompt_area);

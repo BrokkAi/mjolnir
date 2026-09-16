@@ -347,7 +347,7 @@ fn capture(path: &Path, title: &str, description: &str, dashboard: &mut Dashboar
     fs::write(path, svg).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
 }
 
-fn buffer_svg(buffer: &Buffer, title: &str, description: &str) -> String {
+pub(crate) fn buffer_svg(buffer: &Buffer, title: &str, description: &str) -> String {
     let width = buffer.area.width * CELL_WIDTH + PADDING * 2;
     let height = buffer.area.height * CELL_HEIGHT + PADDING * 2;
     let mut svg = String::new();

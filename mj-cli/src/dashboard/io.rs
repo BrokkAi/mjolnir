@@ -90,6 +90,7 @@ pub(crate) enum DashboardIoUpdate {
         message: String,
     },
     CreateSession(Box<DashboardCreateSessionUpdate>),
+    GoSelectionSaved(std::result::Result<(), String>),
     GoContext {
         session_id: String,
         result: std::result::Result<(std::path::PathBuf, String), String>,
@@ -1839,6 +1840,14 @@ impl DashboardContext {
                     }
                 }
                 self.dirty = true;
+            }
+            DashboardIoUpdate::GoSelectionSaved(result) => {
+                self.go_selection_in_flight = false;
+                if let Err(error) = result {
+                    self.dashboard.set_failure_notice(format!(
+                        "Could not remember this conversation: {error}"
+                    ));
+                }
             }
             DashboardIoUpdate::GoContext { session_id, result } => {
                 self.go_context_in_flight = false;
