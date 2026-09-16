@@ -3,7 +3,9 @@
 use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, RowAlign, TextField};
+use mj_chat::components::{
+    ChoiceList, ColumnAlign, ColumnSplit, ControlKind, Dialog, Interaction, TextField,
+};
 use mj_chat::selection::FrameSurfaces;
 use mj_chat::text_input::TextInput;
 use mj_chat::theme;
@@ -1061,7 +1063,6 @@ pub(crate) fn render_workspace_manager(
             Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(1),
         ])
         .split(inner);
     let message = if dialog.loading {
@@ -1101,6 +1102,9 @@ pub(crate) fn render_workspace_manager(
     );
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    // The actions form a column beside the page body rather than a footer row,
+    // so the body gives up exactly the width that column needs.
+    let columns = form.split_actions(rows[1], &dialog.actions());
     let dismiss_enabled = dialog
         .busy
         .is_none_or(|mutation| mutation == WorkspaceMutation::Load);
@@ -1113,10 +1117,10 @@ pub(crate) fn render_workspace_manager(
     );
     frame.render_widget(theme::modal().title(title_line), popup);
     match &dialog.view {
-        WorkspaceManagerView::List => render_manager_list(frame, &rows, dialog, &mut form),
+        WorkspaceManagerView::List => render_manager_list(frame, columns, dialog, &mut form),
         WorkspaceManagerView::Create => render_manager_name_view(
             frame,
-            &rows,
+            columns,
             dialog,
             &mut form,
             "New workspace name:",
@@ -1125,7 +1129,7 @@ pub(crate) fn render_workspace_manager(
         ),
         WorkspaceManagerView::Rename { .. } => render_manager_name_view(
             frame,
-            &rows,
+            columns,
             dialog,
             &mut form,
             "Workspace name:",
@@ -1139,7 +1143,7 @@ pub(crate) fn render_workspace_manager(
             ..
         } => render_manager_delete(
             frame,
-            &rows,
+            columns,
             dialog,
             &mut form,
             workspace_name,
@@ -1147,13 +1151,13 @@ pub(crate) fn render_workspace_manager(
             *draft_count,
         ),
         WorkspaceManagerView::Drafts { .. } => {
-            render_manager_drafts(frame, &rows, dialog, &mut form)
+            render_manager_drafts(frame, columns, dialog, &mut form)
         }
     }
     let busy = dialog.busy.map(|mutation| format!("Working: {mutation:?}"));
     frame.render_widget(
         Paragraph::new(busy.unwrap_or_default()).style(Style::default().fg(theme::palette().muted)),
-        rows[3],
+        rows[2],
     );
     let initial = match &dialog.view {
         WorkspaceManagerView::List if dialog.entries.is_empty() => WorkspaceControl::New,
@@ -1172,10 +1176,11 @@ pub(crate) fn render_workspace_manager(
 
 fn render_manager_list(
     frame: &mut Frame,
-    rows: &[Rect],
+    columns: ColumnSplit,
     dialog: &WorkspaceManager,
     form: &mut Dialog<WorkspaceControl>,
 ) {
+    let ColumnSplit { body, actions } = columns;
     let list_items = dialog
         .entries
         .iter()
@@ -1211,39 +1216,40 @@ fn render_manager_list(
         })
         .collect::<Vec<_>>();
     if list_items.is_empty() {
-        frame.render_widget(Paragraph::new("No workspaces."), rows[1]);
+        frame.render_widget(Paragraph::new("No workspaces."), body);
         form.register(
             WorkspaceControl::List,
             ControlKind::ChoiceList {
                 len: 0,
                 selected: 0,
             },
-            rows[1],
+            body,
             false,
         );
     } else {
         ChoiceList::render(
             frame,
-            rows[1],
+            body,
             &list_items,
             dialog.selected,
             form,
             WorkspaceControl::List,
         );
     }
-    Dialog::render_actions_aligned(frame, rows[2], &dialog.actions(), form, RowAlign::Right);
+    Dialog::render_actions_stacked(frame, actions, &dialog.actions(), form, ColumnAlign::Right);
 }
 
 fn render_manager_name_view(
     frame: &mut Frame,
-    rows: &[Rect],
+    columns: ColumnSplit,
     dialog: &WorkspaceManager,
     form: &mut Dialog<WorkspaceControl>,
     label: &str,
     _submit: WorkspaceControl,
     _submit_label: &str,
 ) {
-    let field = Rect::new(rows[1].x, rows[1].y, rows[1].width, 1);
+    let ColumnSplit { body, actions } = columns;
+    let field = Rect::new(body.x, body.y, body.width, 1);
     let label_width = Line::raw(label).width() as u16 + 1;
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
@@ -1264,18 +1270,22 @@ fn render_manager_name_view(
         form,
         WorkspaceControl::Name,
     );
-    Dialog::render_actions_aligned(frame, rows[2], &dialog.actions(), form, RowAlign::Right);
+    Dialog::render_actions_stacked(frame, actions, &dialog.actions(), form, ColumnAlign::Right);
 }
 
 fn render_manager_delete(
     frame: &mut Frame,
-    rows: &[Rect],
+    columns: ColumnSplit,
     dialog: &WorkspaceManager,
     form: &mut Dialog<WorkspaceControl>,
     workspace_name: &str,
     session_count: u64,
     draft_count: usize,
 ) {
+    let ColumnSplit {
+        body: body_area,
+        actions,
+    } = columns;
     let destructive = session_count > 0 || draft_count > 0;
     let body = Layout::default()
         .direction(Direction::Vertical)
@@ -1285,7 +1295,7 @@ fn render_manager_delete(
             Constraint::Length(1),
             Constraint::Min(1),
         ])
-        .split(rows[1]);
+        .split(body_area);
     let explanation = if destructive {
         format!(
             "Deleting {workspace_name:?} destroys {session_count} session{} and discards {draft_count} draft{}.",
@@ -1303,15 +1313,16 @@ fn render_manager_delete(
         );
         TextField::render(frame, body[2], &dialog.name, form, WorkspaceControl::Name);
     }
-    Dialog::render_actions_aligned(frame, rows[2], &dialog.actions(), form, RowAlign::Right);
+    Dialog::render_actions_stacked(frame, actions, &dialog.actions(), form, ColumnAlign::Right);
 }
 
 fn render_manager_drafts(
     frame: &mut Frame,
-    rows: &[Rect],
+    columns: ColumnSplit,
     dialog: &WorkspaceManager,
     form: &mut Dialog<WorkspaceControl>,
 ) {
+    let ColumnSplit { body, actions } = columns;
     let drafts = dialog
         .viewed_entry()
         .map(|entry| {
@@ -1333,27 +1344,27 @@ fn render_manager_drafts(
         })
         .unwrap_or_default();
     if drafts.is_empty() {
-        frame.render_widget(Paragraph::new("No detached drafts."), rows[1]);
+        frame.render_widget(Paragraph::new("No detached drafts."), body);
         form.register(
             WorkspaceControl::DraftList,
             ControlKind::ChoiceList {
                 len: 0,
                 selected: 0,
             },
-            rows[1],
+            body,
             false,
         );
     } else {
         ChoiceList::render(
             frame,
-            rows[1],
+            body,
             &drafts,
             dialog.selected_draft,
             form,
             WorkspaceControl::DraftList,
         );
     }
-    Dialog::render_actions_aligned(frame, rows[2], &dialog.actions(), form, RowAlign::Right);
+    Dialog::render_actions_stacked(frame, actions, &dialog.actions(), form, ColumnAlign::Right);
 }
 
 #[cfg(test)]
@@ -1785,21 +1796,40 @@ mod tests {
         // second dismiss control a few cells away from the first.
         assert!(!list.contains("Close"), "{list}");
         assert!(list.contains('×'), "{list}");
-        // Create now sits in the action row, which is packed against the
-        // dialog's right edge.
-        let actions = lines
+        // The actions stack in a column at the dialog's right edge, one per
+        // row, in the order they apply.
+        let labels = ["New workspace", "Rename", "Delete", "Open"];
+        let width = labels
             .iter()
-            .find(|line| line.contains("Open"))
-            .expect("the action row")
-            .trim()
-            .trim_matches('│');
-        assert!(actions.trim_start().starts_with("New workspace"), "{list}");
-        assert!(actions.trim_end().ends_with("Open"), "{list}");
-        let leading = actions.len() - actions.trim_start().len();
-        let trailing = actions.len() - actions.trim_end().len();
+            .map(|label| label.len())
+            .max()
+            .expect("labels");
+        let mut rows = Vec::new();
+        for label in labels {
+            let (row, line) = lines
+                .iter()
+                .enumerate()
+                .find(|(_, line)| line.contains(label))
+                .unwrap_or_else(|| panic!("missing {label:?} in\n{list}"));
+            // Every button shares the widest label's width, so a shorter label
+            // is followed by its share of that width and the button's padding,
+            // and nothing else before the dialog's right edge.
+            let after = &line[line.find(label).unwrap() + label.len()..];
+            let gap = format!("{}│", " ".repeat(2 + width - label.len()));
+            assert!(
+                after.starts_with(&gap),
+                "{label} is not packed against the dialog's right edge: {line}"
+            );
+            rows.push((row, cell_column(line, label), label));
+        }
         assert!(
-            leading > trailing,
-            "the action row is not right-packed: {list}"
+            rows.windows(2).all(|pair| pair[0].0 + 1 == pair[1].0),
+            "the buttons are not stacked in order: {rows:?}\n{list}"
+        );
+        let (_, first_column, _) = rows[0];
+        assert!(
+            rows.iter().all(|(_, column, _)| *column == first_column),
+            "the stacked buttons do not share a column: {rows:?}\n{list}"
         );
 
         // Both remaining dismiss paths work: the title bar's × by mouse, and
@@ -1846,13 +1876,17 @@ mod tests {
         assert!(list.contains("New workspace"), "{list}");
         assert!(list.contains("Open"), "{list}");
         assert!(list.contains("Drafts"), "{list}");
-        // Create belongs to the action row, not to a lone button above the
-        // list where it reads as part of the dialog's header.
+        // Create belongs to the column the list is set beside, not to a lone
+        // button above the list where it reads as part of the dialog's header.
+        let list_row = lines
+            .iter()
+            .position(|line| line.contains("Project alpha"))
+            .expect("the list row");
         let actions = lines
             .iter()
-            .position(|line| line.contains("Open"))
-            .expect("the action row");
-        assert!(lines[actions].contains("New workspace"), "{list}");
+            .position(|line| line.contains("New workspace"))
+            .expect("the action column");
+        assert!(actions >= list_row, "{list}");
 
         if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
             manager.form.get_mut().focus(WorkspaceControl::New);

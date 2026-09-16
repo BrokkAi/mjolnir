@@ -10,7 +10,10 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-use super::{ButtonRow, ControlKind, EventResult, Form, Interaction, Outcome, RowAlign};
+use super::{
+    ButtonColumn, ButtonRow, ColumnAlign, ColumnSplit, ControlKind, EventResult, Form, Interaction,
+    Outcome, RowAlign,
+};
 use crate::{modal, selection::FrameSurfaces, theme};
 
 /// The meaning of an action, independent of its label and position.
@@ -158,25 +161,75 @@ impl<K: Copy + Eq> Dialog<K> {
         dialog: &mut Self,
         align: RowAlign,
     ) {
+        let buttons = dialog.ordered_actions(buttons);
+        ButtonRow::render_aligned(frame, area, &buttons, &mut dialog.form, align);
+    }
+
+    /// Draws the action column packed against `align`, in the same role order.
+    pub fn render_actions_stacked(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        buttons: &[(K, &str, bool)],
+        dialog: &mut Self,
+        align: ColumnAlign,
+    ) {
+        let buttons = dialog.ordered_actions(buttons);
+        ButtonColumn::render_aligned(frame, area, &buttons, &mut dialog.form, align);
+    }
+
+    /// Splits `area` into the page body and the action column beside it.
+    ///
+    /// Prefer this to [`ButtonColumn::split`] so the column is sized from the
+    /// same labels the stack renders, including a pending rewrite.
+    pub fn split_actions(&self, area: Rect, buttons: &[(K, &str, bool)]) -> ColumnSplit {
+        let buttons = self.ordered_actions(buttons);
+        ButtonColumn::split(area, &buttons)
+    }
+
+    /// Draws the action column without registering hitboxes.
+    ///
+    /// A page that stays visible behind a popup mirrors its stack through this
+    /// so the controls keep their places, while a click on the overlay covering
+    /// them cannot reach a control behind it.
+    pub fn render_actions_stacked_inert(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        buttons: &[(K, &str, bool)],
+        dialog: &Self,
+        align: ColumnAlign,
+    ) {
+        let labels = dialog
+            .ordered_actions(buttons)
+            .into_iter()
+            .map(|(_, label, _)| label)
+            .collect::<Vec<_>>();
+        ButtonColumn::render_inert(frame, area, &labels, align);
+    }
+
+    /// Applies the pending-submission rewrite and returns the semantic order.
+    ///
+    /// Every action layout reads this, so a stacked column and a row cannot
+    /// disagree about labels or order.
+    fn ordered_actions<'a>(&self, buttons: &[(K, &'a str, bool)]) -> Vec<(K, &'a str, bool)> {
         let mut buttons = buttons.to_vec();
-        if dialog.submission_pending {
+        if self.submission_pending {
             for (id, label, enabled) in &mut buttons {
-                if dialog.form.is_default_action(*id) {
+                if self.form.is_default_action(*id) {
                     *label = "Working…";
                     *enabled = false;
                 }
             }
         }
         buttons.sort_by_key(|(id, _, _)| {
-            let role = dialog
+            let role = self
                 .action_roles
                 .iter()
                 .find(|(control, _)| control == id)
                 .map(|(_, role)| *role)
                 .unwrap_or_else(|| {
-                    if dialog.form.is_default_action(*id) {
+                    if self.form.is_default_action(*id) {
                         ActionRole::Primary
-                    } else if dialog.dismiss_actions.contains(id) {
+                    } else if self.dismiss_actions.contains(id) {
                         ActionRole::Cancel
                     } else {
                         ActionRole::Secondary
@@ -189,7 +242,7 @@ impl<K: Copy + Eq> Dialog<K> {
                 ActionRole::Primary => 3,
             }
         });
-        ButtonRow::render_aligned(frame, area, &buttons, &mut dialog.form, align);
+        buttons
     }
 
     /// Declares which action Enter in a single-line field invokes.
