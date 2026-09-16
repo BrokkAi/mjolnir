@@ -1274,20 +1274,7 @@ impl RuntimeState {
             let session_id = session_id.clone();
             move || {
                 let controller = Controller::load()?;
-                Ok(controller
-                    .state
-                    .subagents
-                    .values()
-                    .filter(|child| child.parent_session_id == session_id)
-                    .filter(|child| {
-                        controller
-                            .state
-                            .sessions
-                            .get(&child.child_session_id)
-                            .is_some_and(|session| session.state.is_active())
-                    })
-                    .map(|child| child.child_session_id.clone())
-                    .collect::<Vec<_>>())
+                Ok(active_child_session_ids(&controller.state, &session_id))
             }
         })
         .await?;
@@ -1637,10 +1624,8 @@ impl RuntimeState {
         let children = blocking({
             let session_id = session_id.clone();
             move || {
-                Ok(crate::database::list_subagents(&session_id)?
-                    .into_iter()
-                    .map(|child| child.child_session_id)
-                    .collect::<Vec<_>>())
+                let controller = Controller::load()?;
+                Ok(active_child_session_ids(&controller.state, &session_id))
             }
         })
         .await?;
@@ -2257,6 +2242,24 @@ fn report_worker_upgrade(
             tracing::warn!(%session_id, %error, "could not upgrade the session worker");
         }
     }
+}
+
+/// Children of `parent_session_id` whose session is still active, in the
+/// order they should be stopped before the parent. A child that already
+/// stopped needs nothing and would make `force_stop` fail on it.
+fn active_child_session_ids(state: &mj_core::state::State, parent_session_id: &str) -> Vec<String> {
+    state
+        .subagents
+        .values()
+        .filter(|child| child.parent_session_id == parent_session_id)
+        .filter(|child| {
+            state
+                .sessions
+                .get(&child.child_session_id)
+                .is_some_and(|session| session.state.is_active())
+        })
+        .map(|child| child.child_session_id.clone())
+        .collect()
 }
 
 fn runtime_records_for_workspace(
@@ -4438,6 +4441,39 @@ mod tests {
             .collect::<Vec<_>>();
         all_child_ids.sort_unstable();
         assert_eq!(all_child_ids, ["child-a1", "child-a2", "child-b1"]);
+    }
+
+    #[test]
+    fn active_child_session_ids_skips_children_that_already_stopped() {
+        let parent = runtime_test_session("parent", "workspace", SessionState::Closing);
+        let running_child =
+            runtime_test_session("running-child", "workspace", SessionState::Running);
+        let stopped_child =
+            runtime_test_session("stopped-child", "workspace", SessionState::Stopped);
+        let unrelated = runtime_test_session("unrelated", "workspace", SessionState::Running);
+        let mut state = mj_core::state::State {
+            sessions: [
+                parent.clone(),
+                running_child.clone(),
+                stopped_child.clone(),
+                unrelated.clone(),
+            ]
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect(),
+            ..mj_core::state::State::default()
+        };
+        state.subagents = [
+            runtime_test_subagent(&running_child.id, &parent.id),
+            runtime_test_subagent(&stopped_child.id, &parent.id),
+        ]
+        .into_iter()
+        .map(|subagent| (subagent.child_session_id.clone(), subagent))
+        .collect();
+
+        let children = active_child_session_ids(&state, &parent.id);
+
+        assert_eq!(children, vec!["running-child".to_owned()]);
     }
 
     #[tokio::test]
