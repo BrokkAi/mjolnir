@@ -145,11 +145,7 @@ impl ControllerLog {
         let directory = mj_core::config::data_dir().join("logs");
         fs::create_dir_all(&directory)
             .with_context(|| format!("create Mjolnir log directory {}", directory.display()))?;
-        prune_logs(
-            &directory,
-            RETAINED_LOGS.saturating_sub(1),
-            crate::daemon::process_is_alive,
-        )?;
+        prune_logs(&directory, RETAINED_LOGS.saturating_sub(1))?;
 
         let path = directory.join(log_filename());
         let mut options = OpenOptions::new();
@@ -208,39 +204,21 @@ fn log_filename() -> String {
     )
 }
 
-/// The process id that created a managed log, read back from the name that
-/// `log_filename` produced.
-fn log_owner_pid(file_name: &str) -> Option<u32> {
-    file_name
-        .strip_suffix(".log")?
-        .rsplit_once('-')?
-        .1
-        .parse()
-        .ok()
-}
-
-/// Remove the oldest managed logs beyond `retain`, counting only logs whose
-/// owner has exited. The daemon and long-running clients such as `mj wait`
-/// keep their log open for their whole lifetime; unlinking it would strand
-/// their output on an inode reachable only through `/proc/<pid>/fd`. A log
-/// with an unrecognized name is treated as unowned and stays eligible.
-fn prune_logs(directory: &Path, retain: usize, owner_is_alive: impl Fn(u32) -> bool) -> Result<()> {
+fn prune_logs(directory: &Path, retain: usize) -> Result<()> {
     let mut logs = Vec::new();
     for entry in fs::read_dir(directory)
         .with_context(|| format!("read Mjolnir log directory {}", directory.display()))?
     {
         let entry = entry.with_context(|| format!("read entry in {}", directory.display()))?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !(name.starts_with("mj-") && name.ends_with(".log")) {
-            continue;
+        if let Some(path) = {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            (name.starts_with("mj-") && name.ends_with(".log")).then_some(entry.path())
+        } {
+            logs.push(path);
         }
-        if log_owner_pid(name).is_some_and(&owner_is_alive) {
-            continue;
-        }
-        logs.push(entry.path());
     }
     logs.sort_unstable();
     let remove = logs.len().saturating_sub(retain);
@@ -313,7 +291,7 @@ mod tests {
             fs::write(directory.path().join(name), name).unwrap();
         }
 
-        prune_logs(directory.path(), 2, |_| false).unwrap();
+        prune_logs(directory.path(), 2).unwrap();
 
         assert!(
             !directory
@@ -341,52 +319,6 @@ mod tests {
             "legacy Hel logs are ignored rather than treated as Mjolnir state"
         );
         assert!(directory.path().join("notes.log").exists());
-    }
-
-    #[test]
-    fn prune_logs_never_removes_a_log_whose_owner_is_alive() {
-        let directory = tempfile::tempdir().unwrap();
-        let names = [
-            "mj-20260101T000000.000Z-nope.log",
-            "mj-20260824T000000.000Z-100.log",
-            "mj-20260825T000000.000Z-200.log",
-            "mj-20260826T000000.000Z-300.log",
-            "mj-20260827T000000.000Z-400.log",
-            "mj-20260828T000000.000Z-500.log",
-        ];
-        for name in names {
-            fs::write(directory.path().join(name), name).unwrap();
-        }
-
-        prune_logs(directory.path(), 2, |pid| pid == 100 || pid == 300).unwrap();
-
-        let exists = |name: &str| directory.path().join(name).exists();
-        assert!(
-            !exists(names[0]),
-            "an unowned log is ordinary retention state"
-        );
-        assert!(
-            exists(names[1]),
-            "the oldest log survives while its owner runs"
-        );
-        assert!(!exists(names[2]));
-        assert!(
-            exists(names[3]),
-            "a live owner does not count against retention"
-        );
-        assert!(exists(names[4]));
-        assert!(exists(names[5]));
-    }
-
-    #[test]
-    fn log_owner_pid_reads_back_the_creating_process() {
-        assert_eq!(
-            log_owner_pid("mj-20260916T015600.490Z-3278229.log"),
-            Some(3278229)
-        );
-        assert_eq!(log_owner_pid("mj-20260916T015600.490Z-nope.log"), None);
-        assert_eq!(log_owner_pid("notes.log"), None);
-        assert_eq!(log_owner_pid(&log_filename()), Some(std::process::id()));
     }
 
     #[test]
