@@ -246,8 +246,16 @@ pub(super) fn serve(root: &Path) -> Result<(SubagentEndpoint, super::unix::Socke
     let service = endpoint.clone();
     tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
+            // A transient accept failure (EMFILE, ECONNABORTED) must not end
+            // the loop: dropping the listener would refuse every later tool
+            // call for the life of the worker.
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(error) => {
+                    tracing::warn!(error = %error, "sub-agent socket accept failed");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
             };
             let service = service.clone();
             tokio::spawn(async move {

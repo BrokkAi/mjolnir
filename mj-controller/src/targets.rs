@@ -38,17 +38,20 @@ enum ManagedResourceKind {
 
 /// Build command-line fragments that identify resources Hel owns for a session.
 fn managed_resource_identity_args(kind: ManagedResourceKind, session_id: &str) -> Vec<String> {
+    let instance = mj_core::config::instance_identity();
     match kind {
         ManagedResourceKind::Container => vec![
             "--label".to_owned(),
             format!("{SESSION_LABEL}={session_id}"),
             "--label".to_owned(),
             format!("{MANAGED_LABEL}=true"),
+            "--label".to_owned(),
+            format!("{INSTANCE_LABEL}={instance}"),
         ],
         ManagedResourceKind::Ec2Instance => vec![
             "--tag-specifications".to_owned(),
             format!(
-                "ResourceType=instance,Tags=[{{Key={SESSION_TAG},Value={session_id}}},{{Key={MANAGED_TAG},Value=true}}]"
+                "ResourceType=instance,Tags=[{{Key={SESSION_TAG},Value={session_id}}},{{Key={MANAGED_TAG},Value=true}},{{Key={INSTANCE_TAG},Value={instance}}}]"
             ),
         ],
     }

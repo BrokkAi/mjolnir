@@ -222,6 +222,10 @@ enum RecoverCommand {
     Scan {
         #[arg(long)]
         json: bool,
+        /// Also list workers created by other Mjolnir instances, or by builds
+        /// that left no instance stamp.
+        #[arg(long)]
+        all_instances: bool,
     },
     /// Probe a managed worker and add it back to controller state.
     Adopt {
@@ -235,6 +239,10 @@ enum RecoverCommand {
         /// Required only for current-v1 workers created before ownership markers.
         #[arg(long)]
         bundle: Option<String>,
+        /// Allow adopting a worker another instance created, or one with no
+        /// instance stamp.
+        #[arg(long)]
+        all_instances: bool,
     },
     /// Destroy an untracked managed resource after exact-ID confirmation.
     Destroy {
@@ -244,6 +252,10 @@ enum RecoverCommand {
         target: String,
         #[arg(long)]
         confirm: String,
+        /// Allow destroying a worker another instance created, or one with no
+        /// instance stamp.
+        #[arg(long)]
+        all_instances: bool,
     },
 }
 
@@ -1219,20 +1231,36 @@ fn resolve_login_profile(config: &Config, requested: Option<&str>) -> Result<Str
 async fn recover(args: RecoverArgs) -> Result<()> {
     let mut daemon = daemon::connect_or_start().await?;
     match args.command {
-        RecoverCommand::Scan { json } => {
-            let scan = daemon.scan_recovery().await?;
+        RecoverCommand::Scan {
+            json,
+            all_instances,
+        } => {
+            let scan = daemon.scan_recovery(all_instances).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&scan)?);
             } else {
                 for candidate in &scan.candidates {
+                    let instance = match candidate.instance_id.as_deref() {
+                        Some(instance) if instance == scan.instance_id => {
+                            "this instance".to_owned()
+                        }
+                        Some(instance) => format!("instance {instance}"),
+                        None => "unknown instance".to_owned(),
+                    };
                     let metadata = if candidate.ownership.is_some() {
                         "ownership verified"
                     } else {
                         "v1 resource; profile and bundle unknown"
                     };
                     println!(
-                        "{}\t{}\t{}",
-                        candidate.session_id, candidate.target_template_id, metadata
+                        "{}\t{}\t{}\t{}",
+                        candidate.session_id, candidate.target_template_id, instance, metadata
+                    );
+                }
+                if scan.hidden_other_instances > 0 {
+                    eprintln!(
+                        "note: {} worker(s) created by other or unknown instances were not listed; pass --all-instances to include them",
+                        scan.hidden_other_instances
                     );
                 }
                 for warning in &scan.warnings {
@@ -1246,9 +1274,10 @@ async fn recover(args: RecoverArgs) -> Result<()> {
             target,
             profile,
             bundle,
+            all_instances,
         } => {
             daemon
-                .adopt_recovery(session.clone(), target, profile, bundle)
+                .adopt_recovery(session.clone(), target, profile, bundle, all_instances)
                 .await?;
             println!("adopted worker {session}");
             Ok(())
@@ -1257,9 +1286,10 @@ async fn recover(args: RecoverArgs) -> Result<()> {
             session,
             target,
             confirm,
+            all_instances,
         } => {
             daemon
-                .destroy_recovery(session.clone(), target, confirm)
+                .destroy_recovery(session.clone(), target, confirm, all_instances)
                 .await?;
             println!("destroyed orphan worker resource {session}");
             Ok(())
