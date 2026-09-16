@@ -1,150 +1,87 @@
 # Releasing Mjolnir
 
-Releases are maintainer-driven. This is the tagging runbook; see
-[CONTRIBUTING.md](CONTRIBUTING.md) for development setup, runtime invariants,
-tests, and dependency-license maintenance.
+Pick a known-good commit, tag it, and push the tag. The commit does not need to
+be current master or merged into master. Passing checks on that exact commit
+count: do not rerun formatting, Clippy, tests, builds, or license generation
+just to release it. A broken newer master does not block the release.
 
-## Versions
+## Tag and release
 
-The release version is set once, in `[workspace.package]` in the root
-`Cargo.toml`; every workspace crate inherits it via `version.workspace = true`,
-so they cannot drift apart. After changing that one value, run
-`node scripts/release-version.mjs sync` to project it into the published
-internal dependency requirements under `[workspace.dependencies]`, then run
-`cargo update --workspace` to refresh the workspace entries in `Cargo.lock`.
-CI runs the script's `check` mode so generated dependency versions cannot
-drift. Member manifests inherit the dependencies and contain no release
-versions. `install.sh`'s `SCRIPT_VERSION` is an independent installer logging
-revision and is not automatically synchronized to product releases.
+The tag must match the version already committed in the selected commit's
+`Cargo.toml`, internal dependency requirements, `Cargo.lock`, and license report.
+For example, to release a known-good commit whose version is `1.2.3`:
 
-`licenses/THIRD_PARTY_LICENSES.html` embeds the workspace crate versions, so a
-version bump must regenerate it. CI diffs the checked-in report against a fresh
-`cargo about generate` and fails on any difference.
+```sh
+git tag v1.2.3 <known-good-commit>
+git push origin v1.2.3
+```
 
-## What a tag triggers
+Use the configured upstream remote if it is not `origin`. No branch switch,
+merge, or new release commit is needed when the version is already prepared.
+The workflow checks version consistency before building. Tags run the workflow
+stored in the tagged commit, so older commits retain their older release workflow.
 
-A `vX.Y.Z` or `vX.Y.Z-PRERELEASE` tag triggers the GitHub release workflow.
-Prerelease tags create a GitHub prerelease, and npm publishes them under the
-`next` dist-tag rather than moving `latest`.
+A release request authorizes pushing the tag and publishing through the normal
+workflows. Registry authorization is configured once; do not repeat an ownership
+or trusted-publisher audit for every release. If publication fails, fix the
+reported problem and retry the failed job.
 
-The release workflow verifies that the tag matches every workspace version
-before building artifacts. It creates the GitHub Release as a draft, attaches
-all assets, and only then publishes it so immutable releases cannot expose a
-partially uploaded asset set. CI's branch and pull request triggers do not match
-tags, so a release relies on the tagged commit having passed CI on master. Run
-the required formatting, Clippy, build, test, license, and release-version
-validations against the clean release commit before creating the tag.
+## When a version bump is needed
 
-The builds cover Linux x86-64 and ARM64 and a universal macOS archive; the
-controller supports Linux and macOS (Windows stays a CI compile gate only —
-use WSL2). Every archive contains the headless `mj` controller, the separate
-`mj-desktop` native application, the voice worker, and the two static musl
-session workers (`mj-worker-x86_64-unknown-linux-musl` and
-`mj-worker-aarch64-unknown-linux-musl`) that the controller uploads into
-disposable targets. The macOS archive additionally contains a universal native
-`mj-worker` for `local-bare`. Every archive includes the applicable licenses
-and notices and is published with a SHA-256 sidecar.
+Prepare the version as an ordinary change before choosing the release commit:
 
-Linux CLI builds use `cargo-zigbuild 0.23.3` and Zig `0.15.2` with an explicit
-glibc 2.28 target. `scripts/build-linux-cli.sh` isolates their output under
-`target/release-cli` and verifies the ELF architecture, GNU loader, shared
-libraries, and maximum GLIBC symbol version before packaging. CI runs these
-binaries through tmux on Rocky Linux 8, Debian 12, and Amazon Linux 2023 for
-both architectures. Desktop and voice helpers retain native builds; the CLI
-compatibility floor does not apply to their system dependencies.
+1. Set `[workspace.package].version` in the root `Cargo.toml`.
+2. Run `node scripts/release-version.mjs sync` and `cargo update --workspace`.
+3. Regenerate `licenses/THIRD_PARTY_LICENSES.html` with the pinned license tools
+   described in [CONTRIBUTING.md](CONTRIBUTING.md), then run
+   `node scripts/sync-package-assets.mjs sync`.
+4. Commit the changes and validate that commit once through the normal checks.
 
-Neither registry publish runs off the tag push. Both wait for the release
-workflow to succeed, so a version mismatch or build failure on any target stops
-the release before anything reaches crates.io or npm.
+Use `node scripts/release-version.mjs check vX.Y.Z` to check a prepared version
+locally if needed. Changing source or version creates a new commit; results
+from a different commit do not establish that the new commit passes.
+`install.sh`'s `SCRIPT_VERSION` is an independent installer logging revision.
 
-## Discord announcement
+## What runs automatically
 
-To announce a published GitHub Release in Discord, set the
-`DISCORD_RELEASE_WEBHOOK_URL` repository Actions secret to the target channel's
-webhook URL. The release workflow reuses GitHub's generated release notes,
-prevents mentions from being parsed, suppresses automatic link embeds, and
-leaves a failed Discord delivery as a warning so it cannot invalidate an
-already-published release.
+The tag workflow checks the version, then builds Linux workers, Linux platform
+binaries, and both macOS architectures concurrently. Only archive assembly waits
+for the binaries it needs. It attaches all archives and SHA-256 sidecars to a
+draft GitHub Release, then publishes the complete release. It does not rerun CI.
 
-## crates.io publishing
+Linux x86-64 and ARM64 archives contain `mj`, `mj-desktop`, `mj-voice-worker`,
+and both static musl session workers. The universal macOS archive also contains
+a native `mj-worker`. All archives include licenses and notices. Linux CLI builds
+retain their glibc 2.28 ELF checks; CI covers older-distribution runtime tests.
 
-`publish.yml` publishes `brokk-mj-voice-worker`, `brokk-mj-core`,
-`brokk-mj-review`, `brokk-mj-transcript`, `brokk-mj-checkpoint`,
-`brokk-mj-client`, `brokk-mj-worker`, `brokk-mj-controller`, `brokk-mj-chat`,
-`brokk-mj-tui`, `brokk-mj-desktop`, and `brokk-mjolnir` in dependency order.
-The checkpoint, transcript and review implementations depend on core but not
-on each other; runtime and UI consumers follow their implementation libraries.
-It refuses to publish when the tag differs from any workspace crate version. It
-assembles the whole workspace in one `cargo package --workspace --no-verify`
-run, because extracted packages cannot resolve same-release path dependencies
-from the registry before publication. It then checks every target in the whole
-workspace on GNU/Linux and asserts that every publishable package produced its
-`.crate` artifact ahead of the `crates-io` environment gate, so a failure
-surfaces without spending an approval. Each `cargo publish` performs extracted
-package verification again after the loop has published the dependencies it
-needs.
+After the GitHub Release succeeds, crates.io and npm publication run independently.
+Rust source packages are assembled and checked for presence, then published in
+dependency order with `--no-verify`, reusing the selected commit's validation
+instead of recompiling the workspace and every extracted package. npm verifies
+release checksums and smoke-tests the packaged installation. Its platform
+packages publish concurrently; the wrapper waits until all platforms are readable.
 
-Publishing runs automatically once the release workflow succeeds. The automated
-release job explicitly dispatches `publish.yml` after creating the GitHub
-Release. This uses a trigger supported by crates.io trusted publishing; GitHub
-does not emit a second workflow from release events created with its workflow
-token, and crates.io rejects the `workflow_run` trigger. A release published by
-another actor also starts `publish.yml` through its release event.
+A `vX.Y.Z-PRERELEASE` tag creates a GitHub prerelease and uses npm's `next`
+dist-tag; stable releases use `latest`.
 
-Each crate is skipped when that version is already on the registry. That is the
-recovery path if some crates publish and a later one fails: re-running resumes
-at the crate that did not land. crates.io reserves a version number permanently
-once published and yanking does not release it, so a shipped version can never
-be republished. Every publish is retried, because a crate cannot be packaged
-until the sibling it depends on has propagated through the sparse index.
+## Recovery and optional channels
 
-To package a tag without publishing, run the workflow manually with `publish`
-off and inspect its `.crate` artifact.
+Rerun failed workflow jobs for the same tag. Registry jobs skip versions that
+already exist, allowing partial publication to resume. Never move a published
+tag or attempt to overwrite a published package version. To inspect packages
+without publishing, manually run `publish.yml` or `publish-npm.yml` with the
+release tag and `publish` disabled.
 
-## npm publishing
+The release workflow dispatches crates.io publication explicitly because its
+workflow token does not trigger a second workflow through release events, and
+crates.io trusted publishing does not accept `workflow_run`. npm also listens
+for successful release-workflow completion. Existing environment approvals,
+when configured, are handled by GitHub.
 
-`publish-npm.yml` packages an existing GitHub Release into `@brokkai/mjolnir`
-and its three platform packages. It verifies the release checksums, then
-publishes every platform package before the root wrapper.
+Discord announcements use `DISCORD_RELEASE_WEBHOOK_URL` and generated release
+notes. Delivery failures are warnings and do not invalidate a published release.
 
-Publishing runs automatically once a GitHub Release is published. Both the
-release event and the release workflow's completion trigger it, and each
-publish step is skipped when that version already exists on the registry, so
-the overlap cannot republish over a shipped version.
-
-To package and smoke-test a tag without publishing, run the workflow manually
-with `publish` off and inspect its tarball artifact and Linux smoke test.
-
-## Homebrew tap
-
-The `BrokkAi/homebrew-tap` repository holds the `mjolnir` formula; it is
-bumped per release outside this repository's workflows, so it is a manual
-step in the release runbook. The formula installs into the Cellar and exposes
-a wrapper script named `mj`. That wrapper must export
-`MJOLNIR_MANAGED_BY_HOMEBREW` before exec-ing the real binary, and must not
-export `MJOLNIR_NO_UPDATE_CHECK`: mj reads that marker to choose
-`brew update && brew upgrade mjolnir` over its curl-installer self-replace
-path, and treating a Homebrew install as a direct install would have mj
-overwriting files brew owns. Until the formula lands, Homebrew users simply
-see no update prompt, which matches the pre-update-check status quo.
-
-## Before tagging
-
-Confirm that:
-
-1. Every workspace crate manifest and its `Cargo.lock` workspace entry matches
-   the intended tag.
-2. Formatting, Clippy, release builds, tests, and relevant cross-platform or
-   packaging checks pass.
-3. Dependency-license policy and generated notice reports are current.
-4. User-facing installation, configuration, and release documentation reflects
-   the shipped behavior.
-5. The release commit is merged and the tagged commit is the exact commit meant
-   to be published.
-6. Publishing authorization is verified for every registry package using the
-   intended publisher. Check the exact repository, workflow, and environment
-   for each trusted-publisher configuration. Package existence, ownership of
-   sibling crates, green CI, and successful dry-runs do not establish this
-   authorization. Stop before tagging if any package's access is unverified.
-
-After regenerating notices or changing package documentation, run `node scripts/sync-package-assets.mjs sync` and commit the synchronized package copies. CI verifies that each published package contains the canonical assets.
+Homebrew is a separate manual update in `BrokkAi/homebrew-tap`. Update its formula
+when shipping to that channel. Its `mj` wrapper must export
+`MJOLNIR_MANAGED_BY_HOMEBREW`, and must not export `MJOLNIR_NO_UPDATE_CHECK`, so
+updates go through Homebrew.

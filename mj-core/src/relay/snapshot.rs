@@ -848,6 +848,16 @@ pub struct RelaySnapshot {
     /// after the fallback still sees that continuity was lost.
     #[serde(default)]
     pub native_continuity_lost: bool,
+    /// The native thread behind `native_session_id` has been used: the agent
+    /// sent conversation content, a prompt was transmitted to it, it was
+    /// resumed rather than created here, or its identity arrived from outside
+    /// this journal. Codex writes a thread's rollout only at its first user
+    /// message, so an unused thread can be missing on disk and safely
+    /// replaced; a used one cannot. Older snapshots omit the field and read as
+    /// `false`, and it is written only once true so an older worker keeps
+    /// reading the snapshots of sessions that never used their thread.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_session_used: bool,
     pub agent_capabilities: Option<Box<AgentCapabilities>>,
     pub agent_info: Option<Implementation>,
     pub config_options: Vec<SessionConfigOption>,
@@ -894,6 +904,7 @@ impl RelaySnapshot {
             recovery_floor_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
             native_session_id: None,
             native_continuity_lost: false,
+            native_session_used: false,
             agent_capabilities: None,
             agent_info: None,
             config_options: Vec::new(),
@@ -1395,11 +1406,17 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         RelayObservation::SessionOpened {
             native_session_id,
             native_continuity_lost,
-            ..
+            resumed,
         } => {
             snapshot.native_session_id = Some(native_session_id.clone());
             // A normal open clears the flag; only the fallback sets it.
             snapshot.native_continuity_lost = *native_continuity_lost;
+            // A resumed thread was not created here, so this journal cannot
+            // show everything the thread contains. Once true this never
+            // clears: replacing such a thread would discard native history.
+            if *resumed {
+                snapshot.native_session_used = true;
+            }
         }
         RelayObservation::SessionConfigured { config_options } => {
             snapshot.config_options = config_options.clone();

@@ -126,6 +126,11 @@ pub struct RuntimeSnapshot {
     /// Recent background events for this workspace's sessions, oldest first.
     #[serde(default)]
     pub notices: Vec<RuntimeNotice>,
+    /// Parent/child relations for the sessions in `records`, so a surface can
+    /// keep a daemon-created child out of the real workspace without a full
+    /// state reload.
+    #[serde(default)]
+    pub subagents: Vec<mj_core::subagent::SubagentRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

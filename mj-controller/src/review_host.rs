@@ -400,6 +400,13 @@ impl TurnReviewHost {
     }
 
     /// Reports one session's latest view. This is the trigger's only input.
+    /// Prune the retained last-views to the live session set. The daemon calls
+    /// this from its reconcile so a stopped or destroyed session's transcript is
+    /// released rather than retained in `sessions` forever.
+    pub fn retain_sessions(&self, live: std::collections::BTreeSet<String>) {
+        let _ = self.events.send(HostEvent::Retain { live });
+    }
+
     pub fn observe(&self, session_id: &str, view: &ManagedSessionView) {
         // Running -> Idle is an edge, not a level: the session manager
         // suppresses unchanged views, so dropping one here can lose an
@@ -505,6 +512,12 @@ enum HostEvent {
         /// Whether this view had a prompt of ours in flight. Only a turn that
         /// answered a prompt arms an automatic review.
         prompt_driven: bool,
+    },
+    /// Drop the retained last-view (with its full transcript) for every session
+    /// no longer in the live set. Without this, `sessions` keeps a
+    /// `MaterializedSession` per session ever observed and never releases it.
+    Retain {
+        live: std::collections::BTreeSet<String>,
     },
     Start {
         session_id: String,
@@ -815,6 +828,7 @@ impl HostState {
                 snapshot,
                 prompt_driven,
             } => self.observe(session_id, snapshot, prompt_driven).await,
+            HostEvent::Retain { live } => self.retain_sessions(&live),
             HostEvent::Start {
                 session_id,
                 manual,
@@ -1004,6 +1018,14 @@ impl HostState {
                 self.run(&session_id, requests);
             }
         }
+    }
+
+    /// Release the retained last-view for every session no longer in the live
+    /// set, so a stopped or destroyed session's `MaterializedSession` (its full
+    /// transcript) does not linger. The in-flight review state in `reviews`/
+    /// `closing` is separate and keeps its own lifetime.
+    fn retain_sessions(&mut self, live: &std::collections::BTreeSet<String>) {
+        self.sessions.retain(|session_id, _| live.contains(session_id));
     }
 
     /// Watches one session for the edge that arms an automatic review.

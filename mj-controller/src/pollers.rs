@@ -41,6 +41,7 @@ use crate::worker_client::CredentialSyncCoordinator;
 
 use crate::daemon;
 use mj_core::state::short_id;
+use mj_core::subagent::SubagentRecord;
 
 #[cfg(test)]
 mod runtime_feed_tests;
@@ -1457,6 +1458,10 @@ pub struct RuntimeStateUpdate {
     pub records: Vec<SessionRecord>,
     pub lifecycles: Vec<daemon::RuntimeLifecycleView>,
     pub moves: Vec<mj_core::state::MoveOperation>,
+    /// Parent/child relations for the sessions in `records`, so a surface can
+    /// keep a daemon-created child out of the real workspace without a full
+    /// state reload.
+    pub subagents: Vec<SubagentRecord>,
 }
 
 /// What a session looked like the last time a view was published for it.
@@ -1809,6 +1814,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 records: snapshot.records,
                                 lifecycles: snapshot.lifecycles,
                                 moves: snapshot.moves,
+                                subagents: snapshot.subagents,
                             });
                             reviews_tx.send_replace(snapshot.reviews);
                             notices_tx.send_replace(snapshot.notices);

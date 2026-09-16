@@ -25,6 +25,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use mj_core::config::Config;
 use mj_core::relay::RelayCommand;
 use mj_core::state::{RecoveryObservation, SessionRecord, SessionState};
+use mj_core::subagent::SubagentRecord;
 
 use crate::controller::{
     Controller, ControllerStoreGuard, SessionLaunchOptions, SessionResumeOptions,
@@ -778,6 +779,7 @@ impl RuntimeState {
             .cloned()
             .collect();
         let records = runtime_records_for_workspace(&controller, &session_ids);
+        let subagents = runtime_subagents_for_workspace(&controller, &records);
         Ok(RuntimeSnapshot {
             workspace_names,
             moves: moves
@@ -791,6 +793,7 @@ impl RuntimeState {
             lifecycles,
             reviews,
             notices,
+            subagents,
         })
     }
 
@@ -1271,20 +1274,7 @@ impl RuntimeState {
             let session_id = session_id.clone();
             move || {
                 let controller = Controller::load()?;
-                Ok(controller
-                    .state
-                    .subagents
-                    .values()
-                    .filter(|child| child.parent_session_id == session_id)
-                    .filter(|child| {
-                        controller
-                            .state
-                            .sessions
-                            .get(&child.child_session_id)
-                            .is_some_and(|session| session.state.is_active())
-                    })
-                    .map(|child| child.child_session_id.clone())
-                    .collect::<Vec<_>>())
+                Ok(active_child_session_ids(&controller.state, &session_id))
             }
         })
         .await?;
@@ -1634,10 +1624,8 @@ impl RuntimeState {
         let children = blocking({
             let session_id = session_id.clone();
             move || {
-                Ok(crate::database::list_subagents(&session_id)?
-                    .into_iter()
-                    .map(|child| child.child_session_id)
-                    .collect::<Vec<_>>())
+                let controller = Controller::load()?;
+                Ok(active_child_session_ids(&controller.state, &session_id))
             }
         })
         .await?;
@@ -2075,18 +2063,36 @@ impl RuntimeState {
     /// Checkpoint a session now and publish the result, the way the daemon's
     /// own checkpoint action does.
     ///
-    /// The API's bundle export needs a fresh archive for a running session, and
-    /// it must take the same lifecycle guard and controller refresh as any
-    /// other checkpoint rather than driving the controller behind their backs.
+    /// The API's bundle export needs a fresh archive for a running session. Only
+    /// that session's own lifecycle operation can conflict with its checkpoint,
+    /// so this refuses when the session itself is mid-operation and returns a
+    /// [`SessionLifecycleBusy`] the export path can fall back on. It must not
+    /// take the process-wide lifecycle guard: that rejected every export while
+    /// any unrelated session anywhere was mid-lifecycle (#1010).
     pub async fn checkpoint_session_now(
         &self,
         session_id: &str,
     ) -> Result<mj_core::state::CheckpointMetadata> {
-        ensure_no_active_lifecycle(self)?;
+        if self.session_lifecycle_active(session_id) {
+            return Err(anyhow::Error::new(SessionLifecycleBusy {
+                session_id: session_id.to_owned(),
+            }));
+        }
         let mut controller = blocking(Controller::load).await?;
         let checkpoint = controller.checkpoint_session(session_id).await?;
         refresh_runtime_controller(self).await;
         Ok(checkpoint)
+    }
+
+    /// Whether this specific session has a lifecycle operation still running.
+    /// A checkpoint conflicts only with its own session's operations, never
+    /// with another session's (#1010).
+    fn session_lifecycle_active(&self, session_id: &str) -> bool {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(session_id)
+            .is_some_and(|active| active.result.borrow().is_none())
     }
 
     /// In-memory records and ownership sampled with the same lock order as
@@ -2256,6 +2262,24 @@ fn report_worker_upgrade(
     }
 }
 
+/// Children of `parent_session_id` whose session is still active, in the
+/// order they should be stopped before the parent. A child that already
+/// stopped needs nothing and would make `force_stop` fail on it.
+fn active_child_session_ids(state: &mj_core::state::State, parent_session_id: &str) -> Vec<String> {
+    state
+        .subagents
+        .values()
+        .filter(|child| child.parent_session_id == parent_session_id)
+        .filter(|child| {
+            state
+                .sessions
+                .get(&child.child_session_id)
+                .is_some_and(|session| session.state.is_active())
+        })
+        .map(|child| child.child_session_id.clone())
+        .collect()
+}
+
 fn runtime_records_for_workspace(
     controller: &Controller,
     session_ids: &BTreeSet<String>,
@@ -2268,6 +2292,25 @@ fn runtime_records_for_workspace(
             !session.state.is_active() || session_ids.contains(*session_id)
         })
         .map(|(_, session)| session.clone())
+        .collect()
+}
+
+/// Relations for the children carried in `records`, so a surface can keep a
+/// daemon-created child out of the real workspace without a full state
+/// reload. Filtering by the returned records, rather than by `session_ids`
+/// directly, keeps this in step with `runtime_records_for_workspace`, which
+/// also includes inactive sessions outside that set.
+fn runtime_subagents_for_workspace(
+    controller: &Controller,
+    records: &[SessionRecord],
+) -> Vec<SubagentRecord> {
+    let record_ids: BTreeSet<&str> = records.iter().map(|record| record.id.as_str()).collect();
+    controller
+        .state
+        .subagents
+        .iter()
+        .filter(|(child_session_id, _)| record_ids.contains(child_session_id.as_str()))
+        .map(|(_, subagent)| subagent.clone())
         .collect()
 }
 
@@ -2851,6 +2894,15 @@ fn spawn_manager_target_refresher(
                                 *current = controller;
                                 changed
                             };
+                            // Prune the review host's retained transcripts to the
+                            // same live set, so a stopped or destroyed session's
+                            // MaterializedSession does not linger there forever.
+                            state.review_host().retain_sessions(
+                                refreshed
+                                    .iter()
+                                    .map(|target| target.session_id.clone())
+                                    .collect(),
+                            );
                             targets.send_replace(refreshed);
                             if changed {
                                 state.publish_revision();
@@ -3644,6 +3696,26 @@ async fn handle_action(
     }
 }
 
+/// A session has its own lifecycle operation in flight, so a fresh checkpoint
+/// would fight it. Callers that only need archived state (bundle export) fall
+/// back to the last durable checkpoint instead of failing (#1010).
+#[derive(Debug)]
+pub(crate) struct SessionLifecycleBusy {
+    pub session_id: String,
+}
+
+impl std::fmt::Display for SessionLifecycleBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "session {} has a lifecycle operation in flight; its checkpoint cannot run now",
+            self.session_id
+        )
+    }
+}
+
+impl std::error::Error for SessionLifecycleBusy {}
+
 fn ensure_no_active_lifecycle(state: &RuntimeState) -> Result<()> {
     ensure!(
         !state
@@ -3970,6 +4042,34 @@ mod tests {
             },
         );
         assert!(state.workspace_has_active_resume("workspace-a"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_lifecycle_guard_is_per_session() {
+        let state = test_runtime_state();
+        let (_completed, result) = tokio::sync::watch::channel(None);
+        state.lifecycle.lock().unwrap().insert(
+            "session-b".into(),
+            ActiveLifecycle {
+                operation_id: "resume-operation".into(),
+                create_control: None,
+                kind: LifecycleKind::Resume,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                started_at_epoch_seconds: 1,
+                active_stages: BTreeMap::new(),
+                resume_workspace_id: None,
+                resume_destination: None,
+                notice: None,
+                request_key: None,
+                _move_guard: None,
+                move_source_closed: false,
+                result,
+            },
+        );
+        // An unrelated session's operation must not block another session's
+        // checkpoint; only the session's own operation does (#1010).
+        assert!(!state.session_lifecycle_active("session-a"));
+        assert!(state.session_lifecycle_active("session-b"));
     }
 
     #[cfg(target_os = "macos")]
@@ -4335,6 +4435,120 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(ids, BTreeSet::from(["history", "local"]));
+    }
+
+    fn runtime_test_subagent(child_session_id: &str, parent_session_id: &str) -> SubagentRecord {
+        SubagentRecord {
+            child_session_id: child_session_id.into(),
+            parent_session_id: parent_session_id.into(),
+            task_name: "task".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "do the task".into(),
+            request_key: format!("request-{child_session_id}"),
+            created_at: "2026-09-03T00:00:00Z".into(),
+            noticed_turn: None,
+        }
+    }
+
+    #[test]
+    fn runtime_subagents_include_only_relations_whose_child_is_in_the_returned_records() {
+        let parent_a = runtime_test_session("parent-a", "workspace-a", SessionState::Running);
+        let child_a1 = runtime_test_session("child-a1", "workspace-a", SessionState::Running);
+        let child_a2 = runtime_test_session("child-a2", "workspace-a", SessionState::Running);
+        let parent_b = runtime_test_session("parent-b", "workspace-b", SessionState::Running);
+        let child_b1 = runtime_test_session("child-b1", "workspace-b", SessionState::Running);
+        let mut state = mj_core::state::State {
+            sessions: [
+                parent_a.clone(),
+                child_a1.clone(),
+                child_a2.clone(),
+                parent_b.clone(),
+                child_b1.clone(),
+            ]
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect(),
+            ..mj_core::state::State::default()
+        };
+        state.subagents = [
+            runtime_test_subagent(&child_a1.id, &parent_a.id),
+            runtime_test_subagent(&child_a2.id, &parent_a.id),
+            runtime_test_subagent(&child_b1.id, &parent_b.id),
+        ]
+        .into_iter()
+        .map(|subagent| (subagent.child_session_id.clone(), subagent))
+        .collect();
+        let controller = Controller {
+            config: Config::default(),
+            state,
+        };
+
+        let workspace_a_ids = BTreeSet::from([
+            "parent-a".to_owned(),
+            "child-a1".to_owned(),
+            "child-a2".to_owned(),
+        ]);
+        let workspace_a_records = runtime_records_for_workspace(&controller, &workspace_a_ids);
+        let workspace_a_subagents =
+            runtime_subagents_for_workspace(&controller, &workspace_a_records);
+        let mut workspace_a_child_ids = workspace_a_subagents
+            .iter()
+            .map(|subagent| subagent.child_session_id.as_str())
+            .collect::<Vec<_>>();
+        workspace_a_child_ids.sort_unstable();
+        assert_eq!(workspace_a_child_ids, ["child-a1", "child-a2"]);
+
+        let all_ids = BTreeSet::from([
+            "parent-a".to_owned(),
+            "child-a1".to_owned(),
+            "child-a2".to_owned(),
+            "parent-b".to_owned(),
+            "child-b1".to_owned(),
+        ]);
+        let all_records = runtime_records_for_workspace(&controller, &all_ids);
+        let all_subagents = runtime_subagents_for_workspace(&controller, &all_records);
+        let mut all_child_ids = all_subagents
+            .iter()
+            .map(|subagent| subagent.child_session_id.as_str())
+            .collect::<Vec<_>>();
+        all_child_ids.sort_unstable();
+        assert_eq!(all_child_ids, ["child-a1", "child-a2", "child-b1"]);
+    }
+
+    #[test]
+    fn active_child_session_ids_skips_children_that_already_stopped() {
+        let parent = runtime_test_session("parent", "workspace", SessionState::Closing);
+        let running_child =
+            runtime_test_session("running-child", "workspace", SessionState::Running);
+        let stopped_child =
+            runtime_test_session("stopped-child", "workspace", SessionState::Stopped);
+        let unrelated = runtime_test_session("unrelated", "workspace", SessionState::Running);
+        let mut state = mj_core::state::State {
+            sessions: [
+                parent.clone(),
+                running_child.clone(),
+                stopped_child.clone(),
+                unrelated.clone(),
+            ]
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect(),
+            ..mj_core::state::State::default()
+        };
+        state.subagents = [
+            runtime_test_subagent(&running_child.id, &parent.id),
+            runtime_test_subagent(&stopped_child.id, &parent.id),
+        ]
+        .into_iter()
+        .map(|subagent| (subagent.child_session_id.clone(), subagent))
+        .collect();
+
+        let children = active_child_session_ids(&state, &parent.id);
+
+        assert_eq!(children, vec!["running-child".to_owned()]);
     }
 
     #[tokio::test]

@@ -1545,6 +1545,12 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                             false
                         }
                     });
+                    // Drop the reseed view for every session that is no longer a
+                    // live target. `latest` is only ever inserted into otherwise,
+                    // so without this it keeps a full MaterializedSession per
+                    // session ever seen — a slow memory leak the actor
+                    // reconciliation above does not cover.
+                    latest.retain(|session_id, _| desired.contains_key(session_id));
                     for session_id in desired.keys() {
                         if !actors.contains_key(session_id)
                             && let Some(view) = latest.get(session_id).cloned()
@@ -2730,6 +2736,16 @@ fn view_is_unchanged(current: &ManagedSessionView, next: &ManagedSessionView) ->
             let (current_session, next_session) = (&current.materialized, &next.materialized);
             current.latest_credential_sync_signal == next.latest_credential_sync_signal
                 && current.operational == next.operational
+                // Sub-agent requests/results are non-transcript projection state:
+                // they come from the separate `subagents.json` poll in
+                // `sync_in_place`, not the relay event chain, so they can change
+                // while every transcript scalar below stays identical. They must
+                // be compared here, or a request that lands without a coincident
+                // view change (e.g. one that survives a daemon restart, where the
+                // tool-call ordinal is already applied) is never republished to the
+                // drain and its `serve_one` waits to the socket ceiling.
+                && current.subagent_requests == next.subagent_requests
+                && current.subagent_results == next.subagent_results
                 && current_session.session_id == next_session.session_id
                 && current_session.applied_event_ordinal == next_session.applied_event_ordinal
                 && current_session.applied_event_digest == next_session.applied_event_digest
@@ -4242,6 +4258,47 @@ mod tests {
             "a sync tick that moved nothing must not wake the dashboard"
         );
         assert!(updates_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_new_subagent_request_publishes_without_a_transcript_change() {
+        let (view_tx, mut view_rx) = watch::channel(ManagedSessionView::default());
+        let (updates_tx, mut updates_rx) = coalesced_update_channel();
+
+        // Establish a baseline view and drain its first-publish notification.
+        publish_view("session-1", view_at_ordinal(7), &view_tx, &updates_tx);
+        let _ = updates_rx.try_recv().expect("the first view is news");
+        let _ = view_rx.borrow_and_update();
+
+        // A second view identical to the baseline except for a queued sub-agent
+        // request: the exact shape that arrives from the subagents.json poll with
+        // no coincident relay event (e.g. one that survives a daemon restart).
+        // It must still reach the drain, or its `serve_one` waits to the ceiling.
+        let mut with_request = view_at_ordinal(7);
+        with_request
+            .snapshot
+            .as_mut()
+            .expect("snapshot present")
+            .subagent_requests
+            .push(mj_core::subagent::SubagentToolRequest {
+                request_id: "req-1".to_owned(),
+                created_at_ms: 1,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            });
+
+        publish_view("session-1", with_request.clone(), &view_tx, &updates_tx);
+
+        assert!(
+            view_rx.has_changed().expect("watch stays open"),
+            "a newly queued sub-agent request is a real change"
+        );
+        assert_eq!(
+            updates_rx
+                .try_recv()
+                .expect("the new sub-agent request must reach the drain")
+                .view,
+            with_request
+        );
     }
 
     #[test]

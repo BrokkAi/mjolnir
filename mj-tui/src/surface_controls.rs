@@ -24,12 +24,23 @@ pub(crate) const SESSION_ACTIONS: [(CommandId, &str); 2] = [
     (CommandId::ResumeDialog, "Resume"),
 ];
 
+fn session_actions(dashboard: &DashboardState) -> [(CommandId, &'static str); 2] {
+    if dashboard.go.is_some() {
+        [
+            (CommandId::NewSessionWizard, "New"),
+            (CommandId::Palette, "Menu"),
+        ]
+    } else {
+        SESSION_ACTIONS
+    }
+}
+
 pub(crate) fn session_action_enabled(dashboard: &DashboardState, id: CommandId) -> bool {
     (spec(id).available)(dashboard) == Availability::Ready
 }
 
 pub(crate) fn first_enabled_session_action(dashboard: &DashboardState) -> Option<CommandId> {
-    SESSION_ACTIONS
+    session_actions(dashboard)
         .iter()
         .map(|(id, _)| *id)
         .find(|id| session_action_enabled(dashboard, *id))
@@ -40,7 +51,8 @@ pub(crate) fn adjacent_enabled_session_action(
     current: CommandId,
     forward: bool,
 ) -> Option<CommandId> {
-    let index = SESSION_ACTIONS.iter().position(|(id, _)| *id == current)?;
+    let actions = session_actions(dashboard);
+    let index = actions.iter().position(|(id, _)| *id == current)?;
     (1..SESSION_ACTIONS.len())
         .map(|step| {
             if forward {
@@ -49,7 +61,7 @@ pub(crate) fn adjacent_enabled_session_action(
                 (index + SESSION_ACTIONS.len() - step) % SESSION_ACTIONS.len()
             }
         })
-        .map(|index| SESSION_ACTIONS[index].0)
+        .map(|index| actions[index].0)
         .find(|id| session_action_enabled(dashboard, *id))
 }
 
@@ -179,7 +191,7 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let commands = SESSION_ACTIONS;
+    let commands = session_actions(dashboard);
     let mut x = area.x;
     for (id, label) in commands {
         let width = Line::raw(label).width() as u16 + 2;

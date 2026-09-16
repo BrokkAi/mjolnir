@@ -101,7 +101,11 @@ fn heading_for(dashboard: &DashboardState, scope: Scope) -> String {
     if scope == Scope::Session
         && let Some(session) = dashboard.selected_session()
     {
-        return session.display_title().to_owned();
+        return if dashboard.go.is_some() {
+            dashboard.go_conversation_title(&session.id)
+        } else {
+            session.display_title().to_owned()
+        };
     }
     scope.heading().to_owned()
 }

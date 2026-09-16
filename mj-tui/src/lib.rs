@@ -45,6 +45,7 @@ mod actions;
 mod combined;
 mod component_events;
 mod dialogs;
+mod go;
 mod help;
 mod ingest;
 mod palette;
@@ -66,6 +67,7 @@ mod test_support;
 pub use crate::actions::{CommandId, global_chord};
 pub use crate::combined::render_combined;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
+pub use crate::go::GoMode;
 pub use crate::ingest::{
     MaterializedProjectionCache, PreparedMaterializedSessionDetail,
     PreparedMaterializedSessionSummary,
@@ -100,6 +102,12 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
     None,
+    GoLaunch {
+        recipe: mj_core::go::GoRecipe,
+    },
+    GoPrepareProject {
+        target_id: String,
+    },
     Open {
         session_id: String,
     },
@@ -618,6 +626,9 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
+    pub(crate) go: Option<go::GoMode>,
+    pub(crate) go_workspaces: BTreeMap<String, go::GoMode>,
+    pub(crate) go_contexts: BTreeMap<String, Result<(std::path::PathBuf, String), String>>,
     modal_click_transition: Option<(u16, u16, Instant)>,
     suppress_modal_release: bool,
     /// Monotonic identity for global review settings discoveries. Keeping it on
@@ -717,6 +728,9 @@ impl DashboardState {
             project_sources: BTreeMap::new(),
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
+            go: None,
+            go_workspaces: BTreeMap::new(),
+            go_contexts: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
             move_operations: BTreeMap::new(),
@@ -891,6 +905,7 @@ impl DashboardState {
                 .insert(current, WorkspaceViewState::from_dashboard(self));
         }
 
+        self.switch_go_workspace(workspace_id.as_deref());
         self.active_workspace_id = workspace_id.clone();
         self.workspace_name = workspace_id
             .as_deref()
@@ -910,7 +925,10 @@ impl DashboardState {
                 self.collapsed_project_keys = view.collapsed_project_keys;
                 self.focus = view.focus;
             } else {
-                self.selected_session_id = None;
+                self.selected_session_id = self
+                    .go
+                    .as_ref()
+                    .and_then(|mode| mode.last_session_id.clone());
                 self.sessions_scroll.set(0);
                 self.targets_scroll.set(0);
                 self.quota_scroll.set(0);
@@ -1345,9 +1363,13 @@ impl DashboardState {
             profile: session
                 .as_ref()
                 .map_or(String::new(), |session| session.last_profile.clone()),
-            title: session
-                .as_ref()
-                .map_or(String::new(), |session| session.display_title().to_owned()),
+            title: session.as_ref().map_or(String::new(), |session| {
+                if self.go.is_some() {
+                    self.go_conversation_title(&session.id)
+                } else {
+                    session.display_title().to_owned()
+                }
+            }),
             harness_kind: session.as_ref().map(|session| session.harness_kind),
             subagent_count: self
                 .state
@@ -1394,6 +1416,11 @@ impl DashboardState {
         if crate::actions::spec_for_key(key, self.focus).is_some() {
             return None;
         }
+        // On macOS the dashboard's primary accelerator is represented by
+        // SUPER, while the chat composer implements readline controls as
+        // CONTROL. Once the dashboard has declined the chord, keep that
+        // platform convention from turning Ctrl-A/K/Y into inserted text.
+        let key = standby_prompt_key(key);
         let (action, changed) = {
             let standby = self.standby_prompt_mut(&session_id);
             let action = standby.handle_key(key);
@@ -2572,6 +2599,20 @@ fn is_paste_shortcut(key: KeyEvent) -> bool {
         && key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+}
+
+#[cfg(target_os = "macos")]
+fn standby_prompt_key(mut key: KeyEvent) -> KeyEvent {
+    if key.modifiers.contains(KeyModifiers::SUPER) && !key.modifiers.contains(KeyModifiers::ALT) {
+        key.modifiers.remove(KeyModifiers::SUPER);
+        key.modifiers.insert(KeyModifiers::CONTROL);
+    }
+    key
+}
+
+#[cfg(not(target_os = "macos"))]
+fn standby_prompt_key(key: KeyEvent) -> KeyEvent {
+    key
 }
 
 #[cfg(target_os = "macos")]
@@ -3908,6 +3949,102 @@ mod tests {
         dashboard.close_subagent_workspace();
         assert_eq!(dashboard.subagent_parent_id(), None);
         assert_eq!(dashboard.selected_session_id(), Some(parent.id.as_str()));
+    }
+
+    /// A daemon-created child that arrives through a later runtime snapshot,
+    /// rather than through a full `Controller::load()`, must still hide from
+    /// the parent's real workspace. This is the contract the dashboard's
+    /// `apply_runtime_records` relies on when it assigns `state.subagents`
+    /// alongside `state.sessions` on every `set_state` call.
+    #[test]
+    fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
+        let mut parent = stopped_session();
+        parent.id = "parent-session".into();
+        parent.state = SessionState::Running;
+        let mut first_child = stopped_session();
+        first_child.id = "first-child".into();
+        first_child.state = SessionState::Running;
+        let first_relation = mj_core::subagent::SubagentRecord {
+            child_session_id: first_child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "First task".into(),
+            profile_id: first_child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "Do the first task".into(),
+            request_key: "request-1".into(),
+            created_at: first_child.created_at.clone(),
+            noticed_turn: None,
+        };
+        let mut dashboard = DashboardState::new(
+            config(),
+            State {
+                subagents: BTreeMap::from([(first_child.id.clone(), first_relation.clone())]),
+                version: STATE_VERSION,
+                sessions: BTreeMap::from([
+                    (parent.id.clone(), parent.clone()),
+                    (first_child.id.clone(), first_child.clone()),
+                ]),
+                mount_history: BTreeMap::new(),
+                container_sizes: BTreeMap::new(),
+            },
+            BTreeMap::new(),
+        );
+
+        let mut second_child = stopped_session();
+        second_child.id = "second-child".into();
+        second_child.state = SessionState::Running;
+        let second_relation = mj_core::subagent::SubagentRecord {
+            child_session_id: second_child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Second task".into(),
+            profile_id: second_child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "Do the second task".into(),
+            request_key: "request-2".into(),
+            created_at: second_child.created_at.clone(),
+            noticed_turn: None,
+        };
+        dashboard.set_state(State {
+            subagents: BTreeMap::from([
+                (first_child.id.clone(), first_relation),
+                (second_child.id.clone(), second_relation),
+            ]),
+            version: STATE_VERSION,
+            sessions: BTreeMap::from([
+                (parent.id.clone(), parent.clone()),
+                (first_child.id.clone(), first_child.clone()),
+                (second_child.id.clone(), second_child.clone()),
+            ]),
+            mount_history: BTreeMap::new(),
+            container_sizes: BTreeMap::new(),
+        });
+
+        assert_eq!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![parent.id.as_str()],
+            "a child arriving through set_state alone must still leave the real workspace"
+        );
+
+        dashboard.open_subagent_workspace(parent.id.clone());
+        let mut virtual_workspace_ids = dashboard
+            .ordered_sessions()
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        virtual_workspace_ids.sort();
+        assert_eq!(
+            virtual_workspace_ids,
+            vec![first_child.id.clone(), second_child.id.clone()],
+            "both children must appear in the virtual workspace"
+        );
     }
 
     #[test]

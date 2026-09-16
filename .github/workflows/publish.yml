@@ -24,8 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
-      # Verify the whole workspace on the host target, where the native voice
-      # and desktop libraries installed below are available.
+      # Keep package resolution on the supported GNU/Linux host target.
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
 
     steps:
@@ -36,41 +35,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.96.0
 
-      - name: Install Linux native dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
-
-      - name: Verify tag matches Cargo.toml version
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${RELEASE_TAG#v}"
-          # Every workspace member inherits `version.workspace`, so check them
-          # all rather than a hand-maintained list that goes stale the next time
-          # a crate is extracted.
-          versions="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | [.name, .version] | @tsv')"
-          test -n "$versions"
-          while IFS=$'\t' read -r crate version; do
-            if [ "$tag" != "$version" ]; then
-              echo "Tag version ($tag) does not match $crate version ($version)" >&2
-              exit 1
-            fi
-          done <<< "$versions"
+      - name: Verify release version
+        run: node scripts/release-version.mjs check "$RELEASE_TAG"
 
       - name: Assemble and verify crates
         shell: bash
         run: |
           set -euo pipefail
-          # Assemble every source package now, but verify the current workspace
-          # directly below: before publication, extracted packages cannot
-          # resolve same-release path dependencies from crates.io.
+          # Reuse the known-good commit's validation; package without rebuilding.
           cargo package --locked --workspace --no-verify
-          # Compile every target from every publishable workspace package on
-          # the supported host target. CARGO_BUILD_TARGET overrides the
-          # repository's headless musl default for this job.
-          cargo check --locked --workspace --all-targets
 
           packages="$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.publish != []) | [.name, .version] | @tsv')"
@@ -100,8 +73,7 @@ jobs:
       contents: read
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
-      # `cargo publish` verifies each extracted package. Voice and desktop use
-      # the native dependencies installed by this job, not the musl default.
+      # Compilation was validated on the selected release commit.
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
 
     steps:
@@ -111,11 +83,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.96.0
-
-      - name: Install Linux native dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
 
       - name: Authenticate to crates.io
         uses: rust-lang/crates-io-auth-action@v1
@@ -171,7 +138,7 @@ jobs:
             # The sparse index may take a moment to expose a just-published
             # workspace sibling that the next crate needs while packaging.
             for attempt in 1 2 3 4 5 6; do
-              cargo publish --locked -p "$crate" && break
+              cargo publish --locked --no-verify -p "$crate" && break
               test "$attempt" -lt 6 || exit 1
               sleep 10
             done

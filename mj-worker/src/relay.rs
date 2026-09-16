@@ -25,7 +25,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail};
 
 use journal::{
     JournalReadMode, RelayJournalSpan, open_relay_journal, read_restored_relay_seed,
@@ -993,66 +993,46 @@ impl DurableRelay {
             .map(|page| page.events)
     }
 
-    /// Prove that this native identity was created here and never used.
-    /// Codex may not persist a new thread until its first prompt. Missing or
-    /// checkpointed history is not evidence that it is safe to replace one.
-    pub fn native_session_is_pristine(&self) -> Result<bool> {
+    /// Whether this session's native thread may hold conversation history
+    /// Mjolnir cannot see. Computed from snapshot state alone, with no journal
+    /// replay, and deliberately conservative: it answers `false` only for a
+    /// thread this journal created and that nothing has used yet.
+    ///
+    /// A `false` answer is what allows Mjolnir to replace a Codex thread that
+    /// Codex says it has no rollout for. Codex writes a thread's rollout only
+    /// at its first user message, so an empty thread can be missing on disk.
+    pub fn native_session_may_have_history(&self) -> bool {
+        // History before the floor was released to an archive, so the
+        // snapshot no longer describes everything this session did.
         if self.snapshot.recovery_floor_ordinal != 0 {
-            return Ok(false);
+            return true;
         }
-        let Some(native_id) = self.snapshot.native_session_id.as_deref() else {
-            return Ok(false);
-        };
-        let plan = self.replay_plan();
-        let mut ordinal = 0;
-        let mut digest = RELAY_EVENT_GENESIS_DIGEST.to_owned();
-        let mut locally_created = false;
-        while ordinal < self.snapshot.latest_ordinal {
-            let page = plan.read_events_after(ordinal, &digest, 64 * 1024)?;
-            ensure!(
-                !page.events.is_empty(),
-                "native session history is incomplete"
-            );
-            for event in page.events {
-                match event.observation {
-                    RelayObservation::SessionOpened {
-                        native_session_id,
-                        resumed,
-                        ..
-                    } => {
-                        if resumed {
-                            return Ok(false);
-                        }
-                        locally_created = native_session_id == native_id;
-                    }
-                    RelayObservation::CommandStarted { command_id, .. } => {
-                        let Some(dispatch) = self.snapshot.dispatches.get(&command_id) else {
-                            return Ok(false);
-                        };
-                        // Admission records CommandStarted before ACP is
-                        // ready. Only a durable claim can have sent it.
-                        if matches!(dispatch.command, RelayCommand::Prompt { .. })
-                            && !matches!(
-                                dispatch.state,
-                                RelayDispatchState::Queued | RelayDispatchState::Pending
-                            )
-                        {
-                            return Ok(false);
-                        }
-                    }
-                    RelayObservation::HarnessTurnStarted { .. } => return Ok(false),
-                    RelayObservation::SessionUpdate { update }
-                        if crate::acp::session_update_has_native_history(&update) =>
-                    {
-                        return Ok(false);
-                    }
-                    _ => {}
-                }
-                ordinal = event.ordinal;
-                digest = event.digest;
-            }
+        // Set when the agent sent conversation content, when a prompt was
+        // transmitted, when the thread was resumed rather than created here,
+        // or when its identity arrived from outside this journal.
+        if self.snapshot.native_session_used {
+            return true;
         }
-        Ok(locally_created)
+        // A prompt that only waits in the durable queue never reached the
+        // agent. Anything past admission may have.
+        self.snapshot.dispatches.values().any(|dispatch| {
+            matches!(dispatch.command, RelayCommand::Prompt { .. })
+                && !matches!(
+                    dispatch.state,
+                    RelayDispatchState::Queued | RelayDispatchState::Pending
+                )
+        })
+    }
+
+    /// Record that the native thread has been used and can never be replaced.
+    /// Persisted immediately: the evidence is live ACP traffic, and a worker
+    /// that dies right after it must not come back believing the thread empty.
+    pub fn mark_native_session_used(&mut self) -> Result<()> {
+        if self.snapshot.native_session_used {
+            return Ok(());
+        }
+        self.snapshot.native_session_used = true;
+        self.persist_snapshot()
     }
 
     /// How many times the journal's files stopped matching a captured
@@ -3468,7 +3448,7 @@ mod tests {
     use test_support::*;
 
     #[test]
-    fn checkpointed_history_cannot_prove_a_native_session_is_pristine() {
+    fn a_locally_created_empty_native_session_has_no_history() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
         relay
@@ -3478,12 +3458,104 @@ mod tests {
                 native_continuity_lost: false,
             })
             .unwrap();
-        assert!(relay.native_session_is_pristine().unwrap());
+        assert!(!relay.native_session_may_have_history());
+        // A prompt waiting in the durable queue never reached the agent.
+        submit_relay(
+            &mut relay,
+            "queued-prompt",
+            RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("queued work")],
+            },
+        );
+        assert!(!relay.native_session_may_have_history());
+    }
+
+    #[test]
+    fn a_dispatched_prompt_gives_the_native_session_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "used".into(),
+                resumed: false,
+                native_continuity_lost: false,
+            })
+            .unwrap();
+        submit_relay(
+            &mut relay,
+            "dispatched-prompt",
+            RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("do work")],
+            },
+        );
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+        assert!(relay.native_session_may_have_history());
+    }
+
+    #[test]
+    fn a_released_recovery_floor_gives_the_native_session_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "unused".into(),
+                resumed: false,
+                native_continuity_lost: false,
+            })
+            .unwrap();
+        assert!(!relay.native_session_may_have_history());
         let cursor = ready_checkpoint(&mut relay, "checkpoint");
         submit_floor(&mut relay, "archive-installed", cursor);
+        assert!(relay.native_session_may_have_history());
+    }
+
+    #[test]
+    fn a_resumed_native_session_has_history_after_reopening() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "imported".into(),
+                resumed: true,
+                native_continuity_lost: false,
+            })
+            .unwrap();
+        assert!(relay.native_session_may_have_history());
         drop(relay);
         let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-        assert!(!relay.native_session_is_pristine().unwrap());
+        assert!(relay.native_session_may_have_history());
+    }
+
+    #[test]
+    fn a_used_native_session_stays_used_across_persist_and_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "used".into(),
+                resumed: false,
+                native_continuity_lost: false,
+            })
+            .unwrap();
+        relay.mark_native_session_used().unwrap();
+        // Transcript events after the mark are replayed on reopen, and replay
+        // must not undo it.
+        relay
+            .record_observation(RelayObservation::Warning {
+                message: "after the mark".into(),
+            })
+            .unwrap();
+        drop(relay);
+        let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert!(relay.native_session_may_have_history());
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(temp.path().join("relay-state.json")).unwrap()
+            )
+            .unwrap()["native_session_used"]
+                .as_bool()
+                .unwrap()
+        );
     }
 
     #[test]

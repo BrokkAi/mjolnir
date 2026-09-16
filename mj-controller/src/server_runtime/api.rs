@@ -1339,13 +1339,29 @@ impl SubagentBackend for ApiBackend {
             // checkpointed, so take a fresh checkpoint; a stopped session's
             // last checkpoint already holds everything it did.
             let archive_path = match record.target {
-                Some(_) => {
-                    self.exports
-                        .checkpoint_now(session_id.clone())
-                        .await
-                        .map_err(checkpoint_export_error)?
-                        .archive_path
-                }
+                Some(_) => match self.exports.checkpoint_now(session_id.clone()).await {
+                    Ok(checkpoint) => checkpoint.archive_path,
+                    // The session has its own lifecycle operation in flight
+                    // (resume/close/move); a fresh checkpoint would fight it, so
+                    // export the last durable checkpoint, which predates that
+                    // operation, rather than failing (#1010).
+                    Err(error)
+                        if error
+                            .downcast_ref::<crate::daemon::SessionLifecycleBusy>()
+                            .is_some() =>
+                    {
+                        record
+                            .checkpoint
+                            .ok_or_else(|| {
+                                ExportError::Refused(format!(
+                                    "session {session_id} is busy with a lifecycle operation and \
+                                     has no earlier checkpoint to export a bundle from"
+                                ))
+                            })?
+                            .archive_path
+                    }
+                    Err(error) => return Err(checkpoint_export_error(error)),
+                },
                 None => {
                     record
                         .checkpoint
