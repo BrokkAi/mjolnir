@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crossterm::event::KeyCode;
 use ratatui::Terminal;
@@ -3305,4 +3306,111 @@ fn readiness_checks_are_independent_and_ignore_changed_configuration() {
     assert!(dashboard.target_readiness_rejection("remote").is_some());
     dashboard.handle_key(key(KeyCode::Esc));
     assert!(!matches!(dashboard.mode, Mode::New(_)));
+}
+
+/// Reopening the wizard with the target's template unchanged must reuse the
+/// readiness result from the previous open instead of re-probing: the probe
+/// is an ssh round trip for non-local targets, so a second open in the same
+/// dashboard session should be instant.
+#[test]
+fn reopening_wizard_with_unchanged_template_reuses_fresh_readiness() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("the first open must probe the non-local target");
+    };
+    assert_eq!(target_ids, ["podman"]);
+    dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
+    assert!(dashboard.target_readiness_rejection("podman").is_none());
+
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(!matches!(dashboard.mode, Mode::New(_)));
+
+    dashboard.begin_new();
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        dashboard.take_prerequisite_check(),
+        None,
+        "a fresh readiness result from the previous open must not be re-probed"
+    );
+    assert!(dashboard.target_readiness_rejection("podman").is_none());
+}
+
+/// A target's template changing between wizard opens invalidates the cached
+/// readiness result even though it has not gone stale.
+#[test]
+fn reopening_wizard_after_template_change_reprobes() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("the first open must probe the non-local target");
+    };
+    assert_eq!(target_ids, ["podman"]);
+    dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(!matches!(dashboard.mode, Mode::New(_)));
+
+    match dashboard.config.targets.get_mut("podman").unwrap() {
+        TargetTemplate::LocalPodman { container } => {
+            container.image = "ubuntu:22.04".into();
+        }
+        other => panic!("expected a podman target, got {other:?}"),
+    }
+
+    dashboard.begin_new();
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Some(DashboardAction::CheckTargetReadiness { target_ids, .. }) =
+        dashboard.take_prerequisite_check()
+    else {
+        panic!("a changed template must be re-probed even though a result is cached");
+    };
+    assert_eq!(target_ids, ["podman"]);
+}
+
+/// A readiness result older than [`TARGET_READINESS_TTL`] is treated as
+/// missing: the wizard shows the checking state again and rejects Create
+/// until a fresh probe completes.
+#[test]
+fn stale_readiness_result_is_treated_as_missing_and_reprobes() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("the first open must probe the non-local target");
+    };
+    assert_eq!(target_ids, ["podman"]);
+    dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
+    assert!(dashboard.target_readiness_rejection("podman").is_none());
+
+    dashboard
+        .target_readiness
+        .get_mut("podman")
+        .expect("readiness entry was recorded")
+        .recorded_at = Instant::now() - TARGET_READINESS_TTL;
+
+    assert_eq!(
+        dashboard.target_readiness_rejection("podman"),
+        Some("checking availability…".into()),
+        "a stale result must reject exactly like a missing one"
+    );
+    let Some(DashboardAction::CheckTargetReadiness { target_ids, .. }) =
+        dashboard.take_prerequisite_check()
+    else {
+        panic!("a stale result must be re-probed");
+    };
+    assert_eq!(target_ids, ["podman"]);
 }
