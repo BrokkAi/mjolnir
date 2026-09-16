@@ -15,7 +15,7 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 ## Progress
 
 - [x] (2026-09-16 22:49Z) Milestone 1: one repaint rule (delete the manual dirty-flag protocol; collapse `Outcome` to a consumed flag; drop the `rat-event` dependency).
-- [ ] Milestone 2: one erased view of the active modal (`ModalSurface` trait replacing seven `match &self.mode` copies).
+- [x] (2026-09-16 23:18Z) Milestone 2: one erased view of the active modal (`ModalSurface` trait replacing seven `match &self.mode` copies).
 - [ ] Milestone 3: background job helpers report panics and share one send path.
 - [ ] Milestone 4: one implementation of readline cursor motion (composer reuses `text_input.rs` helpers; multiline motions move into `TextInput`).
 - [ ] Milestone 5: one body for the New and Move wizard twins (`WizardDraft` trait), in the staged order given below.
@@ -37,6 +37,15 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 - Observation: the acceptance grep for `Outcome::` has to be a word-boundary grep. `WaitOutcome::`, `RemotePreflightOutcome::`, `SetupOutcome::`, `WorkerRecordPersistenceOutcome::`, `ReviewDiscoveryOutcome::` and `EditOutcome::` are unrelated enums in the same three crates. `grep -rEn '\bOutcome::' mj-tui/src mj-chat/src mj-cli/src` reports zero; a plain `grep Outcome::` reports the unrelated ones.
 - Observation: `mark_render_changed` and its relatives are called from far more places than first counted. The dashboard side has 204 `mark_render_changed()` calls plus 49 `mark_render_changed_cells` calls; the chat side has 152 `mark_visible_changed()` calls plus an elicitation-dialog flag (`take_changed`/`mark_changed`) that is polled from five places. Three trackers are layered: the manual flags, a revision counter diffed around every event, and a visual-state diff inside `Form::handle_at`.
   Evidence: `grep -rc "mark_visible_changed()" mj-chat/src`; `mj-tui/src/lib.rs:1489`; `mj-chat/src/components/scope.rs:826-842`.
+
+- Observation: the Milestone 2 text says "twelve payloads whose whole erased behaviour is one `RefCell<Dialog<K>>`" and then lists eleven. Eleven plus the five hand-written impls is sixteen, which is exactly the number of `Mode` variants other than `Dashboard`, so the list was right and the count was a typo.
+  Evidence: `mj-tui/src/lib.rs` `enum Mode` has seventeen variants; `mode_surfaces!` in `mj-tui/src/modal_surface.rs` names sixteen.
+- Observation: Milestone 2 does not reduce the line count. It removes 304 lines from the five files it touches and adds a 393-line module, a net gain of about 90 lines, against a predicted saving of 180 to 200. The prediction counted the deleted `match` arms but not what replaces them: fourteen `impl DialogModal` blocks cost two accessor methods each even behind a macro, and the two `Mode` accessors are still one arm per variant. The milestone's actual benefit is the one that was always the main one, that a new modal is declared in one list instead of seven matches.
+  Evidence: `git diff --shortstat` for the milestone commit.
+- Observation: `SetupDialog::prepare_dialog_state` reads `self.editor`, which is private to `mj-tui/src/setup.rs`, so its `ModalSurface` impl cannot live in `mj-tui/src/modal_surface.rs`. It is written in `setup.rs` instead, and the six inherent methods it absorbed are gone. Every other payload exposes its form as `pub(crate)`, so the rest of the impls are in the new module.
+  Evidence: `mj-tui/src/setup.rs` `struct SetupDialog` fields `editor`, `path`, `draft`.
+- Observation: `ContainerEditFocus` was re-exported from `mj-tui/src/dialogs.rs` only under `#[cfg(test)]`, so naming `Dialog<ContainerEditFocus>` in another module did not compile. It is now an unconditional `pub(crate) use`.
+  Evidence: `mj-tui/src/dialogs.rs:3-4`.
 
 ## Decision Log
 
@@ -81,6 +90,18 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 - Decision: The two new loop tests assert at the `DashboardState` plus `TestBackend` level rather than driving `run_dashboard_for_workspace`.
   Rationale: `DashboardContext::open` enters raw terminal mode, loads the controller, and spawns fourteen pollers, so the loop is not reachable from a unit test. `an_unchanged_clock_tick_does_not_redraw` asserts the exact condition the clock arm evaluates (`clock_changed()` is false on a settled surface) and that the frame it declines is byte-identical to the one on screen. `a_feed_update_redraws_without_a_dirty_mark` applies a quota report the way `drain_feeds` does and asserts the next unconditional frame differs, with nothing having marked anything.
   Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `DialogModal` carries an overridable `fn text_input_focused(&self) -> bool` instead of the planned `fn text_controls(&self) -> &'static [Self::Control]`.
+  Rationale: `text_controls` can only express "focus is on one of these controls". Three payloads whose behaviour is otherwise exactly one `RefCell<Dialog<K>>` do not fit that shape: `ContainerEditor` answers `field().is_some()`, and the two wizards answer a per-step rule. Under the written plan those three would each need a hand-written `ModalSurface` repeating the five form methods. One overridable predicate covers all fourteen with one mechanism and no repetition; the eleven simple cases are still a single line each.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: The two `Mode` accessors are generated by a `mode_surfaces!` macro from one list of variant names.
+  Rationale: written out they are two identical sixteen-arm matches, so the "add a variant here and nowhere else" property lived in two places that could drift. Both generated matches are still exhaustive, so a new variant still fails to compile.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `component_handles_mouse` keeps its dashboard case as an early `if matches!(self.mode, Mode::Dashboard)` return rather than a `match` with a `_` arm.
+  Rationale: the acceptance criterion asks that `component_events.rs` hold no `match &self.mode` outside `handle_component_event`, and a two-arm match would have left one. The behaviour is identical.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `NewWizard::text_input_focused` and `ResumeWizard::text_input_focused` moved into their `DialogModal` impls rather than being delegated to.
+  Rationale: a trait method and an inherent method with the same name on the same type resolve in favour of the inherent one, so delegation compiles and is correct, but deleting the inherent method later would turn it into silent infinite recursion. Their only caller was the `match` in `text_input_focused` that this milestone deletes. Milestone 5's note that the two methods stay unmerged still holds; they are just in `modal_surface.rs` now.
+  Date/Author: 2026-09-16 / Claude Opus 5.
 - Decision: Order the milestones 1, 2, 3, 4, 5, 6. Milestone 1 goes first because it deletes hundreds of `mark_render_changed` calls that Milestones 2 and 5 would otherwise have to carry through their rewrites. Milestone 3 is independent of everything and can be done at any time.
   Date/Author: 2026-09-16 / Claude Fable 5.1.
 
@@ -109,6 +130,29 @@ What is left for a later milestone: the timer signatures in
 `move_recovery_signature` are gone; `session_is_visible`,
 `session_row_is_visible_at` and `support_projection_visible` survive because the
 clock and animation signatures still consult them.
+
+Milestone 2 (2026-09-16). One trait now answers what the dashboard asks of
+whichever modal is open. `mj-tui/src/modal_surface.rs` defines `ModalSurface`
+(confirmation, pointer hit test, pointer release, geometry reset, text focus,
+dialog preparation, layer detail) and the helper trait `DialogModal`, which
+gives a blanket implementation to the fourteen payloads that answer everything
+through the one `RefCell<Dialog<K>>` they own. `HelpOverlay` and `SetupDialog`
+write `ModalSurface` out by hand, the latter in `mj-tui/src/setup.rs` because it
+reads private fields. `Mode::surface` and `Mode::surface_mut`, generated from one
+list of variant names, are the only per-variant lists left outside
+`handle_component_event` and `render_modal`.
+
+Seven `match &self.mode` copies in `mj-tui/src/component_events.rs` and the one
+in `text_input_focused` are gone, together with six inherent `SetupDialog`
+methods and the two wizards' `text_input_focused`. Behaviour is unchanged; the
+three places where the old code was inconsistent rather than uniform
+(`ContainerEditor` treating no focus as its first field, Setup ignoring the
+review editor's text fields, Help hit-testing its stored rectangle) are kept as
+they were, each with a comment saying so.
+
+This milestone costs about 90 lines rather than saving 190; see Surprises &
+Discoveries for why the estimate was wrong and why the milestone is still worth
+having.
 
 ## Context and Orientation
 
@@ -331,7 +375,7 @@ Expected: after the dashboard settles, CPU stays at or near 0.0 while idle; typi
 
 Milestone 1 is accepted when all tests pass, the two new loop tests (`an_unchanged_clock_tick_does_not_redraw`, `a_feed_update_redraws_without_a_dirty_mark`) pass, no file in the three crates mentions `mark_render_changed`, `mark_visible_changed`, `take_render_changed`, `render_change_revision`, `visible_revision`, `rat_event`, or `Outcome::`, and the manual idle check shows no periodic repaint.
 
-Milestone 2 is accepted when all tests pass, `component_events.rs` contains no `match &self.mode` outside `handle_component_event`, `lib.rs` contains the two `Mode::surface` accessors as its only exhaustive per-variant lists besides `render_modal`, and the new Help-overlay test passes.
+Milestone 2 is accepted when all tests pass, `component_events.rs` contains no `match &self.mode` outside `handle_component_event`, `mj-tui/src/modal_surface.rs` contains the two `Mode::surface` accessors as the only exhaustive per-variant lists besides `handle_component_event` and `render_modal` (the accessors live in the new module, not in `lib.rs` as first written, because that is where the trait is), and the new Help-overlay test passes.
 
 Milestone 3 is accepted when the two panic tests pass and `grep -c "updates.send" mj-cli/src/dashboard/io.rs` reports only the `report` function's own send.
 
@@ -390,3 +434,11 @@ because one caller branches on `Changed` to decide whether to re-run a search.
 The two named loop tests are written at the `DashboardState` plus `TestBackend`
 level because `DashboardContext::open` needs a real terminal and fourteen
 pollers. Each of these is in the Decision Log with its reason.
+
+2026-09-16, after implementing Milestone 2. Recorded the four decisions that
+departed from the written milestone (an overridable `text_input_focused` in
+place of `text_controls`, a macro for the two `Mode` accessors, an early return
+in place of the last `match &self.mode`, and moving the wizards'
+`text_input_focused` bodies rather than delegating to them), the two facts that
+forced the shape of the code (`SetupDialog`'s private fields, `ContainerEditFocus`
+being test-only), and the honest line count.

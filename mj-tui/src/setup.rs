@@ -3,6 +3,7 @@ mod schema;
 
 use crate::{
     DashboardAction, DashboardState, Mode,
+    modal_surface::ModalSurface,
     review_settings::{
         ReviewSettingsDialog, ReviewSettingsOutcome, ReviewSettingsValidation,
         render_review_settings,
@@ -328,66 +329,6 @@ fn changed_profile_ids(draft: &Config, current: &Config) -> std::collections::BT
 }
 
 impl SetupDialog {
-    pub(crate) fn layer_key(&self) -> String {
-        format!(
-            "{:?}/{:?}/{}",
-            self.path,
-            self.editor.as_ref().map(|editor| &editor.path),
-            self.review_editor.is_some()
-        )
-    }
-
-    pub(crate) fn prepare_dialog_state(&mut self) {
-        self.form.get_mut().set_action_role(
-            SetupControl::Cancel,
-            mj_chat::components::ActionRole::Cancel,
-        );
-        self.form
-            .get_mut()
-            .set_action_role(SetupControl::Back, mj_chat::components::ActionRole::Back);
-        if let Some(review) = &mut self.review_editor {
-            review.prepare_dialog_state();
-        } else if let Some(editor) = &self.editor {
-            self.form
-                .get_mut()
-                .track_draft(vec![editor.input.to_string()]);
-            self.form
-                .get_mut()
-                .set_dismiss_actions(&[SetupControl::Back]);
-            self.form.get_mut().set_default_action(SetupControl::Apply);
-        } else {
-            // The outer setup draft uses its normalized saved-config comparison.
-            self.form.get_mut().set_dirty(false);
-            self.form.get_mut().set_dismiss_actions(&[]);
-            self.form.get_mut().set_default_action(SetupControl::Save);
-        }
-    }
-
-    pub(crate) fn confirmation_open(&self) -> bool {
-        self.review_editor.as_ref().map_or_else(
-            || self.form.borrow().confirmation_open(),
-            |review| review.form.borrow().confirmation_open(),
-        )
-    }
-
-    pub(crate) fn render_confirmation(
-        &self,
-        frame: &mut Frame<'_>,
-        area: Rect,
-        surfaces: &mut FrameSurfaces,
-    ) {
-        if let Some(review) = &self.review_editor {
-            review
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces);
-        } else {
-            self.form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces);
-        }
-    }
-
     fn new(config: &Config) -> Self {
         let mut draft = serde_json::to_value(config).expect("configuration serializes");
         let original = draft.to_string();
@@ -903,8 +844,33 @@ impl SetupDialog {
             self.review_validation = None;
         }
     }
+}
 
-    pub(crate) fn handles_mouse(&self, column: u16, row: u16) -> bool {
+/// Setup answers the dashboard's modal questions through whichever of its two
+/// forms is on top: the review-settings editor when it is open, the setup form
+/// otherwise.
+impl ModalSurface for SetupDialog {
+    fn confirmation_open(&self) -> bool {
+        self.review_editor.as_ref().map_or_else(
+            || self.form.borrow().confirmation_open(),
+            |review| review.form.borrow().confirmation_open(),
+        )
+    }
+
+    fn render_confirmation(&self, frame: &mut Frame<'_>, area: Rect, surfaces: &mut FrameSurfaces) {
+        if let Some(review) = &self.review_editor {
+            review
+                .form
+                .borrow_mut()
+                .render_confirmation(frame, area, surfaces);
+        } else {
+            self.form
+                .borrow_mut()
+                .render_confirmation(frame, area, surfaces);
+        }
+    }
+
+    fn handles_mouse(&self, column: u16, row: u16) -> bool {
         if let Some(dialog) = &self.review_editor {
             let form = dialog.form.borrow();
             return form.captures_pointer() || form.contains(column, row);
@@ -913,7 +879,7 @@ impl SetupDialog {
         form.captures_pointer() || form.contains(column, row)
     }
 
-    pub(crate) fn cancel_pointer(&mut self) -> bool {
+    fn cancel_pointer(&mut self) -> bool {
         if let Some(review) = &mut self.review_editor {
             let form = review.form.get_mut();
             let changed = form.captures_pointer();
@@ -927,12 +893,54 @@ impl SetupDialog {
         }
     }
 
-    pub(crate) fn reset_geometry(&mut self) {
+    fn reset_geometry(&mut self) {
         if let Some(review) = &mut self.review_editor {
             review.form.get_mut().reset_geometry();
         } else {
             self.form.get_mut().reset_geometry();
         }
+    }
+
+    /// Only the setup form's own field counts. The review-settings editor on
+    /// top of it has text fields too, but routing has never consulted them and
+    /// this milestone does not change that.
+    fn text_input_focused(&self) -> bool {
+        self.form.borrow().is_focused(SetupControl::Field)
+    }
+
+    fn prepare_dialog_state(&mut self) {
+        self.form.get_mut().set_action_role(
+            SetupControl::Cancel,
+            mj_chat::components::ActionRole::Cancel,
+        );
+        self.form
+            .get_mut()
+            .set_action_role(SetupControl::Back, mj_chat::components::ActionRole::Back);
+        if let Some(review) = &mut self.review_editor {
+            review.prepare_dialog_state();
+        } else if let Some(editor) = &self.editor {
+            self.form
+                .get_mut()
+                .track_draft(vec![editor.input.to_string()]);
+            self.form
+                .get_mut()
+                .set_dismiss_actions(&[SetupControl::Back]);
+            self.form.get_mut().set_default_action(SetupControl::Apply);
+        } else {
+            // The outer setup draft uses its normalized saved-config comparison.
+            self.form.get_mut().set_dirty(false);
+            self.form.get_mut().set_dismiss_actions(&[]);
+            self.form.get_mut().set_default_action(SetupControl::Save);
+        }
+    }
+
+    fn layer_detail(&self) -> String {
+        format!(
+            "{:?}/{:?}/{}",
+            self.path,
+            self.editor.as_ref().map(|editor| &editor.path),
+            self.review_editor.is_some()
+        )
     }
 }
 

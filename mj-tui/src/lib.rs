@@ -48,6 +48,7 @@ mod dialogs;
 mod go;
 mod help;
 mod ingest;
+mod modal_surface;
 mod palette;
 mod render;
 mod render_changes;
@@ -1472,36 +1473,8 @@ impl DashboardState {
     }
 
     fn text_input_focused(&self) -> bool {
-        match &self.mode {
-            Mode::Rename(editor) => editor
-                .form
-                .borrow()
-                .is_focused(dialogs::DialogControl::Field),
-            Mode::RepositoryOrigin(dialog) => dialog
-                .form
-                .borrow()
-                .is_focused(dialogs::DialogControl::Field),
-            Mode::EditContainer(editor) => editor.field().is_some(),
-            Mode::ResumeDialog(dialog) => dialog.focused() == crate::resume::ResumeFocus::Search,
-            // The palette's query is a text field, so Ctrl-C closes it and a
-            // paste lands in the query rather than on the dashboard.
-            Mode::Palette(palette) => palette
-                .form
-                .borrow()
-                .is_focused(palette::PaletteControl::Query),
-            Mode::ConfigId(editor) => editor
-                .form
-                .borrow()
-                .is_focused(dialogs::DialogControl::Field),
-            Mode::New(wizard) => wizard.text_input_focused(),
-            Mode::Resume(wizard) => wizard.text_input_focused(),
-            Mode::Setup(dialog) => dialog.form.borrow().is_focused(setup::SetupControl::Field),
-            Mode::WorkspaceManager(dialog) => dialog
-                .form
-                .borrow()
-                .is_focused(crate::workspaces::WorkspaceControl::Name),
-            _ => false,
-        }
+        self.active_modal()
+            .is_some_and(|modal| modal.text_input_focused())
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {

@@ -1,9 +1,7 @@
 //! Modal dialogs: session import, confirmations, and the rename editor.
 
 mod container;
-#[cfg(test)]
-use container::ContainerEditFocus;
-pub(crate) use container::{ContainerEditor, render_container_editor};
+pub(crate) use container::{ContainerEditFocus, ContainerEditor, render_container_editor};
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};

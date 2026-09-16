@@ -327,26 +327,6 @@ impl NewWizard {
             );
         }
     }
-
-    pub(crate) fn text_input_focused(&self) -> bool {
-        if let Some(id) = self.form.borrow().focused() {
-            return match self.step {
-                WizardStep::ProjectDirectory => id == WizardControl::ProjectDirectory,
-                WizardStep::NewBundle => {
-                    id == WizardControl::NewBundleSource && !self.bundle_creation_in_flight
-                }
-                WizardStep::Mounts => matches!(
-                    id,
-                    WizardControl::MountSource | WizardControl::MountDestination
-                ),
-                _ => false,
-            };
-        }
-        matches!(
-            self.step,
-            WizardStep::ProjectDirectory | WizardStep::NewBundle | WizardStep::Mounts
-        )
-    }
 }
 
 impl ResumeWizard {
@@ -394,17 +374,6 @@ impl ResumeWizard {
                     dashboard.config.targets.get(&target_id),
                     Some(TargetTemplate::AwsEc2 { .. })
                 ))
-    }
-
-    pub(crate) fn text_input_focused(&self) -> bool {
-        if let Some(id) = self.form.borrow().focused() {
-            return self.step == WizardStep::Mounts
-                && matches!(
-                    id,
-                    WizardControl::MountSource | WizardControl::MountDestination
-                );
-        }
-        self.step == WizardStep::Mounts
     }
 }
 
