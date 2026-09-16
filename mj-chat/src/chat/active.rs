@@ -3391,24 +3391,39 @@ fn prompt_title_line(
         chip_x = chip_x.saturating_add(width);
     }
     if let Some(effort) = effort {
+        let separator_width = usize::from(model.is_some()) * display_width("· ");
         let text = if model.is_some() {
             format!("· {effort} ")
         } else {
             format!(" {effort} ")
         };
         let width = display_width(&text);
+        let value_width = width.saturating_sub(separator_width);
+        let value_x = chip_x.saturating_add(separator_width);
+        // The dot is visual punctuation between independent controls, so
+        // neither its color nor its hitbox advertises it as clickable.
+        if model.is_some() {
+            spans.push(Span::styled("· ", theme::muted()));
+        }
         if chip_x.saturating_add(width) <= chip_limit {
             chips.push((
                 "effort",
                 Rect::new(
-                    u16::try_from(chip_x).unwrap_or(u16::MAX),
+                    u16::try_from(value_x).unwrap_or(u16::MAX),
                     prompt_area.y,
-                    u16::try_from(width).unwrap_or(u16::MAX),
+                    u16::try_from(value_width).unwrap_or(u16::MAX),
                     1,
                 ),
             ));
         }
-        spans.push(Span::styled(text, theme::selection(false)));
+        spans.push(Span::styled(
+            if model.is_some() {
+                format!("{effort} ")
+            } else {
+                text
+            },
+            theme::selection(false),
+        ));
     }
     if !suffix.is_empty() {
         spans.push(Span::raw(format!(" {suffix} ")));
@@ -3658,7 +3673,11 @@ mod tests {
         agent_message_item, agent_transcript_item, drawn_transcript, fast_mode_option, queued,
         snapshot,
     };
-    use agent_client_protocol::schema::v1::{SessionConfigOption, SessionConfigOptionCategory};
+    use agent_client_protocol::schema::v1::{
+        SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelect, SessionConfigSelectOption, SessionConfigSelectOptions,
+        SessionConfigValueId,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use mj_core::elicitation::{ElicitationField, ElicitationFieldKind, ElicitationRequest};
     use mj_core::relay::RELAY_EVENT_GENESIS_DIGEST;
@@ -5505,6 +5524,70 @@ mod tests {
 
         assert!(prompt_title(&chat).contains("PLAN MODE"));
         assert!(!prompt_title(&chat).contains("Prompt"));
+    }
+
+    #[test]
+    fn effort_separator_between_prompt_chips_is_not_clickable() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_config_options(&[
+            select_config("model", "fast", &["fast", "slow"]),
+            select_config("effort", "high", &["low", "high"]),
+        ]);
+        let (title, _, chips) = prompt_title_line(&chat, Rect::new(0, 0, 100, 3));
+        chat.config_chip_areas = chips;
+
+        let separator = title
+            .spans
+            .iter()
+            .position(|span| span.content == "· ")
+            .expect("the effort separator is rendered");
+        assert_eq!(title.spans[separator].style, theme::muted());
+        assert_eq!(
+            title.spans[separator + 1].content,
+            format!("{} ", chat.current_effort().unwrap())
+        );
+        assert_eq!(title.spans[separator + 1].style, theme::selection(false));
+
+        let (_, model) = chat
+            .config_chip_areas
+            .iter()
+            .find(|(key, _)| *key == "model")
+            .copied()
+            .expect("the model chip is rendered");
+        let (_, effort) = chat
+            .config_chip_areas
+            .iter()
+            .find(|(key, _)| *key == "effort")
+            .copied()
+            .expect("the effort value is rendered");
+        assert_eq!(effort.x, model.right() + display_width("· ") as u16);
+        assert_eq!(
+            chat.prompt_config_chip_at(model.right(), model.y),
+            None,
+            "the separator dot has no click hitbox"
+        );
+        assert_eq!(chat.prompt_config_chip_at(model.right() + 1, model.y), None);
+        assert_eq!(chat.prompt_config_chip_at(model.x, model.y), Some("model"));
+        assert_eq!(
+            chat.prompt_config_chip_at(effort.x, effort.y),
+            Some("effort")
+        );
+    }
+
+    fn select_config(key: &str, current: &str, values: &[&'static str]) -> SessionConfigOption {
+        SessionConfigOption::new(
+            SessionConfigId::new(key),
+            key,
+            SessionConfigKind::Select(SessionConfigSelect::new(
+                SessionConfigValueId::new(current),
+                SessionConfigSelectOptions::Ungrouped(
+                    values
+                        .iter()
+                        .map(|value| SessionConfigSelectOption::new(*value, *value))
+                        .collect(),
+                ),
+            )),
+        )
     }
 
     #[test]
