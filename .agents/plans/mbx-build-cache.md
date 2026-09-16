@@ -23,7 +23,8 @@ The user sees two new settings and no prompts. A global switch, "Enable MBX for 
 - [x] (2026-09-16) Milestone 1a: per-session container workspace path. New sessions record `/workspace/<session id>` (`SessionRecord.container_workspace`, compatible migration 35); sessions created earlier keep `/workspace`; children use the parent's path; orphan adoption probes the container for the path. Consequence for 1b: mbx is enabled only for sessions with a recorded per-session workspace, because legacy sessions could still collide.
 - [x] (2026-09-16) Milestone 1: read-write mounts of the cache directory and a relocated target root at their host paths; `MBX_CACHE_DIR` and optional `MBX_GC_MAX_SIZE` in the worker's target environment.
 - [x] (2026-09-16) Milestone 1: native mbx version check against the pin (older native mbx disables the cache on that host).
-- [ ] Milestone 1: end-to-end validation on localhost (in progress: isolated instance `mbxtest`, dev worker rebuilt) and morannon.
+- [x] (2026-09-16) Milestone 1: end-to-end validation on localhost (isolated instance `mbxtest`, local Podman, native cache `/mnt/optane/mbx-cache`). The cache mechanism works: the `cargo` shim is installed and first on `PATH` for the harness, the cache and the relocated target root are bind-mounted read-write at their host paths and are writable by the mapped container user, the host's `~/.config/mbx/config.toml` is present in the container, `MBX_CACHE_DIR` reaches the harness, two sessions on the same repo get distinct managed targets under the host's `target.root`, and the second session's build reported 44 cache hits and 0 misses off the first. Reflinks and the version check (native mbx upgraded to 1.12.0) both pass.
+- [ ] Milestone 1: end-to-end validation on morannon (SSH Podman, ZFS `/mnt/nvme/mbx`).
 
 ## Surprises & Discoveries
 
@@ -71,6 +72,12 @@ The user sees two new settings and no prompts. A global switch, "Enable MBX for 
 
 - Observation: `--userns=keep-id:uid=0,gid=0` keeps a root image's process as root, but plain `--userns=keep-id` demotes it to the host uid.
   Evidence (localhost, Podman 5.7.0, `ubuntu:24.04`): `podman run --userns=keep-id:uid=0,gid=0 ubuntu:24.04 id` prints `uid=0(root)`; `podman run --userns=keep-id ubuntu:24.04 id -u` prints `1000`. In all three variants (no `--userns`, plain keep-id, `keep-id:uid=0`) a file the container writes to a host-owned bind mount is owned by the host user.
+
+- Observation: mj's harness environment loses the image's `RUSTUP_HOME`/`CARGO_HOME`, which breaks Rust builds that pin a target in `.cargo/config.toml` — independently of mbx.
+  Evidence (localhost, agent-dev image): the image sets `RUSTUP_HOME=/usr/local/rustup` and `CARGO_HOME=/usr/local/cargo` as image `ENV` (not via `/etc/profile.d`). The harness process (`claude-agent-acp`) has neither, because `login_environment::discover()` runs a login shell with `clear_env` and only re-derives what profile scripts set. rustc then resolves its sysroot to the per-user `/home/hel/.rustup`, which carries only the gnu std, so the hel repo (whose `.cargo/config.toml` pins `x86_64-unknown-linux-musl`) fails `error[E0463]: can't find crate for core/std`. Real `cargo build` with mbx absent fails identically; the same environment plus `RUSTUP_HOME=/usr/local/rustup` builds cleanly. A login shell (`bash -lc`) built the whole repo through the mbx shim (52 hits) because `podman exec` inherits the image env. This is a pre-existing mj issue, out of scope for the mbx work, but it currently prevents an agent from seeing a successful cached build in these sessions, and it also splits mbx action-key identity between host-native builds (which use `/usr/local/rustup`) and in-session builds (which use `/home/hel/.rustup`), so the two do not share results until it is fixed.
+
+- Observation: the daemon pins its worker binary at startup, so a rebuilt dev worker needs a daemon restart.
+  Evidence: the first two `mbxtest` sessions failed with `unknown field authentication_marker` parsing `launch.json` — a stale 2.7.1 worker the daemon had pinned before the rebuild. After `mj -i mbxtest daemon restart`, sessions launched. Not an mbx issue; a dev-loop note.
 
 ## Decision Log
 
