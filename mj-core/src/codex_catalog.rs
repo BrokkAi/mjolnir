@@ -55,7 +55,7 @@ impl CodexCatalog {
 /// both shapes.
 pub fn parse(bytes: &[u8]) -> Result<CodexCatalog> {
     let value: Value = serde_json::from_slice(bytes).context("parse model catalog as JSON")?;
-    let entries = if let Some(models) = value.get("models").and_then(Value::as_array) {
+    let mut entries = if let Some(models) = value.get("models").and_then(Value::as_array) {
         let mut entries = Vec::with_capacity(models.len());
         for model in models {
             let Some(object) = model.as_object() else {
@@ -88,7 +88,87 @@ pub fn parse(bytes: &[u8]) -> Result<CodexCatalog> {
     if entries.is_empty() {
         bail!("model catalog lists no models");
     }
+    for entry in &mut entries {
+        backfill_reasoning_levels(entry);
+    }
     Ok(CodexCatalog { models: entries })
+}
+
+/// Fill in reasoning-effort levels for a known model family when the provider's
+/// catalog does not state them.
+///
+/// A provider that serves OpenAI's plain model list (DeepSeek) gives no
+/// capabilities at all, and some Codex-shape catalogs list a model with an empty
+/// `supported_reasoning_levels` (Z.ai returns `glm-5-turbo` that way). Without
+/// levels, Codex advertises no effort selector for that model, so Mjolnir cannot
+/// apply the profile's effort and the session fails with "ACP bridge does not
+/// expose a effort selector". This backfill uses [`known_reasoning_levels`] to
+/// supply the levels the provider omitted. It only fills an absent or empty
+/// list, so a provider that does state its levels keeps them, and a profile's
+/// own `models.json` override still wins because `merge_overrides` runs later.
+fn backfill_reasoning_levels(entry: &mut Map<String, Value>) {
+    let Some(slug) = entry.get("slug").and_then(Value::as_str) else {
+        return;
+    };
+    let already_listed = entry
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)
+        .is_some_and(|levels| !levels.is_empty());
+    if already_listed {
+        return;
+    }
+    let Some((levels, default)) = known_reasoning_levels(slug) else {
+        return;
+    };
+    let levels = levels
+        .iter()
+        .map(|(effort, description)| {
+            Value::Object(Map::from_iter([
+                ("effort".to_owned(), Value::from(*effort)),
+                ("description".to_owned(), Value::from(*description)),
+            ]))
+        })
+        .collect();
+    entry.insert(
+        "supported_reasoning_levels".to_owned(),
+        Value::Array(levels),
+    );
+    // Keep a default the provider already stated (Z.ai's `glm-5-turbo` says
+    // `max` even while listing no levels); only supply one when it is missing.
+    entry
+        .entry("default_reasoning_level".to_owned())
+        .or_insert_with(|| Value::from(default));
+}
+
+/// Reasoning-effort levels for known model families, used only to fill a gap a
+/// provider's catalog left (see [`backfill_reasoning_levels`]).
+///
+/// The values come from the providers' own documentation (checked 2026-09):
+/// DeepSeek V4 Pro and V4 Flash both expose `low`, `high`, and `max`, and Z.ai's
+/// GLM 5.3 family exposes `low`, `high`, and `max` with `max` as its default.
+/// Matching is by model-id prefix so new point releases in a family are covered.
+/// A profile's `models.json` override is the way to correct any entry this table
+/// gets wrong.
+fn known_reasoning_levels(
+    slug: &str,
+) -> Option<(&'static [(&'static str, &'static str)], &'static str)> {
+    const DEEPSEEK: &[(&str, &str)] = &[
+        ("low", "Light reasoning"),
+        ("high", "Deep reasoning"),
+        ("max", "Maximum reasoning"),
+    ];
+    const GLM: &[(&str, &str)] = &[
+        ("low", "Light reasoning"),
+        ("high", "Enhanced reasoning"),
+        ("max", "Deep reasoning"),
+    ];
+    if slug.starts_with("deepseek") {
+        Some((DEEPSEEK, "high"))
+    } else if slug.starts_with("glm") {
+        Some((GLM, "max"))
+    } else {
+        None
+    }
 }
 
 /// Parse a Codex-shape catalog only, for the user's optional `models.json`
@@ -115,10 +195,12 @@ pub fn parse_codex_shape(bytes: &[u8]) -> Result<CodexCatalog> {
 /// Build a Codex catalog entry from one id in an OpenAI-format model list.
 ///
 /// The list carries no capabilities, so the defaults are deliberately
-/// conservative: no reasoning levels (a session shows no effort choice rather
-/// than offering one the provider rejects), a 128k context window, and the
-/// plain shell tool. A user who knows better refines any entry with a
-/// `models.json` override file in the profile home.
+/// conservative: no reasoning levels here, a 128k context window, and the plain
+/// shell tool. `parse` then runs [`backfill_reasoning_levels`], which supplies
+/// levels for a known model family (DeepSeek and GLM), and a session on an
+/// unknown model still shows no effort choice rather than one the provider
+/// rejects. A user refines any entry with a `models.json` override file in the
+/// profile home.
 fn entry_from_openai_model(
     id: &str,
     owned_by: Option<&str>,
@@ -241,6 +323,30 @@ pub fn stamp_reviewer(catalog: &mut CodexCatalog, reviewer: &str) {
 mod tests {
     use super::*;
 
+    /// The `effort` string of each entry in `supported_reasoning_levels`,
+    /// accepting both the object shape (`{"effort": "low"}`) the backfill and
+    /// Z.ai emit and the plain-string shape used in some fixtures.
+    fn efforts(entry: &Map<String, Value>) -> Vec<String> {
+        entry
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .map(|levels| {
+                levels
+                    .iter()
+                    .map(|level| match level {
+                        Value::String(effort) => effort.clone(),
+                        Value::Object(object) => object
+                            .get("effort")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        _ => String::new(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     const BODY: &[u8] = br#"{"models":[
         {"slug":"glm-5.3","supported_reasoning_levels":["low","high","max"],"display_name":"GLM 5.3"},
         {"slug":"glm-5.3-flash","supported_reasoning_levels":["low","high","max"]},
@@ -285,9 +391,14 @@ mod tests {
             "the owner explains where the model came from"
         );
         assert_eq!(
-            flash["supported_reasoning_levels"],
-            Value::Array(vec![]),
-            "a plain list says nothing about reasoning, so no effort is offered"
+            efforts(flash),
+            ["low", "high", "max"],
+            "a known family's levels are backfilled although the list omits them"
+        );
+        assert_eq!(
+            flash["default_reasoning_level"],
+            Value::from("high"),
+            "the backfilled family default is supplied"
         );
         assert_eq!(flash["context_window"], Value::from(128000));
         assert_eq!(flash["priority"], Value::from(0));
@@ -295,6 +406,48 @@ mod tests {
         assert_eq!(flash["truncation_policy"]["limit"], Value::from(10000));
         // Codex must be able to read back what the translation produced.
         assert!(parse(catalog.to_json().as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn backfill_fills_a_codex_entry_that_lists_no_reasoning_levels() {
+        // Z.ai returns `glm-5-turbo` with a `max` default but no levels, which
+        // would otherwise leave the model with no effort selector.
+        let catalog = parse(
+            br#"{"models":[
+                {"slug":"glm-5.3","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]},
+                {"slug":"glm-5-turbo","default_reasoning_level":"max"}
+            ]}"#,
+        )
+        .expect("parse");
+        assert_eq!(
+            efforts(&catalog.models[0]),
+            ["low", "high"],
+            "a provider that states its levels keeps exactly those"
+        );
+        assert_eq!(
+            efforts(&catalog.models[1]),
+            ["low", "high", "max"],
+            "an empty list is backfilled for a known family"
+        );
+        assert_eq!(
+            catalog.models[1]["default_reasoning_level"],
+            Value::from("max"),
+            "a default the provider already stated is preserved"
+        );
+    }
+
+    #[test]
+    fn backfill_leaves_an_unknown_family_without_reasoning_levels() {
+        let catalog = parse(br#"{"object":"list","data":[{"id":"mystery-1","object":"model"}]}"#)
+            .expect("parse");
+        assert!(
+            efforts(&catalog.models[0]).is_empty(),
+            "an unknown model still offers no effort rather than a guessed one"
+        );
+        assert!(
+            !catalog.models[0].contains_key("default_reasoning_level"),
+            "and no default is invented for it"
+        );
     }
 
     #[test]
@@ -337,9 +490,9 @@ mod tests {
             "fields the override omits survive"
         );
         assert_eq!(
-            catalog.models[0]["supported_reasoning_levels"],
-            Value::Array(vec![]),
-            "a model the override does not name is untouched"
+            efforts(&catalog.models[0]),
+            ["low", "high", "max"],
+            "a model the override does not name keeps its backfilled levels"
         );
     }
 
