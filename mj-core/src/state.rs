@@ -1578,12 +1578,23 @@ pub struct RecoveryCandidate {
     pub target_template_id: String,
     pub locator: TargetLocator,
     pub ownership: Option<crate::worker_launch::WorkerOwnership>,
+    /// Instance that created the worker, from its label or tag, else from
+    /// the ownership marker. `None` means an older build left no stamp.
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RecoveryScan {
     pub candidates: Vec<RecoveryCandidate>,
     pub warnings: Vec<String>,
+    /// Identity of the instance that ran the scan.
+    #[serde(default)]
+    pub instance_id: String,
+    /// Candidates left out because another or an unknown instance created
+    /// them and the scan was not widened to all instances.
+    #[serde(default)]
+    pub hidden_other_instances: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

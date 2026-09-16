@@ -23,6 +23,10 @@ pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
 pub const SESSION_TAG: &str = "dev.mj.session";
 pub const MANAGED_TAG: &str = "dev.mj.managed";
+/// Which Mjolnir instance (named `--instance` or data-directory fingerprint)
+/// created a worker; see `config::instance_identity`.
+pub const INSTANCE_LABEL: &str = "dev.mj.instance";
+pub const INSTANCE_TAG: &str = "dev.mj.instance";
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
 
 /// The launch phase a command belongs to, reported as launch progress.

@@ -110,6 +110,7 @@ impl CacheHost {
         let command = self.command(remote, "find live container Git cache snapshots");
         let output = checked(executor.execute(&command)?, &command)?;
         super::recovery_scan::managed_sessions_from_container_json(&output.stdout)
+            .map(|sessions| sessions.into_iter().map(|(session, _)| session).collect())
     }
 }
 

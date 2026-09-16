@@ -155,6 +155,7 @@ impl Controller {
             profile_id: session.last_profile.clone(),
             bundle_id: session.bundle_id.clone(),
             target_template_id: session.target_template_id.clone(),
+            instance_id: Some(mj_core::config::instance_identity()),
         }
         .write(&ownership_path)?;
         let profile_stage = staging.path().join("profile");

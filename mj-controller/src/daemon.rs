@@ -3424,9 +3424,11 @@ async fn handle_action(
         DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
             state.checkpoint_session_now(&session_id).await?,
         )),
-        DaemonAction::ScanRecovery => {
-            let scan =
-                blocking(|| Ok(Controller::load()?.scan_orphan_workers(&ProcessExecutor))).await?;
+        DaemonAction::ScanRecovery { all_instances } => {
+            let scan = blocking(move || {
+                Ok(Controller::load()?.scan_orphan_workers(&ProcessExecutor, all_instances))
+            })
+            .await?;
             Ok(DaemonReply::RecoveryScan(scan))
         }
         DaemonAction::AdoptRecovery {
@@ -3434,6 +3436,7 @@ async fn handle_action(
             target_id,
             profile,
             bundle,
+            all_instances,
         } => {
             ensure_no_active_lifecycle(state)?;
             let mut controller = blocking(Controller::load).await?;
@@ -3443,6 +3446,7 @@ async fn handle_action(
                     &target_id,
                     profile.as_deref(),
                     bundle.as_deref(),
+                    all_instances,
                     &ProcessExecutor,
                 )
                 .await?;
@@ -3453,6 +3457,7 @@ async fn handle_action(
             session_id,
             target_id,
             confirmation,
+            all_instances,
         } => {
             ensure_no_active_lifecycle(state)?;
             blocking(move || {
@@ -3460,6 +3465,7 @@ async fn handle_action(
                     &session_id,
                     &target_id,
                     &confirmation,
+                    all_instances,
                     &ProcessExecutor,
                 )
             })
