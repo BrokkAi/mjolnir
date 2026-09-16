@@ -326,7 +326,12 @@ mod tests {
     fn failed_login_never_returns_an_ambient_environment() {
         let home = fixture();
         std::fs::write(home.path().join(".profile"), "echo secret >&2\nexit 42\n").unwrap();
-        let error = discover_account(account(home.path()), Duration::from_secs(2))
+        // The fixture shell exits immediately, so what is under test is the
+        // reported failure, not the deadline. The deadline is long enough that
+        // a loaded machine cannot turn this into a timeout instead;
+        // `capture_deadline_includes_descendants_holding_output_pipes` is the
+        // test that does bound the wait.
+        let error = discover_account(account(home.path()), Duration::from_secs(600))
             .unwrap_err()
             .to_string();
         assert!(error.contains("42"));
