@@ -13,8 +13,9 @@ default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj
 version = "2.10.0"
 edition = "2024"
 license = "GPL-3.0-only"
-# Keep the SPDX declaration for license policy and ship its text through Cargo.
-license-file = "LICENSE"
+# Each published crate carries a `LICENSE` symlink to the root file. `cargo
+# package` dereferences it, so every crate ships the GPL text without the
+# manifest warning that setting both `license` and `license-file` produces.
 readme = "README.md"
 repository = "https://github.com/BrokkAi/mjolnir"
 homepage = "https://github.com/BrokkAi/mjolnir"

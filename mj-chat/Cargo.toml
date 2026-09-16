@@ -3,7 +3,6 @@ name = "brokk-mj-chat"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-license-file.workspace = true
 license.workspace = true
 description = "Conversation view state and input surfaces for Mjolnir"
 repository = "https://github.com/BrokkAi/mjolnir"

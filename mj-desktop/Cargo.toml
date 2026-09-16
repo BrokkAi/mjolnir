@@ -3,7 +3,6 @@ name = "brokk-mj-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license-file.workspace = true
 license.workspace = true
 description = "Native desktop application for Mjolnir"
 repository.workspace = true
