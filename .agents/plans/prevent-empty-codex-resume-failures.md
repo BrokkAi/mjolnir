@@ -83,3 +83,15 @@ Reuse `DurableRelay`, `RelayObservation`, bounded journal replay, `LaunchSpec`, 
 Revision note: Created after investigating the user's affected journal and incorporating the request to prioritize prevention.
 
 Revision note: Updated after implementation and validation to record admission-versus-dispatch evidence, startup-context preservation, latest-identity selection, and successful recovery of the actual affected session.
+
+Closing note (2026-09-16): the journal-replay proof this plan introduced,
+`DurableRelay::native_session_is_pristine`, has been removed and superseded by
+"resume, then decide", described in
+`.agents/plans/replace-an-empty-codex-thread-after-a-failed-resume.md`. The
+proof could not survive its own environment: after `goal::publish` began
+recording a Mjolnir-authored `session_info_update` on every Codex session, the
+update classifier counted Mjolnir's own metadata as agent history, so no Codex
+session could be proven unused and every unprompted thread failed its resume
+forever. Mjolnir now always attempts the resume, and only a Codex error saying
+the thread does not exist, together with snapshot-only evidence that the thread
+was never used, allows opening a fresh thread in the same session.

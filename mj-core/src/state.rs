@@ -1326,14 +1326,6 @@ impl State {
             {
                 bail!("sub-agent {child_id:?} has incomplete relationship metadata");
             }
-            if subagent.working_directory.is_absolute()
-                || subagent
-                    .working_directory
-                    .components()
-                    .any(|component| component == Component::ParentDir)
-            {
-                bail!("sub-agent {child_id:?} has an unsafe working directory");
-            }
         }
         for (host, sources) in &self.mount_history {
             if host.trim().is_empty() {
@@ -2550,6 +2542,45 @@ mod tests {
                 .to_string()
                 .contains("expects Codex")
         );
+    }
+
+    /// A child's working directory is a launch choice, not a containment
+    /// boundary, so a stored record may name any path on the parent's target.
+    #[test]
+    fn a_stored_subagent_may_launch_outside_the_parent_workspace() {
+        let mut state = sample_state();
+        let parent_id = state.sessions.keys().next().unwrap().clone();
+        let child_id = "fedcba9876543210".to_owned();
+        let mut child = state.sessions[&parent_id].clone();
+        child.id = child_id.clone();
+        state.sessions.insert(child_id.clone(), child);
+        state.subagents.insert(
+            child_id.clone(),
+            SubagentRecord {
+                child_session_id: child_id.clone(),
+                parent_session_id: parent_id,
+                task_name: "lane".into(),
+                profile_id: "codex-1".into(),
+                model: None,
+                effort: None,
+                working_directory: PathBuf::new(),
+                initial_prompt: "work in the lane".into(),
+                request_key: "request-1".into(),
+                created_at: "2026-09-16T00:00:00Z".into(),
+                noticed_turn: None,
+            },
+        );
+        for working_directory in [
+            PathBuf::from("/mnt/optane/bifrost-sg-c2"),
+            PathBuf::from("../shared-checkout"),
+        ] {
+            state
+                .subagents
+                .get_mut(&child_id)
+                .unwrap()
+                .working_directory = working_directory;
+            state.validate().unwrap();
+        }
     }
 
     /// Records written before the verb was renamed say "archived". They must

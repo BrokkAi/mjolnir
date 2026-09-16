@@ -291,7 +291,27 @@ pub fn session_update_has_native_history(update: &SessionUpdate) -> bool {
         SessionUpdate::AvailableCommandsUpdate(_)
             | SessionUpdate::ConfigOptionUpdate(_)
             | SessionUpdate::CurrentModeUpdate(_)
+            // Mjolnir synthesizes this variant itself, in `goal::publish`
+            // (`mj-worker/src/acp/goal.rs`), to carry its own goal metadata.
+            // It never comes from the agent, so it is not agent content.
+            | SessionUpdate::SessionInfoUpdate(_)
     )
+}
+
+/// The stable part of Codex's refusal to resume a thread it never wrote to
+/// disk. Codex defers a thread's rollout file until the first user message, so
+/// a thread that was created and never prompted does not exist to resume.
+/// codex-acp wraps the message, and it reaches Mjolnir looking like
+/// `Internal error: {"details": "no rollout found for thread id 0199…"}`, so
+/// the substring is what can be matched.
+pub const CODEX_MISSING_THREAD_MESSAGE: &str = "no rollout found for thread id";
+
+/// Whether a failed `session/resume` or `session/load` says Codex has no such
+/// thread. If Codex rewords the message, this stops matching and Mjolnir keeps
+/// failing the resume loudly; it can never degrade into silently replacing a
+/// thread that still exists.
+pub fn codex_error_reports_missing_thread(error: &str) -> bool {
+    error.contains(CODEX_MISSING_THREAD_MESSAGE)
 }
 
 /// Only model and reasoning effort survive a bridge replacement. Restoring
@@ -342,6 +362,11 @@ pub enum RuntimeEvent {
     SessionConfigured {
         config_options: Vec<SessionConfigOption>,
     },
+    /// The native thread now holds something only it can replay: the agent
+    /// sent conversation content, or a prompt was transmitted to it. The
+    /// worker persists this so a later restart never treats the thread as an
+    /// empty one it may replace. Emitted once per bridge life, on the change.
+    NativeSessionUsed,
     SessionModesConfigured {
         modes: Option<SessionModeState>,
     },
@@ -633,4 +658,37 @@ pub fn plan_review_answer(response: ElicitationResponse) -> (String, Option<Stri
         _ => None,
     };
     (action, feedback)
+}
+
+#[cfg(test)]
+mod missing_thread_tests {
+    use super::*;
+
+    #[test]
+    fn codex_reports_a_missing_thread_through_the_wrapped_adapter_message() {
+        // What codex-acp actually sends back for a thread with no rollout.
+        assert!(codex_error_reports_missing_thread(
+            r#"resume ACP session 0199f0ba: Internal error: {"details": "no rollout found for thread id 0199f0ba"}"#
+        ));
+        // Anything else keeps failing the resume loudly.
+        assert!(!codex_error_reports_missing_thread(
+            "resume ACP session 0199f0ba: Internal error: session store is locked"
+        ));
+    }
+
+    #[test]
+    fn mjolnirs_own_session_info_update_is_not_agent_content() {
+        let mjolnir_metadata: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": {"mjGoalCapability": null},
+        }))
+        .unwrap();
+        assert!(!session_update_has_native_history(&mjolnir_metadata));
+        let agent_content: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "hello"},
+        }))
+        .unwrap();
+        assert!(session_update_has_native_history(&agent_content));
+    }
 }

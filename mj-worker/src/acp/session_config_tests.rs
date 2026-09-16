@@ -113,6 +113,7 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
         project_memory: None,
         extra_mcp_servers: Vec::new(),
         resume_session: Some("native".into()),
+        native_session_may_have_history: false,
         accepted_config: Arc::new(Mutex::new(saved)),
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,

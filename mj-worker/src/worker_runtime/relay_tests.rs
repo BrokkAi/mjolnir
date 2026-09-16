@@ -4399,22 +4399,18 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
         .unwrap();
     let mut config = launch_config("/var/lib/hel/profiles/session");
     assert_eq!(
-        unix::select_resume_session(&config, &relay)
-            .unwrap()
-            .as_deref(),
+        unix::select_resume_session(&config, &relay).as_deref(),
         Some("native-relay")
     );
     config.native_session_id = Some("native-explicit".into());
     assert_eq!(
-        unix::select_resume_session(&config, &relay)
-            .unwrap()
-            .as_deref(),
+        unix::select_resume_session(&config, &relay).as_deref(),
         Some("native-relay")
     );
 }
 
 #[test]
-fn unused_codex_thread_is_recreated_after_worker_restart_without_losing_queued_work() {
+fn an_unused_codex_thread_is_still_resumed_before_any_decision() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     relay
@@ -4424,39 +4420,58 @@ fn unused_codex_thread_is_recreated_after_worker_restart_without_losing_queued_w
             native_continuity_lost: false,
         })
         .unwrap();
-    // Reproduce the accumulated startup failures in an older worker. Walk
-    // across a replay page boundary without treating warnings as history.
-    relay
-        .record_observation(RelayObservation::Warning {
-            message: "x".repeat(128 * 1024),
-        })
-        .unwrap();
     submit(
         &mut relay,
         "first-prompt",
         prompt("keep this queued prompt"),
     );
-    drop(relay);
-    let relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     let mut config = launch_config("/profile");
     config.native_session_id = Some("unused".into());
-    assert_eq!(unix::select_resume_session(&config, &relay).unwrap(), None);
+    // Resuming is always attempted; only the harness's answer decides what
+    // happens next.
+    assert_eq!(
+        unix::select_resume_session(&config, &relay).as_deref(),
+        Some("unused")
+    );
+    // A queued prompt that never reached the agent is not history, so the
+    // thread may be replaced if Codex says it does not exist.
+    assert!(!relay.native_session_may_have_history());
     assert_eq!(
         relay.operational_state().active_prompt.unwrap().command_id,
         "first-prompt"
     );
-    // Harnesses with different persistence semantics continue to resume.
-    config.harness = HarnessKind::Claude;
-    assert_eq!(
-        unix::select_resume_session(&config, &relay)
-            .unwrap()
-            .as_deref(),
-        Some("unused")
-    );
 }
 
 #[test]
-fn a_dispatched_codex_prompt_keeps_its_native_identity_after_restart() {
+fn an_imported_native_identity_is_recorded_as_used_at_startup() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    let mut config = launch_config("/profile");
+    config.native_session_id = Some("imported".into());
+    unix::record_imported_native_identity(&config, &mut relay).unwrap();
+    assert!(relay.native_session_may_have_history());
+    assert_eq!(
+        unix::select_resume_session(&config, &relay).as_deref(),
+        Some("imported")
+    );
+
+    // A thread this journal opened itself is not imported, even when the
+    // launch configuration still names it.
+    let temp = tempfile::tempdir().unwrap();
+    let mut local = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    local
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "imported".into(),
+            resumed: false,
+            native_continuity_lost: false,
+        })
+        .unwrap();
+    unix::record_imported_native_identity(&config, &mut local).unwrap();
+    assert!(!local.native_session_may_have_history());
+}
+
+#[test]
+fn a_used_native_session_is_reported_as_used_after_a_worker_restart() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     relay
@@ -4466,54 +4481,17 @@ fn a_dispatched_codex_prompt_keeps_its_native_identity_after_restart() {
             native_continuity_lost: false,
         })
         .unwrap();
-    submit(&mut relay, "first-prompt", prompt("already sent"));
-    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
-    drop(relay);
+    // What the ACP layer reports when the agent sends content or a prompt is
+    // transmitted.
+    let mut in_flight = BTreeMap::new();
+    unix::record_runtime_event(
+        &Arc::new(Mutex::new(relay)),
+        &mut in_flight,
+        RuntimeEvent::NativeSessionUsed,
+    )
+    .unwrap();
     let relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    assert_eq!(
-        unix::select_resume_session(&launch_config("/profile"), &relay)
-            .unwrap()
-            .as_deref(),
-        Some("used")
-    );
-}
-
-#[test]
-fn imported_codex_identity_is_never_replaced_without_local_history() {
-    let temp = tempfile::tempdir().unwrap();
-    let relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    let mut config = launch_config("/profile");
-    config.native_session_id = Some("imported".into());
-    assert_eq!(
-        unix::select_resume_session(&config, &relay)
-            .unwrap()
-            .as_deref(),
-        Some("imported")
-    );
-}
-
-#[test]
-fn codex_agent_content_prevents_replacing_a_native_session() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    relay
-        .record_observation(RelayObservation::SessionOpened {
-            native_session_id: "with-content".into(),
-            resumed: false,
-            native_continuity_lost: false,
-        })
-        .unwrap();
-    relay
-        .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-            ContentBlock::Text(TextContent::new("existing content")),
-        )))
-        .unwrap();
-    assert_eq!(
-        unix::select_resume_session(&launch_config("/profile"), &relay)
-            .unwrap()
-            .as_deref(),
-        Some("with-content")
-    );
+    assert!(relay.native_session_may_have_history());
 }
 
 /// A history that seals several journal segments and overflows one replay

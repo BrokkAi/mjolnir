@@ -153,7 +153,9 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         HarnessKind::Kimi => crate::relay::BackgroundWorkPolicy::KimiTasks,
         _ => crate::relay::BackgroundWorkPolicy::HostedTerminals,
     });
-    let resume_session = select_resume_session(&config, &durable_relay)?;
+    record_imported_native_identity(&config, &mut durable_relay)?;
+    let resume_session = select_resume_session(&config, &durable_relay);
+    let native_session_may_have_history = durable_relay.native_session_may_have_history();
     let project_memory = ProjectMemoryEndpoint::new(config.project_memory.clone());
     if !checkpoint_only && resume_session.is_none()
         // Recreating an unused native thread keeps this relay's original
@@ -363,6 +365,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
                 .map(|_| root.join(super::subagents::SUBAGENT_SOCKET)),
             project_memory: config.project_memory,
             resume_session,
+            native_session_may_have_history,
             accepted_config,
             harness: config.harness,
             execution_policy: config.execution_policy,
@@ -1028,6 +1031,9 @@ pub(super) fn record_runtime_event(
         RuntimeEvent::SessionConfigured { config_options } => {
             relay.record_observation(RelayObservation::SessionConfigured { config_options })?;
         }
+        RuntimeEvent::NativeSessionUsed => {
+            relay.mark_native_session_used()?;
+        }
         RuntimeEvent::SessionModesConfigured { modes } => {
             relay.record_observation(RelayObservation::SessionModesConfigured { modes })?;
         }
@@ -1466,18 +1472,34 @@ fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandRequest> {
     }
 }
 
+/// Which native thread this worker should try to resume. Always the identity
+/// the journal recorded last, if there is one: the launch configuration can
+/// still name a thread this session already replaced. Resuming is always
+/// attempted; whether a failure may be answered with a fresh thread is decided
+/// in `mj-worker/src/acp.rs` from the resume error and
+/// `DurableRelay::native_session_may_have_history`.
 pub(super) fn select_resume_session(
     config: &WorkerLaunchConfig,
     relay: &DurableRelay,
-) -> Result<Option<String>> {
-    let recorded = relay.operational_state().native_session_id;
-    if config.harness == HarnessKind::Codex && relay.native_session_is_pristine()? {
-        tracing::info!(native_session_id = ?recorded, "recreating unused Codex thread after worker restart");
-        return Ok(None);
+) -> Option<String> {
+    relay
+        .operational_state()
+        .native_session_id
+        .or_else(|| config.native_session_id.clone())
+}
+
+/// A native identity that arrived with the launch configuration was created
+/// somewhere other than this journal, which therefore cannot show what the
+/// thread contains. Record that durably before the thread is used again, so a
+/// later resume failure can never be answered by replacing it.
+pub(super) fn record_imported_native_identity(
+    config: &WorkerLaunchConfig,
+    relay: &mut DurableRelay,
+) -> Result<()> {
+    if config.native_session_id.is_some() && relay.operational_state().native_session_id.is_none() {
+        relay.mark_native_session_used()?;
     }
-    // The launch config can still name the original unused thread after a
-    // replacement. Once opened, the journal owns the current native identity.
-    Ok(recorded.or_else(|| config.native_session_id.clone()))
+    Ok(())
 }
 
 pub(super) async fn read_bounded_line(

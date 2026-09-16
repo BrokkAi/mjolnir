@@ -1,6 +1,6 @@
 //! Registration and ownership rules for child sessions on a parent's target.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -16,7 +16,10 @@ pub struct RegisterSubagentRequest {
     pub profile_id: String,
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// Empty means the parent's working directory; otherwise this is relative.
+    /// Empty means the parent's working directory. An absolute path is used
+    /// as-is; a relative path is resolved against the parent's working
+    /// directory. The path is interpreted on the parent's target and must
+    /// exist there; no other restriction applies.
     pub working_directory: PathBuf,
     pub initial_prompt: String,
     pub request_key: String,
@@ -46,8 +49,6 @@ impl Controller {
             !request.initial_prompt.trim().is_empty(),
             "sub-agent instructions cannot be empty"
         );
-        ensure_safe_relative_directory(&request.working_directory)?;
-
         let parent = self
             .state
             .sessions
@@ -211,13 +212,6 @@ impl Controller {
             }),
         )
     }
-}
-
-fn ensure_safe_relative_directory(path: &Path) -> Result<()> {
-    if path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
-        bail!("sub-agent working directory must be relative to the parent's workspace");
-    }
-    Ok(())
 }
 
 fn sibling_path(path: &Path, parent_id: &str, child_id: &str) -> Result<PathBuf> {

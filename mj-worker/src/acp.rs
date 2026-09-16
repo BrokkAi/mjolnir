@@ -120,6 +120,13 @@ pub struct LaunchSpec {
     /// Private Mjolnir delegation socket for supported parent sessions.
     pub subagent_mcp_socket: Option<PathBuf>,
     pub resume_session: Option<String>,
+    /// Whether Mjolnir's durable state shows the native thread named by
+    /// `resume_session` may already hold conversation history. Codex writes a
+    /// thread's rollout only at its first user message, so a thread that was
+    /// created and never prompted is missing on disk; when this is false, a
+    /// resume that fails because Codex has no such thread is answered with a
+    /// fresh thread in the same Mjolnir session instead of a dead worker.
+    pub native_session_may_have_history: bool,
     /// Accepted selectors for this logical session, shared across native
     /// bridge replacements. Workers seed this from their durable relay.
     pub accepted_config: Arc<Mutex<AcceptedSessionConfig>>,
@@ -627,10 +634,17 @@ struct OpenedSession {
     native_session_id: String,
     started_at: tokio::time::Instant,
     resume_required: Arc<AtomicBool>,
+    /// Set once this thread holds something only it can replay. Unlike
+    /// `resume_required`, it starts false for every harness, so it is evidence
+    /// about the thread rather than a policy about reloading it.
+    native_session_used: Arc<AtomicBool>,
 }
 
 struct BridgeRestart {
     resume_session: Option<String>,
+    /// Carried into the next bridge's spec: what the dead bridge saw is the
+    /// evidence for whether its thread may be replaced.
+    native_session_used: bool,
     unexpected: bool,
     session_age: Duration,
     message: &'static str,
@@ -686,6 +700,7 @@ async fn run_inner(
                     .state
                     .restart();
                 spec.resume_session = restart.resume_session;
+                spec.native_session_may_have_history |= restart.native_session_used;
                 replacing_previous_bridge = true;
             }
         }
@@ -830,6 +845,9 @@ async fn run_bridge(
         Ok(None) => Ok(None),
         Ok(Some(native_session_id)) => Ok(Some(BridgeRestart {
             resume_session: Some(native_session_id),
+            native_session_used: opened_now
+                .as_ref()
+                .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
             unexpected: false,
             session_age: opened_now
                 .map(|opened| opened.started_at.elapsed())
@@ -843,6 +861,7 @@ async fn run_bridge(
                     .resume_required
                     .load(Ordering::Acquire)
                     .then_some(opened.native_session_id),
+                native_session_used: opened.native_session_used.load(Ordering::Acquire),
                 unexpected: true,
                 session_age: opened.started_at.elapsed(),
                 message: if opened.resume_required.load(Ordering::Acquire) {
@@ -1155,6 +1174,11 @@ where
         spec.resume_session.is_some() || spec.harness != HarnessKind::Codex,
     ));
     let notification_resume_required = resume_required.clone();
+    // Evidence about the thread itself, as opposed to `resume_required`'s
+    // policy about reloading it: false until this thread holds something only
+    // it can replay.
+    let native_session_used = Arc::new(AtomicBool::new(false));
+    let notification_native_session_used = native_session_used.clone();
     // A provider may replay the native transcript as `session/update`
     // notifications while answering `session/load`. Hel already owns that
     // history in its durable relay, so accepting the replay would duplicate
@@ -1282,6 +1306,14 @@ where
                 }
                 if session_update_has_native_history(&update) {
                     notification_resume_required.store(true, Ordering::Release);
+                    // Report the transition once, so the worker can persist
+                    // that this thread must never be replaced.
+                    if !notification_native_session_used.swap(true, Ordering::AcqRel) {
+                        notification_events
+                            .send(RuntimeEvent::NativeSessionUsed)
+                            .await
+                            .map_err(|_| relay_event_channel_error())?;
+                    }
                 }
                 if !session_update_is_relay_visible(
                     &update,
@@ -1935,6 +1967,7 @@ where
                 session_update_count,
                 session_updates_enabled,
                 resume_required,
+                native_session_used,
                 replacing_previous_bridge,
                 grok_usage,
             )
@@ -2095,6 +2128,7 @@ async fn drive_connection(
     session_update_count: Arc<AtomicU64>,
     session_updates_enabled: Arc<AtomicBool>,
     resume_required: Arc<AtomicBool>,
+    native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
     grok_usage: grok_usage::Collector,
 ) -> Result<Option<String>> {
@@ -2113,6 +2147,7 @@ async fn drive_connection(
         &session_update_count,
         &session_updates_enabled,
         resume_required,
+        native_session_used,
         replacing_previous_bridge,
         &grok_usage,
     )
@@ -2350,6 +2385,15 @@ fn drain_requests_from_the_previous_bridge(requests: &mut mpsc::Receiver<Command
     }
 }
 
+/// Whether a failed `session/resume` or `session/load` failed because Codex
+/// has no such thread. Only Codex defers writing a thread to disk until its
+/// first user message, so only Codex can report a thread Mjolnir believes it
+/// created; every other harness's reload failure means something else.
+fn codex_reports_missing_thread(spec: &LaunchSpec, error: &anyhow::Error) -> bool {
+    spec.harness == HarnessKind::Codex
+        && mj_core::acp::codex_error_reports_missing_thread(&format!("{error:#}"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn serve_session(
     connection: &ConnectionTo<Agent>,
@@ -2363,6 +2407,7 @@ async fn serve_session(
     session_update_count: &AtomicU64,
     session_updates_enabled: &AtomicBool,
     resume_required: Arc<AtomicBool>,
+    native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
     grok_usage: &grok_usage::Collector,
 ) -> Result<Option<String>> {
@@ -2501,10 +2546,40 @@ async fn serve_session(
                 .with_context(|| format!("load ACP session {existing}"))
                 .map(|loaded| (loaded.meta, loaded.config_options, loaded.modes))
         };
-        // Every harness captures per-session native files in its checkpoint, so
-        // a failed reload means state the checkpoint restored would be
-        // discarded by starting fresh. Fail instead.
-        let reloaded = Some(reloaded?);
+        // A failed reload normally means state a checkpoint restored would be
+        // discarded by starting fresh, so it fails the worker. The one
+        // exception is a Codex thread that both sides agree is empty: Codex
+        // writes a thread's rollout at its first user message, so a thread
+        // created and never prompted does not exist to resume, and failing
+        // over it forever would strand the session. Replace such a thread only
+        // when Mjolnir's own durable state also shows it was never used.
+        let reloaded = match reloaded {
+            Ok(reloaded) => Some(reloaded),
+            Err(error) => {
+                if !codex_reports_missing_thread(spec, &error) {
+                    return Err(error);
+                }
+                if spec.native_session_may_have_history {
+                    // The thread was used, so a new one would silently drop
+                    // the conversation. Say what is missing instead.
+                    return Err(error.context(format!(
+                        "Codex has no native history for thread {existing}, which this session \
+                         has already used, so the conversation cannot be resumed"
+                    )));
+                }
+                emit_runtime_event(
+                    events,
+                    RuntimeEvent::Warning {
+                        message: format!(
+                            "Codex has no thread {existing} and this session never used it; \
+                             continuing in a new empty thread"
+                        ),
+                    },
+                )
+                .await?;
+                None
+            }
+        };
         match reloaded {
             Some((loaded_meta, config_options, modes)) => {
                 if let Some(state) = grok_models.as_mut()
@@ -2624,6 +2699,7 @@ async fn serve_session(
         native_session_id: session_id.to_string(),
         started_at: tokio::time::Instant::now(),
         resume_required,
+        native_session_used,
     });
     // Drop anything the worker queued for the bridge this one replaced. The
     // worker dispatches only while it believes the session is configured; it
@@ -2762,12 +2838,19 @@ async fn serve_session(
                 let mut updates_before = session_update_count.load(Ordering::Acquire);
                 // Mark before sending: even a failed reply cannot prove the
                 // agent did not receive and persist this prompt.
+                let mut first_use = false;
                 if let Some(opened) = opened
                     .lock()
                     .expect("opened session lock poisoned")
                     .as_mut()
                 {
                     opened.resume_required.store(true, Ordering::Release);
+                    first_use = !opened.native_session_used.swap(true, Ordering::AcqRel);
+                }
+                // Persist the same fact durably, once, so a restart after this
+                // prompt never treats the thread as an empty one to replace.
+                if first_use {
+                    emit_runtime_event(events, RuntimeEvent::NativeSessionUsed).await?;
                 }
                 spec.step_clock.begin_turn();
                 if spec.harness == HarnessKind::Grok {
