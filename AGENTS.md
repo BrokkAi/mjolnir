@@ -45,8 +45,9 @@ do not ask for separate push or publication confirmation.
 Follow `RELEASING.md` for every release. Tag the selected known-good commit;
 it need not be current master or merged into master. Reuse passing validation
 for that exact commit instead of rerunning it for the release. The committed
-workspace version, internal dependency constraints, `Cargo.lock`, and license
-report must match the tag; the release workflow checks version consistency.
+workspace version, internal dependency constraints, and `Cargo.lock` must match
+the tag; the release workflow checks version consistency and generates license
+reports from that tagged commit instead of committing them.
 Do not add a new pre-tag checklist or repeat registry authorization audits.
 
 # Repository Guidelines

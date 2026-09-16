@@ -1803,12 +1803,12 @@ impl Config {
 /// Cross-process lock for one config path. The lock has a stable inode beside
 /// the config because the config itself is replaced atomically after the lock
 /// is acquired.
-struct ConfigLock {
+pub(crate) struct ConfigLock {
     _file: File,
 }
 
 impl ConfigLock {
-    fn acquire(config_path: &Path) -> Result<Self> {
+    pub(crate) fn acquire(config_path: &Path) -> Result<Self> {
         let lock_path = config_lock_path(config_path);
         let parent = lock_path
             .parent()

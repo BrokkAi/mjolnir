@@ -2892,6 +2892,15 @@ fn spawn_manager_target_refresher(
                                 *current = controller;
                                 changed
                             };
+                            // Prune the review host's retained transcripts to the
+                            // same live set, so a stopped or destroyed session's
+                            // MaterializedSession does not linger there forever.
+                            state.review_host().retain_sessions(
+                                refreshed
+                                    .iter()
+                                    .map(|target| target.session_id.clone())
+                                    .collect(),
+                            );
                             targets.send_replace(refreshed);
                             if changed {
                                 state.publish_revision();

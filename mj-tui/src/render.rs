@@ -476,6 +476,14 @@ fn drawn_session_rows_with_options(
                 let Some(session) = sessions.get(index) else {
                     continue;
                 };
+                // Supply a display-only title without changing the durable session record.
+                let named_session = dashboard.go.is_some().then(|| {
+                    let mut named = (*session).clone();
+                    named.session_title_override =
+                        Some(dashboard.go_conversation_title(&session.id));
+                    named
+                });
+                let session = named_session.as_ref().unwrap_or(session);
                 let detail = dashboard.session_details.get(&session.id);
                 let review = dashboard.session_review(&session.id);
                 let unreachable = dashboard.unreachable_sessions.contains(&session.id);

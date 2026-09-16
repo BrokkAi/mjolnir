@@ -340,8 +340,22 @@ fn render_combined_themed(
     dashboard.frame_surfaces.clear();
     dashboard.chat_transcript_area = None;
     dashboard.chat_prompt_area = None;
-    let area = frame.area();
+    let mut area = frame.area();
     frame.render_widget(Block::default().style(theme::base()), area);
+    if dashboard.go.is_some() {
+        let lines = dashboard
+            .go_context()
+            .into_iter()
+            .map(Line::raw)
+            .collect::<Vec<_>>();
+        let paragraph = Paragraph::new(lines)
+            .style(theme::muted())
+            .wrap(Wrap { trim: false });
+        let height = (paragraph.line_count(area.width.max(1)) as u16).min(area.height);
+        frame.render_widget(paragraph, Rect::new(area.x, area.y, area.width, height));
+        area.y += height;
+        area.height = area.height.saturating_sub(height);
+    }
     if area.width < MINIMUM_TERMINAL_WIDTH {
         render_terminal_too_small(
             frame,

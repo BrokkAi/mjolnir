@@ -36,7 +36,9 @@ jobs:
         uses: dtolnay/rust-toolchain@1.96.0
 
       - name: Verify release version
-        run: node scripts/release-version.mjs check "$RELEASE_TAG"
+        run: |
+          cargo metadata --locked --no-deps --format-version 1 |
+            jq -e --arg version "${RELEASE_TAG#v}" 'all(.packages[]; .version == $version)'
 
       - name: Assemble and verify crates
         shell: bash

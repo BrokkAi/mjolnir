@@ -45,6 +45,7 @@ mod actions;
 mod combined;
 mod component_events;
 mod dialogs;
+mod go;
 mod help;
 mod ingest;
 mod palette;
@@ -66,6 +67,7 @@ mod test_support;
 pub use crate::actions::{CommandId, global_chord};
 pub use crate::combined::render_combined;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
+pub use crate::go::GoMode;
 pub use crate::ingest::{
     MaterializedProjectionCache, PreparedMaterializedSessionDetail,
     PreparedMaterializedSessionSummary,
@@ -100,6 +102,12 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
     None,
+    GoLaunch {
+        recipe: mj_core::go::GoRecipe,
+    },
+    GoPrepareProject {
+        target_id: String,
+    },
     Open {
         session_id: String,
     },
@@ -617,6 +625,9 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
+    pub(crate) go: Option<go::GoMode>,
+    pub(crate) go_workspaces: BTreeMap<String, go::GoMode>,
+    pub(crate) go_contexts: BTreeMap<String, Result<(std::path::PathBuf, String), String>>,
     modal_click_transition: Option<(u16, u16, Instant)>,
     suppress_modal_release: bool,
     /// Monotonic identity for global review settings discoveries. Keeping it on
@@ -716,6 +727,9 @@ impl DashboardState {
             project_sources: BTreeMap::new(),
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
+            go: None,
+            go_workspaces: BTreeMap::new(),
+            go_contexts: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
             move_operations: BTreeMap::new(),
@@ -890,6 +904,7 @@ impl DashboardState {
                 .insert(current, WorkspaceViewState::from_dashboard(self));
         }
 
+        self.switch_go_workspace(workspace_id.as_deref());
         self.active_workspace_id = workspace_id.clone();
         self.workspace_name = workspace_id
             .as_deref()
@@ -909,7 +924,10 @@ impl DashboardState {
                 self.collapsed_project_keys = view.collapsed_project_keys;
                 self.focus = view.focus;
             } else {
-                self.selected_session_id = None;
+                self.selected_session_id = self
+                    .go
+                    .as_ref()
+                    .and_then(|mode| mode.last_session_id.clone());
                 self.sessions_scroll.set(0);
                 self.targets_scroll.set(0);
                 self.quota_scroll.set(0);
@@ -1344,9 +1362,13 @@ impl DashboardState {
             profile: session
                 .as_ref()
                 .map_or(String::new(), |session| session.last_profile.clone()),
-            title: session
-                .as_ref()
-                .map_or(String::new(), |session| session.display_title().to_owned()),
+            title: session.as_ref().map_or(String::new(), |session| {
+                if self.go.is_some() {
+                    self.go_conversation_title(&session.id)
+                } else {
+                    session.display_title().to_owned()
+                }
+            }),
             harness_kind: session.as_ref().map(|session| session.harness_kind),
             subagent_count: self
                 .state

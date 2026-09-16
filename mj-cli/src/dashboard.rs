@@ -251,6 +251,10 @@ pub(crate) struct DashboardContext {
     /// Which conversation the surface opens on, and whether it is still the
     /// surface's choice to make.
     startup: StartupSession,
+    go_context_refresh: Option<(String, std::time::Instant)>,
+    go_context_in_flight: bool,
+    go_selection_requested: Option<String>,
+    go_selection_in_flight: bool,
     /// The first pass always draws; subsequent frames require a visible change.
     pub(crate) dirty: bool,
     drawn_size: Option<(u16, u16)>,
@@ -409,6 +413,7 @@ pub(crate) async fn run_dashboard_for_workspace(
     workspace_id: &str,
     client_id: &str,
     open_workspace_manager: bool,
+    go: Option<(mj_tui::GoMode, bool)>,
 ) -> Result<DashboardExit> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
@@ -426,6 +431,15 @@ pub(crate) async fn run_dashboard_for_workspace(
     let Some(mut context) = DashboardContext::open(workspace_id, client_id)? else {
         return Ok(DashboardExit::Normal);
     };
+    if let Some((mode, setup)) = go {
+        let modes = tokio::task::spawn_blocking(crate::go::saved_workspace_modes)
+            .await
+            .context("load project workspace settings task failed")??;
+        context.dashboard.register_go_workspaces(modes);
+        context.cancel_startup_session();
+        let action = context.dashboard.begin_go(mode, setup);
+        actions::apply_dashboard_action(&mut context, action).await?;
+    }
     if open_workspace_manager {
         let action = context.dashboard.begin_workspace_manager();
         actions::apply_dashboard_action(&mut context, action).await?;
@@ -649,7 +663,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
             context.follow_selected_session();
+            context.refresh_go_context();
         }
+        context.remember_go_selection();
         if context.shutdown_requested && context.refresh_shutdown_notice() {
             break;
         }
@@ -712,6 +728,7 @@ impl DashboardContext {
         self.workspace_id = workspace_id.clone().unwrap_or_default();
         self.selection.clear();
         self.dashboard.set_active_workspace(workspace_id);
+        self.go_selection_requested = None;
         self.dashboard.set_current_session(None);
         self.follow_selected_session();
         self.dirty = true;
@@ -960,6 +977,10 @@ impl DashboardContext {
             opening_chat_session: None,
             attachment: attachment::SessionAttachment::default(),
             startup: StartupSession::idle(),
+            go_context_refresh: None,
+            go_context_in_flight: false,
+            go_selection_requested: None,
+            go_selection_in_flight: false,
             dirty: true,
             drawn_size: None,
             drawn_notice_generation: 0,
@@ -1207,6 +1228,79 @@ impl DashboardContext {
     /// trying to pick a conversation for them.
     fn cancel_startup_session(&mut self) {
         self.startup.cancel();
+    }
+
+    fn refresh_go_context(&mut self) {
+        if self.dashboard.go_mode().is_none() || self.go_context_in_flight {
+            return;
+        }
+        let Some(session_id) = self.dashboard.selected_session_id().map(str::to_owned) else {
+            return;
+        };
+        if self
+            .go_context_refresh
+            .as_ref()
+            .is_some_and(|(id, refreshed)| {
+                id == &session_id && refreshed.elapsed() < Duration::from_secs(5)
+            })
+        {
+            return;
+        }
+        self.go_context_in_flight = true;
+        self.go_context_refresh = Some((session_id.clone(), std::time::Instant::now()));
+        let report_id = session_id.clone();
+        io::spawn_io(
+            "reading session working context",
+            self.dashboard_io_tx.clone(),
+            move || {
+                let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
+                    Duration::from_secs(3),
+                );
+                Controller::load()?.session_working_context(&session_id, &executor)
+            },
+            move |result| io::DashboardIoUpdate::GoContext {
+                session_id: report_id,
+                result,
+            },
+        );
+    }
+
+    fn remember_go_selection(&mut self) {
+        if self.go_selection_in_flight {
+            return;
+        }
+        let Some(go) = self.dashboard.go_mode() else {
+            return;
+        };
+        let Some(session_id) = self.dashboard.selected_session_id().map(str::to_owned) else {
+            return;
+        };
+        if self.go_selection_requested.as_ref() == Some(&session_id) {
+            return;
+        }
+        let Some(workspace_id) = go.workspace_id.clone() else {
+            return;
+        };
+        if self.dashboard.active_workspace_id() != Some(workspace_id.as_str()) {
+            return;
+        }
+        let directory = go.directory.clone();
+        self.go_selection_requested = Some(session_id.clone());
+        self.go_selection_in_flight = true;
+        io::spawn_critical_io(
+            self.critical_operations.clone(),
+            "remembering conversation",
+            self.dashboard_io_tx.clone(),
+            move || {
+                mj_core::go::GoPreferences::remember_session(
+                    &mj_core::go::GoPreferences::path(),
+                    &directory,
+                    &workspace_id,
+                    session_id,
+                )
+            },
+            io::DashboardIoUpdate::GoSelectionSaved,
+        );
     }
 
     /// Opens the conversation the surface should start on, once the summaries
@@ -1687,7 +1781,11 @@ impl DashboardContext {
             target: session_record
                 .project_target(&self.controller.config, &session_record.target_template_id),
             profile: session_record.last_profile.clone(),
-            title: session_record.display_title().to_owned(),
+            title: if self.dashboard.go_mode().is_some() {
+                self.dashboard.go_conversation_title(session_id)
+            } else {
+                session_record.display_title().to_owned()
+            },
             harness_kind: Some(session_record.harness_kind),
             subagent_count: self
                 .controller
@@ -2184,6 +2282,9 @@ impl DashboardContext {
             &self.controller.config,
             self.controller.state.sessions.get(chat.session_id()),
         );
+        if self.dashboard.go_mode().is_some() {
+            chat.set_display_title(self.dashboard.go_conversation_title(chat.session_id()));
+        }
         let count = self
             .controller
             .state

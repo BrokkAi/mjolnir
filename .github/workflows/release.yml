@@ -14,8 +14,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Check tag against workspace versions
-        run: node scripts/release-version.mjs check "$GITHUB_REF_NAME"
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Check tag against Cargo package versions
+        run: |
+          cargo metadata --locked --no-deps --format-version 1 |
+            jq -e --arg version "${GITHUB_REF_NAME#v}" 'all(.packages[]; .version == $version)'
+
+  release-notices:
+    name: Generate release notices
+    needs: verify-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install license report tool
+        run: cargo install --locked cargo-about --version 0.9.1 --features cli
+      - name: Generate notices for the tagged dependency graph
+        run: |
+          cargo fetch --locked
+          mkdir -p target/release-notices
+          cargo about generate --workspace --offline --config licenses/about.toml --locked --fail licenses/about.hbs -o target/release-notices/THIRD_PARTY_LICENSES.html
+          node scripts/generate-supplemental-third-party-notices.mjs target/release-notices/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notices
+          path: target/release-notices/
+          if-no-files-found: error
 
   # Session workers run inside disposable Linux targets (containers and
   # instances), so they are static musl builds of the dedicated worker binary
@@ -148,7 +175,7 @@ jobs:
 
   package-x86_64-unknown-linux-gnu:
     name: Package x86_64-unknown-linux-gnu
-    needs: [build-linux, build-worker-x64, build-worker-arm64]
+    needs: [build-linux, build-worker-x64, build-worker-arm64, release-notices]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -163,6 +190,12 @@ jobs:
           pattern: mj-worker-*
           path: workers
 
+      - name: Download generated notices
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notices
+          path: release-notices
+
       - name: Package archive
         shell: bash
         run: |
@@ -176,7 +209,7 @@ jobs:
           chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
-          cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
+          cp licenses/SOURCE.md licenses/OFL-1.1.md release-notices/THIRD_PARTY_LICENSES.html release-notices/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
           cp -R licenses/native "$name/licenses/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
@@ -231,7 +264,7 @@ jobs:
 
   package-aarch64-unknown-linux-gnu:
     name: Package aarch64-unknown-linux-gnu
-    needs: [build-linux-arm64, build-worker-x64, build-worker-arm64]
+    needs: [build-linux-arm64, build-worker-x64, build-worker-arm64, release-notices]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -246,6 +279,12 @@ jobs:
           pattern: mj-worker-*
           path: workers
 
+      - name: Download generated notices
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notices
+          path: release-notices
+
       - name: Package archive
         shell: bash
         run: |
@@ -259,7 +298,7 @@ jobs:
           chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
-          cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
+          cp licenses/SOURCE.md licenses/OFL-1.1.md release-notices/THIRD_PARTY_LICENSES.html release-notices/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
           cp -R licenses/native "$name/licenses/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
@@ -300,7 +339,7 @@ jobs:
 
   package-macos:
     name: Package macOS universal
-    needs: [build-macos, build-worker-x64, build-worker-arm64]
+    needs: [build-macos, build-worker-x64, build-worker-arm64, release-notices]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -339,6 +378,12 @@ jobs:
           pattern: mj-worker-*
           path: workers
 
+      - name: Download generated notices
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notices
+          path: release-notices
+
       - name: Package archive
         run: |
           name="brokk-mjolnir-${GITHUB_REF_NAME}-universal-apple-darwin"
@@ -352,7 +397,7 @@ jobs:
           chmod 0755 "$name/mj" "$name/mj-worker" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
-          cp licenses/SOURCE.md licenses/OFL-1.1.md licenses/THIRD_PARTY_LICENSES.html licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
+          cp licenses/SOURCE.md licenses/OFL-1.1.md release-notices/THIRD_PARTY_LICENSES.html release-notices/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
           cp -R licenses/native "$name/licenses/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
