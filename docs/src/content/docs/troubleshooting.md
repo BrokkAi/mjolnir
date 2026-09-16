@@ -328,8 +328,10 @@ When the built-in remediation is not enough, collect:
   target ID;
 - the latest `mj doctor --json` output;
 - the exact launch, checkpoint, resume, or viewer error; and
-- the newest `mj-*.log` under Mjolnir's platform data directory `logs/`
-  subdirectory.
+- the newest `mj-daemon-*.log` under Mjolnir's platform data directory
+  `logs/` subdirectory, which is the long-running daemon's own log;
+  `mj-tui-*.log` and `mj-cli-*.log` files there are shorter-lived dashboard
+  and one-shot command runs, retained separately.
 
 Set `MJ_DATA_DIR` only when you intentionally override that platform data
 directory. Worker connection failures include the worker exit record and the

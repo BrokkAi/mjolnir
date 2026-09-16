@@ -298,9 +298,10 @@ fn main() -> Result<()> {
     // child inherits it. This also covers `daemon-run`, which is this same
     // binary, so a per-instance daemon validates its own environment on boot.
     mj_core::config::apply_instance_flag(cli.instance.as_deref())?;
-    let log = Some(logging::ControllerLog::start(command_name(
-        cli.command.as_ref(),
-    ))?);
+    let log = Some(logging::ControllerLog::start(
+        command_name(cli.command.as_ref()),
+        process_kind(cli.command.as_ref()),
+    )?);
     install_panic_logging();
     let result = run(cli);
     if let Err(error) = &result {
@@ -350,6 +351,19 @@ fn install_panic_logging() {
         tracing::error!(panic = %info, "Mjolnir panicked");
         default_hook(info);
     }));
+}
+
+/// Classifies a command for log retention: the persistent daemon and any
+/// terminal-owning interactive surface each get their own retained window so
+/// short CLI invocations never push a long-running process's log out of it.
+fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
+    match command {
+        Some(Command::DaemonRun) => logging::ProcessKind::Daemon,
+        None | Some(Command::Go(_)) | Some(Command::Workspaces) | Some(Command::App) => {
+            logging::ProcessKind::Tui
+        }
+        _ => logging::ProcessKind::Cli,
+    }
 }
 
 fn command_name(command: Option<&Command>) -> &'static str {
