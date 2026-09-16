@@ -3164,9 +3164,11 @@ pub(super) fn render_composer_band(
         bottom_spans.push(Span::styled(
             task_label,
             if chat.task_control_focused() {
-                theme::selection(false)
+                theme::selection(true)
             } else {
-                theme::muted()
+                // The chip is always clickable while its work is running, so
+                // keep its blue highlight; focus only adds accent foreground.
+                theme::selection(false)
             },
         ));
         bottom_left_width = task_start + usize::from(task_width);
@@ -5609,6 +5611,45 @@ mod tests {
             .map(|x| buffer[(x, area.y)].symbol())
             .collect::<String>();
         assert_eq!(label, " Sub-agents (2) ");
+        assert!((area.x..area.right()).all(|x| {
+            let cell = &buffer[(x, area.y)];
+            cell.bg == theme::palette().selection && cell.fg == theme::palette().text
+        }));
+    }
+
+    #[test]
+    fn running_tasks_are_blue_highlighted_as_clickable_on_prompt_border() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_session_activity(mj_client::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
+            capacity_retry: None,
+            activity_turn_started_at_ms: None,
+            prompt_in_flight: false,
+            idle_since_ms: None,
+            execution: None,
+            harness_turn_started_at_ms: None,
+            foreground_tool_started_at_ms: None,
+            background_commands: vec![mj_core::relay::BackgroundCommand {
+                id: "test:task".into(),
+                started_at_ms: 0,
+                command: "cargo test".into(),
+                can_stop: false,
+            }],
+            active_user_shells: Vec::new(),
+        });
+        let mut terminal =
+            Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
+        terminal
+            .draw(|frame| render_full_frame(frame, &mut chat, false))
+            .expect("chat draws");
+        let area = chat
+            .task_control_area
+            .expect("the running-task control is rendered");
+        let buffer = terminal.backend().buffer();
+        let label = (area.x..area.right())
+            .map(|x| buffer[(x, area.y)].symbol())
+            .collect::<String>();
+        assert_eq!(label, " View tasks (1) ");
         assert!((area.x..area.right()).all(|x| {
             let cell = &buffer[(x, area.y)];
             cell.bg == theme::palette().selection && cell.fg == theme::palette().text
