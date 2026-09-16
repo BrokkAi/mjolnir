@@ -3748,6 +3748,7 @@ mod tests {
         mj_core::worker_launch::WorkerLaunchConfig {
             goal_resume_request: Default::default(),
             target_environment: Default::default(),
+            seed_image_environment: false,
             run_mode: Default::default(),
             session_id: SESSION.into(),
             harness: HarnessKind::Codex,

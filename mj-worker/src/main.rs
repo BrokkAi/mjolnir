@@ -234,7 +234,19 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
         if let WorkerCommand::Run { config, .. } | WorkerCommand::PrepareHarness { config } =
             &args.command
         {
-            environment.extend(WorkerLaunchConfig::read(config)?.target_environment);
+            let launch = WorkerLaunchConfig::read(config)?;
+            // On a container target the worker's own environment is the image's
+            // declared `ENV`, which a minimal-seed login shell cannot reproduce.
+            // Restore it before the deliberate target settings, which win.
+            // This runs before the environment-clearing re-exec, so the ambient
+            // environment is still the container's.
+            if launch.seed_image_environment {
+                mj_core::login_environment::overlay_image_environment(
+                    &mut environment,
+                    std::env::vars(),
+                );
+            }
+            environment.extend(launch.target_environment);
         }
         if let WorkerCommand::PushBranch { root, .. } = &args.command {
             environment.extend(

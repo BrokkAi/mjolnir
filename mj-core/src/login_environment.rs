@@ -45,6 +45,52 @@ pub async fn with_overrides(overrides: &Environment) -> Result<Environment> {
     Ok(environment)
 }
 
+/// Restore the container image's declared environment onto a discovered login
+/// environment.
+///
+/// A login shell started with a minimal seed reproduces only what a profile
+/// script exports. An image that declares variables with `ENV` (for example
+/// `RUSTUP_HOME` or `PLAYWRIGHT_BROWSERS_PATH`) rather than through
+/// `/etc/profile.d` therefore loses them, and processes the worker launches
+/// resolve their toolchains against the wrong locations. In a fresh container
+/// the worker's own process environment is exactly the image's `ENV` plus the
+/// values the controller passed at `run`, with no host pollution, because the
+/// container is a clean namespace. This carries the keys `discovered` lacks
+/// from that `ambient` environment: keys the login shell already produced (such
+/// as `PATH` and `HOME`) are left untouched, launcher and shell internals are
+/// never carried, and credentials are left to the controller's own token
+/// mechanism. The caller applies its deliberate `target_environment` on top, so
+/// those still win.
+///
+/// This must only run for container targets, where the ambient environment is
+/// the image's. On a bare or localhost target the ambient environment is the
+/// user's shell, and carrying it would defeat the isolation `discover` exists
+/// to provide.
+pub fn overlay_image_environment(
+    discovered: &mut Environment,
+    ambient: impl IntoIterator<Item = (String, String)>,
+) {
+    for (name, value) in ambient {
+        if discovered.contains_key(&name) || !carries_image_variable(&name) {
+            continue;
+        }
+        discovered.insert(name, value);
+    }
+}
+
+/// Whether an ambient variable is part of the image's contract rather than
+/// launcher noise or a credential handled elsewhere.
+fn carries_image_variable(name: &str) -> bool {
+    !(name.is_empty()
+        // The worker's own launcher and re-exec internals.
+        || name.starts_with("MJ_")
+        // Shell bookkeeping the login shell already re-derives for itself.
+        || matches!(name, "_" | "SHLVL" | "PWD" | "OLDPWD")
+        // Tokens flow through the controller's own credential channel, not the
+        // image contract, and are stripped from some child contexts.
+        || matches!(name, "GH_TOKEN" | "GITHUB_TOKEN"))
+}
+
 /// Minimal account identity for recovery that must not depend on shell startup.
 #[cfg(unix)]
 pub fn bootstrap() -> Result<Environment> {
@@ -218,6 +264,39 @@ mod tests {
     use crate::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn image_overlay_carries_absent_image_variables_only() {
+        let mut discovered = Environment::from([
+            ("PATH".into(), "/login/bin:/usr/bin".into()),
+            ("HOME".into(), "/home/hel".into()),
+        ]);
+        let ambient = [
+            // Image ENV a profile script never re-exported: carried.
+            ("RUSTUP_HOME".to_owned(), "/usr/local/rustup".to_owned()),
+            (
+                "PLAYWRIGHT_BROWSERS_PATH".to_owned(),
+                "/ms-playwright".to_owned(),
+            ),
+            // The login shell already built PATH and HOME: left untouched.
+            ("PATH".to_owned(), "/image/only".to_owned()),
+            ("HOME".to_owned(), "/root".to_owned()),
+            // Launcher, shell, and credential noise: never carried.
+            ("MJ_DISCOVER_LOGIN_PATH".to_owned(), "1".to_owned()),
+            ("SHLVL".to_owned(), "3".to_owned()),
+            ("GH_TOKEN".to_owned(), "secret".to_owned()),
+        ];
+
+        overlay_image_environment(&mut discovered, ambient);
+
+        assert_eq!(discovered["RUSTUP_HOME"], "/usr/local/rustup");
+        assert_eq!(discovered["PLAYWRIGHT_BROWSERS_PATH"], "/ms-playwright");
+        assert_eq!(discovered["PATH"], "/login/bin:/usr/bin");
+        assert_eq!(discovered["HOME"], "/home/hel");
+        assert!(!discovered.contains_key("MJ_DISCOVER_LOGIN_PATH"));
+        assert!(!discovered.contains_key("SHLVL"));
+        assert!(!discovered.contains_key("GH_TOKEN"));
+    }
 
     fn account(home: &std::path::Path) -> Account {
         Account {

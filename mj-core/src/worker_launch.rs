@@ -104,6 +104,13 @@ pub struct WorkerLaunchConfig {
     /// Explicit target settings shared by primary and reviewer processes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub target_environment: std::collections::BTreeMap<String, String>,
+    /// Restore the container image's declared `ENV` onto the discovered login
+    /// environment before applying `target_environment`. True only for
+    /// container targets, where the worker's own environment is the image's;
+    /// on a bare or localhost target the ambient environment is the user's
+    /// shell and must not be carried.
+    #[serde(default)]
+    pub seed_image_environment: bool,
     pub harness: HarnessKind,
     /// File name inside the staged harness home that proves authentication.
     /// An API-key profile is proven by its harness configuration file rather
