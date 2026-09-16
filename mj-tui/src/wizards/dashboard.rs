@@ -1376,18 +1376,18 @@ impl DashboardState {
             || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Target)
         {
             let now = Instant::now();
-            let target_ids: Vec<_> = self
-                .config
-                .targets
-                .iter()
-                .filter(|(id, template)| {
-                    !matches!(template, TargetTemplate::LocalBare)
-                        && self.target_readiness.get(*id).is_none_or(|check| {
-                            &check.template != *template || check.is_stale(now)
-                        })
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
+            let target_ids: Vec<_> =
+                self.config
+                    .targets
+                    .iter()
+                    .filter(|(id, template)| {
+                        !matches!(template, TargetTemplate::LocalBare)
+                            && self.target_readiness.get(*id).is_none_or(|check| {
+                                &check.template != *template || check.is_stale(now)
+                            })
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
             if !target_ids.is_empty() {
                 self.target_readiness_generation = self.target_readiness_generation.wrapping_add(1);
                 let generation = self.target_readiness_generation;

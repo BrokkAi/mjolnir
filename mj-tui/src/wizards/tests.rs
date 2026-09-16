@@ -3414,3 +3414,45 @@ fn stale_readiness_result_is_treated_as_missing_and_reprobes() {
     };
     assert_eq!(target_ids, ["podman"]);
 }
+
+/// A failed result is kept only briefly: a failure is usually a host that is
+/// asleep or a probe that timed out, which the user fixes and retries within
+/// minutes, so it is re-probed long before a success would be.
+#[test]
+fn failed_readiness_result_is_reprobed_after_the_short_failure_ttl() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Some(DashboardAction::CheckTargetReadiness { generation, .. }) =
+        dashboard.take_prerequisite_check()
+    else {
+        panic!("the first open must probe the non-local target");
+    };
+    dashboard.apply_target_readiness(generation, "podman".into(), Err("host asleep".into()));
+    assert_eq!(
+        dashboard.target_readiness_rejection("podman"),
+        Some("unavailable: host asleep".into())
+    );
+    assert!(
+        dashboard.take_prerequisite_check().is_none(),
+        "a fresh failure is not re-probed on its own"
+    );
+
+    dashboard
+        .target_readiness
+        .get_mut("podman")
+        .expect("readiness entry was recorded")
+        .recorded_at = Instant::now() - TARGET_READINESS_FAILURE_TTL;
+
+    assert_eq!(
+        dashboard.target_readiness_rejection("podman"),
+        Some("checking availability…".into()),
+        "an aged failure must reject like a missing entry, not repeat the old error"
+    );
+    let Some(DashboardAction::CheckTargetReadiness { target_ids, .. }) =
+        dashboard.take_prerequisite_check()
+    else {
+        panic!("an aged failure must be re-probed");
+    };
+    assert_eq!(target_ids, ["podman"]);
+}

@@ -84,6 +84,13 @@ pub(crate) enum WizardControl {
 /// catching a target that went unavailable a while ago.
 pub(crate) const TARGET_READINESS_TTL: Duration = Duration::from_secs(30 * 60);
 
+/// How long a failed readiness result is kept. Failures are usually
+/// transient (a sleeping host, a VPN that is down, an expired cloud session,
+/// a probe that timed out) and the user fixes them within minutes, so they
+/// are re-probed much sooner than successes; the re-probe only costs the
+/// user whose target is already broken.
+pub(crate) const TARGET_READINESS_FAILURE_TTL: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone)]
 pub(crate) struct TargetReadiness {
     template: TargetTemplate,
@@ -97,7 +104,12 @@ pub(crate) struct TargetReadiness {
 
 impl TargetReadiness {
     fn is_stale(&self, now: Instant) -> bool {
-        self.result.is_some() && now.saturating_duration_since(self.recorded_at) >= TARGET_READINESS_TTL
+        let ttl = match &self.result {
+            None => return false,
+            Some(Ok(())) => TARGET_READINESS_TTL,
+            Some(Err(_)) => TARGET_READINESS_FAILURE_TTL,
+        };
+        now.saturating_duration_since(self.recorded_at) >= ttl
     }
 }
 
