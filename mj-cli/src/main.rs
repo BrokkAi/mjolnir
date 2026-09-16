@@ -10,6 +10,7 @@ mod api_commands;
 mod daemon;
 mod dashboard;
 mod desktop;
+mod go;
 mod import;
 mod logging;
 mod pollers;
@@ -66,6 +67,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Work in a folder using remembered account and target settings.
+    Go(go::GoArgs),
     /// Open the workspace selector even when Mjolnir could auto-attach.
     Workspaces,
     /// Open the web viewer in a native desktop window.
@@ -340,6 +343,7 @@ fn install_panic_logging() {
 fn command_name(command: Option<&Command>) -> &'static str {
     match command {
         None => "dashboard",
+        Some(Command::Go(_)) => "go",
         Some(Command::Workspaces) => "workspaces",
         Some(Command::App) => "app",
         Some(Command::DesktopBootstrap) => "desktop-bootstrap",
@@ -381,9 +385,20 @@ async fn run_command(
     requested_workspace: Option<String>,
 ) -> Result<DashboardExit> {
     match command {
-        None => run_workspace_dashboard(requested_workspace.as_deref(), false).await,
+        None => run_workspace_dashboard(requested_workspace.as_deref(), false, None).await,
+        Some(Command::Go(args)) => {
+            ensure!(
+                requested_workspace.is_none(),
+                "mj go selects its workspace from the folder; omit --workspace"
+            );
+            let setup = args.setup || args.global_default;
+            let mode = tokio::task::spawn_blocking(move || go::prepare(args))
+                .await
+                .context("prepare fast start")??;
+            run_workspace_dashboard(None, false, Some((mode, setup))).await
+        }
         Some(Command::Workspaces) => {
-            run_workspace_dashboard(requested_workspace.as_deref(), true).await
+            run_workspace_dashboard(requested_workspace.as_deref(), true, None).await
         }
         Some(Command::App) => desktop::run_desktop_app()
             .await
@@ -817,10 +832,18 @@ fn print_move_human(outcome: &mj_core::state::MoveOutcome) {
 async fn run_workspace_dashboard(
     requested_workspace: Option<&str>,
     open_workspace_manager: bool,
+    go: Option<(mj_tui::GoMode, bool)>,
 ) -> Result<DashboardExit> {
     let mut daemon = daemon::connect_or_start().await?;
     let workspaces = daemon.list_workspaces().await?;
-    let selected = if let Some(requested) = requested_workspace {
+    let selected = if let Some((mode, _)) = &go {
+        let name = mj_core::go::GoPreferences::workspace_name(&mode.directory);
+        if let Some(workspace) = workspaces.iter().find(|entry| entry.workspace.name == name) {
+            workspace.workspace.id.clone()
+        } else {
+            daemon.create_workspace(name).await?.id
+        }
+    } else if let Some(requested) = requested_workspace {
         workspaces
             .iter()
             .find(|candidate| {
@@ -851,7 +874,8 @@ async fn run_workspace_dashboard(
         std::process::id(),
         attachment_cancellation.clone(),
     );
-    let result = run_dashboard_for_workspace(&selected, &client_id, open_workspace_manager).await;
+    let result =
+        run_dashboard_for_workspace(&selected, &client_id, open_workspace_manager, go).await;
     attachment_cancellation.cancel();
     if let Err(error) = attachment_task.await {
         tracing::warn!(%error, "workspace attachment task failed");

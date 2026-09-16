@@ -90,6 +90,15 @@ pub(crate) enum DashboardIoUpdate {
         message: String,
     },
     CreateSession(Box<DashboardCreateSessionUpdate>),
+    GoContext {
+        session_id: String,
+        result: std::result::Result<(std::path::PathBuf, String), String>,
+    },
+    GoPrepared {
+        workspace_id: String,
+        retry: Box<DashboardAction>,
+        result: Box<std::result::Result<(Config, mj_core::go::GoRecipe), String>>,
+    },
     RemotePreflight {
         generation: u64,
         launch: Box<DashboardAction>,
@@ -1431,6 +1440,7 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
 /// so this stays separate from [`spawn_lifecycle_operation`].
 pub(crate) fn spawn_dashboard_create_session(
     action: DashboardAction,
+    go_save: Option<(std::path::PathBuf, mj_core::go::GoRecipe, bool)>,
     updates: UnboundedSender<DashboardIoUpdate>,
     lifecycle_updates: UnboundedSender<LifecycleUpdate>,
     runtime: tokio::runtime::Handle,
@@ -1456,6 +1466,15 @@ pub(crate) fn spawn_dashboard_create_session(
             return;
         };
         let registered = (|| -> Result<Option<RegisteredDashboardSession>> {
+            if let Some((directory, recipe, global)) = go_save {
+                mj_core::go::GoPreferences::save_recipe(
+                    &mj_core::go::GoPreferences::path(),
+                    directory,
+                    recipe,
+                    global,
+                )
+                .context("save fast-start setup; session has not been started")?;
+            }
             let controller = Controller::load()?;
             let executor = CancellableProcessExecutor::new(cancelled.clone())
                 .with_deadline(Duration::from_secs(30));
@@ -1821,6 +1840,29 @@ impl DashboardContext {
                 }
                 self.dirty = true;
             }
+            DashboardIoUpdate::GoContext { session_id, result } => {
+                self.go_context_in_flight = false;
+                self.dashboard.set_go_context(session_id, result);
+            }
+            DashboardIoUpdate::GoPrepared {
+                workspace_id,
+                retry,
+                result,
+            } => match *result {
+                Ok((config, recipe)) => {
+                    self.controller.config = config.clone();
+                    let mut action = self.dashboard.go_launch_action(config, recipe);
+                    if let DashboardAction::CreateSession {
+                        workspace_id: destination,
+                        ..
+                    } = &mut action
+                    {
+                        *destination = workspace_id;
+                    }
+                    super::actions::start_session_launch(self, action);
+                }
+                Err(error) => self.dashboard.show_launch_failure(error, Some(*retry)),
+            },
             DashboardIoUpdate::CreateSession(update) => self.apply_create_session_update(*update),
             DashboardIoUpdate::RemotePreflight {
                 generation,

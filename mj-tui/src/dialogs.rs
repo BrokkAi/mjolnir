@@ -452,8 +452,10 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::ConfigurationRepair { .. } => {
             &["Dismiss", "Open transcript", "Open settings"]
         }
-        Confirmation::LaunchFailed { retry: Some(_), .. } => &["Dismiss", "Retry launch"],
-        Confirmation::LaunchFailed { .. } => &["Dismiss"],
+        Confirmation::LaunchFailed { retry: Some(_), .. } => {
+            &["Dismiss", "Retry launch", "Settings"]
+        }
+        Confirmation::LaunchFailed { .. } => &["Dismiss", "Settings"],
         Confirmation::Dismiss {
             intent: DismissalIntent::DiscardSetup,
             ..
@@ -2513,7 +2515,10 @@ impl DashboardState {
                 index,
             ) => {
                 self.restore_dismissed_mode(previous);
-                if index == 1 {
+                if (retry.is_some() && index == 2) || (retry.is_none() && index == 1) {
+                    self.begin_setup();
+                    DashboardAction::None
+                } else if index == 1 {
                     retry.map(|action| *action).unwrap_or(DashboardAction::None)
                 } else {
                     DashboardAction::None

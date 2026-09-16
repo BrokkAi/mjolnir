@@ -179,7 +179,15 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let commands = SESSION_ACTIONS;
+    let commands = if dashboard.go.is_some() {
+        vec![
+            (CommandId::NewSessionWizard, "New"),
+            (CommandId::ChangeGoSetup, "Change setup"),
+            (CommandId::ResumeDialog, "Resume"),
+        ]
+    } else {
+        SESSION_ACTIONS.to_vec()
+    };
     let mut x = area.x;
     for (id, label) in commands {
         let width = Line::raw(label).width() as u16 + 2;

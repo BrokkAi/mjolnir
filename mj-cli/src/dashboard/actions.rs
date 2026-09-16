@@ -40,6 +40,40 @@ pub(crate) async fn apply_dashboard_action(
     context.cancel_stale_path_input();
     match action {
         DashboardAction::None => {}
+        DashboardAction::GoPrepareProject { target_id: _ } => {
+            if let Some(go) = context.dashboard.go_mode() {
+                spawn_create_bundle(
+                    vec![go.directory.to_string_lossy().into_owned()],
+                    context.dashboard_io_tx.clone(),
+                    context.critical_operations.clone(),
+                );
+            }
+        }
+        DashboardAction::GoLaunch { recipe } => {
+            if let Some(go) = context.dashboard.go_mode().cloned() {
+                context.cancel_startup_session();
+                let workspace_id = context
+                    .dashboard
+                    .active_workspace_id()
+                    .unwrap_or_default()
+                    .to_owned();
+                let retry = DashboardAction::GoLaunch {
+                    recipe: recipe.clone(),
+                };
+                context.dashboard.set_notice("Preparing session…");
+                super::io::spawn_critical_io(
+                    context.critical_operations.clone(),
+                    "preparing fast-start session",
+                    context.dashboard_io_tx.clone(),
+                    move || crate::go::resolve_recipe(&go.directory, recipe),
+                    move |result| DashboardIoUpdate::GoPrepared {
+                        workspace_id,
+                        retry: Box::new(retry),
+                        result: Box::new(result),
+                    },
+                );
+            }
+        }
         DashboardAction::SaveSpinnerStyle { style } => {
             super::io::spawn_spinner_style_save(
                 style,
@@ -1176,8 +1210,10 @@ fn start_session_launch_with_repository_preflight(
         action @ DashboardAction::CreateSession { .. } => {
             debug_assert!(repository_preflight.is_none());
             context.dashboard.set_notice("Preparing session launch…");
+            let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,
+                go_save,
                 context.dashboard_io_tx.clone(),
                 context.lifecycle_updates_tx.clone(),
                 tokio::runtime::Handle::current(),

@@ -1152,13 +1152,35 @@ impl DashboardState {
                     self.mode = Mode::New(wizard);
                     return DashboardAction::None;
                 }
+                if let Some(go) = &self.go {
+                    if !is_bare_project_target(target) {
+                        wizard.step = WizardStep::Bundle;
+                        wizard.bundle_creation_in_flight = true;
+                        self.mode = Mode::New(wizard);
+                        return DashboardAction::GoPrepareProject {
+                            target_id: target_template_id,
+                        };
+                    }
+                    wizard.project_directory = if matches!(target, TargetTemplate::LocalBare) {
+                        go.directory.to_string_lossy().into_owned().into()
+                    } else {
+                        go.recipe
+                            .as_ref()
+                            .filter(|recipe| recipe.target_id == target_template_id)
+                            .and_then(|recipe| recipe.project_directory.as_ref())
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                            .into()
+                    };
+                }
                 wizard.step = if is_bare_project_target(target) {
                     wizard.mounts.history.clear();
                     wizard.project_history = project_history_host(target)
                         .map(|host| self.state.project_directories(host).to_vec())
                         .unwrap_or_default();
                     wizard.project_history_index = 0;
-                    if wizard.project_directory.is_empty()
+                    if self.go.is_none()
+                        && wizard.project_directory.is_empty()
                         && let Some(directory) = wizard.project_history.first()
                     {
                         wizard.project_directory = directory.to_string_lossy().into_owned().into();
@@ -1902,7 +1924,13 @@ impl DashboardState {
                             old_target != &target || old_directory != &value
                         },
                     ) {
-                        wizard.create_managed_worktree = options.default_create;
+                        wizard.create_managed_worktree =
+                            self.go.as_ref().map_or(options.default_create, |go| {
+                                go.recipe
+                                    .as_ref()
+                                    .and_then(|recipe| recipe.create_managed_worktree)
+                                    .unwrap_or(false)
+                            });
                     }
                     if !options.available {
                         wizard.create_managed_worktree = false;
@@ -2621,6 +2649,18 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_new(&mut self) -> DashboardAction {
+        if let Some(go) = &self.go {
+            if let Some(recipe) = &go.recipe {
+                return DashboardAction::GoLaunch {
+                    recipe: recipe.clone(),
+                };
+            }
+            return self.change_go_setup();
+        }
+        self.begin_new_wizard()
+    }
+
+    pub(crate) fn begin_new_wizard(&mut self) -> DashboardAction {
         self.target_readiness.clear();
         if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
             self.begin_settings_section("profiles", None);

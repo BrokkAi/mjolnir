@@ -127,6 +127,30 @@ From your project directory, run:
 mj
 ```
 
+For a focused, remembered launch workflow, use `mj go` instead:
+
+```sh
+mj go                 # work in the current folder
+mj go ../my-project   # work in a specific folder
+```
+
+Choose an account and target on first use, including Docker, Podman, SSH,
+EC2, or a configured custom target. The first setup becomes the default for
+new projects; each folder remembers its own setup. **New** (or **Alt-N**)
+starts another concurrent session with those choices. **Change setup** changes
+this project's next launch; `mj go --global-default` also changes the default
+for new projects. `mj go --setup` opens that setup directly.
+
+The context banner identifies the source folder and the selected session's
+actual working directory, branch, account, and target. Local bare sessions
+share the selected folder unless you enable a separate worktree in setup.
+Container and other isolated targets use the existing repository-clone flow:
+they start from the remote default branch, not uncommitted local changes.
+SSH bare targets ask once for the remote folder. Repository choices, remote
+paths, and attached directories are remembered per project, not copied to
+unrelated projects. Launch failures offer **Retry launch** and **Settings**
+inside the application. Plain `mj` keeps its existing dashboard workflow.
+
 On first launch, Mjolnir creates a workspace from the current directory.
 Press **Create** to choose a profile, target, and project. Local target choices
 are supplied automatically and checked before selection. Open **F7 Settings**

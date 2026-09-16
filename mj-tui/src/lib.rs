@@ -45,6 +45,7 @@ mod actions;
 mod combined;
 mod component_events;
 mod dialogs;
+mod go;
 mod help;
 mod ingest;
 mod palette;
@@ -66,6 +67,7 @@ mod test_support;
 pub use crate::actions::{CommandId, global_chord};
 pub use crate::combined::render_combined;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
+pub use crate::go::GoMode;
 pub use crate::ingest::{
     MaterializedProjectionCache, PreparedMaterializedSessionDetail,
     PreparedMaterializedSessionSummary,
@@ -100,6 +102,12 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
     None,
+    GoLaunch {
+        recipe: mj_core::go::GoRecipe,
+    },
+    GoPrepareProject {
+        target_id: String,
+    },
     Open {
         session_id: String,
     },
@@ -618,6 +626,8 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
+    pub(crate) go: Option<go::GoMode>,
+    pub(crate) go_contexts: BTreeMap<String, Result<(std::path::PathBuf, String), String>>,
     modal_click_transition: Option<(u16, u16, Instant)>,
     suppress_modal_release: bool,
     /// Monotonic identity for global review settings discoveries. Keeping it on
@@ -717,6 +727,8 @@ impl DashboardState {
             project_sources: BTreeMap::new(),
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
+            go: None,
+            go_contexts: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
             move_operations: BTreeMap::new(),

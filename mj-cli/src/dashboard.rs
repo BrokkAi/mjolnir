@@ -251,6 +251,8 @@ pub(crate) struct DashboardContext {
     /// Which conversation the surface opens on, and whether it is still the
     /// surface's choice to make.
     startup: StartupSession,
+    go_context_refresh: Option<(String, std::time::Instant)>,
+    go_context_in_flight: bool,
     /// The first pass always draws; subsequent frames require a visible change.
     pub(crate) dirty: bool,
     drawn_size: Option<(u16, u16)>,
@@ -409,6 +411,7 @@ pub(crate) async fn run_dashboard_for_workspace(
     workspace_id: &str,
     client_id: &str,
     open_workspace_manager: bool,
+    go: Option<(mj_tui::GoMode, bool)>,
 ) -> Result<DashboardExit> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
@@ -426,6 +429,11 @@ pub(crate) async fn run_dashboard_for_workspace(
     let Some(mut context) = DashboardContext::open(workspace_id, client_id)? else {
         return Ok(DashboardExit::Normal);
     };
+    if let Some((mode, setup)) = go {
+        context.cancel_startup_session();
+        let action = context.dashboard.begin_go(mode, setup);
+        actions::apply_dashboard_action(&mut context, action).await?;
+    }
     if open_workspace_manager {
         let action = context.dashboard.begin_workspace_manager();
         actions::apply_dashboard_action(&mut context, action).await?;
@@ -649,6 +657,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
             context.follow_selected_session();
+            context.refresh_go_context();
         }
         if context.shutdown_requested && context.refresh_shutdown_notice() {
             break;
@@ -960,6 +969,8 @@ impl DashboardContext {
             opening_chat_session: None,
             attachment: attachment::SessionAttachment::default(),
             startup: StartupSession::idle(),
+            go_context_refresh: None,
+            go_context_in_flight: false,
             dirty: true,
             drawn_size: None,
             drawn_notice_generation: 0,
@@ -1207,6 +1218,41 @@ impl DashboardContext {
     /// trying to pick a conversation for them.
     fn cancel_startup_session(&mut self) {
         self.startup.cancel();
+    }
+
+    fn refresh_go_context(&mut self) {
+        if self.dashboard.go_mode().is_none() || self.go_context_in_flight {
+            return;
+        }
+        let Some(session_id) = self.dashboard.selected_session_id().map(str::to_owned) else {
+            return;
+        };
+        if self
+            .go_context_refresh
+            .as_ref()
+            .is_some_and(|(id, refreshed)| {
+                id == &session_id && refreshed.elapsed() < Duration::from_secs(5)
+            })
+        {
+            return;
+        }
+        self.go_context_in_flight = true;
+        self.go_context_refresh = Some((session_id.clone(), std::time::Instant::now()));
+        let report_id = session_id.clone();
+        io::spawn_io(
+            "reading session working context",
+            self.dashboard_io_tx.clone(),
+            move || {
+                let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
+                    Duration::from_secs(3),
+                );
+                Controller::load()?.session_working_context(&session_id, &executor)
+            },
+            move |result| io::DashboardIoUpdate::GoContext {
+                session_id: report_id,
+                result,
+            },
+        );
     }
 
     /// Opens the conversation the surface should start on, once the summaries
