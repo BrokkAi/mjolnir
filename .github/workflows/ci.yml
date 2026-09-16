@@ -32,6 +32,9 @@ jobs:
       with:
         node-version: 24
 
+    - name: Test release archive assembly and parallel npm publishing
+      run: node --test scripts/release-workflow.test.mjs
+
     - name: Check workspace release versions
       run: node scripts/release-version.mjs check
 
