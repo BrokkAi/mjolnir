@@ -7,7 +7,7 @@ use std::sync::{Barrier, Mutex};
 use anyhow::Result;
 
 use crate::controller::test_support::{
-    FIXTURE_FETCH_URL, FixtureRemoteExecutor, checkout_with_network_remote,
+    FIXTURE_FETCH_URL, FixtureRemoteExecutor, IsolatedTest, checkout_with_network_remote,
     checkpoint_test_session, committed_repository, managed_worktree_session, network_remote_for,
     raw_session_on, resume_compatibility_config, write_checkpoint_archive_with_native_state,
     write_checkpoint_gate_archive,
@@ -124,22 +124,14 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(test_name)
             .env(WORKER_PREFLIGHT_TEST_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path().join("data"))
             .env("MJ_CONFIG_DIR", directory.path().join("config"))
             // Names a worker binary that is not there, which is how a
             // machine without an installed worker fails the same lookup.
             .env("MJ_WORKER_BINARY", directory.path().join("absent-worker"))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated worker preflight test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     // Alone in this child process, so it installs the one writer.
@@ -1107,22 +1099,14 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(test_name)
             .env(RESUME_ROLLBACK_TEST_CHILD, "1")
             // A remote target needs a portable worker; any existing file
             // satisfies the preflight so the test reaches provisioning.
             .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
             .env("MJ_DATA_DIR", directory.path())
             .env("GH_TOKEN", "test-token")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated resume rollback test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     // Alone in this child process, so it installs the one writer.
@@ -1301,22 +1285,14 @@ fn failed_resume_retires_a_checkout_it_recreated() {
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(test_name)
             .env(RETIRED_WORKTREE_RESUME_TEST_CHILD, "1")
             // A remote target needs a portable worker; any existing file
             // satisfies the preflight so the test reaches provisioning.
             .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
             .env("MJ_DATA_DIR", directory.path().join("data"))
             .env("MJ_CONFIG_DIR", directory.path().join("config"))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated retired-worktree resume test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     // Alone in this child process, so it installs the one writer.
@@ -1486,8 +1462,7 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(test_name)
             .env(RAW_CONVERSION_TEST_CHILD, "1")
             // A remote target needs a portable worker; any existing file
             // satisfies the preflight so the test reaches provisioning.
@@ -1495,14 +1470,7 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
             .env("MJ_DATA_DIR", directory.path().join("data"))
             .env("MJ_CONFIG_DIR", directory.path().join("config"))
             .env("GH_TOKEN", "test-token")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated raw conversion test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     // Alone in this child process, so it installs the one writer.

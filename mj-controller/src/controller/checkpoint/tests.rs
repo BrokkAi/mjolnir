@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::process::Command;
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -14,7 +13,9 @@ use anyhow::Result;
 #[cfg(unix)]
 use crate::controller::now;
 use crate::controller::restore_session_after_persistence_failure;
-use crate::controller::test_support::{checkpoint_test_session, write_checkpoint_gate_archive};
+use crate::controller::test_support::{
+    IsolatedTest, checkpoint_test_session, write_checkpoint_gate_archive,
+};
 #[cfg(unix)]
 use crate::session_manager::{ManagedSessionHandle, new_command_id};
 use crate::worker_client::RelayTransportDead;
@@ -1256,18 +1257,10 @@ async fn a_close_checkpoint_cancels_a_running_turn_without_restarting_the_worker
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(test_name)
             .env(LATCH_TEST_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated cancellation checkpoint test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -1325,18 +1318,10 @@ async fn ending_the_checkpoint_latch_returns_the_connection_to_its_actor() {
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(test_name)
             .env(LATCH_TEST_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated checkpoint latch test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     // Alone in this child process, so it installs the one writer.
@@ -1422,18 +1407,10 @@ async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(test_name)
             .env(RELEASE_TEST_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated checkpoint release test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     // Alone in this child process, so it installs the one writer.
@@ -1530,18 +1507,10 @@ async fn a_worker_that_rejects_the_release_keeps_its_barrier_through_the_transfe
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(test_name)
             .env(LEGACY_RELEASE_TEST_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated legacy checkpoint release test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     // Alone in this child process, so it installs the one writer.
@@ -1616,18 +1585,10 @@ async fn abandoning_a_latched_checkpoint_drops_the_connection_that_opened_its_ba
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(test_name)
             .env(ABANDON_TEST_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated abandoned checkpoint test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     // Alone in this child process, so it installs the one writer.
@@ -1685,19 +1646,11 @@ fn a_move_checkpoint_can_verify_its_archive_without_source_harness_readiness() {
             .strip_prefix("mj_controller::")
             .unwrap_or(module_path!())
     );
-    let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &name, "--nocapture"])
+    IsolatedTest::new(name)
         .env(REUSE_TEST_CHILD, "1")
         .env(LATCH_CHECKPOINT_ONLY, "1")
         .env("MJ_DATA_DIR", directory.path())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "checkpoint-only capture failed: {}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        .run();
 }
 
 #[cfg(unix)]
@@ -1713,21 +1666,13 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(test_name)
             .env(REUSE_TEST_CHILD, "1")
             // Longer than the normal checkpoint barrier deadline. The
             // controller must wait for startup rather than restart it.
             .env(LATCH_RELAY_STARTUP_DELAY_MS, "31000")
             .env("MJ_DATA_DIR", directory.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated checkpoint reuse test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     // Alone in this child process, so it installs the one writer.

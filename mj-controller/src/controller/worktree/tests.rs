@@ -8,10 +8,10 @@ use anyhow::Result;
 use crate::controller::Controller;
 use crate::controller::resume::apply_failed_resume_rollback;
 use crate::controller::test_support::{
-    FIXTURE_FETCH_URL, FixtureRemoteExecutor, checkout_with_network_remote,
+    FIXTURE_FETCH_URL, FixtureRemoteExecutor, IsolatedTest, checkout_with_network_remote,
     checkpoint_test_session, committed_repository, local_bundle, managed_raw_session,
     managed_worktree_session, raw_session_on, resume_compatibility_config, ssh_worktree_target,
-    test_git,
+    test_git, test_name,
 };
 use mj_checkpoint::archive::RepositoryMetadata;
 use mj_core::config::{Config, HarnessProfile, ProjectBundle, ProjectRepository, TargetTemplate};
@@ -28,16 +28,14 @@ fn worktree_choice_survives_reload_and_controls_creation() {
     const CHILD: &str = "MJ_TEST_WORKTREE_CHOICE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
-        let mut command = Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact", "controller::worktree::tests::worktree_choice_survives_reload_and_controls_creation", "--nocapture"])
-            .env(CHILD, "1").env("MJ_DATA_DIR", directory.path()).env("MJ_CONFIG_DIR", directory.path());
-        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "worktree_choice_survives_reload_and_controls_creation",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_DATA_DIR", directory.path())
+        .env("MJ_CONFIG_DIR", directory.path())
+        .run();
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();

@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[cfg(unix)]
 use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
@@ -10,8 +9,9 @@ use anyhow::Result;
 
 use super::{Controller, MoveMutationGuard, move_owns_session, move_refuses_command};
 use crate::controller::test_support::{
-    checkpoint_test_session, committed_repository, local_bundle, managed_raw_session,
-    raw_session_on, resume_compatibility_config, ssh_worktree_target,
+    IsolatedTest, checkpoint_test_session, committed_repository, install_fake_command,
+    local_bundle, managed_raw_session, raw_session_on, resume_compatibility_config,
+    ssh_worktree_target,
 };
 #[cfg(unix)]
 use mj_checkpoint::archive::{
@@ -70,30 +70,16 @@ fn isolated_test_child(test_name: &str, marker: &str) -> bool {
         return true;
     }
     let directory = tempfile::tempdir().unwrap();
-    let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test_name, "--nocapture"])
+    IsolatedTest::new(test_name)
         .env(marker, "1")
-        .env("MJ_DATA_DIR", directory.path().join("data"))
-        .env("MJ_CONFIG_DIR", directory.path().join("config"))
+        .isolated_store(directory.path())
         .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "isolated move test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        .run();
     false
 }
 
 fn test_name(short: &str) -> String {
-    format!(
-        "{}::{short}",
-        module_path!()
-            .strip_prefix("mj_controller::")
-            .unwrap_or(module_path!())
-    )
+    crate::controller::test_support::test_name(module_path!(), short)
 }
 
 #[cfg(unix)]
@@ -119,7 +105,7 @@ fn install_move_queue_relay_worker(root: &Path, marker: &Path, marker_exists: bo
         binary = shell_literal(&std::env::current_exe().unwrap()),
         child = test_name("move_queue_relay_child"),
     );
-    crate::controller::test_support::install_fake_command(root, "hel", &script);
+    install_fake_command(root, "hel", &script);
 }
 
 /// Serve one durable relay connection. The first queue submission is ACKed

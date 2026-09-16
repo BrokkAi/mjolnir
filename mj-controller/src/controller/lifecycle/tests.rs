@@ -5,8 +5,8 @@ use anyhow::Result;
 
 use crate::controller::Controller;
 use crate::controller::test_support::{
-    checkpoint_test_session, committed_repository, managed_worktree_session, test_git,
-    write_checkpoint_gate_archive,
+    IsolatedTest, checkpoint_test_session, committed_repository, managed_worktree_session,
+    test_git, write_checkpoint_gate_archive,
 };
 use mj_core::config::{Config, ContainerTemplate as ConfigContainer, TargetTemplate};
 use mj_core::state::{SessionState, State, TargetLocator};
@@ -280,19 +280,11 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
     const TEST: &str = "controller::lifecycle::tests::destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
+        IsolatedTest::new(TEST)
             .env(CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
             .env("MJ_CONFIG_DIR", directory.path().join("config"))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();

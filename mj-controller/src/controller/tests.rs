@@ -8,6 +8,7 @@ use mj_core::config::{
 };
 use mj_core::state::State;
 
+use super::test_support::IsolatedTest;
 use super::*;
 
 /// One profile, one bundle with nothing checked out locally, and one
@@ -382,23 +383,11 @@ fn muse_registration_rejects_more_than_one_workspace_root_before_persisting() {
 /// MJ_DATA_DIR is process-global, so every test that reaches the
 /// controller database runs in an exact child with its own data directory.
 fn run_registration_child(marker: &str, test: &str, data_directory: &Path) {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            &format!("controller::tests::{test}"),
-            "--nocapture",
-        ])
+    IsolatedTest::new(format!("controller::tests::{test}"))
         .env(marker, "1")
         .env("MJ_DATA_DIR", data_directory)
         .env("MJ_CONFIG_DIR", data_directory)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "isolated {test} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        .run();
 }
 
 #[test]
@@ -766,25 +755,13 @@ fn controller_store_lock_excludes_a_second_process_owner() {
     run_controller_lock_probe(directory.path(), false);
 }
 fn run_controller_lock_probe(directory: &Path, expect_locked: bool) {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "controller::tests::controller_store_lock_subprocess_probe",
-            "--nocapture",
-        ])
+    IsolatedTest::new("controller::tests::controller_store_lock_subprocess_probe")
         .env("MJ_CONTROLLER_LOCK_PROBE", directory)
         .env(
             "MJ_CONTROLLER_LOCK_EXPECTED",
             if expect_locked { "locked" } else { "available" },
         )
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "controller lock subprocess failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        .run();
 }
 #[test]
 fn controller_store_lock_subprocess_probe() {

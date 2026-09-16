@@ -1,5 +1,6 @@
 use super::launch::*;
 use super::*;
+use crate::controller::test_support::{IsolatedTest, test_name};
 use mj_core::targets::ProcessExecutor;
 
 use anyhow::Result;
@@ -664,24 +665,13 @@ fn a_replaced_controller_still_honors_the_worker_binary_override() {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("mj-worker");
         std::fs::write(&worker, b"worker").unwrap();
-        let test_name = format!(
-            "{}::a_replaced_controller_still_honors_the_worker_binary_override",
-            module_path!()
-                .strip_prefix("mj_controller::")
-                .unwrap_or(module_path!())
-        );
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
-            .env(WORKER_BINARY_OVERRIDE_CHILD, "1")
-            .env("MJ_WORKER_BINARY", &worker)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated worker override test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_replaced_controller_still_honors_the_worker_binary_override",
+        ))
+        .env(WORKER_BINARY_OVERRIDE_CHILD, "1")
+        .env("MJ_WORKER_BINARY", &worker)
+        .run();
         return;
     }
 

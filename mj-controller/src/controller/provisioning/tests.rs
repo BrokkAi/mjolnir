@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::controller::test_support::{IsolatedTest, test_name};
 use std::sync::Mutex;
 
 use mj_core::config::{
@@ -325,23 +326,11 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
     if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let test = "failed_ssh_docker_preflight_retains_durable_error_record";
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                &format!("controller::provisioning::tests::{test}"),
-                "--nocapture",
-            ])
+        IsolatedTest::new(test_name(module_path!(), test))
             .env(SSH_DOCKER_FAILURE_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
-            .env("MJ_CONFIG_DIR", directory.path());
-        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
-        assert!(
-            output.status.success(),
-            "isolated {test} failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .env("MJ_CONFIG_DIR", directory.path())
+            .run();
         return;
     }
 
@@ -414,23 +403,11 @@ fn failed_node_preflight_retains_error_before_provisioning() {
     if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let test = "failed_node_preflight_retains_error_before_provisioning";
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                &format!("controller::provisioning::tests::{test}"),
-                "--nocapture",
-            ])
+        IsolatedTest::new(test_name(module_path!(), test))
             .env(SSH_DOCKER_FAILURE_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
-            .env("MJ_CONFIG_DIR", directory.path());
-        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
-        assert!(
-            output.status.success(),
-            "isolated {test} failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .env("MJ_CONFIG_DIR", directory.path())
+            .run();
         return;
     }
 

@@ -396,6 +396,77 @@ pub(super) fn managed_worktree_session(repository: &Path, session_id: &str) -> S
     session
 }
 
+/// The `--exact` name of a test in this binary, given its `module_path!()`.
+///
+/// `module_path!()` carries the crate name, which libtest's filter does not.
+pub(crate) fn test_name(module_path: &str, test: &str) -> String {
+    let module = module_path
+        .strip_prefix("mj_controller::")
+        .unwrap_or(module_path);
+    format!("{module}::{test}")
+}
+
+/// Re-run one test alone, in a child of this test binary.
+///
+/// The data directory, the installed database writer, the tracing subscriber
+/// and the process working directory are all process-global, so a test that
+/// needs its own has to be the only test in its process. The child runs the
+/// named test with `--exact`, and [`IsolatedTest::run`] fails the parent with
+/// the child's own output when it does not pass.
+///
+/// Build the name with [`test_name`], which strips the crate prefix that
+/// `module_path!()` carries and libtest's filter does not accept.
+pub(crate) struct IsolatedTest {
+    name: String,
+    command: Command,
+}
+
+impl IsolatedTest {
+    pub(crate) fn new(name: impl Into<String>) -> Self {
+        let name = name.into();
+        let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+        command.args(["--exact", &name, "--nocapture"]);
+        Self { name, command }
+    }
+
+    /// Set a variable for the child. The marker a test uses to tell the child
+    /// apart from the parent goes here too.
+    pub(crate) fn env(
+        mut self,
+        key: impl AsRef<std::ffi::OsStr>,
+        value: impl AsRef<std::ffi::OsStr>,
+    ) -> Self {
+        self.command.env(key, value);
+        self
+    }
+
+    /// Give the child its own configuration and data directories under `root`.
+    pub(crate) fn isolated_store(self, root: &Path) -> Self {
+        self.env("MJ_DATA_DIR", root.join("data"))
+            .env("MJ_CONFIG_DIR", root.join("config"))
+    }
+
+    /// Run the child and return its output without judging it.
+    pub(crate) fn output(mut self) -> std::process::Output {
+        self.command
+            .output()
+            .unwrap_or_else(|error| panic!("run isolated {}: {error}", self.name))
+    }
+
+    /// Run the child and fail this test with its output if it did not pass.
+    pub(crate) fn run(self) -> std::process::Output {
+        let name = self.name.clone();
+        let output = self.output();
+        assert!(
+            output.status.success(),
+            "isolated {name} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+}
+
 /// Install a shell stand-in, under `program`, for a command the code under
 /// test looks up on `PATH` in `directory`.
 ///

@@ -1,4 +1,5 @@
 use super::*;
+use crate::controller::test_support::{IsolatedTest, test_name};
 
 fn recovery_source_target() -> mj_core::state::TargetLocator {
     mj_core::state::TargetLocator::LocalBare {
@@ -1100,25 +1101,11 @@ async fn unreachable_relay_publishes_error_view() {
     // process.
     if std::env::var_os(UNREACHABLE_VIEW_TEST_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
-        let test_name = format!(
-            "{}::unreachable_relay_publishes_error_view",
-            module_path!()
-                .strip_prefix("mj_controller::")
-                .unwrap_or(module_path!())
-        );
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &test_name, "--nocapture"])
+        IsolatedTest::new(exact_test_name("unreachable_relay_publishes_error_view"))
             .env(UNREACHABLE_VIEW_TEST_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
             .env("MJ_CONFIG_DIR", directory.path().join("config"))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated unreachable relay test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run();
         return;
     }
 
@@ -1179,22 +1166,13 @@ async fn connecting_to_an_absent_worker_never_reads_the_projection() {
         // projection read fail, so a read that happens at all shows up in
         // the reported error.
         std::fs::create_dir(directory.path().join("mj.sqlite3")).unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                &format!(
-                    "{}::connecting_to_an_absent_worker_never_reads_the_projection",
-                    module_path!()
-                        .strip_prefix("mj_controller::")
-                        .unwrap_or(module_path!())
-                ),
-                "--nocapture",
-            ])
-            .env(UNREADABLE_PROJECTION_TEST_CHILD, "1")
-            .env("MJ_DATA_DIR", directory.path())
-            .env("MJ_CONFIG_DIR", directory.path().join("config"))
-            .output()
-            .unwrap();
+        let output = IsolatedTest::new(exact_test_name(
+            "connecting_to_an_absent_worker_never_reads_the_projection",
+        ))
+        .env(UNREADABLE_PROJECTION_TEST_CHILD, "1")
+        .env("MJ_DATA_DIR", directory.path())
+        .env("MJ_CONFIG_DIR", directory.path().join("config"))
+        .output();
         assert!(
             output.status.success(),
             "isolated projection ordering test failed\nstdout:\n{}\nstderr:\n{}",
@@ -1297,12 +1275,7 @@ fn leased_relay_child_serves_stdio() {
 
 #[cfg(unix)]
 fn exact_test_name(test: &str) -> String {
-    format!(
-        "{}::{test}",
-        module_path!()
-            .strip_prefix("mj_controller::")
-            .unwrap_or(module_path!())
-    )
+    test_name(module_path!(), test)
 }
 
 /// MJ_DATA_DIR is process-global, so every test that reaches the
@@ -1310,19 +1283,11 @@ fn exact_test_name(test: &str) -> String {
 #[cfg(unix)]
 fn run_in_isolated_child(marker: &str, test: &str) {
     let directory = tempfile::tempdir().unwrap();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &exact_test_name(test), "--nocapture"])
+    IsolatedTest::new(exact_test_name(test))
         .env(marker, "1")
         .env("MJ_DATA_DIR", directory.path())
         .env("MJ_CONFIG_DIR", directory.path().join("config"))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "isolated {test} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        .run();
 }
 
 #[cfg(unix)]
