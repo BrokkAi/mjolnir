@@ -22,14 +22,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::theme;
 use crossterm::event::{Event, MouseEvent};
-use rat_event::ConsumedEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::components::{ButtonRow, ControlKind, Form, Interaction, Outcome, TabStrip};
+use crate::components::{ButtonRow, ControlKind, Form, Interaction, TabStrip};
 use mj_client::review::{RuntimeReviewView, VerdictKind};
 use mj_core::review::driver::{Resolution, RoleState, TurnReviewPhase};
 
@@ -559,11 +558,7 @@ impl super::ChatState {
 
     pub(super) fn cancel_turn_review_pointer(&mut self) {
         if let Some(review) = self.turn_review.as_mut() {
-            let captured = review.form.captures_pointer();
             review.form.cancel_pointer();
-            if captured {
-                self.mark_visible_changed();
-            }
         }
     }
 
@@ -582,9 +577,6 @@ impl super::ChatState {
             Some(review) => review.form.handle(&event),
             None => return (false, super::ChatAction::None),
         };
-        if result.outcome == Outcome::Changed {
-            self.mark_visible_changed();
-        }
         match result.action {
             Some(Interaction::Activate(control)) => {
                 if let Some(review) = self.turn_review.as_mut() {
@@ -604,20 +596,17 @@ impl super::ChatState {
             }
             _ => {}
         }
-        (result.outcome.is_consumed(), super::ChatAction::None)
+        (result.consumed, super::ChatAction::None)
     }
 
     /// Shows the daemon's review, or takes the pane down when it has resolved.
     pub(super) fn set_turn_review(&mut self, view: Option<RuntimeReviewView>) {
         match (view, self.turn_review.as_mut()) {
             (Some(view), Some(open)) => {
-                if open.update(view) {
-                    self.mark_visible_changed();
-                }
+                open.update(view);
             }
             (Some(view), None) => {
                 self.turn_review = Some(Box::new(TurnReview::new(view)));
-                self.mark_visible_changed();
             }
             (None, _) => self.close_turn_review(),
         }
@@ -626,7 +615,6 @@ impl super::ChatState {
     pub(super) fn close_turn_review(&mut self) {
         if self.turn_review.take().is_some() {
             self.turn_review_action_areas.clear();
-            self.mark_visible_changed();
         }
     }
 
@@ -646,9 +634,6 @@ impl super::ChatState {
             };
             (review.component_ready, review.form.handle(&event))
         };
-        if result.outcome == Outcome::Changed {
-            self.mark_visible_changed();
-        }
         if let Some(interaction) = result.action {
             match interaction {
                 Interaction::Select(ReviewControl::Tabs, selected) => {
@@ -684,7 +669,7 @@ impl super::ChatState {
                 _ => {}
             }
         }
-        if result.outcome.is_consumed()
+        if result.consumed
             && (component_ready || !matches!(key.code, KeyCode::Tab | KeyCode::BackTab))
         {
             return super::ChatAction::None;
@@ -694,12 +679,8 @@ impl super::ChatState {
             // the actions, so a fan-out stays readable without giving up the
             // one-key Forward.
             KeyCode::Tab => {
-                if self
-                    .turn_review
-                    .as_mut()
-                    .is_some_and(|review| review.cycle_selection())
-                {
-                    self.mark_visible_changed();
+                if let Some(review) = self.turn_review.as_mut() {
+                    review.cycle_selection();
                 }
                 super::ChatAction::None
             }
@@ -709,7 +690,6 @@ impl super::ChatState {
                         Some(action) => action.next(1),
                         None => ReviewAction::Forward,
                     });
-                    self.mark_visible_changed();
                 }
                 super::ChatAction::None
             }
@@ -719,29 +699,20 @@ impl super::ChatState {
                         Some(action) => action.next(-1),
                         None => ReviewAction::Cancel,
                     });
-                    self.mark_visible_changed();
                 }
                 super::ChatAction::None
             }
             KeyCode::PageUp => {
                 let page = self.last_viewport_height.max(1);
-                if self
-                    .turn_review
-                    .as_mut()
-                    .is_some_and(|review| review.scroll_pane(-(page as isize), page))
-                {
-                    self.mark_visible_changed();
+                if let Some(review) = self.turn_review.as_mut() {
+                    review.scroll_pane(-(page as isize), page);
                 }
                 super::ChatAction::None
             }
             KeyCode::PageDown => {
                 let page = self.last_viewport_height.max(1);
-                if self
-                    .turn_review
-                    .as_mut()
-                    .is_some_and(|review| review.scroll_pane(page as isize, page))
-                {
-                    self.mark_visible_changed();
+                if let Some(review) = self.turn_review.as_mut() {
+                    review.scroll_pane(page as isize, page);
                 }
                 super::ChatAction::None
             }
@@ -810,11 +781,7 @@ impl super::ChatState {
         let Some(review) = self.turn_review.as_mut() else {
             return false;
         };
-        let changed = review.scroll_pane(rows, height);
-        if changed {
-            self.mark_visible_changed();
-        }
-        changed
+        review.scroll_pane(rows, height)
     }
 }
 

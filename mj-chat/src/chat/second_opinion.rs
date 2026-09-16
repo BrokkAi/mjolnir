@@ -13,14 +13,13 @@ use std::sync::Arc;
 
 use crate::theme;
 use crossterm::event::{Event, KeyEvent, MouseEvent};
-use rat_event::ConsumedEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, Outcome};
+use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction};
 use crate::selection::{SelectionRange, SurfaceFrame, SurfaceId};
 use mj_core::elicitation::ElicitationRequest;
 use mj_core::relay::RelayEvent;
@@ -544,7 +543,6 @@ impl super::ChatState {
             form: Box::new(setup_form(&setup)),
             setup: Box::new(setup),
         });
-        self.mark_visible_changed();
     }
 
     pub(super) fn second_opinion(&self) -> Option<&SecondOpinion> {
@@ -568,20 +566,10 @@ impl super::ChatState {
     }
 
     pub(super) fn cancel_second_opinion_pointer(&mut self) {
-        let mut captured = false;
         match self.second_opinion.as_mut() {
-            Some(SecondOpinion::Setup { form, .. }) => {
-                captured = form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Some(SecondOpinion::Review(review)) => {
-                captured = review.form.captures_pointer();
-                review.form.cancel_pointer();
-            }
+            Some(SecondOpinion::Setup { form, .. }) => form.cancel_pointer(),
+            Some(SecondOpinion::Review(review)) => review.form.cancel_pointer(),
             None => {}
-        }
-        if captured {
-            self.mark_visible_changed();
         }
     }
 
@@ -606,11 +594,7 @@ impl super::ChatState {
                 Some(SecondOpinion::Setup { form, .. }) => form.handle(&event),
                 _ => unreachable!(),
             };
-            let consumed = result.outcome.is_consumed();
-            let changed = result.outcome == Outcome::Changed;
-            if changed {
-                self.mark_visible_changed();
-            }
+            let consumed = result.consumed;
             if let Some(interaction) = result.action.map(SetupInteraction::from) {
                 return match interaction {
                     SetupInteraction::Select(selected) => {
@@ -638,11 +622,7 @@ impl super::ChatState {
                 Some(SecondOpinion::Review(review)) => review.form.handle(&event),
                 _ => unreachable!(),
             };
-            let consumed = result.outcome.is_consumed();
-            let changed = result.outcome == Outcome::Changed;
-            if changed {
-                self.mark_visible_changed();
-            }
+            let consumed = result.consumed;
             if let Some(SplitInteraction::Activate(control)) =
                 result.action.map(SplitInteraction::from)
             {
@@ -668,20 +648,13 @@ impl super::ChatState {
         if let Some(SecondOpinion::Setup { setup, form, .. }) = self.second_opinion.as_mut() {
             prepare_setup_form(setup, form);
         }
-        let (consumed, changed, interaction) = {
+        let (consumed, interaction) = {
             let Some(SecondOpinion::Setup { form, .. }) = self.second_opinion.as_mut() else {
                 return (false, super::ChatAction::None);
             };
             let result = form.handle(&event);
-            (
-                result.outcome.is_consumed(),
-                result.outcome == Outcome::Changed,
-                result.action,
-            )
+            (result.consumed, result.action)
         };
-        if changed {
-            self.mark_visible_changed();
-        }
         let Some(interaction) = interaction else {
             return (consumed, super::ChatAction::None);
         };
@@ -721,21 +694,13 @@ impl super::ChatState {
         let event = Event::Key(KeyEvent::new_with_kind_and_state(
             code, modifiers, key.kind, key.state,
         ));
-        let (consumed, changed, interaction, focused) = {
+        let (consumed, interaction, focused) = {
             let Some(SecondOpinion::Review(review)) = self.second_opinion.as_mut() else {
                 return (false, super::ChatAction::None);
             };
             let result = review.form.handle(&event);
-            (
-                result.outcome.is_consumed(),
-                result.outcome == Outcome::Changed,
-                result.action,
-                review.form.focused(),
-            )
+            (result.consumed, result.action, review.form.focused())
         };
-        if changed {
-            self.mark_visible_changed();
-        }
         if let Some(action) = interaction {
             match action {
                 Interaction::Activate(SplitControl::Transfer) => {
@@ -817,26 +782,20 @@ impl super::ChatState {
             SecondOpinion::Review(review) => match code {
                 KeyCode::Tab | KeyCode::Right => {
                     review.action = review.action.next(1);
-                    self.mark_visible_changed();
                     super::ChatAction::None
                 }
                 KeyCode::BackTab | KeyCode::Left => {
                     review.action = review.action.next(-1);
-                    self.mark_visible_changed();
                     super::ChatAction::None
                 }
                 KeyCode::PageUp => {
                     let page = self.last_viewport_height.max(1);
-                    if review.reviewer.scroll_by(-(page as isize), page) {
-                        self.mark_visible_changed();
-                    }
+                    review.reviewer.scroll_by(-(page as isize), page);
                     super::ChatAction::None
                 }
                 KeyCode::PageDown => {
                     let page = self.last_viewport_height.max(1);
-                    if review.reviewer.scroll_by(page as isize, page) {
-                        self.mark_visible_changed();
-                    }
+                    review.reviewer.scroll_by(page as isize, page);
                     super::ChatAction::None
                 }
                 KeyCode::Enter => self.activate_split_action(),
@@ -984,11 +943,7 @@ impl super::ChatState {
         else {
             return false;
         };
-        let changed = reviewer.scroll_by(rows, height);
-        if changed {
-            self.mark_visible_changed();
-        }
-        changed
+        reviewer.scroll_by(rows, height)
     }
 
     /// The text a reviewer-pane selection covers.

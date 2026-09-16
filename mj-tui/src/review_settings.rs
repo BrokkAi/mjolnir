@@ -589,12 +589,7 @@ impl ReviewSettingsDialog {
     ) -> (DashboardAction, ReviewSettingsOutcome) {
         use ReviewSettingsFocus::*;
         let result = self.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &dashboard.last_event_outcome,
-            &dashboard.render_changed,
-            &dashboard.render_change_revision,
-            &result,
-        );
+        dashboard.last_event_consumed.set(result.consumed);
         let changed = result.action.is_some();
         let interaction = self.combo.route(result.action);
         let dismiss = matches!(&interaction, Some(Interaction::Cancel));
@@ -607,7 +602,6 @@ impl ReviewSettingsDialog {
             }
             Some(Interaction::Toggle(Enabled)) => {
                 self.review.enabled = !self.review.enabled;
-                dashboard.mark_render_changed();
                 DashboardAction::None
             }
             Some(Interaction::ComboBoxCommit(Tier, index)) => {
@@ -618,7 +612,6 @@ impl ReviewSettingsDialog {
                 };
                 if self.review.tier != tier {
                     self.review.tier = tier;
-                    dashboard.mark_render_changed();
                 }
                 DashboardAction::None
             }
@@ -628,7 +621,6 @@ impl ReviewSettingsDialog {
                     DashboardAction::None
                 } else {
                     self.review.profile = profile;
-                    dashboard.mark_render_changed();
                     self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Profile)
                 }
             }
@@ -641,7 +633,6 @@ impl ReviewSettingsDialog {
                     DashboardAction::None
                 } else {
                     self.review.model = model;
-                    dashboard.mark_render_changed();
                     self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Model)
                 }
             }
@@ -653,7 +644,6 @@ impl ReviewSettingsDialog {
                         .flatten();
                 if self.review.effort != effort {
                     self.review.effort = effort;
-                    dashboard.mark_render_changed();
                 }
                 DashboardAction::None
             }
@@ -664,21 +654,17 @@ impl ReviewSettingsDialog {
                     .find(|(candidate, _, _, _)| *candidate == id)
                 {
                     self.combo.open(id, selected);
-                    dashboard.mark_render_changed();
                 }
                 DashboardAction::None
             }
             Some(Interaction::ComboBoxDismiss(Tier | Profile | Model | Effort)) => {
-                dashboard.mark_render_changed();
                 DashboardAction::None
             }
             Some(Interaction::Activate(Refresh)) => {
                 if let Some(profile) = self.review.profile.as_deref() {
                     dashboard.clear_review_settings_choices(profile);
                 }
-                let action = self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Refresh);
-                dashboard.mark_render_changed();
-                action
+                self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Refresh)
             }
             Some(Interaction::Activate(Save)) if self.can_save() => {
                 let had_pending = self.probing;
@@ -692,7 +678,6 @@ impl ReviewSettingsDialog {
                     self.request_key = None;
                 }
                 self.save_error = None;
-                dashboard.mark_render_changed();
                 if had_pending {
                     DashboardAction::CancelReviewSettingsDiscovery
                 } else {
@@ -764,29 +749,12 @@ impl DashboardState {
         let Some(dialog) = review_settings_dialog_mut(&mut self.mode) else {
             return false;
         };
-        let old = (
-            dialog.model_choices.clone(),
-            dialog.effort_choices.clone(),
-            dialog.model_choices_discovered,
-            dialog.effort_capabilities_discovered,
-            dialog.discovery_error.clone(),
-            dialog.choices_loading,
-        );
         if !dialog.apply_choices(generation, profile_id, model, choices.clone()) {
             return false;
         }
         self.review_settings_choices
             .insert((profile_id.to_owned(), model.map(str::to_owned)), choices);
         dialog.prepare();
-        let changed = old.0 != dialog.model_choices
-            || old.1 != dialog.effort_choices
-            || old.2 != dialog.model_choices_discovered
-            || old.3 != dialog.effort_capabilities_discovered
-            || old.4 != dialog.discovery_error
-            || old.5 != dialog.choices_loading;
-        if changed {
-            self.mark_render_changed();
-        }
         true
     }
 
@@ -819,35 +787,12 @@ impl DashboardState {
             return false;
         }
         let key = (profile_id.to_owned(), model.map(str::to_owned));
-        let old = (
-            dialog.probing,
-            dialog.choices_loading,
-            dialog.model_choices.clone(),
-            dialog.effort_choices.clone(),
-            dialog.model_choices_discovered,
-            dialog.effort_capabilities_discovered,
-            dialog.cleanup_warning.clone(),
-            dialog.discovery_error.clone(),
-            dialog.save_error.clone(),
-        );
         let choices = dialog.apply_discovery(generation, profile_id, model, result);
         dialog.request_key = None;
         if let Some(choices) = choices {
             self.review_settings_choices.insert(key, choices);
         }
         dialog.prepare();
-        let changed = old.0 != dialog.probing
-            || old.1 != dialog.choices_loading
-            || old.2 != dialog.model_choices
-            || old.3 != dialog.effort_choices
-            || old.4 != dialog.model_choices_discovered
-            || old.5 != dialog.effort_capabilities_discovered
-            || old.6 != dialog.cleanup_warning
-            || old.7 != dialog.discovery_error
-            || old.8 != dialog.save_error;
-        if changed {
-            self.mark_render_changed();
-        }
         true
     }
 }

@@ -334,9 +334,6 @@ impl DashboardState {
             }
             _ => {}
         }
-        if changed {
-            self.mark_render_changed();
-        }
         changed
     }
 
@@ -377,8 +374,7 @@ impl DashboardState {
         if matches!(self.mode, Mode::WorkspaceManager(_)) {
             return self.handle_workspace_manager_event(event);
         }
-        let was_modal = !matches!(self.mode, Mode::Dashboard);
-        let action = match std::mem::replace(&mut self.mode, Mode::Dashboard) {
+        match std::mem::replace(&mut self.mode, Mode::Dashboard) {
             Mode::EditContainer(editor) => self.handle_container_edit_event(event, editor),
             Mode::Setup(dialog) => self.handle_setup_event(event, dialog),
             Mode::Rename(dialog) => self.handle_rename_event(event, dialog),
@@ -395,14 +391,7 @@ impl DashboardState {
                 self.mode = mode;
                 DashboardAction::None
             }
-        };
-        // Most component handlers receive an extracted modal so that they can
-        // decide whether to restore it. `cancel_modal` cannot observe that
-        // original mode, so account for a real close at this boundary.
-        if was_modal && matches!(self.mode, Mode::Dashboard) {
-            self.mark_render_changed();
         }
-        action
     }
 }
 

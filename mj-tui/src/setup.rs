@@ -947,12 +947,10 @@ impl DashboardState {
         }
         dialog.prepare();
         self.mode = Mode::Setup(dialog);
-        self.mark_render_changed();
     }
 
     pub fn begin_setup(&mut self) {
         self.mode = Mode::Setup(SetupDialog::new(&self.config));
-        self.mark_render_changed();
     }
 
     fn dismiss_setup(&mut self, dialog: SetupDialog) -> DashboardAction {
@@ -967,7 +965,6 @@ impl DashboardState {
                     intent: crate::dialogs::DismissalIntent::DiscardSetup,
                 },
             ));
-            self.mark_render_changed();
         } else {
             self.cancel_modal();
         }
@@ -1083,12 +1080,7 @@ impl DashboardState {
             .is_none()
             .then(|| dialog.form.get_mut().handle(&event));
         if let Some(result) = &form_result {
-            crate::record_form_outcome_cells(
-                &self.last_event_outcome,
-                &self.render_changed,
-                &self.render_change_revision,
-                result,
-            );
+            self.last_event_consumed.set(result.consumed);
         }
         let interaction = shortcut.or_else(|| form_result.and_then(|result| result.action));
         let interaction = if choice_editor {
@@ -1117,12 +1109,10 @@ impl DashboardState {
             Some(Interaction::Select(List, index)) => {
                 if dialog.selected != index {
                     dialog.selected = index;
-                    self.mark_render_changed();
                 }
             }
             Some(Interaction::Toggle(List)) => {
                 dialog.open_selected();
-                self.mark_render_changed();
             }
             Some(Interaction::Activate(List)) => {
                 if dialog.selected_is_review() {
@@ -1130,14 +1120,13 @@ impl DashboardState {
                 } else {
                     dialog.open_selected();
                 }
-                self.mark_render_changed();
             }
             Some(Interaction::Edit(Field, edit)) => {
                 if let Some(editor) = &mut dialog.editor
                     && TextField::apply(&mut editor.input, edit)
-                        == mj_chat::components::Outcome::Changed
+                        == mj_chat::components::EditOutcome::Changed
                 {
-                    self.record_visible_event_change();
+                    self.record_event_handled();
                 }
             }
             Some(Interaction::ComboBoxCommit(Choices, index)) => {
@@ -1145,28 +1134,21 @@ impl DashboardState {
                     editor.selected = index;
                 }
                 dialog.notice = dialog.apply_editor(false).err();
-                self.mark_render_changed();
             }
             Some(Interaction::ComboBoxDismiss(Choices)) => {
                 dialog.editor = None;
                 dialog.form = RefCell::new(Dialog::default());
-                self.mark_render_changed();
             }
-            Some(Interaction::Activate(Field | Apply)) => {
-                match dialog.resolve_path_action() {
-                    Ok(Some(resolve)) => action = resolve,
-                    Ok(None) => dialog.notice = dialog.apply_editor(false).err(),
-                    Err(error) => dialog.notice = Some(error),
-                }
-                self.mark_render_changed();
-            }
+            Some(Interaction::Activate(Field | Apply)) => match dialog.resolve_path_action() {
+                Ok(Some(resolve)) => action = resolve,
+                Ok(None) => dialog.notice = dialog.apply_editor(false).err(),
+                Err(error) => dialog.notice = Some(error),
+            },
             Some(Interaction::Activate(Clear)) => {
                 dialog.notice = dialog.apply_editor(true).err();
-                self.mark_render_changed();
             }
             Some(Interaction::Activate(Add)) => {
                 dialog.add();
-                self.mark_render_changed();
             }
             Some(Interaction::Activate(Remove)) if dialog.collection() => {
                 if let Some(key) = dialog.keys().get(dialog.selected).cloned() {
@@ -1183,17 +1165,14 @@ impl DashboardState {
                         let profile_id = dialog.path.get(1).unwrap_or(&key).clone();
                         dialog.invalidate_review_validation_for(Some(&profile_id));
                     }
-                    self.mark_render_changed();
                 }
             }
             Some(Interaction::Activate(Save)) if dialog.editor.is_none() => {
                 action = dialog.save();
-                self.mark_render_changed();
             }
             Some(Interaction::Activate(Detect)) if !dialog.discovering => {
                 dialog.discovering = true;
                 dialog.notice = Some("Detecting agent profiles and usable local runtimes…".into());
-                self.mark_render_changed();
                 action = DashboardAction::DiscoverSetup {
                     generation: dialog.generation,
                 };
@@ -1234,7 +1213,6 @@ impl DashboardState {
             }
             Err(error) => dialog.notice = Some(error),
         }
-        self.mark_render_changed();
     }
 
     pub fn setup_saved(&mut self, generation: u64, result: Result<Config, String>) {
@@ -1258,7 +1236,6 @@ impl DashboardState {
                     dialog.saving = false;
                     dialog.notice = Some(format!("Could not save: {error}"));
                     dialog.prepare();
-                    self.mark_render_changed();
                 } else {
                     self.set_failure_notice(error);
                 }
@@ -1285,7 +1262,6 @@ impl DashboardState {
                             "Review the settings draft before detecting entries: {error}"
                         ));
                         dialog.prepare();
-                        self.mark_render_changed();
                         return;
                     }
                 };
@@ -1314,7 +1290,6 @@ impl DashboardState {
             Err(error) => dialog.notice = Some(format!("Detection failed: {error}")),
         }
         dialog.prepare();
-        self.mark_render_changed();
     }
 }
 

@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph, Wrap};
 
 use crate::components::{Button, ControlKind};
-use crate::components::{EventResult, Outcome, render_scrollbar, scrollbar_geometry};
+use crate::components::{EventResult, render_scrollbar, scrollbar_geometry};
 use crate::selection::{FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId};
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord, TranscriptItem, config_command_text};
@@ -343,7 +343,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
             // down around a stopped manager.
             if state.activity_reachable {
                 state.activity_reachable = false;
-                state.mark_visible_changed();
             }
             tracing::warn!(error = format!("{error:#}"), "chat session view failed");
             state.set_notice(format!("connection lost: {error:#}"));
@@ -356,7 +355,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     let activity_reachable = view.connected && view.snapshot.is_some() && view.error.is_none();
     if state.activity_reachable != activity_reachable {
         state.activity_reachable = activity_reachable;
-        state.mark_visible_changed();
     }
     if view.snapshot.is_some() {
         state.set_transcript_loading(false);
@@ -377,7 +375,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
         if state.steering_supported != snapshot.operational.steering_supported {
             state.steering_supported = snapshot.operational.steering_supported;
-            state.mark_visible_changed();
         }
         state.set_session_activity(mj_client::usage_format::SessionActivity::of(
             &snapshot.operational,
@@ -386,7 +383,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     if let Some(error) = view.error {
         if state.activity_reachable {
             state.activity_reachable = false;
-            state.mark_visible_changed();
         }
         match error {
             ViewError::Unreachable(detail) => {
@@ -1000,12 +996,6 @@ impl ActiveChat {
         self.state.animation_changed()
     }
 
-    /// Consumes a visible mutation performed by an external host callback,
-    /// such as review projection or refreshed session context.
-    pub fn take_render_changed(&mut self) -> bool {
-        self.state.take_render_changed()
-    }
-
     /// Records the time-dependent cells represented by the frame just drawn.
     /// The next clock or animation tick can then request a redraw only after
     /// its displayed value actually moves.
@@ -1014,16 +1004,15 @@ impl ActiveChat {
     }
 
     /// Waits for the next background message, applies it, and drains whatever
-    /// queued behind it, reporting whether their visible state changed.
+    /// queued behind it.
     ///
     /// `None` means no chat is warm, and the feed never wakes the caller. Cancel
     /// safe: every arm is a cancel-safe receive, and a message is applied only
     /// once its arm has won.
-    pub async fn pump(chat: Option<&mut Self>) -> Outcome {
+    pub async fn pump(chat: Option<&mut Self>) {
         let Some(chat) = chat else {
             return std::future::pending().await;
         };
-        let before = chat.state.visible_revision();
         enum Wakeup {
             Remote(Option<ChatRemoteResult>),
             Io(ChatIoUpdate),
@@ -1049,12 +1038,6 @@ impl ActiveChat {
         }
         chat.drain().await;
         chat.report_worker_death().await;
-        let changed = chat.state.visible_revision() != before;
-        if changed {
-            Outcome::Changed
-        } else {
-            Outcome::Unchanged
-        }
     }
 
     async fn drain(&mut self) {
@@ -1109,10 +1092,8 @@ impl ActiveChat {
         else {
             return;
         };
-        if let Some(view) = self.state.second_opinion_mut()
-            && view.set_status("the reviewer is reading the plan…")
-        {
-            self.state.mark_visible_changed();
+        if let Some(view) = self.state.second_opinion_mut() {
+            view.set_status("the reviewer is reading the plan…");
         }
         self.persist_review();
         self.run_workflow_request(request);
@@ -1217,9 +1198,7 @@ impl ActiveChat {
     pub fn report_review_refusal(&mut self, message: String) {
         match self.state.turn_review_mut() {
             Some(review) => {
-                if review.report_failure(message) {
-                    self.state.mark_visible_changed();
-                }
+                review.report_failure(message);
             }
             None => self.state.set_notice(message),
         }
@@ -1438,10 +1417,7 @@ impl ActiveChat {
             }
             VoiceUpdate::Status(status) => self.state.set_notice(status),
             VoiceUpdate::Finished(result) => {
-                if self.state.voice_active {
-                    self.state.voice_active = false;
-                    self.state.mark_visible_changed();
-                }
+                self.state.voice_active = false;
                 self.voice_cancel = None;
                 self.voice_finishing = false;
                 match result {
@@ -1568,12 +1544,9 @@ impl ActiveChat {
             .unwrap_or(ChatEventOutcome::None)
     }
 
-    /// Applies one terminal event while preserving both dispatch and repaint
-    /// information.  The action is intentionally separate from `Outcome`:
-    /// editing the composer may need a redraw without asking the host to do
-    /// anything, while a remote command can be consumed with no visual delta.
+    /// Applies one terminal event, reporting whether the conversation consumed
+    /// it and whatever action it asks the host to take.
     pub fn handle_event_result(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
-        let before = self.state.visible_revision();
         let action = match &event {
             Event::Key(key) => self.state.handle_key(*key),
             Event::Paste(pasted) => self.state.handle_terminal_paste(pasted),
@@ -1584,16 +1557,9 @@ impl ActiveChat {
         let consumed = self.state.event_consumed(&event, &action);
         let dispatched = self.dispatch(action);
         dispatch_history_search_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
-        let changed = self.state.visible_revision() != before;
         let action = (!matches!(dispatched, ChatEventOutcome::None)).then_some(dispatched);
         EventResult {
-            outcome: if changed {
-                Outcome::Changed
-            } else if consumed || action.is_some() {
-                Outcome::Unchanged
-            } else {
-                Outcome::Continue
-            },
+            consumed: consumed || action.is_some(),
             action,
         }
     }
@@ -1825,7 +1791,6 @@ impl ActiveChat {
                     self.voice_cancel = Some(cancel_tx);
                     self.voice_finishing = false;
                     self.state.voice_active = true;
-                    self.state.mark_visible_changed();
                     self.state.set_notice(
                         "Starting microphone… click again or press Alt-V to transcribe",
                     );
@@ -1910,10 +1875,8 @@ impl ActiveChat {
         self.state
             .open_second_opinion(CapturedProposal { request, proposal }, setup);
         if let Some(selection) = remembered {
-            if let Some(view) = self.state.second_opinion_mut()
-                && view.set_status("resuming the reviewer…")
-            {
-                self.state.mark_visible_changed();
+            if let Some(view) = self.state.second_opinion_mut() {
+                view.set_status("resuming the reviewer…");
             }
             self.probe_reviewer(
                 0,
@@ -2462,12 +2425,8 @@ impl ActiveChat {
         let events = match result {
             Ok(events) => events,
             Err(error) => {
-                let changed = self
-                    .state
-                    .second_opinion_mut()
-                    .is_some_and(|view| view.report_failure(error));
-                if changed {
-                    self.state.mark_visible_changed();
+                if let Some(view) = self.state.second_opinion_mut() {
+                    view.report_failure(error);
                 }
                 return;
             }
@@ -2480,28 +2439,21 @@ impl ActiveChat {
         } else {
             false
         };
-        if reviewer_changed {
-            if let Some(SecondOpinion::Review(review)) = self.state.second_opinion_mut()
-                && let Some(answer) = review.reviewer.latest_answer()
-                && let mj_core::second_opinion::ReviewStage::Reviewing { command_id } =
-                    review.workflow.stage().clone()
-            {
-                review.workflow.reviewer_turn_completed(&command_id, answer);
-            }
-            self.state.mark_visible_changed();
+        if reviewer_changed
+            && let Some(SecondOpinion::Review(review)) = self.state.second_opinion_mut()
+            && let Some(answer) = review.reviewer.latest_answer()
+            && let mj_core::second_opinion::ReviewStage::Reviewing { command_id } =
+                review.workflow.stage().clone()
+        {
+            review.workflow.reviewer_turn_completed(&command_id, answer);
         }
         let finished = self.state.second_opinion().is_some_and(
             |view| matches!(view, SecondOpinion::Review(review) if review.workflow.finished()),
         );
-        let status_changed = if let Some(view) = self.state.second_opinion_mut()
+        if let Some(view) = self.state.second_opinion_mut()
             && view.reviewer().is_some_and(|reviewer| !reviewer.is_empty())
         {
-            view.set_status("Enter to act · Tab to choose")
-        } else {
-            false
-        };
-        if status_changed {
-            self.state.mark_visible_changed();
+            view.set_status("Enter to act · Tab to choose");
         }
         self.persist_review();
         self.surface_reviewer_elicitations();
@@ -3702,7 +3654,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[tokio::test]
-    async fn handle_event_result_reports_only_real_chat_repaints() {
+    async fn handle_event_result_reports_which_events_the_chat_consumed() {
         let fixture =
             mj_client::session::replacement_session_test_fixture("session-event-result", 72);
         let mut chat = ActiveChat::open(
@@ -3714,7 +3666,6 @@ mod tests {
             String::new(),
             Notices::default(),
         );
-        chat.acknowledge_render();
 
         let moved = chat.handle_event_result(Event::Mouse(MouseEvent {
             kind: MouseEventKind::Moved,
@@ -3722,35 +3673,30 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::NONE,
         }));
-        assert_ne!(moved.outcome, Outcome::Changed);
-        assert!(!chat.take_render_changed());
-
-        let unchanged = chat.handle_event_result(Event::Key(KeyEvent::new(
-            KeyCode::Backspace,
-            KeyModifiers::NONE,
-        )));
-        assert_eq!(unchanged.outcome, Outcome::Unchanged);
+        assert!(!moved.consumed);
 
         let ignored = chat.handle_event_result(Event::Key(KeyEvent::new(
             KeyCode::F(12),
             KeyModifiers::NONE,
         )));
-        assert_eq!(ignored.outcome, Outcome::Continue);
+        assert!(!ignored.consumed);
 
-        let changed = chat.handle_event_result(Event::Key(KeyEvent::new(
+        let typed = chat.handle_event_result(Event::Key(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::NONE,
         )));
-        assert_eq!(changed.outcome, Outcome::Changed);
+        assert!(typed.consumed);
         assert_eq!(chat.draft(), "x");
 
-        let cursor_changed =
+        // A cursor move and a cursor move that is already clamped are both the
+        // composer's to answer, so neither reaches the dashboard behind it.
+        let moved_cursor =
             chat.handle_event_result(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
-        assert_eq!(cursor_changed.outcome, Outcome::Changed);
+        assert!(moved_cursor.consumed);
 
         let clamped =
             chat.handle_event_result(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
-        assert_eq!(clamped.outcome, Outcome::Unchanged);
+        assert!(clamped.consumed);
     }
 
     #[test]

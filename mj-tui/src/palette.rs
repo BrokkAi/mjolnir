@@ -204,7 +204,6 @@ impl DashboardState {
         };
         palette.prepare();
         self.mode = Mode::Palette(palette);
-        self.mark_render_changed();
     }
 
     pub(crate) fn begin_session_palette(&mut self) {
@@ -240,7 +239,6 @@ impl DashboardState {
         palette.form.get_mut().cancel_pointer();
         palette.entries = entries;
         palette.prepare();
-        self.mark_render_changed();
     }
 
     pub(crate) fn handle_palette_event(&mut self, event: Event) -> DashboardAction {
@@ -271,43 +269,22 @@ impl DashboardState {
             form.focus(PaletteControl::Commands);
             let result = form.handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
             form.focus(PaletteControl::Query);
-            crate::record_form_outcome_cells(
-                &self.last_event_outcome,
-                &self.render_changed,
-                &self.render_change_revision,
-                &result,
-            );
+            self.last_event_consumed.set(result.consumed);
             result.action
         } else {
             let result = palette.form.get_mut().handle(&event);
-            crate::record_form_outcome_cells(
-                &self.last_event_outcome,
-                &self.render_changed,
-                &self.render_change_revision,
-                &result,
-            );
+            self.last_event_consumed.set(result.consumed);
             result.action
         };
         match interaction {
             Some(Interaction::Cancel) => self.cancel_modal(),
             Some(Interaction::Edit(PaletteControl::Query, edit)) => {
-                if TextField::apply(&mut palette.query, edit)
-                    == mj_chat::components::Outcome::Changed
-                {
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
-                }
+                TextField::apply(&mut palette.query, edit);
                 self.rebuild_palette_entries();
             }
             Some(Interaction::Select(PaletteControl::Commands, index)) => {
                 if palette.selected != index {
                     palette.selected = index;
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
                 }
             }
             Some(Interaction::Activate(
@@ -339,11 +316,9 @@ impl DashboardState {
                     };
                     if self.selected_session_id.as_deref() != Some(id.as_str()) {
                         self.selected_session_id = Some(id);
-                        self.mark_render_changed();
                     }
                 }
                 self.mode = Mode::Dashboard;
-                self.mark_render_changed();
                 return self.run_available_command(entry.id);
             }
             _ => {}

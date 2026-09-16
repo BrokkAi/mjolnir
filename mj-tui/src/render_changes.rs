@@ -10,9 +10,7 @@ pub(crate) use mj_core::clock::epoch_seconds;
 
 use mj_client::review::RuntimeReviewView;
 use mj_core::state::SessionState;
-use mj_core::targets::{DeploymentCapacityKind, DeploymentCapacityUsage};
 
-use crate::ingest::{CapacityDetail, SessionDetail};
 use crate::render::{
     CAPACITY_SAMPLE_STALE_AFTER_SECONDS, checkpoint_age, quota_reset_cells, refresh_age,
     session_display_clock,
@@ -46,86 +44,6 @@ pub(crate) struct RenderAnimationSignature {
     active: bool,
     frame: Option<&'static str>,
     modal_frame: Option<&'static str>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CapacityDisplaySignature {
-    host: String,
-    target_ids: Vec<String>,
-    kind: DeploymentCapacityKind,
-    probe_count: usize,
-    usage: Option<DeploymentCapacityUsage>,
-    on_demand: bool,
-    probe_error: Option<String>,
-    refreshing: bool,
-    stale: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MaterializedDisplaySignature {
-    current_turn_started_at: Option<u64>,
-    last_agent_message: Option<std::sync::Arc<str>>,
-    last_user_message: Option<std::sync::Arc<str>>,
-    last_agent_message_follows_last_user: bool,
-    latest_agent_activity_after_last_user: Option<std::sync::Arc<str>>,
-    unread_agent_messages: usize,
-    unread_session_restarts: usize,
-    queued_prompt_count: usize,
-    pending_elicitation_count: usize,
-}
-
-pub(crate) fn materialized_display_signature(
-    detail: &SessionDetail,
-) -> MaterializedDisplaySignature {
-    MaterializedDisplaySignature {
-        current_turn_started_at: detail.current_turn_started_at,
-        last_agent_message: detail.last_agent_message.clone(),
-        last_user_message: detail.last_user_message.clone(),
-        last_agent_message_follows_last_user: detail.last_agent_message_follows_last_user,
-        latest_agent_activity_after_last_user: detail.latest_agent_activity_after_last_user.clone(),
-        unread_agent_messages: detail.unread_agent_messages,
-        unread_session_restarts: detail.unread_session_restarts,
-        queued_prompt_count: detail.queued_prompts.len(),
-        pending_elicitation_count: detail.pending_elicitations.len(),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct VisibleStateSignature {
-    id: String,
-    workspace_id: String,
-    state: SessionState,
-    display_title: String,
-    profile: String,
-    target: String,
-    created_at: String,
-    updated_at: String,
-    last_error: Option<String>,
-    configuration_issue: Option<String>,
-    last_checkpoint_error: Option<String>,
-    checkpoint_created_at: Option<String>,
-    project_source: mj_core::state::ProjectSourceIdentity,
-    materialized: Option<MaterializedDisplaySignature>,
-}
-
-/// Capture only the fields that the Targets pane renders for one capacity
-/// detail.  In particular, a fresh sample timestamp does not invalidate the
-/// pane while its displayed value and stale status stay the same.
-pub(crate) fn capacity_display_signature(
-    detail: &CapacityDetail,
-    now_epoch_seconds: u64,
-) -> CapacityDisplaySignature {
-    CapacityDisplaySignature {
-        host: detail.target.host.clone(),
-        target_ids: detail.target.target_ids.clone(),
-        kind: detail.target.kind,
-        probe_count: detail.target.probes.len(),
-        usage: detail.usage.clone(),
-        on_demand: detail.on_demand,
-        probe_error: detail.probe_error.clone(),
-        refreshing: detail.refreshing,
-        stale: crate::render::capacity_staleness(detail, now_epoch_seconds),
-    }
 }
 
 impl DashboardState {
@@ -241,45 +159,6 @@ impl DashboardState {
             let area = areas[index];
             area.width > 0 && area.height > 0
         })
-    }
-
-    /// Capture the fields whose state projection can alter a visible Sessions
-    /// row. Hidden workspaces never enter this list, so a complete daemon
-    /// snapshot can update them without causing an unnecessary frame.
-    pub(crate) fn visible_state_signature(&self) -> Vec<VisibleStateSignature> {
-        let Some(workspace_id) = self.active_workspace_id() else {
-            return Vec::new();
-        };
-        self.ordered_sessions()
-            .into_iter()
-            .enumerate()
-            .filter(|(index, session)| {
-                session.workspace_id == workspace_id && self.session_row_is_visible_at(*index)
-            })
-            .map(|(_, session)| session)
-            .map(|session| VisibleStateSignature {
-                id: session.id.clone(),
-                workspace_id: session.workspace_id.clone(),
-                state: session.state,
-                display_title: session.display_title().to_owned(),
-                profile: session.last_profile.clone(),
-                target: session.target_template_id.clone(),
-                created_at: session.created_at.clone(),
-                updated_at: session.updated_at.clone(),
-                last_error: session.last_error.clone(),
-                configuration_issue: session.configuration_issue(&self.config),
-                last_checkpoint_error: session.last_checkpoint_error.clone(),
-                checkpoint_created_at: session
-                    .checkpoint
-                    .as_ref()
-                    .map(|checkpoint| checkpoint.created_at.clone()),
-                project_source: self.project_source(session),
-                materialized: self
-                    .session_details
-                    .get(&session.id)
-                    .map(materialized_display_signature),
-            })
-            .collect()
     }
 
     fn session_clock_signature(&self, now: u64) -> Vec<DisplayedClock> {

@@ -1111,19 +1111,6 @@ pub(crate) fn session_display_clock(
     )
 }
 
-/// The review fields that can alter a session row: its compact activity label
-/// and whether the row owns an animation frame. Controller progress text and
-/// role details are intentionally omitted because the dashboard does not draw
-/// them.
-pub(crate) fn session_review_display_signature(
-    review: Option<&RuntimeReviewView>,
-) -> (Option<&'static str>, bool) {
-    (
-        review.and_then(RuntimeReviewView::activity_label),
-        review.is_some_and(RuntimeReviewView::is_working),
-    )
-}
-
 /// Select only content authored by the agent for the expanded output rows.
 /// The user prompt is a fallback for the compact summary, never an agent
 /// excerpt with a misleading prefix.

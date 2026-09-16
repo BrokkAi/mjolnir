@@ -409,7 +409,6 @@ impl DashboardState {
                 self.surface_form
                     .borrow_mut()
                     .focus(crate::surface_controls::SurfaceControl::WorkspaceMenu);
-                self.mark_render_changed();
                 self.record_event_handled();
                 Some(DashboardAction::None)
             }
@@ -420,7 +419,6 @@ impl DashboardState {
             }
             (WorkspaceControlFocus::Menu, _, true) => {
                 self.workspace_control_focus = WorkspaceControlFocus::Tabs;
-                self.mark_render_changed();
                 self.record_event_handled();
                 Some(DashboardAction::None)
             }
@@ -431,7 +429,6 @@ impl DashboardState {
             }
             (WorkspaceControlFocus::Menu, KeyCode::Left, false) => {
                 self.workspace_control_focus = WorkspaceControlFocus::Tabs;
-                self.mark_render_changed();
                 self.record_event_handled();
                 Some(DashboardAction::None)
             }
@@ -450,7 +447,6 @@ impl DashboardState {
                     self.surface_form
                         .borrow_mut()
                         .focus(crate::surface_controls::SurfaceControl::WorkspaceMenu);
-                    self.mark_render_changed();
                     self.record_event_handled();
                     Some(DashboardAction::None)
                 } else {
@@ -495,7 +491,6 @@ impl DashboardState {
             generation,
             self.active_workspace_id.clone(),
         ));
-        self.mark_render_changed();
         DashboardAction::LoadWorkspaceManagement { generation }
     }
 
@@ -525,9 +520,6 @@ impl DashboardState {
         match result {
             Ok(entries) => {
                 let previous_busy = manager.busy;
-                let was_loading = manager.loading;
-                let previous_error = manager.error.clone();
-                let previous_selected = manager.selected;
                 let previous_view_id = manager.view_workspace_id().map(str::to_owned);
                 let previous_selected_id = manager
                     .selected_entry()
@@ -553,7 +545,6 @@ impl DashboardState {
                     .get(manager.selected)
                     .and_then(|entry| entry.drafts.get(manager.selected_draft))
                     .map(|draft| draft.id.clone());
-                let old_view = manager.view.clone();
                 manager.selected = selected;
                 manager.selected_draft = previous_draft_id
                     .as_deref()
@@ -596,25 +587,10 @@ impl DashboardState {
                         .unwrap_or_else(|| TextInput::default().with_max_chars(64));
                 }
                 manager.sync_form();
-                let changed = manager.entries != previous_entries
-                    || manager.selected != previous_selected
-                    || was_loading
-                    || previous_busy.is_some()
-                    || manager.view != old_view
-                    || previous_error.is_some();
-                if changed {
-                    self.mark_render_changed();
-                }
                 return foreground;
             }
             Err(error) => {
-                let changed = manager.loading
-                    || manager.busy.is_some()
-                    || manager.error.as_deref() != Some(error.as_str());
                 manager.set_error(error);
-                if changed {
-                    self.mark_render_changed();
-                }
             }
         }
         true
@@ -625,12 +601,7 @@ impl DashboardState {
             return DashboardAction::None;
         };
         let result = manager.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         match result.action {
             Some(Interaction::Cancel) => {
                 let locked = manager
@@ -641,20 +612,15 @@ impl DashboardState {
                         self.cancel_modal();
                     } else {
                         manager.reset_to_list();
-                        self.mark_render_changed();
                     }
                 }
             }
             Some(Interaction::Edit(WorkspaceControl::Name, edit)) => {
                 if TextField::apply(&mut manager.name, edit)
-                    == mj_chat::components::Outcome::Changed
+                    == mj_chat::components::EditOutcome::Changed
                 {
                     manager.error = None;
                     manager.success = None;
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
                 }
             }
             Some(Interaction::Select(WorkspaceControl::List, index)) => {
@@ -663,19 +629,11 @@ impl DashboardState {
                 if manager.selected != previous {
                     manager.error = None;
                     manager.success = None;
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
                 }
             }
             Some(Interaction::Select(WorkspaceControl::DraftList, index)) => {
                 if manager.selected_draft != index {
                     manager.selected_draft = index;
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
                 }
             }
             Some(Interaction::Activate(control)) => match control {
@@ -695,7 +653,6 @@ impl DashboardState {
                     manager.error = None;
                     manager.success = None;
                     manager.form.get_mut().focus(WorkspaceControl::Name);
-                    self.mark_render_changed();
                 }
                 WorkspaceControl::Rename if manager.can_mutate() => {
                     if let Some((workspace_id, workspace_name)) = manager
@@ -707,7 +664,6 @@ impl DashboardState {
                         manager.error = None;
                         manager.success = None;
                         manager.form.get_mut().focus(WorkspaceControl::Name);
-                        self.mark_render_changed();
                     }
                 }
                 WorkspaceControl::Delete if manager.can_mutate() => {
@@ -726,7 +682,6 @@ impl DashboardState {
                         } else {
                             manager.form.get_mut().focus(WorkspaceControl::Cancel);
                         }
-                        self.mark_render_changed();
                     }
                 }
                 WorkspaceControl::Drafts if manager.can_mutate() => {
@@ -738,7 +693,6 @@ impl DashboardState {
                         manager.error = None;
                         manager.success = None;
                         manager.form.get_mut().focus(WorkspaceControl::DraftList);
-                        self.mark_render_changed();
                     }
                 }
                 WorkspaceControl::Back => {
@@ -746,7 +700,6 @@ impl DashboardState {
                         self.cancel_modal();
                     } else {
                         manager.reset_to_list();
-                        self.mark_render_changed();
                     }
                 }
                 WorkspaceControl::Name => {
@@ -776,7 +729,6 @@ impl DashboardState {
                 WorkspaceControl::Cancel => {
                     if matches!(manager.view, WorkspaceManagerView::Delete { .. }) {
                         manager.reset_to_list();
-                        self.mark_render_changed();
                     } else {
                         self.cancel_modal();
                     }
@@ -801,7 +753,6 @@ impl DashboardState {
                 let name = manager.name.trim().to_owned();
                 if name.is_empty() {
                     manager.error = Some("Workspace name cannot be empty.".into());
-                    self.mark_render_changed();
                     return DashboardAction::None;
                 }
                 DashboardAction::CreateWorkspace { generation, name }
@@ -813,7 +764,6 @@ impl DashboardState {
                 let name = manager.name.trim().to_owned();
                 if name.is_empty() {
                     manager.error = Some("Workspace name cannot be empty.".into());
-                    self.mark_render_changed();
                     return DashboardAction::None;
                 }
                 DashboardAction::RenameWorkspace {
@@ -837,7 +787,6 @@ impl DashboardState {
                     manager.error =
                         Some("Type the workspace name exactly to enable Force delete.".into());
                     manager.form.get_mut().focus(WorkspaceControl::Name);
-                    self.mark_render_changed();
                     return DashboardAction::None;
                 }
                 DashboardAction::DeleteWorkspace {
@@ -852,7 +801,6 @@ impl DashboardState {
                     .and_then(|entry| entry.drafts.get(manager.selected_draft))
                 else {
                     manager.error = Some("This workspace has no detached drafts.".into());
-                    self.mark_render_changed();
                     return DashboardAction::None;
                 };
                 DashboardAction::RecoverWorkspaceDraft {
@@ -865,7 +813,6 @@ impl DashboardState {
         manager.busy = Some(mutation);
         manager.error = None;
         manager.success = None;
-        self.mark_render_changed();
         action
     }
 }
@@ -897,17 +844,14 @@ pub(crate) fn workspace_tab_click(
         && dashboard.focus != crate::Focus::Workspaces
     {
         dashboard.focus = crate::Focus::Workspaces;
-        dashboard.mark_render_changed();
         dashboard.set_session_action_focus(None);
     }
     let workspace_id = workspace_id?;
     if dashboard.focus != crate::Focus::Workspaces {
         dashboard.focus = crate::Focus::Workspaces;
-        dashboard.mark_render_changed();
     }
     if dashboard.workspace_control_focus != WorkspaceControlFocus::Tabs {
         dashboard.workspace_control_focus = WorkspaceControlFocus::Tabs;
-        dashboard.mark_render_changed();
     }
     (dashboard.active_workspace_id() != Some(workspace_id.as_str()))
         .then_some(DashboardAction::SelectWorkspace { workspace_id })

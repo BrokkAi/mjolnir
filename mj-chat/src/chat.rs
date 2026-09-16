@@ -35,7 +35,6 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use rat_event::{ConsumedEvent, Outcome};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
@@ -665,11 +664,6 @@ pub struct ChatState {
     /// Bumped whenever the cached rows are dropped wholesale, so a frozen row
     /// space can tell that the rows it was pinned against are gone.
     render_cache_generation: u64,
-    /// Monotonic identity for visible chat state.  Mutations bump this only
-    /// when they can affect the next frame; it lets hosts consume redraws
-    /// without copying transcripts or application state.
-    visible_revision: u64,
-    render_changed: bool,
     last_clock_text: Option<String>,
     last_animation_frame: Option<Line<'static>>,
 }
@@ -792,8 +786,6 @@ impl ChatState {
             transcript_selection: None,
             transcript_selection_invalid: false,
             render_cache_generation: 0,
-            visible_revision: 0,
-            render_changed: false,
             last_clock_text: None,
             last_animation_frame: None,
         };
@@ -953,12 +945,10 @@ impl ChatState {
         };
         if self.phase != phase {
             self.phase = phase;
-            self.mark_visible_changed();
         }
         let turn_started_at = turn_started_at_epoch_seconds(session.execution);
         if self.turn_started_at_epoch_seconds != turn_started_at {
             self.turn_started_at_epoch_seconds = turn_started_at;
-            self.mark_visible_changed();
         }
         self.latest_seq = session.applied_event_ordinal;
         self.sync_elicitation(&session.pending_elicitations);
@@ -979,7 +969,6 @@ impl ChatState {
                 self.unconverted_prefix,
                 std::mem::take(&mut self.entries),
             );
-            self.mark_visible_changed();
             // Reusing entry rows is safe only after the collapse topology is
             // recomputed. A tool can become completed without changing the
             // transcript length, joining or splitting a collapsed streak.
@@ -1032,13 +1021,11 @@ impl ChatState {
             .collect();
         if self.queued_prompts != queued_prompts {
             self.queued_prompts = queued_prompts;
-            self.mark_visible_changed();
         }
         match mj_core::goal::GoalState::from_configuration(&session.configuration) {
             Ok(goal) => {
                 if self.goal_state != goal {
                     self.goal_state = goal;
-                    self.mark_visible_changed();
                 }
             }
             Err(error) => {
@@ -1102,7 +1089,6 @@ impl ChatState {
     fn sync_elicitation(&mut self, pending: &[ElicitationRequest]) {
         if self.pending_elicitations != pending {
             self.pending_elicitations = pending.to_vec();
-            self.mark_visible_changed();
         }
         // A reviewer's form is not in the primary's pending list, so the
         // primary's projection must not take it down.
@@ -1116,12 +1102,10 @@ impl ChatState {
             // An answer or cancellation removed the request. Drop the local
             // form immediately so no later relay snapshot can resurrect it.
             self.elicitation = None;
-            self.mark_visible_changed();
         }
         let next = pending.first().cloned().map(ElicitationDialog::new);
         if next.is_some() != self.elicitation.is_some() {
             self.elicitation = next;
-            self.mark_visible_changed();
         }
     }
 
@@ -1149,7 +1133,6 @@ impl ChatState {
                 .first()
                 .cloned()
                 .map(ElicitationDialog::new);
-            self.mark_visible_changed();
         }
     }
 
@@ -1174,7 +1157,6 @@ impl ChatState {
         self.elicitation_is_reviewers = true;
         self.elicitation_role = role;
         self.elicitation = Some(ElicitationDialog::new(request));
-        self.mark_visible_changed();
         true
     }
 
@@ -1246,14 +1228,12 @@ impl ChatState {
         self.elicitation = Some(dialog);
         self.elicitation_is_reviewers = draft.reviewer;
         self.elicitation_role = draft.reviewer_role;
-        self.mark_visible_changed();
         true
     }
 
     fn restore_elicitation(&mut self, request: ElicitationRequest) {
         if self.elicitation.is_none() {
             self.elicitation = Some(ElicitationDialog::new(request));
-            self.mark_visible_changed();
         }
     }
 
@@ -1281,29 +1261,14 @@ impl ChatState {
         self.phase
     }
 
-    pub(super) fn visible_revision(&self) -> u64 {
-        self.visible_revision
-    }
-
-    pub fn take_render_changed(&mut self) -> bool {
-        std::mem::take(&mut self.render_changed)
-    }
-
     pub(super) fn acknowledge_render(&mut self) {
-        self.render_changed = false;
         self.last_clock_text = Some(self.clock_text(epoch_seconds()));
         self.last_animation_frame = self.needs_animation().then(|| self.activity_spinner());
-    }
-
-    pub(super) fn mark_visible_changed(&mut self) {
-        self.visible_revision = self.visible_revision.wrapping_add(1);
-        self.render_changed = true;
     }
 
     pub(super) fn set_transcript_loading(&mut self, loading: bool) {
         if self.transcript_loading != loading {
             self.transcript_loading = loading;
-            self.mark_visible_changed();
         }
     }
 
@@ -1311,35 +1276,17 @@ impl ChatState {
         let bundle_id = bundle_id.into();
         if self.bundle_id.as_deref() != Some(bundle_id.as_str()) {
             self.bundle_id = Some(bundle_id);
-            self.mark_visible_changed();
         }
     }
 
     pub fn set_session_modes(&mut self, modes: Option<SessionModeState>) {
-        let before = (
-            self.fast_mode_active(),
-            self.plan_mode_active(),
-            self.acp_surface.current_mode().map(str::to_owned),
-        );
         self.acp_surface.set_session_modes(modes);
         self.rebuild_command_choices();
-        let after = (
-            self.fast_mode_active(),
-            self.plan_mode_active(),
-            self.acp_surface.current_mode().map(str::to_owned),
-        );
-        if before != after {
-            self.mark_visible_changed();
-        }
     }
 
     pub fn set_harness_kind(&mut self, harness_kind: HarnessKind) {
-        let before = (self.supports_plan_mode(), self.supports_fast_mode());
         self.acp_surface.set_harness_kind(harness_kind);
         self.rebuild_command_choices();
-        if before != (self.supports_plan_mode(), self.supports_fast_mode()) {
-            self.mark_visible_changed();
-        }
     }
 
     fn supports_plan_mode(&self) -> bool {
@@ -1365,19 +1312,11 @@ impl ChatState {
     }
 
     pub(super) fn begin_plan_mode_change(&mut self, active: bool) {
-        let before = self.plan_mode_active();
         self.acp_surface.begin_plan_mode_change(active);
-        if before != self.plan_mode_active() {
-            self.mark_visible_changed();
-        }
     }
 
     pub(super) fn finish_plan_mode_change(&mut self, active: bool) {
-        let before = self.plan_mode_active();
         self.acp_surface.finish_plan_mode_change(active);
-        if before != self.plan_mode_active() {
-            self.mark_visible_changed();
-        }
     }
 
     #[cfg(test)]
@@ -1463,7 +1402,6 @@ impl ChatState {
             self.header_target = target;
             self.header_profile = profile;
             self.header_title = title;
-            self.mark_visible_changed();
         }
     }
 
@@ -1472,11 +1410,9 @@ impl ChatState {
     pub(super) fn set_prompt_in_flight(&mut self, in_flight: bool) {
         if self.prompt_in_flight != in_flight {
             self.prompt_in_flight = in_flight;
-            self.mark_visible_changed();
         }
         if self.session_activity.prompt_in_flight != in_flight {
             self.session_activity.prompt_in_flight = in_flight;
-            self.mark_visible_changed();
         }
     }
 
@@ -1516,19 +1452,13 @@ impl ChatState {
             .iter()
             .map(|command| command.id.as_str())
             .collect::<BTreeSet<_>>();
-        let pending_before = self.pending_background_stops.len();
         self.pending_background_stops
             .retain(|id| live_ids.contains(id.as_str()));
         if self.session_activity != activity {
             self.session_activity = activity;
-            self.mark_visible_changed();
-        }
-        if self.pending_background_stops.len() != pending_before {
-            self.mark_visible_changed();
         }
         if self.background_task_count() == 0 && self.task_control_focused {
             self.task_control_focused = false;
-            self.mark_visible_changed();
         }
     }
 
@@ -1553,7 +1483,6 @@ impl ChatState {
             if count == 0 {
                 self.subagent_control_focused = false;
             }
-            self.mark_visible_changed();
         }
     }
 
@@ -1566,7 +1495,6 @@ impl ChatState {
         if self.subagent_count > 0 && !self.subagent_control_focused {
             self.task_control_focused = false;
             self.subagent_control_focused = true;
-            self.mark_visible_changed();
         }
     }
 
@@ -1585,7 +1513,6 @@ impl ChatState {
             .iter()
             .any(|command| command.id == id && command.can_stop);
         if stoppable && self.pending_background_stops.insert(id.clone()) {
-            self.mark_visible_changed();
             ChatAction::StopBackgroundTask { id }
         } else {
             ChatAction::None
@@ -1597,7 +1524,6 @@ impl ChatState {
     /// the next activity snapshot owns removal and keeps the row honest.
     pub(super) fn fail_background_stop(&mut self, id: &str, error: &str) {
         if self.pending_background_stops.remove(id) {
-            self.mark_visible_changed();
             self.set_notice(format!("Background task could not be stopped: {error}"));
         }
     }
@@ -1605,7 +1531,6 @@ impl ChatState {
     pub(super) fn fail_all_background_stops(&mut self) -> bool {
         if !self.pending_background_stops.is_empty() {
             self.pending_background_stops.clear();
-            self.mark_visible_changed();
             true
         } else {
             false
@@ -1631,14 +1556,12 @@ impl ChatState {
             self.task_dialog_area = None;
             self.task_dialog_control_ids.clear();
             self.task_dialog_form.clear();
-            self.mark_visible_changed();
         }
     }
 
     fn focus_task_control(&mut self) {
         if self.background_task_count() > 0 && !self.task_control_focused {
             self.task_control_focused = true;
-            self.mark_visible_changed();
         }
     }
 
@@ -1648,7 +1571,6 @@ impl ChatState {
             self.task_control_focused = false;
             self.task_dialog_scroll = 0;
             self.task_dialog_max_scroll = 0;
-            self.mark_visible_changed();
         }
     }
 
@@ -1656,7 +1578,6 @@ impl ChatState {
         let scroll = scroll.min(self.task_dialog_max_scroll);
         if self.task_dialog_scroll != scroll {
             self.task_dialog_scroll = scroll;
-            self.mark_visible_changed();
         }
     }
 
@@ -1677,7 +1598,6 @@ impl ChatState {
         let timestamp_ms = timestamp_ms.and_then(|value| u64::try_from(value).ok());
         if self.current_step_started_at_ms != timestamp_ms {
             self.current_step_started_at_ms = timestamp_ms;
-            self.mark_visible_changed();
         }
     }
 
@@ -1705,14 +1625,12 @@ impl ChatState {
     pub fn set_spinner_style(&mut self, style: mj_core::config::SpinnerStyle) {
         if self.spinner_style != style {
             self.spinner_style = style;
-            self.mark_visible_changed();
         }
     }
 
     pub fn set_detailed_activity_clocks(&mut self, detailed: bool) {
         if self.detailed_activity_clocks != detailed {
             self.detailed_activity_clocks = detailed;
-            self.mark_visible_changed();
         }
     }
 
@@ -1792,7 +1710,6 @@ impl ChatState {
     pub fn set_review_config(&mut self, review: mj_core::config::ReviewConfig) {
         if self.review_config != review {
             self.review_config = review;
-            self.mark_visible_changed();
         }
     }
 
@@ -1809,7 +1726,6 @@ impl ChatState {
         // Local echo: start the clock now so the header moves with the send.
         // The next materialized update replaces this with the recorded start.
         self.turn_started_at_epoch_seconds = Some(epoch_seconds());
-        self.mark_visible_changed();
     }
 
     /// Starts the header clock for a turn the event log just reported. An
@@ -1822,7 +1738,6 @@ impl ChatState {
             .or_else(|| Some(epoch_seconds()));
         if self.turn_started_at_epoch_seconds != started {
             self.turn_started_at_epoch_seconds = started;
-            self.mark_visible_changed();
         }
     }
 
@@ -1887,17 +1802,12 @@ impl ChatState {
     }
 
     pub fn set_notice(&mut self, notice: impl Into<String>) {
-        let before = self.notices.current();
         self.notices.set(notice);
-        if self.notices.current() != before {
-            self.mark_visible_changed();
-        }
     }
 
     pub(super) fn clear_notice(&mut self) {
         if self.notices.current().is_some() {
             self.notices.clear();
-            self.mark_visible_changed();
         }
     }
 
@@ -1907,7 +1817,6 @@ impl ChatState {
     pub(super) fn set_voice_available(&mut self, available: bool) {
         if self.voice_available != available {
             self.voice_available = available;
-            self.mark_visible_changed();
         }
     }
 
@@ -1945,7 +1854,6 @@ impl ChatState {
         self.transcript_scrollbar.clear();
         if self.notices.current().is_some() {
             self.notices.clear();
-            self.mark_visible_changed();
         }
         self.voice_active = false;
         self.submitting_images.clear();
@@ -1974,12 +1882,6 @@ impl ChatState {
                 .unwrap_or(1),
         );
         let next_cursor = payload.text.len();
-        let changed = self.input != payload.text
-            || self.input_images != payload.images
-            || self.input_cursor != next_cursor
-            || self.history_index.is_some()
-            || !self.history_draft.is_empty()
-            || !self.history_draft_images.is_empty();
         self.input = payload.text;
         self.input_images = payload.images;
         self.input_cursor = next_cursor;
@@ -1987,9 +1889,6 @@ impl ChatState {
         self.history_index = None;
         self.preferred_column = None;
         self.update_autocomplete();
-        if changed {
-            self.mark_visible_changed();
-        }
     }
 
     fn clear_input(&mut self) {
@@ -2071,7 +1970,6 @@ impl ChatState {
                 self.preferred_column = None;
                 self.update_autocomplete();
                 self.set_notice("Image pasted · Backspace removes its marker");
-                self.mark_visible_changed();
             }
         }
     }
@@ -2093,7 +1991,6 @@ impl ChatState {
         self.pending_attachment_markers.insert(sequence, number);
         self.input_generation = self.input_generation.wrapping_add(1);
         self.set_notice("Processing image attachment…");
-        self.mark_visible_changed();
         true
     }
 
@@ -2120,7 +2017,6 @@ impl ChatState {
                 self.input_images[index].image = ready;
                 self.input_generation = self.input_generation.wrapping_add(1);
                 self.set_notice("Image attached · Backspace removes its marker");
-                self.mark_visible_changed();
             }
             Err(error) => {
                 if let Some(command) = command {
@@ -2137,7 +2033,6 @@ impl ChatState {
                     self.input_generation = self.input_generation.wrapping_add(1);
                 }
                 self.set_notice(format!("Attachment failed: {error}"));
-                self.mark_visible_changed();
             }
         }
     }
@@ -2239,7 +2134,6 @@ impl ChatState {
         images: Vec<PromptImage>,
         error: String,
     ) {
-        let before_len = self.unsent_prompts.len();
         self.unsent_prompts.retain(|unsent| {
             unsent.kind != kind || unsent.payload.text != text || unsent.payload.images != images
         });
@@ -2249,22 +2143,15 @@ impl ChatState {
             error,
             recorded_at_ms: mj_core::clock::epoch_millis(),
         });
-        if self.unsent_prompts.len() != before_len || before_len > 0 {
-            self.mark_visible_changed();
-        }
     }
 
     /// Drop the record for a submit the relay has now accepted. Nothing else
     /// clears one: a snapshot cannot, because the relay never saw the prompt,
     /// and an unrelated prompt says nothing about this one.
     fn clear_unsent_prompt(&mut self, kind: UnsentKind, text: &str, images: &[PromptImage]) {
-        let before = self.unsent_prompts.len();
         self.unsent_prompts.retain(|unsent| {
             unsent.kind != kind || unsent.payload.text != text || unsent.payload.images != images
         });
-        if self.unsent_prompts.len() != before {
-            self.mark_visible_changed();
-        }
     }
 
     fn fail_queued_prompt_removal(&mut self, id: String, text: String, kind: QueuedCommandKind) {
@@ -2278,7 +2165,6 @@ impl ChatState {
                 images,
                 attachments_unsupported: false,
             });
-            self.mark_visible_changed();
         }
     }
 
@@ -2672,13 +2558,8 @@ impl ChatState {
             }
             let request = dialog.request().clone();
             let response = dialog.handle_key_event(key);
-            let dialog_changed = dialog.take_changed();
-            if dialog_changed {
-                self.mark_visible_changed();
-            }
             if let Some(response) = response {
                 self.elicitation = None;
-                self.mark_visible_changed();
                 if std::mem::take(&mut self.elicitation_is_reviewers) {
                     return ChatAction::RespondReviewerElicitation {
                         role: self.elicitation_role.take(),
@@ -2713,7 +2594,7 @@ impl ChatState {
                 self.close_task_dialog();
                 return ChatAction::None;
             }
-            if result.outcome.is_consumed() {
+            if result.consumed {
                 return ChatAction::None;
             }
             match code {
@@ -2740,7 +2621,6 @@ impl ChatState {
             match code {
                 KeyCode::Esc | KeyCode::Up => {
                     self.task_control_focused = false;
-                    self.mark_visible_changed();
                 }
                 KeyCode::Enter => {
                     self.open_task_dialog();
@@ -2753,7 +2633,6 @@ impl ChatState {
                 KeyCode::Down => return ChatAction::None,
                 _ => {
                     self.task_control_focused = false;
-                    self.mark_visible_changed();
                 }
             }
             if code == KeyCode::Esc || code == KeyCode::Up {
@@ -2765,7 +2644,6 @@ impl ChatState {
             match code {
                 KeyCode::Esc | KeyCode::Up => {
                     self.subagent_control_focused = false;
-                    self.mark_visible_changed();
                 }
                 KeyCode::Enter => return ChatAction::OpenSubagents,
                 KeyCode::Left if self.background_task_count() > 0 => {
@@ -2776,7 +2654,6 @@ impl ChatState {
                 KeyCode::Down => return ChatAction::None,
                 _ => {
                     self.subagent_control_focused = false;
-                    self.mark_visible_changed();
                 }
             }
             if code == KeyCode::Esc || code == KeyCode::Up {
@@ -3053,7 +2930,6 @@ impl ChatState {
             .collect();
         if self.active_user_shells != next {
             self.active_user_shells = next;
-            self.mark_visible_changed();
         }
     }
 
@@ -3092,7 +2968,6 @@ impl ChatState {
         if previous_terminals != terminals || previous_claims != &claims {
             self.active_agent_terminals = terminals.to_vec();
             self.claimed_agent_terminals = claims;
-            self.mark_visible_changed();
         }
     }
 
@@ -3106,7 +2981,6 @@ impl ChatState {
             TranscriptRenderMode::Rich => "Rich transcript rendering enabled",
             TranscriptRenderMode::Raw => "Raw transcript source enabled",
         });
-        self.mark_visible_changed();
     }
 
     /// The surfaces the last frame registered, for the selection engine.
@@ -3175,22 +3049,11 @@ impl ChatState {
 
     /// Cancels any pointer gesture owned by a chat component.
     pub fn cancel_component_pointer(&mut self) {
-        let task_captured = self.task_dialog_form.captures_pointer();
         self.task_dialog_form.cancel_pointer();
-        if task_captured {
-            self.mark_visible_changed();
-        }
-        let voice_captured = self.voice_form.captures_pointer();
         self.voice_form.cancel_pointer();
-        if voice_captured {
-            self.mark_visible_changed();
-        }
         self.cancel_config_picker_pointer();
         if let Some(dialog) = self.elicitation.as_ref() {
             dialog.cancel_component_pointer();
-            if dialog.take_changed() {
-                self.mark_visible_changed();
-            }
         }
         self.cancel_second_opinion_pointer();
         self.cancel_turn_review_pointer();
@@ -3220,9 +3083,6 @@ impl ChatState {
     pub(super) fn scroll_elicitation_message(&mut self, rows: isize) {
         if let Some(dialog) = self.elicitation.as_ref() {
             dialog.scroll_message(rows);
-            if dialog.take_changed() {
-                self.mark_visible_changed();
-            }
         }
     }
 
@@ -3237,10 +3097,8 @@ impl ChatState {
     /// scrollback repaints whole TUI frames and is unusably slow on long
     /// sessions.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> ChatAction {
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && self.notices.dismiss(std::time::Instant::now())
-        {
-            self.mark_visible_changed();
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.notices.dismiss(std::time::Instant::now());
         }
         // The topmost form receives the gesture before selection, scrollbars,
         // or a review pane. This also lets reviewer elicitations stay above
@@ -3254,13 +3112,8 @@ impl ChatState {
             if over_form || over_message {
                 let request = dialog.request().clone();
                 let response = dialog.handle_mouse(mouse);
-                let dialog_changed = dialog.take_changed();
-                if dialog_changed {
-                    self.mark_visible_changed();
-                }
                 if let Some(response) = response {
                     self.elicitation = None;
-                    self.mark_visible_changed();
                     if std::mem::take(&mut self.elicitation_is_reviewers) {
                         return self.finish_reviewer_elicitation_response(request, response);
                     }
@@ -3319,9 +3172,6 @@ impl ChatState {
         }
         if self.task_dialog_open {
             let result = self.task_dialog_form.handle(&Event::Mouse(mouse));
-            if result.outcome == Outcome::Changed {
-                self.mark_visible_changed();
-            }
             if let Some(Interaction::Activate(control)) = result.action.as_ref() {
                 return self.activate_background_task_control(*control);
             }
@@ -3329,7 +3179,7 @@ impl ChatState {
                 self.close_task_dialog();
                 return ChatAction::None;
             }
-            if result.outcome.is_consumed() {
+            if result.consumed {
                 return ChatAction::None;
             }
             match mouse.kind {
@@ -3455,7 +3305,7 @@ impl ChatState {
                 ChatAction::None
             };
         }
-        if voice_result.outcome.is_consumed() {
+        if voice_result.consumed {
             return ChatAction::None;
         }
         // Keep the legacy hitbox usable for callers that have not rendered a
@@ -3545,7 +3395,6 @@ impl ChatState {
     fn set_anchor(&mut self, anchor: TranscriptAnchor) {
         if self.anchor != anchor {
             self.anchor = anchor;
-            self.mark_visible_changed();
         }
     }
 
@@ -3570,24 +3419,14 @@ impl ChatState {
                     ChatEntry::plain(event.seq, ChatRole::User, text)
                         .with_recorded_at(event.recorded_at_ms),
                 );
-                self.mark_visible_changed();
             }
             WorkerEvent::TurnCompleted => {
-                let changed = self.phase != WorkerPhase::Idle
-                    || self.prompt_in_flight
-                    || self.session_activity.prompt_in_flight
-                    || self.session_activity.harness_turn_started_at_ms.is_some()
-                    || self.goal_prompt_active
-                    || self.turn_started_at_epoch_seconds.is_some();
                 self.phase = WorkerPhase::Idle;
                 self.prompt_in_flight = false;
                 self.session_activity.prompt_in_flight = false;
                 self.session_activity.harness_turn_started_at_ms = None;
                 self.goal_prompt_active = false;
                 self.turn_started_at_epoch_seconds = None;
-                if changed {
-                    self.mark_visible_changed();
-                }
             }
             // The durable worker records cancellation acceptance before the
             // ACP prompt future resolves. Keep the chat busy until the later
@@ -3595,22 +3434,16 @@ impl ChatState {
             WorkerEvent::Cancelled => {
                 if self.phase != WorkerPhase::Running {
                     self.phase = WorkerPhase::Running;
-                    self.mark_visible_changed();
                 }
             }
             WorkerEvent::Closing => {
                 if self.phase != WorkerPhase::Closing {
                     self.phase = WorkerPhase::Closing;
-                    self.mark_visible_changed();
                 }
             }
             WorkerEvent::Closed => {
-                let changed = self.phase != WorkerPhase::Closed || self.prompt_in_flight;
                 self.phase = WorkerPhase::Closed;
                 self.prompt_in_flight = false;
-                if changed {
-                    self.mark_visible_changed();
-                }
             }
             WorkerEvent::Checkpointed { .. } => {}
             WorkerEvent::Adapter { payload, .. } => {
@@ -3628,17 +3461,12 @@ impl ChatState {
                         images: Vec::new(),
                         attachments_unsupported: false,
                     });
-                    self.mark_visible_changed();
                 }
             }
             WorkerEvent::QueuedPromptRemoved { queue_id } => {
-                let before = self.queued_prompts.len();
                 self.queued_prompts.retain(|prompt| prompt.id != *queue_id);
                 self.pending_queue_removals.remove(queue_id);
                 self.pending_queue_images.remove(queue_id);
-                if self.queued_prompts.len() != before {
-                    self.mark_visible_changed();
-                }
             }
             WorkerEvent::QueuedPromptPromoted { prompt, .. } => {
                 self.queued_prompts.retain(|queued| queued.id != prompt.id);
@@ -3651,15 +3479,10 @@ impl ChatState {
                     ChatEntry::plain(event.seq, ChatRole::User, &prompt.text)
                         .with_recorded_at(event.recorded_at_ms),
                 );
-                self.mark_visible_changed();
             }
             WorkerEvent::QueuedPromptsCleared => {
-                let changed = !self.queued_prompts.is_empty();
                 self.queued_prompts.clear();
                 self.pending_queue_removals.clear();
-                if changed {
-                    self.mark_visible_changed();
-                }
             }
             WorkerEvent::ConfigChanged { .. } => {}
         }
@@ -3687,7 +3510,6 @@ impl ChatState {
         else {
             return;
         };
-        self.mark_visible_changed();
         match runtime {
             RuntimeEvent::SessionUpdate { update } => {
                 self.apply_session_update_at(seq, recorded_at_ms, &update)
@@ -3731,7 +3553,6 @@ impl ChatState {
         else {
             return;
         };
-        self.mark_visible_changed();
         match parsed {
             SessionUpdate::AvailableCommandsUpdate(update) => {
                 self.acp_surface

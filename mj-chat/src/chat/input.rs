@@ -30,7 +30,6 @@ impl ChatState {
         self.history_index = None;
         self.preferred_column = None;
         self.update_autocomplete();
-        self.mark_visible_changed();
         removed
     }
 
@@ -60,9 +59,6 @@ impl ChatState {
     pub(super) fn handle_paste(&mut self, pasted: &str) {
         if let Some(dialog) = self.elicitation.as_mut() {
             dialog.paste(pasted);
-            if dialog.take_changed() {
-                self.mark_visible_changed();
-            }
             return;
         }
         let pasted = sanitize_terminal_text(pasted);
@@ -72,7 +68,6 @@ impl ChatState {
         if let Some(search) = self.history_search.as_mut() {
             search.query.push_str(&pasted.replace(['\r', '\n'], " "));
             self.refresh_history_search();
-            self.mark_visible_changed();
             return;
         }
         self.replace_input_range(
@@ -98,8 +93,6 @@ impl ChatState {
     }
 
     pub(super) fn move_input_cursor(&mut self, delta: isize) {
-        let old_cursor = self.input_cursor;
-        let old_preferred = self.preferred_column;
         self.input_cursor = if delta.is_negative() {
             previous_grapheme_boundary(&self.input, self.input_cursor)
         } else {
@@ -108,9 +101,6 @@ impl ChatState {
         self.input_cursor = attachments::snap_cursor(&self.input_images, self.input_cursor, delta);
         self.preferred_column = None;
         self.update_autocomplete();
-        if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-            self.mark_visible_changed();
-        }
     }
 
     fn line_start(&self) -> usize {
@@ -126,8 +116,6 @@ impl ChatState {
     }
 
     pub(super) fn move_to_line_start(&mut self, cross_boundary: bool) {
-        let old_cursor = self.input_cursor;
-        let old_preferred = self.preferred_column;
         let start = self.line_start();
         self.input_cursor = if cross_boundary && self.input_cursor == start && start > 0 {
             self.input[..start - 1]
@@ -138,14 +126,9 @@ impl ChatState {
         };
         self.preferred_column = None;
         self.update_autocomplete();
-        if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-            self.mark_visible_changed();
-        }
     }
 
     pub(super) fn move_to_line_end(&mut self, cross_boundary: bool) {
-        let old_cursor = self.input_cursor;
-        let old_preferred = self.preferred_column;
         let end = self.line_end();
         self.input_cursor = if cross_boundary && self.input_cursor == end && end < self.input.len()
         {
@@ -158,14 +141,9 @@ impl ChatState {
         };
         self.preferred_column = None;
         self.update_autocomplete();
-        if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-            self.mark_visible_changed();
-        }
     }
 
     pub(super) fn move_vertical(&mut self, direction: isize) {
-        let old_cursor = self.input_cursor;
-        let old_preferred = self.preferred_column;
         let start = self.line_start();
         let column = self
             .preferred_column
@@ -175,9 +153,6 @@ impl ChatState {
                 self.input_cursor = 0;
                 self.preferred_column = None;
                 self.update_autocomplete();
-                if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-                    self.mark_visible_changed();
-                }
                 return;
             }
             self.input[..start - 1]
@@ -189,9 +164,6 @@ impl ChatState {
                 self.input_cursor = self.input.len();
                 self.preferred_column = None;
                 self.update_autocomplete();
-                if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-                    self.mark_visible_changed();
-                }
                 return;
             }
             end + 1
@@ -207,9 +179,6 @@ impl ChatState {
             attachments::snap_cursor(&self.input_images, self.input_cursor, direction);
         self.preferred_column = Some(column);
         self.update_autocomplete();
-        if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-            self.mark_visible_changed();
-        }
     }
 
     pub(super) fn previous_word_start(&self) -> usize {
@@ -260,8 +229,6 @@ impl ChatState {
     }
 
     pub(super) fn move_word(&mut self, direction: isize) {
-        let old_cursor = self.input_cursor;
-        let old_preferred = self.preferred_column;
         self.input_cursor = if direction.is_negative() {
             self.previous_word_start()
         } else {
@@ -271,9 +238,6 @@ impl ChatState {
             attachments::snap_cursor(&self.input_images, self.input_cursor, direction);
         self.preferred_column = None;
         self.update_autocomplete();
-        if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-            self.mark_visible_changed();
-        }
     }
 
     pub(super) fn kill_range(&mut self, range: std::ops::Range<usize>) {

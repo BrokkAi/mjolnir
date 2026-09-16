@@ -1,7 +1,7 @@
 //! Visible entry points for the same commands the keyboard dispatches.
 
 use crossterm::event::{Event, MouseEvent};
-use mj_chat::components::{ButtonRow, ConsumedEvent, ControlKind, Interaction};
+use mj_chat::components::{ButtonRow, ControlKind, Interaction};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -117,12 +117,7 @@ impl DashboardState {
                 .workspace_hamburger_area
                 .is_some_and(|area| area.contains((mouse.column, mouse.row).into()));
         let result = self.surface_form.get_mut().handle(&Event::Mouse(mouse));
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         if workspace_menu_hit
             && self
                 .surface_form
@@ -132,7 +127,6 @@ impl DashboardState {
             self.focus = Focus::Workspaces;
             self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Menu;
             self.set_session_action_focus(None);
-            self.mark_render_changed();
         }
         if let Some(Interaction::Activate(control)) = result.action {
             self.last_row_click = None;
@@ -154,15 +148,11 @@ impl DashboardState {
                     self.focus = Focus::Workspaces;
                     self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Menu;
                     self.set_session_action_focus(None);
-                    self.mark_render_changed();
                     self.run_available_command(CommandId::Workspaces)
                 }
             });
         }
-        result
-            .outcome
-            .is_consumed()
-            .then_some(DashboardAction::None)
+        result.consumed.then_some(DashboardAction::None)
     }
 }
 
@@ -395,56 +385,50 @@ mod tests {
         dashboard.set_selection_for(Focus::Sessions, 0);
         draw(&mut dashboard, (120, 40));
 
-        assert_eq!(
+        assert!(
             dashboard
                 .handle_event_result(Event::Key(key(KeyCode::Down)))
-                .outcome,
-            mj_chat::components::Outcome::Changed,
+                .consumed
         );
         assert_eq!(dashboard.selected_visible_index(), Some(1));
-        assert_eq!(
+        assert!(
             dashboard
                 .handle_event_result(Event::Key(key(KeyCode::Up)))
-                .outcome,
-            mj_chat::components::Outcome::Changed,
+                .consumed
         );
         assert_eq!(dashboard.selected_visible_index(), Some(0));
-        assert_eq!(
+        assert!(
             dashboard
                 .handle_event_result(Event::Key(key(KeyCode::Up)))
-                .outcome,
-            mj_chat::components::Outcome::Changed,
+                .consumed
         );
         assert_eq!(
             dashboard.session_action_focus,
             Some(CommandId::NewSessionWizard)
         );
-        assert_eq!(
+        assert!(
             dashboard
                 .handle_event_result(Event::Key(key(KeyCode::Right)))
-                .outcome,
-            mj_chat::components::Outcome::Changed,
+                .consumed
         );
         assert_eq!(
             dashboard.session_action_focus,
             Some(CommandId::ResumeDialog)
         );
-        assert_eq!(
+        assert!(
             dashboard
                 .handle_event_result(Event::Key(key(KeyCode::Left)))
-                .outcome,
-            mj_chat::components::Outcome::Changed,
+                .consumed
         );
         assert_eq!(
             dashboard.session_action_focus,
             Some(CommandId::NewSessionWizard),
             "Left returns from Resume to Create"
         );
-        assert_eq!(
+        assert!(
             dashboard
                 .handle_event_result(Event::Key(key(KeyCode::Down)))
-                .outcome,
-            mj_chat::components::Outcome::Changed,
+                .consumed
         );
         assert_eq!(dashboard.session_action_focus, None);
         assert_eq!(dashboard.selected_visible_index(), Some(0));

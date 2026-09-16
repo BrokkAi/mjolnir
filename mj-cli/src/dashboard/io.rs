@@ -1792,7 +1792,6 @@ impl DashboardContext {
                 {
                     self.dashboard.set_current_session(None);
                     self.defer_chat_open();
-                    self.dirty = true;
                     return;
                 }
                 match *result {
@@ -1837,7 +1836,6 @@ impl DashboardContext {
                         self.dashboard.set_notice(format!("Could not open session: {error}. Press Enter in Sessions to retry, or select another session. Alt-Q quits."));
                     }
                 }
-                self.dirty = true;
             }
             DashboardIoUpdate::GoSelectionSaved(result) => {
                 self.go_selection_in_flight = false;

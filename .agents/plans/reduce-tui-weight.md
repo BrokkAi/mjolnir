@@ -14,7 +14,7 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 
 ## Progress
 
-- [ ] Milestone 1: one repaint rule (delete the manual dirty-flag protocol; collapse `Outcome` to a consumed flag; drop the `rat-event` dependency).
+- [x] (2026-09-16 22:49Z) Milestone 1: one repaint rule (delete the manual dirty-flag protocol; collapse `Outcome` to a consumed flag; drop the `rat-event` dependency).
 - [ ] Milestone 2: one erased view of the active modal (`ModalSurface` trait replacing seven `match &self.mode` copies).
 - [ ] Milestone 3: background job helpers report panics and share one send path.
 - [ ] Milestone 4: one implementation of readline cursor motion (composer reuses `text_input.rs` helpers; multiline motions move into `TextInput`).
@@ -29,6 +29,12 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
   Evidence: `mj-chat/src/chat/input.rs:11-35` (`replace_input_range`), `mj-chat/src/chat/attachments.rs:359-465`.
 - Observation: `#[derive(Default)]` on `ReviewWizardView` does not compile because it holds `&'a MountWizard`, and references to arbitrary types have no `Default`. That item is dropped (see Decision Log).
   Evidence: `mj-tui/src/wizards.rs:1554`.
+- Observation: substituting "consumed" for "changed" in the batch loop's pre-dispatch draw is lossy without extra work. The dashboard's plain mouse handling (`mj-tui/src/lib.rs:1557-1690`) marked a repaint on a pane-focus click, a row click, a project-heading click, a pane-size control click and a pane wheel, but never called `record_event_handled`, so those events would have reported `consumed == false` and left a stale frame under the next pointer event in the batch. Fixed by recording consumption there; see the Decision Log.
+- Observation: the redraw rule as first written had a hole. `tokio::select!` picks one ready arm at random, and `drain_feeds` then applies every message queued behind it. If a clock tick won the select while a background message was also ready, the timer arm set `redraw = false` and the drain applied a visible update that never reached the screen until some later wakeup. The old protocol did not have this hole because `draw()` re-read `take_render_changed()` after the drain. `Feed` now reports whether the drain took a message (`take_delivered`, `mj-controller/src/pollers.rs:205-216`) and the loop ORs that into `redraw` (`mj-cli/src/dashboard.rs:653`).
+  Evidence: `mj-cli/src/dashboard.rs` select arms at `:575-650` versus `drain_feeds` at `:1947`; every `drain_*` reads `Feed::next_ready`, which the winning arm's `accept` only latches.
+- Observation: `EditOutcome` is kept, not collapsed to `bool`. One caller branches on `EditOutcome::Changed` for a reason that is not repaint: `ChatState::handle_history_search_key` re-runs `refresh_history_search()` only when the key changed the query text, so a cursor move must not restart the search.
+  Evidence: `mj-chat/src/chat/history.rs:266-276`.
+- Observation: the acceptance grep for `Outcome::` has to be a word-boundary grep. `WaitOutcome::`, `RemotePreflightOutcome::`, `SetupOutcome::`, `WorkerRecordPersistenceOutcome::`, `ReviewDiscoveryOutcome::` and `EditOutcome::` are unrelated enums in the same three crates. `grep -rEn '\bOutcome::' mj-tui/src mj-chat/src mj-cli/src` reports zero; a plain `grep Outcome::` reports the unrelated ones.
 - Observation: `mark_render_changed` and its relatives are called from far more places than first counted. The dashboard side has 204 `mark_render_changed()` calls plus 49 `mark_render_changed_cells` calls; the chat side has 152 `mark_visible_changed()` calls plus an elicitation-dialog flag (`take_changed`/`mark_changed`) that is polled from five places. Three trackers are layered: the manual flags, a revision counter diffed around every event, and a visual-state diff inside `Form::handle_at`.
   Evidence: `grep -rc "mark_visible_changed()" mj-chat/src`; `mj-tui/src/lib.rs:1489`; `mj-chat/src/components/scope.rs:826-842`.
 
@@ -57,12 +63,52 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 - Decision: Drop the `ReviewWizardView: Default` item. A `base()` constructor would be line-neutral.
   Rationale: see Surprises & Discoveries.
   Date/Author: 2026-09-16 / Claude Fable 5.1.
+- Decision: `drain_feeds` returns whether it applied a background message, and the loop ORs that into `redraw`; `Feed` gained a `delivered` flag to report it.
+  Rationale: closes the hole described in Surprises & Discoveries. The alternative, leaving the timer arms free to suppress a drained feed update, would have made a visible update wait for an unrelated wakeup. This is not a per-mutation dirty flag: it reports that a message arrived, not that something visible changed, and it is cleared by the drain that reads it.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: The dashboard's plain mouse paths now call `record_event_handled()`, so a click that moves pane focus, selects a row, collapses a project, resizes a pane, or switches a workspace tab reports itself consumed.
+  Rationale: the batch loop's new `previous_consumed` gate replaces a gate that was on "did anything visible change", and those paths marked a repaint but never recorded consumption. Without this, a second pointer event in the same input batch would be hit-tested against the frame from before the first one. Recording is also the honest answer: those handlers do take responsibility for the event.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `DashboardContext::maybe_open_startup_session` returns whether the pick ran, and the clock arm ORs that into `redraw`.
+  Rationale: the startup pick runs inside the clock arm and opens a conversation. `StartupSession::ready` answers true at most once, so the report costs nothing and keeps that one frame from waiting a second.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: Keep `EditOutcome` as a three-state enum and give `apply_field_edit`, `TextField::apply`, and `PathField::apply` that return type in place of `rat_event::Outcome`.
+  Rationale: the plan said to collapse it only if every remaining reader of `Changed` used it for repaint. One does not; see Surprises & Discoveries. The mapping is one-to-one with the old outcomes (`Unhandled`/`Handled`/`Changed` for `Continue`/`Unchanged`/`Changed`), so no call site changed meaning.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: The loop keeps its draw at the top of the iteration rather than moving it after `drain_feeds`, with `redraw` reset to true immediately after each draw.
+  Rationale: the draw has to happen before the loop blocks on `select!`, or the first frame would wait for the first event, and `continue`/`break` inside the select arms would skip a trailing draw. Drawing at the top of iteration N+1 is still "after the drain of iteration N", which is what the plan's rule asks for.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: The two new loop tests assert at the `DashboardState` plus `TestBackend` level rather than driving `run_dashboard_for_workspace`.
+  Rationale: `DashboardContext::open` enters raw terminal mode, loads the controller, and spawns fourteen pollers, so the loop is not reachable from a unit test. `an_unchanged_clock_tick_does_not_redraw` asserts the exact condition the clock arm evaluates (`clock_changed()` is false on a settled surface) and that the frame it declines is byte-identical to the one on screen. `a_feed_update_redraws_without_a_dirty_mark` applies a quota report the way `drain_feeds` does and asserts the next unconditional frame differs, with nothing having marked anything.
+  Date/Author: 2026-09-16 / Claude Opus 5.
 - Decision: Order the milestones 1, 2, 3, 4, 5, 6. Milestone 1 goes first because it deletes hundreds of `mark_render_changed` calls that Milestones 2 and 5 would otherwise have to carry through their rewrites. Milestone 3 is independent of everything and can be done at any time.
   Date/Author: 2026-09-16 / Claude Fable 5.1.
 
 ## Outcomes & Retrospective
 
-To be written at the end of each milestone and at completion.
+Milestone 1 (2026-09-16). The dashboard now draws once per event-loop wakeup.
+Every manual repaint signal is gone: `mark_render_changed`, `take_render_changed`,
+`render_change_revision`, `mark_render_changed_cells`, `record_form_outcome_cells`
+and `record_visible_event_change` on the dashboard side; `mark_visible_changed`,
+`visible_revision`, `take_render_changed` on the chat side; the elicitation
+dialog's third flag; the `FormVisualState` diff inside `Form::handle_at`; and
+`DashboardContext::dirty` with its 31 assignment sites. `EventResult` now carries
+`consumed: bool` instead of `rat_event::Outcome`, and `rat-event` is no longer a
+dependency of `mj-chat`. About 800 non-test lines went with them, together with
+the "previous value" snapshots that only existed to compare against.
+
+Two things did not go as the plan assumed, both recorded above: the timer arms
+could swallow a background update that the drain applied in the same iteration,
+which needed `Feed::take_delivered`; and `EditOutcome` has a caller that branches
+on `Changed` for a non-repaint reason, so it stays a three-state enum.
+
+What is left for a later milestone: the timer signatures in
+`mj-tui/src/render_changes.rs` (`clock_changed`, `animation_changed`,
+`acknowledge_render`) are still the right gate and stay. `visible_state_signature`,
+`capacity_display_signature`, `materialized_display_signature` and
+`move_recovery_signature` are gone; `session_is_visible`,
+`session_row_is_visible_at` and `support_projection_visible` survive because the
+clock and animation signatures still consult them.
 
 ## Context and Orientation
 
@@ -316,7 +362,11 @@ The generic composer design considered and deferred for Milestone 4, for the rec
         pub fn with_action(action: A) -> Self;
     }
 
-`mj-cli/src/dashboard.rs` after Milestone 1: `DashboardContext` has no `dirty` field; `fn draw(&mut self) -> Result<()>` always draws; `fn dispatch_event(…) -> (bool /* consumed */, bool /* batch continues */)`.
+`mj-chat/src/text_input.rs` keeps `EditOutcome` as it is. `apply_field_edit`, `TextField::apply` and `PathField::apply` return `EditOutcome` in place of `rat_event::Outcome`, and `mj_chat::components` re-exports `EditOutcome` where it used to re-export `Outcome` and `ConsumedEvent`.
+
+`mj-cli/src/dashboard.rs` after Milestone 1: `DashboardContext` has no `dirty` field and no `drawn_size`; `fn draw(&mut self) -> Result<()>` always draws; `fn dispatch_event(…) -> (bool /* consumed */, bool /* batch continues */)`; `fn drain_feeds(&mut self) -> bool` reports whether it applied a background message; `fn clock_tick_redraws(&mut self) -> bool` is the clock arm's whole condition; `fn maybe_open_startup_session(&mut self) -> bool` reports whether the pick ran.
+
+`mj-controller/src/pollers.rs` after Milestone 1: `Feed` has `pub fn take_delivered(&mut self) -> bool`, set by `next_ready` when it produced a message.
 
 `mj-tui/src/modal_surface.rs` after Milestone 2: `ModalSurface`, `DialogModal`, and `impl Mode { fn surface(&self) -> Option<&dyn ModalSurface>; fn surface_mut(&mut self) -> Option<&mut dyn ModalSurface>; }` as specified in Milestone 2.
 
@@ -327,3 +377,16 @@ The generic composer design considered and deferred for Milestone 4, for the rec
 `mj-tui/src/wizards/draft.rs` after Milestone 5: `DraftChange` and `WizardDraft` as specified in Milestone 5, implemented for `NewWizard` and `ResumeWizard`.
 
 Dependencies removed: `rat-event` from `mj-chat/Cargo.toml` (Milestone 1). No dependencies added.
+
+## Revision notes
+
+2026-09-16, after implementing Milestone 1. Recorded what the milestone actually
+required beyond the written plan: `Feed::take_delivered` and a `bool` from
+`drain_feeds` (a timer wakeup could otherwise swallow a background update the
+drain applied), `record_event_handled` on the dashboard's plain mouse paths (the
+batch loop's new `consumed` gate replaces a "changed" gate those paths fed), a
+`bool` from `maybe_open_startup_session`, and keeping `EditOutcome` as an enum
+because one caller branches on `Changed` to decide whether to re-run a search.
+The two named loop tests are written at the `DashboardState` plus `TestBackend`
+level because `DashboardContext::open` needs a real terminal and fourteen
+pollers. Each of these is in the Decision Log with its reason.
